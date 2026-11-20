@@ -1,6 +1,9 @@
 # @email-gateway/archive
 
-The pure library of step 8.1, journaling and compliance archiving. The binding design is
+The pure library of step 8.1, journaling and compliance archiving, extended by step 8.6
+(journal-only intake and cross-source dedupe,
+[docs/plan/steps/27-journal-intake-and-archive-split.md](../../docs/plan/steps/27-journal-intake-and-archive-split.md)
+D1–D3, D6–D8, §4.2; ADRs 0087 and 0088). The binding 8.1 design is
 [docs/plan/steps/23-journaling-archiving.md](../../docs/plan/steps/23-journaling-archiving.md)
 (A1, A3–A4, A8, A10–A13, A16–A18, A22, §4.1–§4.3) together with ADRs
 [0064](../../docs/architecture/adr/0064-journal-capture-intents-and-archive-consumer.md) to
@@ -48,6 +51,11 @@ these rules has one implementation.
 | `archive-search/1`                         | `ediscovery_searches.criteria`, `GET /archive/messages` filters                             | `documents/search.ts`                       |
 | `archive-export-manifest/1`                | `manifest.json` of export packages (+ Ed25519 `manifest.sig`)                               | `documents/search.ts`, `export/manifest.ts` |
 | Download token `v1.<payload>.<mac>`        | `GET /archive/downloads/{token}`                                                            | `tokens/download-token.ts`                  |
+| `journal-envelope/1` (8.6)                 | `journal_intake_messages.envelope`                                                          | `intake/documents.ts`, `intake/envelope.ts` |
+| `journal-intake-proof/1` (8.6)             | `journal_intake_messages.proof`                                                             | `intake/documents.ts`                       |
+| `intake-networks/1` (8.6)                  | `journal_intake_sources.networks`                                                           | `intake/documents.ts`, `intake/networks.ts` |
+| `archive-fingerprint/1` (8.6)              | `archive_dedupe_keys.header_fingerprint`                                                    | `dedupe/fingerprint.ts`                     |
+| `archive-dedupe/1` (8.6)                   | `archive_dedupe_keys.message_id_hash`                                                       | `dedupe/fingerprint.ts`                     |
 
 The `archive-object/1` layout is a 51-byte header: `EGARC1`, version `0x01`, kind (1 eml,
 2 journal, 3 scan, 4 export), chunk size (u32 BE), a 32-byte salt and a 7-byte nonce prefix.
@@ -186,12 +194,80 @@ keep memory bounded by one chunk.
   `exportTimestamp` formats the timestamp.
 - The text constants are `EXPORT_README_TEXT` and `EXPORT_MALICIOUS_README_TEXT`.
 
+### `intake/` (step 8.6)
+
+- **Unwrapper.** `JournalReportUnwrapper` (a Transform) and its push core `JournalReportSplitter`
+  (`push(chunk)` / `end()` return the bytes to store; `decision`; `result()`), plus
+  `unwrapJournalReport(buffer)`. Input: the raw intake message. It recognizes an Exchange journal
+  report (outer `X-MS-Journal-Report`, top-level `multipart/mixed`, a `text/plain` envelope part,
+  then a `message/rfc822` part) and emits the embedded message (`7bit`/`8bit`/`binary` byte-exact,
+  `base64` and `quoted-printable` decoded) with format `journal_report` and the decoded
+  `envelopeText`; anything else is emitted byte for byte with format `journal_report_unparsed`
+  and a `reason`. **Streaming contract:** nothing is emitted before the decision (event
+  `decision`, emitted before the first output byte); the decision is final, so the caller streams
+  the output to S3 in both cases without re-reading. **Bound:** before the decision at most
+  `prefixLimitOf(options)` input bytes are retained (3 × `headerMaxBytes` + `preambleMaxBytes` +
+  `envelopeMaxBytes` + 4 KiB, 1 MiB + 832 KiB with the defaults 256 KiB / 64 KiB / 1 MiB) plus the
+  chunk that crossed it; afterwards only a delimiter-sized tail. Late anomalies
+  (`closing_delimiter_missing`, `extra_parts`) are recorded in `result().anomalies`.
+- `parseJournalEnvelope(text, { maxRecipients?, embeddedMessageId? })` → `journal-envelope/1`
+  (`Sender`, `On-Behalf-Of`, `Message-Id`, `To`/`Cc`/`Bcc`/`Recipient`, `, Expanded:` and
+  `, Forwarded:` suffixes, folded lines, CRLF/LF, cap 10 000 with `truncated`,
+  `envelopeMismatch`). `buildCopyEnvelope({ kind, headerBlock, mailFrom })` for copy kinds
+  (`X-Gm-Original-To` → field `envelope`, else To/Cc → field `header`).
+- `stripHeaderFields(names)` (Transform, `removed`, `overlongLines`), `HeaderFieldStripper`,
+  `stripHeaderFieldsFromBuffer`: removes every occurrence (case-insensitive, folded) of the named
+  fields from the header block only (`X-EG-Journal-Token`); memory is one header line.
+- `classifyIntakeParties({ sender, headerFrom, recipients, orgDomains })` → message direction,
+  per-recipient direction (`inbound` / `internal` / `outbound` / `null`) and `orgSideDomain` (D3).
+- Addresses and tokens: `parseIntakeAddressSecret(hex)`, `deriveIntakeAddressToken(secret, sourcePublicId, version)`,
+  `deriveIntakeHeaderToken(...)`, `intakeLocalPart`, `intakeAddress(token, domain)`,
+  `parseIntakeLocalPart`, `intakeAddressHash(localPart)`, `intakeHeaderTokenHash(token)`,
+  `sha256HexEqual` (constant time), `maskIntakeAddress`, `maskIntakeHeaderToken`, `base32Lower`.
+- Documents: `journalEnvelopeSchema`, `journalIntakeProofSchema`, `intakeNetworksSchema` (+
+  examples). `validateIntakeNetworks(cidrs, { allowPrivate, providerRanges })` → canonical CIDRs
+  or typed issues (`count`, `invalid`, `host_bits_set`, `too_broad`, `private_not_allowed`,
+  `provider_overlap`, `duplicate`); `parseCidr`, `cidrsOverlap`, `cidrContains`, `addressInCidrs`.
+- RFC 5322 helpers: `parseHeaderFields`, `headerValues`, `parseAddressList`, `normalizeAddrSpec`,
+  `parseRfc5322Date` (obsolete syntax tolerated); transfer decoders `createTransferDecoder`,
+  `decodeTransfer`, `transferEncodingOf`; `parseContentType`.
+
+### `dedupe/` (step 8.6)
+
+- `dedupeMessageIdHash(organizationId, messageId)` (`archive-dedupe/1`; null without a
+  Message-ID) and `headerFingerprint({ headerBlock, attachmentSha256s })` (`archive-fingerprint/1`;
+  null when Message-ID, Date or From is unusable or an attachment hash is missing).
+- `BodyHasher` (pass-through Transform, `bodySha256` after the end), `BodyHashState`,
+  `bodySha256Of`: SHA-256 of the bytes after the first `CRLF CRLF` or `LF LF`.
+- `decideMerge({ candidate, incoming, limits, now? })` → `merge` (`content: none | variant`) or
+  `separate` (`scope_gateway_gateway`, `record_inactive`, `outside_window`, `merged_limit`,
+  `variant_limit`); `inMergeScope`.
+- `mergeParties(a, b, { aSource?, bSource?, max? })` (in `documents/`): union by lower-cased
+  address with `sources` and `field`, gateway facts win.
+
+### Step 8.6 additions to existing documents and builders
+
+- `archive-settings/1` + `intake.scanEnabled` (resolved default false,
+  `ResolvedArchiveSettings.intake`); `archive-parties/1` recipients + optional `field`, `sources`,
+  a nullable `direction` and status `journaled`; `archive-journal/1` + optional `intake` and
+  `mergedFrom` (envelope recipients: nullable `direction`, optional `field`); `objects` +
+  optional `merged` (≤ 8). Every 8.1 document still parses.
+- `decideCapture`: `CaptureMessageFacts.ingestSource`; an intake message is captured only in
+  `journaled` (category `delivered`, final) and waits otherwise. Journal eligibility, holds and
+  retention ignore NULL recipient directions.
+- Search: the index document gains `ingest_sources` (from `sourceGateway` / `sourceJournalIntake`
+  of `ArchiveIndexRecord`), `ARCHIVE_INDEX_MAPPING_REVISION = 2` (index names stay `-v1-`);
+  `buildIndexMappingUpdate()` is the additive `PUT <index>/_mapping` body for existing indices
+  (no reindex; the 8.1 rebuild tooling remains the fallback). `buildArchiveSearchQuery` accepts
+  `source: 'gateway' | 'journal_intake'` (`gateway` also matches documents without the field).
+
 ### `versions` and `vocabulary`
 
 - `versions` holds every document and format id: `ARCHIVE_*_VERSION`, `ARCHIVE_OBJECT_FORMAT`
   and `ARCHIVE_TENANT_KEY_ALGORITHM`.
 - `vocabulary` holds the enums that mirror Prisma (directions, statuses, categories, lock modes,
-  review tags and so on).
+  review tags and so on), with step 8.6's `journaled` statuses, `INGEST_SOURCES`,
+  `INTAKE_SOURCE_KINDS`, `INTAKE_FORMATS`, `INTAKE_RECIPIENT_FIELDS` and `PROVIDER_DKIM_RESULTS`.
 
 ## How services use it
 
@@ -221,4 +297,9 @@ They cover crypto round trips (0 B, 1 B, chunk−1, chunk, chunk+1, a property o
 50 MiB stream), every tamper case, AAD binding, previous-key unwrap, Ed25519, every schema
 with its examples and unknown keys, the A3 table, scope, retention, expiry order, holds
 (legacy and unparsable), the query and document builders, the codec, keys, tokens and the
-manifest.
+manifest. Step 8.6 adds the unwrapper (Microsoft 365 and on-premises style reports, 7bit /
+8bit / binary / base64 / quoted-printable, CRLF and LF, unparsed cases, a split at every byte and
+fast-check chunkings), header stripping at every split, the envelope parser, party
+classification, address and token vectors, networks, the fingerprint, the body hash (property
+test against a reference), the merge table, the document additions with the 8.1 examples, the
+`journaled` capture rows and the `ingest_sources` index field and filter.

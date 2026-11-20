@@ -33,6 +33,13 @@ import { RelayMarkerStore } from './relay-marker.store';
     ProviderRelayPolicy,
     ProviderRelayIngestion,
   ],
-  exports: [ProviderRelayPolicy, ProviderRelayIngestion, EgressIndexService, RelayCountersService],
+  // Step 8.6: the journal LMTP reuses the egress index and the DKIM verifier (evidence only).
+  exports: [
+    ProviderRelayPolicy,
+    ProviderRelayIngestion,
+    EgressIndexService,
+    RelayCountersService,
+    ProofVerifier,
+  ],
 })
 export class ProviderRelayModule {}

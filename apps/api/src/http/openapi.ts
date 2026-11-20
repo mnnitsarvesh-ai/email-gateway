@@ -466,6 +466,22 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'overrides). Shared or organization-wide views are not offered.',
   },
   {
+    name: 'journaling',
+    description:
+      'Step 8.6: the Journaling area (capture). The journaling half of the archive settings ' +
+      '(the same row and `rowVersion` as `/archive/settings`: enabled, directions, categories, ' +
+      'scope, policy-rule archiving, journal intake scanning), the journaling status, and ' +
+      'journal-only intake: per-source intake addresses `journal-<token>@<intake domain>` for ' +
+      'Microsoft 365 / on-premises Exchange journal reports, Google Workspace copies and SMTP ' +
+      'BCC copies (derived, never stored; shown once, masked afterwards, audited reveal and ' +
+      'rotation with overlap), kind-specific sender rules (the bound step 8.2 connection or ' +
+      'registered networks), the computed setup wizard, customer guides (JSON or Markdown) and ' +
+      'attestations. `journal:read` / `journal:manage` (ADR-0089). Capture issues and the ' +
+      'settings operations of the archive tag are listed here too. Intake mail is archived, ' +
+      'never delivered, and never appears in the Email Explorer, reports or usage counts of ' +
+      'filtered mail. Not offered: import of historical mail (PST, mbox, provider export).',
+  },
+  {
     name: 'archive',
     description:
       'Step 8.1: journaling and compliance archiving. Archive settings (journal directions, ' +
@@ -478,7 +494,10 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'Every read of archived content is audited before it is returned. Not offered: content ' +
       '(body) search, per-attachment downloads, backfill of mail received before journaling ' +
       'was enabled, shortening retention of existing records, re-wrapping record keys after a ' +
-      'rotation (8.x / 10.x).',
+      'rotation (8.x / 10.x). Step 8.6 (ADR-0089): record detail, journal, security and reveal ' +
+      'need `archive:search` (organization admins hold no archive access by default; the ' +
+      '`compliance_officer` role does), the settings are authorized per changed path, search ' +
+      'filters on `ingestSource` and records list their copy sources and merged copies.',
   },
   {
     name: 'ediscovery',
@@ -551,7 +570,26 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
     .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, ACCESS_TOKEN_SCHEME)
     .addApiKey({ type: 'apiKey', in: 'header', name: 'X-API-Key' }, API_KEY_SCHEME);
   for (const tag of OPENAPI_TAGS) builder.addTag(tag.name, tag.description);
-  return postProcessOpenApiDocument(SwaggerModule.createDocument(app, builder.build()));
+  const document = postProcessOpenApiDocument(SwaggerModule.createDocument(app, builder.build()));
+  (document as OpenAPIObject & Record<string, unknown>)['x-tagGroups'] = openApiTagGroups(
+    OPENAPI_TAGS.map((t) => t.name),
+  );
+  return document;
+}
+
+/**
+ * Step 8.6 D11: `x-tagGroups` (Redoc) with the two areas of the archive settings row —
+ * `Journaling` = [`journaling`] (capture) and `Archive` = [`archive`, `ediscovery`] (storage and
+ * use) — and every other tag in `Gateway and platform`, so no tag is hidden by a renderer that
+ * only lists grouped tags.
+ */
+export function openApiTagGroups(tags: readonly string[]): Array<{ name: string; tags: string[] }> {
+  const grouped = new Set(['journaling', 'archive', 'ediscovery']);
+  return [
+    { name: 'Gateway and platform', tags: tags.filter((t) => !grouped.has(t)) },
+    { name: 'Journaling', tags: ['journaling'] },
+    { name: 'Archive', tags: ['archive', 'ediscovery'] },
+  ];
 }
 
 /** Serves Swagger UI at `/docs` (and the JSON at `/docs-json`). Callers skip it in production. */

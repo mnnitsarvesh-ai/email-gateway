@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-11-19, after the step 8.2 local verification against the provider simulators: the stack suite `provider-integrations` 10/10, the worker, library, api and smtp-adapter integration suites, the regression stack suites, Playwright 112/112, the 3-node RabbitMQ cluster suite on topology v14; record [docs/plan/steps/25-m365-google-connectors.md](../../plan/steps/25-m365-google-connectors.md) §13 WP6, §14; live verification against real Microsoft 365 and Google Workspace tenants, CI and a cluster apply not done). Proposed by the step 8.2 architect on 2026-11-17. Design: 25-m365-google-connectors.md D7, D8. **Amends [ADR-0019](0019-smtp-gateway-topology.md)** decision 5 (a third post-queue refusal case, `provider_proof_failed`) and step 2.2 D10 (now enforced: `source_ip` connectors may not cover provider egress ranges).
 
+Amended by [ADR-0087](0087-journal-intake-path.md) (step 8.6): its provider proof evaluation (tenant header against the bound connection, DKIM evidence) and the egress-range rule are reused for journal intake sources.
+
 **Context.** Exchange Online outbound connectors cannot use SMTP AUTH, present Microsoft's shared certificate and connect from address ranges shared by every Microsoft 365 tenant; Gmail outbound routes behave the same way. Step 2.2 therefore documented outbound through the gateway as unsupported for Exchange Online and forbade `source_ip` connectors on shared ranges, because any tenant of the provider could relay as any other. The only tenant-unique evidence is in the message: a DKIM signature by the customer's own domain (keys only that customer's provider tenant signs with) and, for Microsoft 365, the `X-MS-Exchange-CrossTenant-Id` header Exchange Online stamps.
 
 **Decision.**

@@ -9,6 +9,7 @@ import type { PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import { ArchiveRequestConsumer } from './capture/consumer';
 import { type CaptureFaults, CaptureExecutor } from './capture/executor';
+import { INTAKE_HEALTH_LOCK, IntakeHealthJob } from './capture/intake-health';
 import { OrgContextCache } from './capture/org-context';
 import { CaptureScheduler } from './capture/scheduler';
 import {
@@ -29,6 +30,7 @@ import { ROOT_REWRAP_LOCK, RootRewrapJob } from './keys/root-rewrap';
 import { TenantKeyService } from './keys/tenant-keys';
 import { DisposalPipeline } from './lifecycle/disposal';
 import { ExpiryJob, LIFECYCLE_LOCK } from './lifecycle/expiry';
+import { IntakeDataPruner } from './lifecycle/prune';
 import {
   DISPOSAL_VERIFY_CURSOR,
   DisposalVerifier,
@@ -74,7 +76,15 @@ export interface CaptureComponents {
   policy: PolicyReconciler;
   scheduler: CaptureScheduler;
   executor: CaptureExecutor;
-  loops: { journal: LeaderJob; policy: LeaderJob; scheduler: Periodic; maintain: Periodic };
+  /** Step 8.6 D9: the journal intake health job. */
+  intakeHealth: IntakeHealthJob;
+  loops: {
+    journal: LeaderJob;
+    policy: LeaderJob;
+    scheduler: Periodic;
+    maintain: Periodic;
+    intakeHealth: LeaderJob;
+  };
 }
 
 export interface IndexComponents {
@@ -91,6 +101,8 @@ export interface LifecycleComponents {
   orphans: OrphanReconciler;
   verifier: DisposalVerifier;
   rewrap: RootRewrapJob;
+  /** Step 8.6: pruning of `archive_dedupe_keys` and `journal_intake_counters`. */
+  pruner: IntakeDataPruner;
   loops: { lifecycle: LeaderJob; disposal: Periodic; rewrap: LeaderJob };
 }
 
@@ -140,6 +152,7 @@ export class ArchiveComponents {
         metrics.disposalOldestPending.set(0);
       },
       root_rewrap: () => metrics.rootRewrapPending.set(0),
+      intake_health: () => metrics.intakeSources.reset(),
     };
     const leader = (job: string) => ({
       locks: deps.locks,
@@ -178,6 +191,11 @@ export class ArchiveComponents {
         chunkBytes: config.ARCHIVE_CHUNK_BYTES,
         previewPartMaxBytes: config.ARCHIVE_PREVIEW_PART_MAX_BYTES,
         daySeconds: days,
+        dedupe: {
+          windowHours: config.ARCHIVE_DEDUPE_WINDOW_HOURS,
+          maxContentVariants: config.ARCHIVE_MAX_CONTENT_VARIANTS,
+          maxMergedCopies: config.ARCHIVE_MAX_MERGED_COPIES,
+        },
         ...(deps.faults ? { faults: deps.faults } : {}),
         ...(deps.now ? { now: deps.now } : {}),
       });
@@ -224,13 +242,28 @@ export class ArchiveComponents {
         ...(only ? { organizationIds: only } : {}),
         ...(deps.now ? { now: deps.now } : {}),
       });
+      const intakeHealth = new IntakeHealthJob(prisma, {
+        metrics,
+        logger: logger.child({ component: 'archive-intake-health' }),
+        alertMinIntervalHours: config.JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS,
+        ...(only ? { organizationIds: only } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+      });
       this.capture = {
         consumer,
         journal,
         policy,
         scheduler,
         executor,
+        intakeHealth,
         loops: {
+          intakeHealth: new LeaderJob(
+            'archive-intake-health',
+            lock(INTAKE_HEALTH_LOCK),
+            config.JOURNAL_INTAKE_HEALTH_INTERVAL_MS,
+            async () => void (await intakeHealth.runOnce()),
+            leader('intake_health'),
+          ),
           journal: new LeaderJob(
             'archive-journal-sweep',
             lock(JOURNAL_SWEEP_LOCK),
@@ -384,6 +417,14 @@ export class ArchiveComponents {
         batchSize: config.ARCHIVE_LIFECYCLE_BATCH_SIZE,
         ...(only ? { organizationIds: only } : {}),
       });
+      const pruner = new IntakeDataPruner(prisma, {
+        metrics,
+        logger: lifecycleLogger,
+        dedupeWindowHours: config.ARCHIVE_DEDUPE_WINDOW_HOURS,
+        batchSize: config.ARCHIVE_LIFECYCLE_BATCH_SIZE,
+        ...(only ? { organizationIds: only } : {}),
+        ...(deps.now ? { now: deps.now } : {}),
+      });
       const step = async (name: string, fn: () => Promise<unknown>): Promise<void> => {
         try {
           await fn();
@@ -398,6 +439,7 @@ export class ArchiveComponents {
         orphans,
         verifier,
         rewrap,
+        pruner,
         loops: {
           lifecycle: new LeaderJob(
             'archive-lifecycle',
@@ -409,6 +451,7 @@ export class ArchiveComponents {
               await step('lock_pass', () => lockPass.runOnce());
               await step('orphans', () => orphans.runOnce());
               await step('verify', () => verifier.runOnce());
+              await step('prune', () => pruner.runOnce());
               await step('gauges', () => disposal.gauges());
             },
             leader('lifecycle'),

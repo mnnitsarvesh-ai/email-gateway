@@ -2,8 +2,11 @@ import { createHash, type KeyObject } from 'node:crypto';
 import { PassThrough, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
+  archivePartiesSchema,
   assertKeyOfOrganization,
   buildSignedExportManifest,
+  canonicalJsonBytes,
+  createArchiveDecryptStream,
   createArchiveEncryptStream,
   EDISCOVERY_REVIEW_TAGS,
   type EdiscoveryReviewTag,
@@ -17,6 +20,8 @@ import {
   exportEntryPath,
   exportObjectKey,
   generateDataKey,
+  sha256Hex,
+  signManifest,
   wrapExportKey,
 } from '@email-gateway/archive';
 import { type EmailArchive, type PrismaClient } from '@email-gateway/database';
@@ -28,6 +33,26 @@ import { big, orgFilter, systemAudit } from '../shared/db';
 import { errorCode, errorFields } from '../shared/errors';
 import type { ArchiveStorage, StoredVersion } from '../storage/archive-storage';
 import { type RecordObjects, RecordShreddedError } from '../storage/record-objects';
+import { mergedCopiesOf } from '../storage/record-versions';
+
+/** Step 8.6 D7: the signed supplement of merged records (variants and merged parties). */
+export const EXPORT_MERGED_PATH = 'merged.json';
+export const EXPORT_MERGED_SIGNATURE_PATH = 'merged.sig';
+export const EXPORT_MERGED_VERSION = 'archive-export-merged/1';
+
+/** `<item path without .eml>.variant-<n>.eml` (n from 1, in `objects.merged` order). */
+export function variantEntryPath(itemPath: string, n: number): string {
+  return `${itemPath.replace(/\.eml$/, '')}.variant-${String(n)}.eml`;
+}
+
+/** One stored content variant of an exported record. */
+interface ExportVariant {
+  record: EmailArchive;
+  messagePublicId: string;
+  path: string;
+  sha256: string;
+  sizeBytes: number;
+}
 
 export class ExportError extends Error {
   constructor(readonly code: string) {
@@ -297,6 +322,7 @@ export class ExportBuilder {
       );
       const zip = new ZipFile();
       const mtime = now;
+      const merged = await this.mergedSupplement(e, items);
       for (const item of items) {
         const path = exportEntryPath({
           receivedAt: item.record.receivedAt,
@@ -314,6 +340,27 @@ export class ExportBuilder {
             (error: unknown) => cb(error, undefined as never),
           );
         });
+        // Step 8.6 D7: the record's content variants as additional files of the item.
+        for (const v of merged.variants.filter((x) => x.record.id === item.record.id)) {
+          zip.addReadStreamLazy(v.path, { mtime, compress: true }, (cb) => {
+            this.variantStream(v).then(
+              (stream) => {
+                stream.once('error', (error: unknown) => zip.emit('error', error));
+                cb(null, stream);
+              },
+              (error: unknown) => cb(error, undefined as never),
+            );
+          });
+        }
+      }
+      if (merged.document !== null) {
+        const bytes = canonicalJsonBytes(merged.document);
+        zip.addBuffer(bytes, EXPORT_MERGED_PATH, { mtime });
+        zip.addBuffer(
+          Buffer.from(signManifest(bytes, this.options.signingKey), 'utf8'),
+          EXPORT_MERGED_SIGNATURE_PATH,
+          { mtime },
+        );
       }
       if (items.some((i) => i.malicious)) {
         zip.addBuffer(
@@ -446,6 +493,161 @@ export class ExportBuilder {
       throw new RecordShreddedError();
     }
     return this.options.objects.emlStream(fresh);
+  }
+
+  /**
+   * The step 8.6 supplement of an export (D7, ADR-0088): for every selected record with merged
+   * copies or a journal intake source, `merged.json` (`archive-export-merged/1`, canonical JSON,
+   * signed like the manifest into `merged.sig`): the record's sources, its merged parties
+   * (addresses with their envelope field and sources) and its merged copies (public id, received
+   * time, source, whether the body is a stored variant and then its ZIP path, plaintext SHA-256
+   * and size from `archive_record_sources`). The signed `archive-export-manifest/1` itself is
+   * unchanged (strict schema); variants are listed here.
+   */
+  private async mergedSupplement(
+    e: ClaimedExport,
+    items: readonly ExportItem[],
+  ): Promise<{ document: Record<string, unknown> | null; variants: ExportVariant[] }> {
+    const variants: ExportVariant[] = [];
+    const records: Array<Record<string, unknown>> = [];
+    for (const item of items) {
+      const r = item.record;
+      const copies = mergedCopiesOf(r.objects);
+      if (copies.length === 0 && !r.sourceJournalIntake) continue;
+      const sources =
+        copies.length === 0
+          ? []
+          : await this.prisma.archiveRecordSource.findMany({
+              where: {
+                organizationId: e.organizationId,
+                archiveId: r.id,
+                archiveReceivedAt: r.receivedAt,
+              },
+              select: {
+                organizationId: true,
+                messagePublicId: true,
+                emlSha256: true,
+                sizeBytes: true,
+                bodySha256: true,
+              },
+            });
+      const itemPath = exportEntryPath({
+        receivedAt: r.receivedAt,
+        messageId: r.messagePublicId,
+        malicious: item.malicious,
+      });
+      let n = 0;
+      const mergedCopies = copies.map((c) => {
+        const row = sources.find(
+          (x) => x.messagePublicId === c.messageId && x.organizationId === e.organizationId,
+        );
+        if (c.eml === null || row === undefined) {
+          return {
+            messageId: c.messageId,
+            receivedAt: c.receivedAt,
+            source: c.source,
+            contentVariant: false,
+            path: null,
+            sha256: row?.emlSha256 ?? null,
+            sizeBytes: row?.sizeBytes ?? null,
+          };
+        }
+        n += 1;
+        const path = variantEntryPath(itemPath, n);
+        variants.push({
+          record: r,
+          messagePublicId: c.messageId,
+          path,
+          sha256: row.emlSha256,
+          sizeBytes: row.sizeBytes,
+        });
+        return {
+          messageId: c.messageId,
+          receivedAt: c.receivedAt,
+          source: c.source,
+          contentVariant: true,
+          path,
+          sha256: row.emlSha256,
+          sizeBytes: row.sizeBytes,
+        };
+      });
+      const parties = archivePartiesSchema.safeParse(r.parties);
+      records.push({
+        messageId: r.messagePublicId,
+        path: itemPath,
+        sources: [
+          ...(r.sourceGateway ? ['gateway'] : []),
+          ...(r.sourceJournalIntake ? ['journal_intake'] : []),
+        ],
+        parties: parties.success
+          ? {
+              from: parties.data.from,
+              headerFrom: parties.data.headerFrom,
+              recipients: parties.data.recipients.map((p) => ({
+                address: p.address,
+                direction: p.direction,
+                status: p.status,
+                ...(p.field !== undefined ? { field: p.field } : {}),
+                ...(p.sources !== undefined ? { sources: p.sources } : {}),
+              })),
+            }
+          : null,
+        mergedCopies,
+      });
+    }
+    if (records.length === 0) return { document: null, variants };
+    const document = {
+      version: EXPORT_MERGED_VERSION,
+      exportId: e.publicId,
+      records,
+      counts: {
+        records: records.length,
+        variants: variants.length,
+        variantBytes: variants.reduce((sum, v) => sum + v.sizeBytes, 0),
+      },
+    };
+    return { document: { ...document, sha256: sha256Hex(canonicalJsonBytes(document)) }, variants };
+  }
+
+  /**
+   * One content variant: the record (status, DEK) re-read on the writer, the variant decrypted
+   * under the record's DEK with the merged message's public id as subject and its plaintext
+   * SHA-256 (`archive_record_sources.eml_sha256`) re-verified while it streams.
+   */
+  private async variantStream(v: ExportVariant): Promise<NodeJS.ReadableStream> {
+    const fresh = await this.prisma.emailArchive.findUnique({
+      where: { id_receivedAt: { id: v.record.id, receivedAt: v.record.receivedAt } },
+    });
+    if (
+      fresh === null ||
+      fresh.organizationId !== v.record.organizationId ||
+      fresh.wrappedDek === null ||
+      (fresh.status !== 'active' && fresh.status !== 'expiry_review')
+    ) {
+      throw new RecordShreddedError();
+    }
+    const copy = mergedCopiesOf(fresh.objects).find((c) => c.messageId === v.messagePublicId);
+    if (copy === undefined || copy.eml === null) throw new RecordShreddedError();
+    const key = assertKeyOfOrganization(copy.eml.key, fresh.organizationId, 'archive');
+    const { dek } = await this.options.objects.dek(fresh);
+    const storage = this.options.storage;
+    let sealed: NodeJS.ReadableStream;
+    try {
+      sealed = await storage.getStream(storage.buckets.archive, key, copy.eml.versionId);
+    } catch (error) {
+      dek.fill(0);
+      throw error;
+    }
+    const decrypt = createArchiveDecryptStream({
+      dek,
+      kind: 'eml',
+      organizationId: fresh.organizationId,
+      subjectId: v.messagePublicId,
+      expectedSha256: v.sha256.toLowerCase(),
+    });
+    decrypt.once('close', () => dek.fill(0));
+    sealed.once('error', (error: unknown) => decrypt.destroy(error as Error));
+    return sealed.pipe(decrypt);
   }
 
   /**

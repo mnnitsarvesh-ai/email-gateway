@@ -6,10 +6,13 @@ import {
   currentTestUrl,
   expectNoAxeViolations,
   expectRequestMatchesContract,
+  makeMe,
   mockApi,
   noContentResponse,
   okJson,
   renderWithProviders,
+  ROLE_PERMISSIONS,
+  TEST_ORG,
 } from '@/test';
 import { ApiKeysPage, apiKeyBody, apiKeySchema, grantableScopes } from './api-keys-page';
 import { IntegrationsPage } from './integrations-page';
@@ -122,15 +125,28 @@ describe('IntegrationsPage', () => {
       '/integrations/providers/new',
     );
     expect(await screen.findByText('No connections')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Archive settings' })).toHaveAttribute(
+    // Step 8.6: organization admins manage journaling but hold no archive access by default.
+    expect(screen.getByRole('link', { name: 'Journaling settings' })).toHaveAttribute(
       'href',
-      '/settings?tab=archive',
+      '/settings?tab=journaling',
     );
-    expect(screen.getByRole('link', { name: 'Search the archive' })).toHaveAttribute(
+    expect(screen.queryByRole('link', { name: 'Search the archive' })).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('links the archive search for compliance officers and hides SMTP connectors for archive-only plans (step 8.6)', async () => {
+    mockApi({ WebhooksController_list_v1: () => okJson({ data: [], nextCursor: null }) });
+    const me = makeMe({
+      permissions: [...ROLE_PERMISSIONS.organization_admin, ...ROLE_PERMISSIONS.compliance_officer],
+      overrides: { organization: { ...TEST_ORG, serviceProfile: 'archive_only' } },
+    });
+    renderWithProviders(<IntegrationsPage />, { me, route: '/integrations' });
+    expect(await screen.findByRole('link', { name: 'Search the archive' })).toHaveAttribute(
       'href',
       '/archive',
     );
-    await expectNoAxeViolations(container);
+    expect(screen.queryByRole('link', { name: 'Manage SMTP connectors' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Manage API keys' })).toBeInTheDocument();
   });
 
   it('gates sections by role: read-only users see no webhooks; mailbox users get 403', () => {

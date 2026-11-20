@@ -1,8 +1,13 @@
 import { z } from 'zod';
+import { journalEnvelopeSchema, journalIntakeProofSchema } from '../intake/documents';
 import {
   categorySchema,
   decimalIdSchema,
   directionSchema,
+  ingestSourceSchema,
+  intakeFormatSchema,
+  intakeRecipientFieldSchema,
+  intakeSourceKindSchema,
   isoDateTimeSchema,
   recipientStatusSchema,
   sha256HexSchema,
@@ -14,6 +19,11 @@ import {
  * Documents stored with or inside an archive record (§4.2): `archive-parties/1`
  * (`email_archives.parties`), `archive-journal/1` (the encrypted journal object) and the
  * `objects` / `scan_rounds` columns.
+ *
+ * Step 8.6 (additive, every 8.1 document still parses): parties recipients gain an optional
+ * `field` (where an intake recipient came from) and `sources`, a NULL `direction` (an external
+ * recipient of an external intake sender, D3) and the status `journaled`; the journal gains an
+ * optional `intake` block and `mergedFrom`; `objects` gains an optional `merged` list (≤ 8).
  */
 
 export const archivePartiesSchema = z.strictObject({
@@ -26,9 +36,14 @@ export const archivePartiesSchema = z.strictObject({
       z.strictObject({
         seq: z.number().int().min(0).max(65_535),
         address: storedAddressSchema,
-        direction: directionSchema,
+        /** NULL: unknown (step 8.6 D3). */
+        direction: directionSchema.nullable(),
         status: recipientStatusSchema,
         finalAction: z.string().min(1).max(32).nullable(),
+        /** Step 8.6: the journal envelope field of an intake recipient. */
+        field: intakeRecipientFieldSchema.optional(),
+        /** Step 8.6: the copies that named this recipient (merged records). */
+        sources: z.array(ingestSourceSchema).min(1).max(2).optional(),
       }),
     )
     .max(65_535),
@@ -51,6 +66,31 @@ export const ARCHIVE_PARTIES_EXAMPLE: ArchiveParties = {
 };
 
 const nullableText = (max: number) => z.string().max(max).nullable();
+
+/** Step 8.6: the intake facts of a journal object (from `journal_intake_messages`). */
+export const archiveJournalIntakeSchema = z.strictObject({
+  /** Intake source public id. */
+  sourceId: uuidSchema,
+  kind: intakeSourceKindSchema,
+  format: intakeFormatSchema,
+  envelope: journalEnvelopeSchema,
+  envelopeMismatch: z.boolean(),
+  /** The passing proof's codes (`journal-intake-proof/1`). */
+  proof: journalIntakeProofSchema,
+});
+export type ArchiveJournalIntake = z.infer<typeof archiveJournalIntakeSchema>;
+
+/** Step 8.6: the journal object of a merged copy names the record it was merged into. */
+export const archiveJournalMergedFromSchema = z.strictObject({
+  /** Public id of the record's primary message. */
+  recordMessageId: uuidSchema,
+  recordReceivedAt: isoDateTimeSchema,
+  mergedAt: isoDateTimeSchema,
+  source: ingestSourceSchema,
+  /** The copy's body differed and its EML is stored as a content variant. */
+  contentVariant: z.boolean(),
+});
+export type ArchiveJournalMergedFrom = z.infer<typeof archiveJournalMergedFromSchema>;
 
 export const archiveJournalSchema = z.strictObject({
   version: z.literal('archive-journal/1'),
@@ -86,8 +126,11 @@ export const archiveJournalSchema = z.strictObject({
         z.strictObject({
           seq: z.number().int().min(0).max(65_535),
           address: storedAddressSchema,
-          direction: directionSchema,
+          /** NULL: unknown (step 8.6 D3). */
+          direction: directionSchema.nullable(),
           status: recipientStatusSchema,
+          /** Step 8.6: the journal envelope field of an intake recipient. */
+          field: intakeRecipientFieldSchema.optional(),
         }),
       )
       .max(65_535),
@@ -127,6 +170,10 @@ export const archiveJournalSchema = z.strictObject({
       }),
     )
     .max(65_535),
+  /** Step 8.6: present for a journal intake message. */
+  intake: archiveJournalIntakeSchema.optional(),
+  /** Step 8.6: present on the journal object of a merged copy. */
+  mergedFrom: archiveJournalMergedFromSchema.optional(),
 });
 export type ArchiveJournal = z.infer<typeof archiveJournalSchema>;
 
@@ -182,6 +229,22 @@ const objectRef = z.strictObject({
 });
 export type ArchiveObjectRef = z.infer<typeof objectRef>;
 
+/** Step 8.6: the most merged copies of one record (`ARCHIVE_MAX_MERGED_COPIES`). */
+export const ARCHIVE_MAX_MERGED_COPIES_LIMIT = 8;
+
+/** Step 8.6: one merged copy of a record (D7). */
+export const archiveMergedCopySchema = z.strictObject({
+  /** Public id of the merged message. */
+  messageId: uuidSchema,
+  receivedAt: isoDateTimeSchema,
+  source: ingestSourceSchema,
+  /** The merged copy's journal object (under the record's DEK). */
+  journal: objectRef,
+  /** The content variant, or null when the body equals a stored one. */
+  eml: objectRef.nullable(),
+});
+export type ArchiveMergedCopy = z.infer<typeof archiveMergedCopySchema>;
+
 /** `email_archives.objects`: the capture id and exact versions written by the capture (A6). */
 export const archiveRecordObjectsSchema = z.strictObject({
   captureId: uuidSchema,
@@ -195,6 +258,8 @@ export const archiveRecordObjectsSchema = z.strictObject({
       }),
     )
     .max(16),
+  /** Step 8.6: merged copies (≤ 8). */
+  merged: z.array(archiveMergedCopySchema).max(ARCHIVE_MAX_MERGED_COPIES_LIMIT).optional(),
 });
 export type ArchiveRecordObjects = z.infer<typeof archiveRecordObjectsSchema>;
 

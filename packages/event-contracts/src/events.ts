@@ -21,6 +21,14 @@ export const messageReceivedV1 = z.object({
   sizeBytes: z.number().int().nonnegative(),
   envelopeFrom: z.string().max(320),
   recipientCount: z.number().int().positive(),
+  /**
+   * Step 8.6 (ADR-0087, contracts §34): where the message entered the registry. Absent =
+   * `gateway` (every producer before 8.6). `journal_intake` messages are journal copies: the
+   * email-worker parses them (and scans them only when the organization opted in), never routes
+   * them to the policy engine, and webhooks never project them. Optional and the schema stays
+   * non-strict, so consumers built before 8.6 ignore it.
+   */
+  ingestSource: z.enum(['gateway', 'journal_intake']).optional(),
 });
 export type MessageReceivedV1 = z.infer<typeof messageReceivedV1>;
 
@@ -902,6 +910,9 @@ export const MESSAGE_STATES = [
   'delivered',
   'archived',
   'expired',
+  // Step 8.6 (ADR-0087, amends ADR-0025): the final state of a journal intake message
+  // (`email_messages.ingest_source = journal_intake`; edges E30-E32). Appended.
+  'journaled',
 ] as const;
 export const messageStateSchema = z.enum(MESSAGE_STATES);
 export type MessageStateValue = z.infer<typeof messageStateSchema>;
@@ -2058,6 +2069,9 @@ export const NOTIFICATION_ALERT_KIND_VALUES = [
   'webhook_disabled',
   // Step 8.2 D12: a provider connection's health became `critical`.
   'integration_unhealthy',
+  // Step 8.6 D9 (ADR-0087): a journal intake source became `silent` or `failing` (archive-worker
+  // intake health loop).
+  'journal_intake_silent',
 ] as const;
 /** Public event severities (step 6.2 §5). */
 export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
@@ -2070,19 +2084,23 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
   domain_dns_failed: ['webhookEventId', 'domainId'],
   webhook_disabled: ['subscriptionId'],
   integration_unhealthy: ['webhookEventId', 'connectionId'],
+  journal_intake_silent: ['intakeSourceId'],
 };
 
 /**
  * A security alert request (step 6.2 N2, §4.1): the first event of a throttle window
  * (`notification_alert_windows`) of an organization, kind and scope. Written by the
  * webhook-worker (fanout: `threat_detected`, `domain_dns_failed`; delivery role auto-disable:
- * `webhook_disabled`) through `message_outbox` (`aggregate_type = 'organization'`,
+ * `webhook_disabled`; step 8.2 integration-worker: `integration_unhealthy`; step 8.6
+ * archive-worker intake health loop: `journal_intake_silent`) through `message_outbox`
+ * (`aggregate_type = 'organization'`,
  * `aggregate_id` = the decimal organization id); published to `email.policy` and consumed from
  * `email.notifications` by the notification-worker, which reads what it renders at send time.
  *
  * Strict; ids, codes, times and counts only (no address, subject, URL, name or secret). Each
  * kind carries the refs it needs (threat: the public event id, message id and received time;
- * DNS: the public event id and domain id; webhook disabled: the subscription public id);
+ * DNS: the public event id and domain id; webhook disabled: the subscription public id; journal
+ * intake silent: the intake source public id);
  * `messageId` and `receivedAt` go together; `window.from` precedes `window.to`.
  */
 export const notificationAlertRequestedV1 = z
@@ -2097,6 +2115,8 @@ export const notificationAlertRequestedV1 = z
       subscriptionId: z.uuid().optional(),
       /** Step 8.2: the provider connection public id (`integration_unhealthy`). */
       connectionId: z.uuid().optional(),
+      /** Step 8.6: the journal intake source public id (`journal_intake_silent`). */
+      intakeSourceId: z.uuid().optional(),
     }),
     window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
     counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),

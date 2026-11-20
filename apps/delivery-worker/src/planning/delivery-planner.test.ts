@@ -293,3 +293,39 @@ describe('approvalObjectLabel (delivery_approvals_total{object}, step 4.3 U20, s
     expect(approvalObjectLabel('org/7/policyx/x.eml', 7n)).toBe('original');
   });
 });
+
+describe('DeliveryPlanner journal intake guard (step 8.6 D4)', () => {
+  it('refuses an approval of a journal intake message: rejected, metric, nothing read or written', async () => {
+    const registry = new MetricsService({ service: 't-intake' });
+    const metrics = new DeliveryMetrics(registry);
+    const t = tx({ id: 100n, direction: 'inbound', ingestSource: 'journal_intake' });
+    expect(await planner(metrics).plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'intake_not_deliverable',
+      deliveries: 0,
+      reinjections: 0,
+    });
+    expect(t.emailMessage.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: { id: true, direction: true, ingestSource: true },
+      }),
+    );
+    expect(t.messageOutbox.findFirst).not.toHaveBeenCalled();
+    expect(t.emailRecipient.findMany).not.toHaveBeenCalled();
+    expect(lock).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+    const text = await registry.metrics();
+    expect(text).toMatch(/delivery_intake_refusals_total\{[^}]*stage="planning"[^}]*\} 1/);
+    expect(text).toMatch(
+      /delivery_approvals_rejected_total\{[^}]*reason="intake_not_deliverable"[^}]*\} 1/,
+    );
+  });
+
+  it('plans a gateway message as before', async () => {
+    const t = tx({ id: 100n, direction: 'outbound', ingestSource: 'gateway' }, []);
+    expect(await planner().plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'no_known_recipients',
+    });
+  });
+});

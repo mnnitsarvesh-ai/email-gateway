@@ -368,3 +368,102 @@ describe('applyDerivedDeliveryState (L9)', () => {
     expect(await fx.history(pending)).toHaveLength(3);
   });
 });
+
+describe('transitionMessage: journaled only for journal intake messages (step 8.6 D4, ADR-0087)', () => {
+  const journal = (
+    m: MessageFixture,
+    reason: 'intake_unscanned' | 'intake_scan_complete' = 'intake_unscanned',
+  ): TransitionRequest => {
+    const eventId = randomUUID();
+    return {
+      message: m,
+      to: 'journaled',
+      reason,
+      actor: { role: 'scanner', service: 'email-worker', type: 'system' },
+      transitionKey: `evt:${eventId}:journaled`,
+      causationEventId: eventId,
+      expectedRound: 0,
+    };
+  };
+
+  it('applies E30 and E31 to an ingest_source = journal_intake message (row, history, outbox)', async () => {
+    const unscanned = await fx.message(org, { ingestSource: 'journal_intake' });
+    const outcome = await transitionMessageWithRetry(prisma, journal(unscanned), TX);
+    expect(outcome).toMatchObject({ result: 'applied', from: 'persisted', to: 'journaled' });
+    expect(await fx.row(unscanned)).toMatchObject({
+      status: 'journaled',
+      version: 2,
+      statusReason: 'intake_unscanned',
+    });
+    const history = await fx.history(unscanned);
+    expect(history.at(-1)).toMatchObject({
+      fromStatus: 'persisted',
+      toStatus: 'journaled',
+      reasonCode: 'intake_unscanned',
+      actorRole: 'scanner',
+    });
+    const outbox = await fx.outbox(unscanned);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.eventType).toBe(EventTypes.MessageStateChanged);
+    expect(messageStateChangedV1.parse(outbox[0]!.payload)).toMatchObject({
+      previousState: 'persisted',
+      state: 'journaled',
+      reasonCode: 'intake_unscanned',
+    });
+    // Final: a later rescan request is stale, nothing written.
+    const rescan = await transitionMessageWithRetry(
+      prisma,
+      {
+        message: unscanned,
+        to: 'scanning',
+        reason: 'admin_rescan',
+        actor: { role: 'operator', service: 'api', type: 'user', id: randomUUID() },
+        transitionKey: `api:${randomUUID()}`,
+        recordIgnored: false,
+      },
+      TX,
+    );
+    expect(rescan).toMatchObject({ result: 'stale', why: 'final_state' });
+
+    const scanned = await fx.message(org, { ingestSource: 'journal_intake', state: 'scanned' });
+    expect(
+      await transitionMessageWithRetry(prisma, journal(scanned, 'intake_scan_complete'), TX),
+    ).toMatchObject({ result: 'applied', from: 'scanned', to: 'journaled' });
+  });
+
+  it('refuses journaled for a gateway message: invalid, recorded, row unchanged', async () => {
+    const m = await fx.message(org);
+    const outcome = await transitionMessageWithRetry(prisma, journal(m), TX);
+    expect(outcome).toMatchObject({ result: 'invalid', why: 'ingest_source_not_allowed' });
+    expect(await fx.row(m)).toMatchObject({ status: 'persisted', version: 1 });
+    expect(await fx.outbox(m)).toHaveLength(0);
+    const ignored = await fx.events(m, 'lifecycle.ignored');
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]!.details).toMatchObject({
+      requested: 'journaled',
+      current: 'persisted',
+      result: 'invalid',
+      why: 'ingest_source_not_allowed',
+    });
+  });
+
+  it('keeps every gateway edge for a journal intake message unchanged (the gate is on journaled only)', async () => {
+    const m = await fx.message(org, { ingestSource: 'journal_intake' });
+    const locked = await prisma.$transaction((tx) => lockLifecycle(tx, m));
+    expect(locked).toMatchObject({ state: 'persisted', version: 1 });
+    expect(
+      await transitionMessageWithRetry(
+        prisma,
+        {
+          message: m,
+          to: 'scanning',
+          reason: 'scan_started',
+          actor: { role: 'scanner', service: 'email-worker', type: 'system' },
+          transitionKey: `evt:${randomUUID()}:scanning`,
+          expectedRound: 0,
+        },
+        TX,
+      ),
+    ).toMatchObject({ result: 'applied', to: 'scanning' });
+  });
+});

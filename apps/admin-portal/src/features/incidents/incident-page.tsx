@@ -168,7 +168,13 @@ function WorkflowSection({ incident }: { incident: IncidentDetail }) {
   const me = useMe();
   const myId = me.data?.user.id ?? null;
   const ui = categoryUi(incident.category);
-  const [dialog, setDialog] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<'assign' | 'unassign' | 'severity' | null>(null);
+  // The transition is kept as chosen while its dialog is open: the refetch after the change
+  // drops it from `allowedTransitions`, and deriving it would close the dialog before the
+  // mutation settles, whose late close then shut the next transition's dialog.
+  const [transition, setTransition] = useState<IncidentDetail['allowedTransitions'][number] | null>(
+    null,
+  );
   const [resolution, setResolution] = useState<ResolutionCode | ''>('');
   const [feedback, setFeedback] = useState<Record<string, unknown>>({});
   const [severity, setSeverity] = useState<IncidentSeverity>(incident.severity);
@@ -178,14 +184,13 @@ function WorkflowSection({ incident }: { incident: IncidentDetail }) {
     invalidates: INVALIDATES,
     successMessage: 'Incident updated',
   });
-  const transition = incident.allowedTransitions.find((t) => t.to === dialog) ?? null;
   const closed = incident.status === 'false_positive' || incident.status === 'resolved';
   const base = { expectedRowVersion: incident.rowVersion };
   const open = (to: string) => {
     const t = incident.allowedTransitions.find((x) => x.to === to);
     setResolution(t?.resolutionCodes.length === 1 ? t.resolutionCodes[0]! : '');
     setFeedback(to === 'false_positive' && ui?.initialFeedback ? ui.initialFeedback() : {});
-    setDialog(to);
+    setTransition(t ?? null);
   };
   return (
     <Section
@@ -245,7 +250,7 @@ function WorkflowSection({ incident }: { incident: IncidentDetail }) {
       ) : null}
       <AtoReasonDialog
         open={transition !== null}
-        onOpenChange={(next) => !next && setDialog(null)}
+        onOpenChange={(next) => !next && setTransition(null)}
         title={transition ? `${TRANSITION_LABELS[transition.to]}?` : ''}
         description={
           transition?.to === 'false_positive'

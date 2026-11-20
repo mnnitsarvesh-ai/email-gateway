@@ -36,6 +36,7 @@ const organization: SuccessBody<'OrganizationsController_get_v1'> = {
   statusReason: null,
   statusChangedAt: null,
   plan: { code: 'business', name: 'Business' },
+  serviceProfile: 'gateway',
   deploymentMode: 'saas',
   dataRegion: 'eu-west-1',
   deployments: [],
@@ -183,6 +184,8 @@ describe('Settings: notifications and preferences', () => {
       route: '/settings?tab=notifications',
     });
     await screen.findByRole('form', { name: 'Organization alerts' });
+    // Step 8.6: the journal intake silence alert is listed (always on).
+    expect(screen.getByText('journal_intake_silent')).toBeInTheDocument();
     await expectNoAxeViolations(container);
     await user.click(screen.getByRole('switch', { name: 'Send webhook alerts' }));
     await user.click(screen.getByRole('button', { name: 'Save alert settings' }));
@@ -241,7 +244,7 @@ describe('Settings: notifications and preferences', () => {
     await screen.findByRole('form', { name: 'Your notifications' });
   });
 
-  it('archive tab (step 8.1) is hidden without archive:read; switching tabs writes the URL', async () => {
+  it('the step 8.1 archive tab link redirects to Journaling (hidden without journal:read); switching tabs writes the URL', async () => {
     mockApi({
       NotificationsController_preferences_v1: () => okJson(preferences),
       SessionsController_list_v1: () => okJson({ data: [], nextCursor: null }),
@@ -250,7 +253,9 @@ describe('Settings: notifications and preferences', () => {
       route: '/settings?tab=archive',
       role: 'mailbox_user',
     });
+    await waitFor(() => expect(currentTestUrl()).toBe('/settings?tab=journaling'));
     expect(screen.queryByRole('tab', { name: 'Archive and retention' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Journaling' })).not.toBeInTheDocument();
     expect(screen.queryByText('Arrives in step 8.1')).not.toBeInTheDocument();
     await screen.findByRole('form', { name: 'Your notifications' });
     await expectNoAxeViolations(container);

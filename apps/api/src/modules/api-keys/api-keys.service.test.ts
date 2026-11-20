@@ -51,6 +51,15 @@ describe('API key scopes (D11)', () => {
     expect(() => assertValidApiKeyScopes(['user:read', 'domain:read'], all)).not.toThrow();
   });
 
+  it('accepts the journaling scopes journal:read and journal:manage (step 8.6 D12)', () => {
+    expect(() =>
+      assertValidApiKeyScopes(
+        ['journal:read', 'journal:manage'],
+        new Set(['journal:read', 'journal:manage']),
+      ),
+    ).not.toThrow();
+  });
+
   it('refuses empty, platform and unknown scopes (400) and unheld scopes (403)', () => {
     expectBadRequest(() => assertValidApiKeyScopes([], all), 'at least one');
     expectBadRequest(() => assertValidApiKeyScopes(['platform:operations'], all), 'platform');

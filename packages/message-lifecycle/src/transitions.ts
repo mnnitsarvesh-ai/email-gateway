@@ -46,6 +46,11 @@ export const LIFECYCLE_REASON_CODES = [
   'quarantine_partial_release',
   'manual_quarantine',
   'quarantine_expired',
+  // Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md D4, ADR-0087), appended.
+  'intake_unscanned',
+  'intake_parse_failed',
+  'intake_scan_complete',
+  'intake_scan_failed',
 ] as const;
 
 export type LifecycleReasonCode = (typeof LIFECYCLE_REASON_CODES)[number];
@@ -82,7 +87,8 @@ export interface TransitionEdge {
  * gives E5, E8–E13 their producer, the policy-engine, ADR-0044; step 5.3 (ADR-0046 decision 4)
  * adds the reason `policy_partial` to E10, produces E16–E18 (role `quarantine`), lets the
  * quarantine sweeper expire held messages through E26 (`quarantine_expired`) and adds E28 and
- * E29; step 8.1 retires E25, ADR-0064), as data. Every allowed change of `email_messages.status` is one of these edges;
+ * E29; step 8.1 retires E25, ADR-0064; step 8.6 adds E30-E32 into the final state `journaled`
+ * of journal intake messages, ADR-0087), as data. Every allowed change of `email_messages.status` is one of these edges;
  * everything else is stale or invalid (L4). Retired ids are never reused.
  * At most one edge exists per `(from, to)` pair (`transitions.test.ts`).
  */
@@ -334,7 +340,43 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
     reasons: ['manual_quarantine'],
     producedBy: '5.3',
   },
+  // Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md D4, ADR-0087 amends
+  // ADR-0025): a journal intake message (`ingest_source = journal_intake`) ends in `journaled`
+  // instead of reaching the policy engine. The email-worker applies them as `scanner`: E30 from
+  // the MIME commit (scan not requested, or the parse failed), E31 / E32 from the scan
+  // finalization of a requested scan (in place of `scanned.v1`). The transition service refuses
+  // every edge into `journaled` for a gateway message (`invalid/ingest_source_not_allowed`).
+  {
+    id: 'E30',
+    from: ['persisted'],
+    to: 'journaled',
+    roles: ['scanner'],
+    reasons: ['intake_unscanned', 'intake_parse_failed'],
+    producedBy: '8.6',
+  },
+  {
+    id: 'E31',
+    from: ['scanned'],
+    to: 'journaled',
+    roles: ['scanner'],
+    reasons: ['intake_scan_complete'],
+    producedBy: '8.6',
+  },
+  {
+    id: 'E32',
+    from: ['scan_failed'],
+    to: 'journaled',
+    roles: ['scanner'],
+    reasons: ['intake_scan_failed'],
+    producedBy: '8.6',
+  },
 ];
+
+/** `email_messages.ingest_source` (Prisma `MessageIngestSource`, step 8.6). */
+export type MessageIngestSourceValue = 'gateway' | 'journal_intake';
+
+/** Target states only a journal intake message may enter (step 8.6 D4). */
+export const INTAKE_ONLY_STATES: readonly MessageState[] = ['journaled'];
 
 /** The edge from `from` to `to` in `table`, if any (at most one exists per pair). */
 export function findEdge(

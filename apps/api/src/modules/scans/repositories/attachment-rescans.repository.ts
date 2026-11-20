@@ -74,7 +74,8 @@ export class AttachmentRescansRepository {
    * `apps/email-worker/src/scanning/engines/attachment/rescan-runner.ts`), without its cursor:
    * received in the window, in one of the states, optionally one organization, with at least
    * one `email_attachments` row, and either `scan_failed` or without a final `malicious`
-   * attachment result in the message's current round. Both must change together.
+   * attachment result in the message's current round. Both must change together. Step 8.6 D5:
+   * journal intake messages are never rescanned (gateway messages only).
    */
   async countCandidates(filter: CandidateFilter): Promise<number> {
     const organization =
@@ -86,6 +87,7 @@ export class AttachmentRescansRepository {
       FROM email_messages m
       WHERE m.received_at >= ${filter.windowStart} AND m.received_at <= ${filter.windowEnd}
         AND m.status IN (${Prisma.join([...filter.states])})
+        AND m.ingest_source = 'gateway'
         ${organization}
         AND EXISTS (
           SELECT 1 FROM email_attachments a

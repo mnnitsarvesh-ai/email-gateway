@@ -31,6 +31,7 @@ import {
   type ReinjectionContext,
   type ReinjectionStore,
 } from './reinjection-store';
+import { INTAKE_NOT_DELIVERABLE } from '../planning/delivery-planner';
 import { isAmbiguousSmtpError, SmtpClient, SmtpClientError, type SmtpReply } from './smtp-client';
 
 export interface ReinjectorConfig {
@@ -157,6 +158,21 @@ export class Reinjector {
     const context = await this.checkedRead(row, () => this.deps.store.context(row));
     if (context === INCONSISTENT) return 'retry';
     if (!context) return this.contextMissing(row);
+    if (context.ingestSource === 'journal_intake') {
+      // Step 8.6 D4 (defence in depth): an intake message is never handed to postfix-outbound.
+      // The reinjection row ends `failed`; the message and its deliveries are not touched.
+      this.deps.metrics.intakeRefusals.inc({ stage: 'reinjection' });
+      this.logger.error(
+        { ...ids, reason: INTAKE_NOT_DELIVERABLE },
+        'reinjection of a journal intake message refused: intake messages are never delivered',
+      );
+      await this.deps.store.markFailed(
+        row,
+        INTAKE_NOT_DELIVERABLE,
+        'journal intake messages are never delivered',
+      );
+      return 'failed';
+    }
     let active = context.deliveries;
     if (active.length === 0) {
       this.logger.info(ids, 'no recipient of the reinjection still needs the hop');

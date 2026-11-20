@@ -123,6 +123,8 @@ export class ArchiveMessagesController {
       'in clear); clear values only through the audited reveal. No totals; `nextCursor` (v1, ' +
       '`archive_messages`) is bound to the filters, the range and the sort. The response ' +
       'header `X-EG-Index-Lag-Seconds` gives the age of your oldest change not yet indexed. ' +
+      'Step 8.6: `ingestSource` (`gateway`, `journal_intake`) filters on where a copy came ' +
+      'from; items carry `ingestSources`. ' +
       'Search unavailable or not configured: `503 archive_search_unavailable` (detail and ' +
       'content routes keep working). The first page is audited `archive.searched` (filter ' +
       'names and hashes, never values). Rate class `expensive`.',
@@ -153,7 +155,7 @@ export class ArchiveMessagesController {
   }
 
   @Get(':messageId')
-  @RequirePermissions(P.read)
+  @RequirePermissions(P.search)
   @ApiOperation({
     summary: 'Get an archived message',
     description:
@@ -161,8 +163,10 @@ export class ArchiveMessagesController {
       '(sources, category, message state), retention (stored and effective retain-until, ' +
       'expiry action), the legal-hold flag (the matching holds only for holders of ' +
       '`archive:legal_hold` or `ediscovery:manage`), immutability, integrity (original ' +
-      'SHA-256, sizes, encryption format, key version) and the linked scan rounds. Audited ' +
-      '`archive.message_viewed`.',
+      'SHA-256, sizes, encryption format, key version) and the linked scan rounds. Step 8.6: ' +
+      '`ingestSources`, the journal intake source of an intake record (`intake`) and the copies ' +
+      'merged into the record (`mergedCopies`); needs `archive:search` (was `archive:read` ' +
+      'before step 8.6, ADR-0089). Audited `archive.message_viewed`.',
   })
   @ApiMessageIdParam()
   @ApiArchiveResponse(200, ArchiveMessageDetailSchema, X.detail, 'The archived message')
@@ -179,7 +183,7 @@ export class ArchiveMessagesController {
   }
 
   @Get(':messageId/journal')
-  @RequirePermissions(P.read)
+  @RequirePermissions(P.search)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
     summary: 'Get the journal report of an archived message',
@@ -187,8 +191,10 @@ export class ArchiveMessagesController {
       'The decrypted journal report frozen at capture: envelope recipients (BCC included, ' +
       'masked), message facts (subject masked), the stored headers (the ADR-0062 safe subset ' +
       'in clear; To, Cc, Subject and unknown names `value: null, masked: true`), attachments ' +
-      '(names, types, sizes, SHA-256), the parse outcome and deliveries at capture. Audited ' +
-      '`archive.journal_viewed`.' +
+      '(names, types, sizes, SHA-256), the parse outcome and deliveries at capture. Step 8.6: ' +
+      'recipients carry their journal envelope `field`, and a journal intake copy has `intake` ' +
+      '(the envelope with fields and expansions, masked; the sender proof codes). Needs ' +
+      '`archive:search` (ADR-0089). Audited `archive.journal_viewed`.' +
       CONTENT_RULE,
   })
   @ApiMessageIdParam()
@@ -208,7 +214,7 @@ export class ArchiveMessagesController {
   }
 
   @Get(':messageId/security')
-  @RequirePermissions(P.read)
+  @RequirePermissions(P.search)
   @Header('Cache-Control', NO_STORE)
   @ApiOperation({
     summary: 'Get the frozen scan results of an archived message',
@@ -216,7 +222,7 @@ export class ArchiveMessagesController {
       'Every scan round linked at capture (never a rescan), decrypted from its frozen ' +
       'snapshot and mapped exactly like GET /messages/{messageId}/scans (DLP sections only for ' +
       '`dlp:read` holders; DLP evidence, URL click summaries and BEC feedback are live-only and ' +
-      'not retained). Audited `archive.security_viewed`.' +
+      'not retained). Needs `archive:search` (ADR-0089). Audited `archive.security_viewed`.' +
       CONTENT_RULE,
   })
   @ApiMessageIdParam()
@@ -236,7 +242,7 @@ export class ArchiveMessagesController {
   }
 
   @Post(':messageId/reveal')
-  @RequirePermissions(P.read, P.reveal)
+  @RequirePermissions(P.search, P.reveal)
   @HttpCode(HttpStatus.OK)
   @ArchiveRateLimit('reveal')
   @Header('Cache-Control', NO_STORE)
@@ -244,7 +250,7 @@ export class ArchiveMessagesController {
     summary: 'Reveal masked values of an archived message',
     description:
       'The clear subject, envelope recipient addresses (≤ 1 000) and To/Cc/Subject header ' +
-      'values (from the journal report) of one archived message. Needs `archive:read` and ' +
+      'values (from the journal report) of one archived message. Needs `archive:search` and ' +
       '`message:reveal`. One `archive.revealed` audit row (fields and counts, never values) is ' +
       'committed before the response; if it cannot be written nothing is returned (`503 ' +
       'service_unavailable`). ARCHIVE_REVEAL_PER_MINUTE per caller (`429 rate_limited`, ' +
@@ -329,7 +335,10 @@ export class ArchiveMessagesController {
       'malicious acknowledgement). The token is bound to your organization, you, the kind and ' +
       'the message and valid ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS; download it with GET ' +
       '/archive/downloads/{token}. ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR per user. Audited ' +
-      '`archive.download_granted`. Not idempotency-stored (the response carries the token).' +
+      '`archive.download_granted`. Not idempotency-stored (the response carries the token). ' +
+      'Step 8.6: `variant` (a `mergedCopies[].id` with `contentVariant: true`) grants the ' +
+      'download of that stored content variant instead (`404 archive_variant_not_found`); the ' +
+      'download verifies its own SHA-256.' +
       CUSTOMER_ONLY,
   })
   @ApiMessageIdParam()
@@ -343,7 +352,12 @@ export class ArchiveMessagesController {
     [C.overrideForbidden, C.downloadDisabled],
     '`archive_override_forbidden`, `archive_download_disabled`',
   )
-  @ApiArchiveMessageNotFound()
+  @ApiCodedError(
+    404,
+    'Unknown archived message, one of another organization (`archive_message_not_found`), or ' +
+      '`variant` is not a stored content variant of it (`archive_variant_not_found`)',
+    [C.messageNotFound, C.variantNotFound],
+  )
   @ApiArchiveConflicts([C.downloadBlocked], '`archive_download_blocked` (`reason`)', false, {
     reason: { type: 'string' },
   })

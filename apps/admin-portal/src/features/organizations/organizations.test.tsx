@@ -32,6 +32,7 @@ const org = (over: Partial<Organization> = {}): Organization => ({
   statusReason: null,
   statusChangedAt: null,
   plan: { code: 'business', name: 'Business' },
+  serviceProfile: 'gateway',
   deploymentMode: 'saas',
   dataRegion: 'eu-west-1',
   deployments: [

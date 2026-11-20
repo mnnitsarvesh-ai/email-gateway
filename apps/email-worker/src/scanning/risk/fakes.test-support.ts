@@ -140,6 +140,10 @@ export class FakeRiskDb {
       rows.filter((r) => r.scan_id === scanId && same(r.received_at, receivedAt));
     let table = '';
     let rows: Row[] = [];
+    // Step 8.6: the completion reads the message's ingest source (fixtures are gateway mail).
+    if (sql.includes('ingest_source') && sql.includes('FROM email_messages')) {
+      return [{ ingest_source: 'gateway', organization_id: ORG }];
+    }
     if (sql.includes('FROM email_scans')) {
       table = 'email_scans';
       rows = this.scans.filter((r) => r.id === scanId && same(r.received_at, receivedAt));

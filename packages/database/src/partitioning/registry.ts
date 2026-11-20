@@ -52,13 +52,14 @@ const monthly = (
 });
 
 /**
- * The 39 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 41 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
  * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3),
  * the risk scores table of step 5.1 (§3), the webhook events and delivery attempts of
- * step 6.2 (§3), the archive capture intents and disposal log of step 8.1 (§3) and the four
- * account takeover tables of step 8.4 (§3.3, D22).
+ * step 6.2 (§3), the archive capture intents and disposal log of step 8.1 (§3), the four
+ * account takeover tables of step 8.4 (§3.3, D22) and the journal intake messages and archive
+ * record sources of step 8.6 (§3.2).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -124,6 +125,15 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // Step 8.1 (A14, A21): the per-record disposal log is the compliance trail of every deletion
   // of archived mail (append-only); partitioned by the disposal request instant, never dropped.
   monthly('archive_disposals', 'requested_at', null, 'compliance'),
+  // Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md §3.2, D3): the journal
+  // envelope and proof of an intake message live as long as the message (6 months, core). The
+  // archive keeps its own copy of what it needs (journal object), so dropping them never loses
+  // archived facts.
+  monthly('journal_intake_messages', 'received_at', 6, 'core'),
+  // Step 8.6 (§3.2, D7, ADR-0088): the merged copies of an archive record are compliance data,
+  // partitioned by the record's received_at and never dropped (deleted row by row with the
+  // record's disposal, like email_archives).
+  monthly('archive_record_sources', 'archive_received_at', null, 'compliance'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),
   // Compliance: export and drop are a later manual or ops decision.
   monthly('audit_logs', 'created_at', null, 'compliance'),

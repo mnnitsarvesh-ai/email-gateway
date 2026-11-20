@@ -405,6 +405,9 @@ export async function purgeArchiveTenants(
   await prisma.archiveIndexQueue.deleteMany({ where });
   await prisma.archiveIndexCheck.deleteMany({ where });
   await prisma.archiveDisposal.deleteMany({ where });
+  // Step 8.6: merged copies and dedupe keys of the records (ADR-0088).
+  await prisma.archiveRecordSource.deleteMany({ where });
+  await prisma.archiveDedupeKey.deleteMany({ where });
   await prisma.emailArchive.deleteMany({ where });
   await prisma.archiveCaptureIntent.deleteMany({ where });
   await prisma.archiveSetting.deleteMany({ where });

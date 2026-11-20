@@ -185,6 +185,15 @@ spec:
                 name: API_TRUSTED_FORWARDER_TOKEN_FILE,
                 value: /var/run/secrets/api-trusted-forwarder/token,
               }
+            # Journal intake (step 8.6 D1, ADR-0087): the HMAC key that derives intake addresses and
+            # Google header tokens (64 hex). The api alone holds it (the smtp-adapter compares
+            # SHA-256 hashes); its own Secret. The non-secret JOURNAL_INTAKE_* keys are in the
+            # ConfigMap. Rotation of this key changes every address: rotate sources instead
+            # (docs/runbooks/journal-intake.md).
+            - {
+                name: JOURNAL_INTAKE_ADDRESS_SECRET_FILE,
+                value: /var/run/secrets/journal-intake-address/secret,
+              }
             # Journaling and archiving (step 8.1 §4.8, A9, A17-A19, ADR-0065..0069). Shared keys
             # (search URL, index prefix, Object Lock mode, retention cap, key ids, export bounds)
             # come from the ConfigMap. The archive root key (decrypts archived content; held by the
@@ -256,6 +265,11 @@ spec:
             - {
                 name: provider-credential-key,
                 mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: journal-intake-address,
+                mountPath: /var/run/secrets/journal-intake-address,
                 readOnly: true,
               }
             - {
@@ -341,6 +355,11 @@ spec:
           secret:
             secretName: email-gateway-provider-route-token-key
             items: [{ key: key, path: key }]
+        # Step 8.6: the journal intake address secret (api only).
+        - name: journal-intake-address
+          secret:
+            secretName: email-gateway-journal-intake-address-secret
+            items: [{ key: secret, path: secret }]
         # Step 8.1: only the items the api needs (never the export signing PRIVATE key, which only
         # the archive-jobs Deployment mounts).
         - name: archive-root-key

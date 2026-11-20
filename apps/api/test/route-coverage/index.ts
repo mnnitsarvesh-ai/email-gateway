@@ -13,7 +13,8 @@
  * - `archive.ts` (step 8.1): archive, legal hold and eDiscovery operations;
  * - `ato.ts` and `incidents.ts` (step 8.4): account takeover and security incident operations;
  * - `provider-connections.ts` (step 8.2): Microsoft 365 and Google Workspace connections;
- * - `ato-providers.ts` (step 8.5): ATO identity-provider integrations and mailbox state.
+ * - `ato-providers.ts` (step 8.5): ATO identity-provider integrations and mailbox state;
+ * - `journaling.ts` (step 8.6): journaling settings, status and journal intake sources.
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
@@ -25,6 +26,7 @@ import { COVERAGE as ATO_PROVIDERS } from './ato-providers';
 import { COVERAGE as EXPLORER } from './explorer';
 import { COVERAGE as INCIDENTS } from './incidents';
 import { COVERAGE as INSIGHTS } from './insights';
+import { COVERAGE as JOURNALING } from './journaling';
 import { COVERAGE as LEGACY } from './legacy';
 import { COVERAGE as MESSAGES } from './messages';
 import { COVERAGE as POLICY_BUILDER } from './policy-builder';
@@ -56,7 +58,8 @@ export type CoverageArea =
   | 'ato'
   | 'incidents'
   | 'provider-connections'
-  | 'ato-providers';
+  | 'ato-providers'
+  | 'journaling';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
   Object.freeze({
@@ -71,6 +74,7 @@ export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCover
     incidents: INCIDENTS,
     'provider-connections': PROVIDER_CONNECTIONS,
     'ato-providers': ATO_PROVIDERS,
+    journaling: JOURNALING,
   });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
@@ -85,4 +89,5 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...INCIDENTS,
   ...PROVIDER_CONNECTIONS,
   ...ATO_PROVIDERS,
+  ...JOURNALING,
 ]);

@@ -2,6 +2,8 @@
 
 **Status:** Accepted
 
+Amended by [ADR-0089](0089-journaling-archive-permission-split.md) (step 8.6): ten system roles (new `compliance_officer`); `organization_admin` holds every tenant permission except `ARCHIVE_ACCESS_PERMISSIONS`; new permissions `journal:read` / `journal:manage`; the grant-preserving migration gives every existing organization admin of a customer organization a `compliance_officer` assignment.
+
 **Context.** Steps 1.2 and 1.3 need login, sessions, MFA, API keys and tenant-aware authorization for the control-plane API. The step 1.1 schema already has `users`, `roles`, `permissions`, `role_permissions`, `user_roles`, `user_sessions` (hashed refresh token plus `family_id`), `api_keys` (prefix plus HMAC) and `login_audit_logs`. `docs/architecture/contracts.md` listed "OIDC for the portal" as the plan, but no identity provider exists, the brief asks for password login with Argon2id, and customer SSO is a plan feature (`sso`), not a prerequisite. ADR-0012 requires the tenant to come from the authenticated principal, never from a header.
 
 **Decision.**

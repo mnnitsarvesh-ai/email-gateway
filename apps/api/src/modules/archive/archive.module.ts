@@ -57,6 +57,8 @@ import { ArchiveSettingsService } from './services/archive-settings.service';
     ArchiveDownloadsService,
   ],
   exports: [
+    // Step 8.6: the journaling module writes the same settings row through this service.
+    ArchiveSettingsService,
     ArchiveMetrics,
     ArchiveRateLimitGuard,
     ArchiveConfigRepository,

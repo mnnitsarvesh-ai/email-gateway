@@ -15,13 +15,25 @@ import {
   type SecurityAlertReads,
   type StoredAlertEvent,
 } from './alert-reads';
-import { type AlertFacts, renderSecurityAlert, securityAlertMessageId } from './alert-templates';
+import {
+  type AlertFacts,
+  renderSecurityAlert,
+  type SecurityAlertKind,
+  securityAlertMessageId,
+} from './alert-templates';
 import type { NoticeMailer } from './mailer';
 import type { AlertResult, NotificationMetrics } from './notification-metrics';
 import { addressDomain } from './policy-notification.handler';
 import type { PreferenceFilter } from './preference-filter';
 
 export type AlertKind = NotificationAlertRequestedV1['kind'];
+
+/**
+ * Permission a user must hold to receive an alert kind (N3): the shared map plus the step 8.6
+ * `journal_intake_silent` → `journal:manage` (the users who can fix a journal rule or source).
+ */
+export const SECURITY_ALERT_RECIPIENT_PERMISSION: Readonly<Record<SecurityAlertKind, string>> =
+  Object.freeze({ ...ALERT_RECIPIENT_PERMISSION, journal_intake_silent: 'journal:manage' });
 
 export interface AlertNotificationOptions {
   maxRecipients: number;
@@ -141,6 +153,9 @@ export class AlertNotificationHandler {
     settings: ResolvedNotificationSettings,
     p: NotificationAlertRequestedV1,
   ): boolean {
+    // Step 8.6 D9: `journal_intake_silent` has no tenant setting (always on, like
+    // `integration_unhealthy`; throttled per source by the producer).
+    if (p.kind === 'journal_intake_silent') return true;
     if (!alertKindSettings(settings, p.kind).enabled) return false;
     if (p.kind === 'threat_detected') {
       return severityRank(p.severity) >= severityRank(settings.alerts.threatDetected.minSeverity);
@@ -272,6 +287,29 @@ export class AlertNotificationHandler {
           },
         };
       }
+      case 'journal_intake_silent': {
+        // Step 8.6 D9: the source row at send time (name, kind, health); never its address.
+        const { intakeSourceId } = p.refs;
+        if (!intakeSourceId) return this.deadLetter(p.kind, 'alert_refs_missing');
+        const source = await this.reads.intakeSource(tx, organizationId, intakeSourceId);
+        if (source === null) return this.deadLetter(p.kind, 'intake_source_not_found');
+        return {
+          scopeKey: alertScopeKey(p.kind, { intakeSourcePublicId: source.publicId }),
+          facts: {
+            kind: p.kind,
+            severity: p.severity,
+            ...counts,
+            intake: {
+              sourcePublicId: source.publicId,
+              name: source.displayName,
+              sourceKind: source.kind,
+              healthNow: source.healthStatus,
+              lastAcceptedAt: source.lastAcceptedAt?.toISOString() ?? null,
+              silenceAlertMinutes: source.silenceAlertMinutes,
+            },
+          },
+        };
+      }
       case 'webhook_disabled': {
         const { subscriptionId } = p.refs;
         if (!subscriptionId) return this.deadLetter(p.kind, 'alert_refs_missing');
@@ -326,7 +364,7 @@ export class AlertNotificationHandler {
     kind: AlertKind,
     settings: ResolvedNotificationSettings,
   ): Promise<string[]> {
-    const permission = ALERT_RECIPIENT_PERMISSION[kind];
+    const permission = SECURITY_ALERT_RECIPIENT_PERMISSION[kind];
     const { emails } = await this.preferences.collect(
       tx,
       organization.id,

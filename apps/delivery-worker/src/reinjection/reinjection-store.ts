@@ -65,6 +65,8 @@ export interface ActiveDelivery {
 }
 
 export interface ReinjectionContext {
+  /** `email_messages.ingest_source` (step 8.6): `journal_intake` is never reinjected. */
+  ingestSource?: 'gateway' | 'journal_intake';
   envelopeFrom: string;
   clientIp: string | null;
   clientHelo: string | null;
@@ -208,6 +210,7 @@ export class ReinjectionStore {
         envelopeFrom: true,
         clientIp: true,
         clientHelo: true,
+        ingestSource: true,
       },
     });
     if (!message) return null;
@@ -219,6 +222,7 @@ export class ReinjectionStore {
       throw new InconsistentReadError('message', 'identity echo');
     }
     return {
+      ingestSource: message.ingestSource,
       envelopeFrom: message.envelopeFrom,
       clientIp: message.clientIp,
       clientHelo: message.clientHelo,

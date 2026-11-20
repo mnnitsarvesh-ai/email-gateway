@@ -18,6 +18,7 @@ import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { idempotencyKeyHash } from '../../../http/idempotency/idempotency-key';
 import type { IdempotentResult } from '../../../http/idempotency/idempotency.service';
 import type { ClientContext } from '../../auth/services/session.service';
+import { gatewayMessageState, gatewayRecipientState } from '../domain/gateway-states';
 import { LifecycleGateway } from '../../messages/services/lifecycle-gateway';
 import { MessageLifecycleRepository } from '../../messages/repositories/message-lifecycle.repository';
 import { hardBlockIds, stringList } from '../domain/entry';
@@ -406,7 +407,7 @@ export class QuarantineDispositionService {
         recipientDirections,
         senderAddresses,
         recipientAddresses: recipients.map((r) => r.address),
-        state: locked.snapshot.state,
+        state: gatewayMessageState(locked.snapshot.state),
       },
       legalHolds: facts.legalHolds.map((h) => ({
         id: h.id.toString(),
@@ -441,7 +442,7 @@ export class QuarantineDispositionService {
       recipientStatuses: recipients.map((r) =>
         discardsRecipient && r.rcptSeq === locked.entry.rcptSeq && r.status === 'quarantined'
           ? 'discarded'
-          : r.status,
+          : gatewayRecipientState(r.status),
       ),
     });
   }

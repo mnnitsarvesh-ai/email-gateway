@@ -493,6 +493,22 @@ export class ScanRepository implements ScanStore {
     });
   }
 
+  /** `email_messages.ingest_source` of the round's message (row already locked; step 8.6). */
+  private async ingestSourceOf(
+    tx: Prisma.TransactionClient,
+    round: ScanRound,
+  ): Promise<'gateway' | 'journal_intake'> {
+    const rows = await tx.$queryRaw<Array<{ ingest_source: string; organization_id: bigint }>>`
+      SELECT ingest_source, organization_id FROM email_messages
+      WHERE id = ${round.messageId} AND received_at = ${round.receivedAt}`;
+    const row = rows[0];
+    return row !== undefined &&
+      BigInt(row.organization_id) === round.organizationId &&
+      row.ingest_source === 'journal_intake'
+      ? 'journal_intake'
+      : 'gateway';
+  }
+
   private async lockScanRow(
     tx: Prisma.TransactionClient,
     scanId: bigint,
@@ -1230,6 +1246,42 @@ export class ScanRepository implements ScanStore {
         round,
         transition: outcome.result,
         scannedEventId: null,
+      };
+    }
+
+    if ((await this.ingestSourceOf(tx, round)) === 'journal_intake') {
+      // Step 8.6 D4: a journal intake message (scan requested by its organization) ends in
+      // `journaled` in the round's own transaction: E31 after `scanned`, E32 after `scan_failed`
+      // (a failed or timed-out round). E31/E32 replace `mail.message.scanned.v1`: nothing reaches
+      // the policy engine, ATO or webhooks. The risk score above is recorded as for any round.
+      const journaled = await transitionMessage(
+        tx,
+        {
+          message: {
+            id: round.messageId,
+            receivedAt: round.receivedAt,
+            organizationId: round.organizationId,
+          },
+          to: 'journaled',
+          reason: aggregate.outcome === 'scanned' ? 'intake_scan_complete' : 'intake_scan_failed',
+          actor: SCANNER_ACTOR,
+          transitionKey: `intake-scan:${round.messageId.toString()}:${String(round.round)}`,
+          causationEventId: ctx.causationEventId,
+          correlationId: ctx.correlationId,
+          expectedFrom: [aggregate.outcome],
+        },
+        this.lifecycleMetrics ? { metrics: this.lifecycleMetrics } : {},
+      );
+      return {
+        kind: 'completed',
+        aggregate,
+        round,
+        transition: outcome.result,
+        scannedEventId: null,
+        intake:
+          journaled.result === 'applied' || journaled.result === 'duplicate'
+            ? 'journaled'
+            : 'transition_skipped',
       };
     }
 

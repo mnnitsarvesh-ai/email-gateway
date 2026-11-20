@@ -87,7 +87,7 @@ function ArchiveSearchContent() {
         actions={
           access.read ? (
             <Button asChild variant="outline" size="sm">
-              <Link href={retentionHref()}>Retention and review</Link>
+              <Link href={retentionHref()}>Retention and lock</Link>
             </Button>
           ) : null
         }
@@ -157,6 +157,7 @@ function ArchiveSearchContent() {
             setState={setState}
             can={{ reveal: access.reveal, holds: holdsAllowed }}
             holdOptions={holdsAllowed ? holdOptions : undefined}
+            ingestSource
           />
         }
         isFiltered={hasArchiveFilters(state)}
@@ -200,7 +201,7 @@ function ArchiveSearchContent() {
           <EmptyState
             icon={hasArchiveFilters(state) ? SearchXIcon : ArchiveIcon}
             title="No archived mail in this range"
-            description="No archived message matches. Choose a longer range or change the filters. Archiving captures mail only while it is enabled in Settings."
+            description="No archived message matches. Choose a longer range or change the filters. Archiving captures mail only while journaling is enabled in Settings → Journaling."
           />
         }
         mobileCard={(row) => <ArchiveCard row={row} revealed={reveal.values.get(row.messageId)} />}

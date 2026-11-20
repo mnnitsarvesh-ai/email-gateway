@@ -179,9 +179,13 @@ export class MailHandler {
         subjectKey: true,
         recipientCount: true,
         attachmentCount: true,
+        ingestSource: true,
       },
     });
     if (!msg) return 'skipped_org';
+    // Step 8.6 D4 (defence in depth): a journal intake message never writes `scanned.v1` and the
+    // catch-up excludes it; one reaching here is still never an ATO signal.
+    if (msg.ingestSource === 'journal_intake') return 'skipped_source';
     if (
       msg.organizationId !== orgId ||
       msg.id !== messageId ||
@@ -236,6 +240,7 @@ export class MailHandler {
         where: {
           organizationId: orgId,
           messageIdKey: parentKey,
+          ingestSource: 'gateway',
           receivedAt: { gte: new Date(receivedAt.getTime() - REPLY_PARENT_DAYS * 86_400_000) },
         },
         select: { id: true },

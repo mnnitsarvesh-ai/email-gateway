@@ -29,6 +29,11 @@ export interface HeaderMetadata {
   crossTenantIds?: string[];
   /** Step 8.2 D8: every raw, unfolded `DKIM-Signature` value (at most 32, ≤ 8 KiB each). */
   dkimSignatures?: string[];
+  /**
+   * Step 8.6 D2.6 (journal intake proof; set only when such headers exist): every unfolded,
+   * trimmed `X-EG-Journal-Token` value (at most 32, ≤ 256 characters each). Never logged.
+   */
+  journalTokens?: string[];
   /** The empty line ending the header block was seen within the limit. */
   complete: boolean;
   /** The header block exceeded the limit; only complete lines within it were parsed. */
@@ -57,6 +62,8 @@ export function headerAddress(value: string): string {
 /** Bounds of the provider relay evidence lists (step 8.2 D8). */
 export const MAX_RELAY_EVIDENCE_VALUES = 32;
 const MAX_DKIM_SIGNATURE_CHARS = 8192;
+/** A journal token is 26 characters; anything longer cannot match and is cut. */
+const MAX_JOURNAL_TOKEN_CHARS = 256;
 
 const LF = 0x0a;
 
@@ -162,6 +169,12 @@ export class HeaderScanner {
           meta.crossTenantIds ??= [];
           if (meta.crossTenantIds.length < MAX_RELAY_EVIDENCE_VALUES) {
             meta.crossTenantIds.push(value.trim().toLowerCase());
+          }
+          break;
+        case 'x-eg-journal-token':
+          meta.journalTokens ??= [];
+          if (meta.journalTokens.length < MAX_RELAY_EVIDENCE_VALUES) {
+            meta.journalTokens.push(value.slice(0, MAX_JOURNAL_TOKEN_CHARS));
           }
           break;
         case 'dkim-signature':

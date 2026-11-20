@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (35, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (41, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -209,7 +209,10 @@ enum MessageDirection {
 
 /// Message lifecycle states (ADR-0025, docs/plan/steps/08-message-lifecycle.md L2). Replaced once
 /// in step 3.3 (the one-time exception to the append-only enum rule); append-only again from now
-/// on. Transitions are the table of @email-gateway/message-lifecycle (L3).
+/// on. Transitions are the table of @email-gateway/message-lifecycle (L3). Step 8.6
+/// (docs/plan/steps/27-journal-intake-and-archive-split.md D3, D4, ADR-0087) appended `journaled`:
+/// the final state of a journal intake message (`ingest_source = journal_intake`, edges E30-E32);
+/// a gateway message never enters it.
 enum MessageStatus {
   received
   persisted
@@ -226,6 +229,17 @@ enum MessageStatus {
   delivered
   archived
   expired
+  journaled
+}
+
+/// Where a registry message came from (`email_messages.ingest_source`, step 8.6 D3, ADR-0087):
+/// `gateway` = the SMTP gateway's inbound/outbound LMTP ingestion (every message before 8.6);
+/// `journal_intake` = a journal report or copy received on a journal intake address (never
+/// delivered, never evaluated by policy; excluded from every gateway view). Also the source of a
+/// merged archive copy (`archive_record_sources.source`, ADR-0088). Append-only.
+enum MessageIngestSource {
+  gateway
+  journal_intake
 }
 
 enum MessageVerdict {
@@ -257,6 +271,8 @@ enum MessageAction {
   partial
 }
 
+/// Per-recipient delivery state. Append-only. Step 8.6 (D2.6, ADR-0087) appended `journaled`: the
+/// recipients of a journal intake message (the journal envelope; never delivered).
 enum RecipientStatus {
   pending
   delivered
@@ -265,6 +281,7 @@ enum RecipientStatus {
   deferred
   failed
   bounced
+  journaled
 }
 
 enum AttachmentVerdict {
@@ -1710,6 +1727,7 @@ model Organization {
   atoProviderStreams       AtoProviderStream[]
   atoProviderMailboxItems  AtoProviderMailboxItem[]
   providerConnections      ProviderConnection[]
+  journalIntakeSources     JournalIntakeSource[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -2449,64 +2467,68 @@ model MessageIdentity {
 /// PARTITIONED by RANGE COLUMNS(received_at), monthly. `id` is the registry id
 /// (message_identities.id), not an auto-increment. No foreign keys.
 model EmailMessage {
-  id                BigInt           @db.UnsignedBigInt
-  receivedAt        DateTime         @map("received_at") @db.DateTime(3)
-  organizationId    BigInt           @map("organization_id") @db.UnsignedBigInt
-  domainId          BigInt?          @map("domain_id") @db.UnsignedBigInt
+  id                BigInt              @db.UnsignedBigInt
+  receivedAt        DateTime            @map("received_at") @db.DateTime(3)
+  organizationId    BigInt              @map("organization_id") @db.UnsignedBigInt
+  domainId          BigInt?             @map("domain_id") @db.UnsignedBigInt
   direction         MessageDirection
   /// Lifecycle state (ADR-0025). status, status_changed_at, version, lifecycle_round and
   /// status_reason are written only through @email-gateway/message-lifecycle (step 3.3 L5).
-  status            MessageStatus    @default(received)
-  statusChangedAt   DateTime         @map("status_changed_at") @db.DateTime(3)
+  status            MessageStatus       @default(received)
+  statusChangedAt   DateTime            @map("status_changed_at") @db.DateTime(3)
   /// Optimistic concurrency: +1 per applied lifecycle transition (0 = the `received` history
   /// row, 1 = `persisted`).
-  version           Int              @default(0) @db.UnsignedInt
+  version           Int                 @default(0) @db.UnsignedInt
   /// Lifecycle round: +1 on rescan/release (re-entry edges), ADR-0025.
-  lifecycleRound    Int              @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
+  lifecycleRound    Int                 @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
   /// Reason code of the last applied transition (`/^[a-z0-9_]{1,64}$/`, e.g. delivery_partial).
-  statusReason      String?          @map("status_reason") @db.VarChar(64)
-  internetMessageId String?          @map("internet_message_id") @db.VarChar(998)
-  envelopeFrom      String           @map("envelope_from") @db.VarChar(320)
-  headerFrom        String?          @map("header_from") @db.VarChar(320)
-  subject           String?          @db.VarChar(998)
-  sizeBytes         Int              @map("size_bytes") @db.UnsignedInt
-  recipientCount    Int              @map("recipient_count") @db.UnsignedSmallInt
-  attachmentCount   Int              @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  statusReason      String?             @map("status_reason") @db.VarChar(64)
+  internetMessageId String?             @map("internet_message_id") @db.VarChar(998)
+  envelopeFrom      String              @map("envelope_from") @db.VarChar(320)
+  headerFrom        String?             @map("header_from") @db.VarChar(320)
+  subject           String?             @db.VarChar(998)
+  sizeBytes         Int                 @map("size_bytes") @db.UnsignedInt
+  recipientCount    Int                 @map("recipient_count") @db.UnsignedSmallInt
+  attachmentCount   Int                 @default(0) @map("attachment_count") @db.UnsignedSmallInt
   /// S3 key of the raw EML (step 2.2 D8):
   /// `org/{organizationId}/eml/{yyyy}/{mm}/{dd}/{objectRef}.eml`, UTC date of the ingestion
   /// attempt, objectRef = first 32 hex characters of SHA-256 of
   /// `{mtaId}|{queueId}|{direction}|{organizationId}`. Consumers read it, never derive it.
-  emlObjectKey      String           @map("eml_object_key") @db.VarChar(512)
-  emlSha256         String           @map("eml_sha256") @db.Char(64)
-  clientIp          String?          @map("client_ip") @db.VarChar(45)
-  clientHelo        String?          @map("client_helo") @db.VarChar(255)
+  emlObjectKey      String              @map("eml_object_key") @db.VarChar(512)
+  emlSha256         String              @map("eml_sha256") @db.Char(64)
+  clientIp          String?             @map("client_ip") @db.VarChar(45)
+  clientHelo        String?             @map("client_helo") @db.VarChar(255)
   /// Verified client host name from Postfix XFORWARD NAME (step 4.1 §3): Postfix's literal
   /// `unknown` is stored as `unknown`; `[UNAVAILABLE]`, `[TEMPUNAVAIL]` and a missing attribute
   /// are NULL. Trusted envelope data for the scan engines (§2.0 invariant 7).
-  clientName        String?          @map("client_name") @db.VarChar(255)
+  clientName        String?             @map("client_name") @db.VarChar(255)
   /// Postfix queue id; collation utf8mb4_bin (case-sensitive Postfix queue ids, step 3.3).
-  mtaQueueId        String?          @map("mta_queue_id") @db.VarChar(32)
-  finalVerdict      MessageVerdict?  @map("final_verdict")
-  finalAction       MessageAction?   @map("final_action")
+  mtaQueueId        String?             @map("mta_queue_id") @db.VarChar(32)
+  finalVerdict      MessageVerdict?     @map("final_verdict")
+  finalAction       MessageAction?      @map("final_action")
   /// 0–1000.
-  riskScore         Int?             @map("risk_score") @db.UnsignedSmallInt
-  createdAt         DateTime         @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.DateTime(3)
+  riskScore         Int?                @map("risk_score") @db.UnsignedSmallInt
+  createdAt         DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
   /// READ-ONLY, generated by MySQL (step 7.2 §3.1, ADR-0061): `GENERATED ALWAYS AS (IF(subject
   /// IS NULL, NULL, LEFT(<subject without leading reply/forward markers, whitespace runs
   /// collapsed, trimmed>, 128))) VIRTUAL`; the exact expression is in migration
   /// `email_explorer_search` and mirrored by `normalizeSubjectKey` of the api
   /// (`modules/messages/domain/search-keys.ts`). Case and accents are ignored by the column
   /// collation. Search key of the explorer's subject driver. Never write it.
-  subjectKey        String?          @map("subject_key") @db.VarChar(128)
+  subjectKey        String?             @map("subject_key") @db.VarChar(128)
   /// READ-ONLY, generated by MySQL (step 7.2): `GENERATED ALWAYS AS (IF(LOCATE('@',
   /// envelope_from) = 0, NULL, LEFT(SUBSTRING_INDEX(envelope_from, '@', -1), 253))) VIRTUAL`:
   /// the domain of the envelope sender, NULL for the null sender. Never write it.
-  senderDomain      String?          @map("sender_domain") @db.VarChar(253)
+  senderDomain      String?             @map("sender_domain") @db.VarChar(253)
   /// READ-ONLY, generated by MySQL (step 7.2): `GENERATED ALWAYS AS (IF(internet_message_id IS
   /// NULL, NULL, LEFT(TRIM(TRAILING '>' FROM TRIM(LEADING '<' FROM TRIM(internet_message_id))),
   /// 255))) VIRTUAL`: the Message-ID without angle brackets. Never write it.
-  messageIdKey      String?          @map("message_id_key") @db.VarChar(255)
+  messageIdKey      String?             @map("message_id_key") @db.VarChar(255)
+  /// Step 8.6 (D3, D5, ADR-0087): `journal_intake` = a journal intake copy (status ends in
+  /// `journaled`; details in `journal_intake_messages`). Every gateway-facing read filters
+  /// `ingest_source = 'gateway'`.
+  ingestSource      MessageIngestSource @default(gateway) @map("ingest_source")
 
   @@id([id, receivedAt])
   @@index([organizationId, receivedAt, id])
@@ -2516,8 +2538,10 @@ model EmailMessage {
   /// Step 6.1 D12: index-only report counts (traffic, directions, and the threats outcomes by
   /// verdict and action; final_action since migration rest_api_index_coverage). Step 7.1 §3.2:
   /// domain_id appended (migration admin_portal_reports) so the top attacked domains report
-  /// (inbound messages by domain and verdict) is index-only too.
-  @@index([organizationId, receivedAt, direction, finalVerdict, finalAction, domainId], map: "email_messages_org_received_dir_verdict_idx")
+  /// (inbound messages by domain and verdict) is index-only too. Step 8.6 (D5): rebuilt as
+  /// `…_src_idx` with ingest_source appended (migration journal_intake), so the reports stay
+  /// index-only with the `ingest_source = 'gateway'` predicate.
+  @@index([organizationId, receivedAt, direction, finalVerdict, finalAction, domainId, ingestSource], map: "email_messages_org_received_dir_verdict_src_idx")
   /// Step 7.2 §3.1 (ADR-0061): driver indexes of the Email Explorer search (`GET /messages`),
   /// each read in keyset order (received_at, id) after an equality on its key.
   @@index([organizationId, envelopeFrom, receivedAt, id], map: "email_messages_org_envelope_from_received_idx")
@@ -5241,70 +5265,80 @@ model ArchiveRetentionPolicy {
 /// encrypted objects in the archive bucket named by `objects`; `wrapped_dek` is the record data
 /// key wrapped under tenant key `key_version` and is set to NULL by the disposal decision
 /// (crypto-shredding). `deleted_at` is set when disposal starts (NULL = live: the registry purge
-/// and the step 1.2 organization deletion contracts). No foreign keys.
+/// and the step 1.2 organization deletion contracts). No foreign keys. Step 8.6 (ADR-0088): a record
+/// may also hold merged copies of the same message from another source (journal intake), each in
+/// `archive_record_sources`, with their objects under `objects.merged`; `source_*` are OR-ed.
 model EmailArchive {
-  id                 BigInt                @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt         DateTime              @map("received_at") @db.DateTime(3)
-  messageId          BigInt                @map("message_id") @db.UnsignedBigInt
-  organizationId     BigInt                @map("organization_id") @db.UnsignedBigInt
+  id                  BigInt                @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt          DateTime              @map("received_at") @db.DateTime(3)
+  messageId           BigInt                @map("message_id") @db.UnsignedBigInt
+  organizationId      BigInt                @map("organization_id") @db.UnsignedBigInt
   /// message_identities.public_id of the message (the REST `messageId`).
-  messagePublicId    String                @map("message_public_id") @db.Char(36)
-  direction          MessageDirection
-  capturedByJournal  Boolean               @default(false) @map("captured_by_journal")
-  capturedByPolicy   Boolean               @default(false) @map("captured_by_policy")
+  messagePublicId     String                @map("message_public_id") @db.Char(36)
+  direction           MessageDirection
+  capturedByJournal   Boolean               @default(false) @map("captured_by_journal")
+  capturedByPolicy    Boolean               @default(false) @map("captured_by_policy")
   /// `ruleRef` of the policy ARCHIVE action that requested the capture.
-  policyRuleRef      String?               @map("policy_rule_ref") @db.VarChar(128)
-  category           ArchiveCategory
-  status             ArchiveRecordStatus   @default(active)
+  policyRuleRef       String?               @map("policy_rule_ref") @db.VarChar(128)
+  category            ArchiveCategory
+  status              ArchiveRecordStatus   @default(active)
   /// email_messages.status / status_reason at the last outcome refresh (A7).
-  messageState       MessageStatus         @map("message_state")
-  messageStateReason String?               @map("message_state_reason") @db.VarChar(64)
-  envelopeFrom       String                @map("envelope_from") @db.VarChar(320)
-  headerFrom         String?               @map("header_from") @db.VarChar(320)
+  messageState        MessageStatus         @map("message_state")
+  messageStateReason  String?               @map("message_state_reason") @db.VarChar(64)
+  envelopeFrom        String                @map("envelope_from") @db.VarChar(320)
+  headerFrom          String?               @map("header_from") @db.VarChar(320)
   /// Metadata (masked in every API response, ADR-0062); never a body.
-  subject            String?               @db.VarChar(998)
-  internetMessageId  String?               @map("internet_message_id") @db.VarChar(998)
+  subject             String?               @db.VarChar(998)
+  internetMessageId   String?               @map("internet_message_id") @db.VarChar(998)
   /// `archive-parties/1`: envelope sender, header From and every envelope recipient with
   /// direction, status and final action.
-  parties            Json
-  recipientCount     Int                   @map("recipient_count") @db.UnsignedSmallInt
-  attachmentCount    Int                   @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  parties             Json
+  recipientCount      Int                   @map("recipient_count") @db.UnsignedSmallInt
+  attachmentCount     Int                   @default(0) @map("attachment_count") @db.UnsignedSmallInt
   /// EML object key in the archive bucket (`org/<org>/archive/.../<captureId>/eml.bin`).
-  archiveObjectKey   String                @map("archive_object_key") @db.VarChar(512)
+  archiveObjectKey    String                @map("archive_object_key") @db.VarChar(512)
   /// Hex SHA-256 of the original EML (= email_messages.eml_sha256, re-verified at capture).
-  sha256             String                @db.Char(64)
+  sha256              String                @db.Char(64)
   /// Size of the original EML in bytes.
-  sizeBytes          Int                   @map("size_bytes") @db.UnsignedInt
+  sizeBytes           Int                   @map("size_bytes") @db.UnsignedInt
   /// Capture id, object keys, version ids, ciphertext SHA-256s and sizes of every object.
-  objects            Json
-  storedBytes        BigInt                @map("stored_bytes") @db.UnsignedBigInt
+  objects             Json
+  storedBytes         BigInt                @map("stored_bytes") @db.UnsignedBigInt
   /// `archive-object/1`.
-  encryptionFormat   String                @map("encryption_format") @db.VarChar(32)
-  keyVersion         Int                   @map("key_version") @db.UnsignedInt
+  encryptionFormat    String                @map("encryption_format") @db.VarChar(32)
+  keyVersion          Int                   @map("key_version") @db.UnsignedInt
   /// `v1.k<version>.<iv>.<tag>.<ct>`; NULL once disposal started (crypto-shredded).
-  wrappedDek         String?               @map("wrapped_dek") @db.VarChar(255)
-  lockMode           ObjectLockMode        @default(none) @map("lock_mode")
-  lockUntil          DateTime?             @map("lock_until") @db.DateTime(3)
-  retentionPolicyId  BigInt?               @map("retention_policy_id") @db.UnsignedBigInt
-  retainUntil        DateTime              @map("retain_until") @db.DateTime(3)
-  expiryAction       RetentionExpiryAction @default(delete) @map("expiry_action")
+  wrappedDek          String?               @map("wrapped_dek") @db.VarChar(255)
+  lockMode            ObjectLockMode        @default(none) @map("lock_mode")
+  lockUntil           DateTime?             @map("lock_until") @db.DateTime(3)
+  retentionPolicyId   BigInt?               @map("retention_policy_id") @db.UnsignedBigInt
+  retainUntil         DateTime              @map("retain_until") @db.DateTime(3)
+  expiryAction        RetentionExpiryAction @default(delete) @map("expiry_action")
   /// Informational: set when an active legal hold blocked an expiry (A12). Holds are evaluated
   /// authoritatively at disposal time.
-  legalHold          Boolean               @default(false) @map("legal_hold")
-  finalVerdict       MessageVerdict?       @map("final_verdict")
-  finalAction        MessageAction?        @map("final_action")
-  riskScore          Int?                  @map("risk_score") @db.UnsignedSmallInt
-  malicious          Boolean               @default(false)
+  legalHold           Boolean               @default(false) @map("legal_hold")
+  finalVerdict        MessageVerdict?       @map("final_verdict")
+  finalAction         MessageAction?        @map("final_action")
+  riskScore           Int?                  @map("risk_score") @db.UnsignedSmallInt
+  malicious           Boolean               @default(false)
   /// ≤ 16 links (round, revision, snapshot object) to frozen `archive-scan/1` snapshots.
-  scanRounds         Json                  @map("scan_rounds")
-  settingsGeneration BigInt                @map("settings_generation") @db.UnsignedBigInt
-  indexedAt          DateTime?             @map("indexed_at") @db.DateTime(3)
-  outcomeRefreshedAt DateTime?             @map("outcome_refreshed_at") @db.DateTime(3)
+  scanRounds          Json                  @map("scan_rounds")
+  settingsGeneration  BigInt                @map("settings_generation") @db.UnsignedBigInt
+  indexedAt           DateTime?             @map("indexed_at") @db.DateTime(3)
+  outcomeRefreshedAt  DateTime?             @map("outcome_refreshed_at") @db.DateTime(3)
   /// Captured at.
-  archivedAt         DateTime              @map("archived_at") @db.DateTime(3)
-  deletedAt          DateTime?             @map("deleted_at") @db.DateTime(3)
-  createdAt          DateTime              @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt          DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+  archivedAt          DateTime              @map("archived_at") @db.DateTime(3)
+  deletedAt           DateTime?             @map("deleted_at") @db.DateTime(3)
+  createdAt           DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step 8.6 (ADR-0088): the record holds a gateway copy (default: every 8.1 record).
+  sourceGateway       Boolean               @default(true) @map("source_gateway")
+  /// Step 8.6: the record holds a journal intake copy (primary or merged).
+  sourceJournalIntake Boolean               @default(false) @map("source_journal_intake")
+  /// Step 8.6: journal_intake_sources.id of the primary intake copy (no FK: partitioned).
+  intakeSourceId      BigInt?               @map("intake_source_id") @db.UnsignedBigInt
+  /// Step 8.6: merged copies (`archive_record_sources` rows; ≤ ARCHIVE_MAX_MERGED_COPIES).
+  mergedCount         Int                   @default(0) @map("merged_count") @db.UnsignedSmallInt
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt])
@@ -5379,6 +5413,11 @@ model ArchiveCaptureIntent {
   closedAt           DateTime?           @map("closed_at") @db.DateTime(3)
   createdAt          DateTime            @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt          DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step 8.6 (ADR-0088): email_archives.received_at of the record `archive_id` names; NULL = the
+  /// intent's own `received_at` (every non-merged capture).
+  archiveReceivedAt  DateTime?           @map("archive_received_at") @db.DateTime(3)
+  /// Step 8.6: the message was merged into another message's record (cross-source dedupe).
+  merged             Boolean             @default(false)
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt])
@@ -7221,17 +7260,19 @@ model ProviderConnection {
   createdAt                DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt                DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
 
-  organization      Organization               @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  createdByUser     User?                      @relation("ProviderConnectionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  grants            ProviderConnectionGrant[]
-  consentStates     ProviderConsentState[]
-  domains           ProviderConnectionDomain[]
-  validationRuns    ProviderValidationRun[]
-  probeObservations ProviderProbeObservation[]
-  healthChecks      ProviderHealthCheck[]
-  healthEvents      ProviderHealthEvent[]
-  relayCounters     ProviderRelayCounter[]
-  smtpConnector     SmtpConnector?
+  organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdByUser        User?                      @relation("ProviderConnectionCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  grants               ProviderConnectionGrant[]
+  consentStates        ProviderConsentState[]
+  domains              ProviderConnectionDomain[]
+  validationRuns       ProviderValidationRun[]
+  probeObservations    ProviderProbeObservation[]
+  healthChecks         ProviderHealthCheck[]
+  healthEvents         ProviderHealthEvent[]
+  relayCounters        ProviderRelayCounter[]
+  smtpConnector        SmtpConnector?
+  /// Step 8.6: journal intake sources bound to this connection (provider kinds).
+  journalIntakeSources JournalIntakeSource[]
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -7506,4 +7547,224 @@ model ProviderEgressRange {
   @@unique([setId, cidr])
   @@index([provider, ipVersion, rangeStart])
   @@map("provider_egress_ranges")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step 8.6: journal-only intake and cross-source archive dedupe
+// (docs/plan/steps/27-journal-intake-and-archive-split.md §3, ADR-0087, ADR-0088). Two tables are
+// partitioned (journal_intake_messages, archive_record_sources). No message content: envelopes
+// hold addresses, proofs hold codes; EMLs live in S3; intake credentials are stored as SHA-256.
+// ---------------------------------------------------------------------------------------------
+
+enum JournalIntakeSourceKind {
+  microsoft_365_journal
+  google_workspace_copy
+  exchange_onprem_journal
+  smtp_bcc
+}
+
+enum JournalIntakeSourceStatus {
+  pending_verification
+  active
+  paused
+  disabled
+}
+
+enum JournalIntakeHealthStatus {
+  unknown
+  healthy
+  silent
+  failing
+  paused
+}
+
+enum JournalIntakeFormat {
+  journal_report
+  copy
+  journal_report_unparsed
+}
+
+/// A customer sender configuration of journal-only intake (step 8.6 D1, ADR-0087): one intake
+/// address `journal-<token>@<JOURNAL_INTAKE_DOMAIN>` per source. Only hashes are stored:
+/// `address_hash` = SHA-256 of the lower-case local part (the token is derived by the api from
+/// JOURNAL_INTAKE_ADDRESS_SECRET, the public id and `address_version`), `header_token_hash` = SHA-256
+/// of the Google `X-EG-Journal-Token` value; `previous_*` stay valid until `previous_valid_until`
+/// after a rotation. The organization of an intake message is always the source's (I4).
+/// `networks` = `intake-networks/1` (on-premises kinds), `client_cert_fingerprints` = ≤ 4 SHA-256
+/// hex, `attestations` = `provider-attestations/1` with `journal.*` codes. `last_accepted_at`,
+/// `last_refused_at` and `last_refusal_code` are written by the smtp-adapter counter flush;
+/// `health_*` by the archive-worker intake health loop. CAS on `row_version`. `disabled` is
+/// terminal. `created_by_user_id` / `disabled_by_user_id` have no FK (the trail survives the user).
+model JournalIntakeSource {
+  id                      BigInt                    @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String                    @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt                    @map("organization_id") @db.UnsignedBigInt
+  kind                    JournalIntakeSourceKind
+  displayName             String                    @map("display_name") @db.VarChar(128)
+  status                  JournalIntakeSourceStatus @default(pending_verification)
+  /// Provider kinds only: the bound step 8.2 connection (same organization and provider).
+  providerConnectionId    BigInt?                   @map("provider_connection_id") @db.UnsignedBigInt
+  /// `intake-networks/1` `{ v: 1, cidrs: [1..32] }` (on-premises kinds); never a provider range.
+  networks                Json?
+  requireTls              Boolean                   @default(true) @map("require_tls")
+  clientCertFingerprints  Json?                     @map("client_cert_fingerprints")
+  /// Per-source size ceiling (bytes); NULL = plan and platform limits only.
+  maxMessageBytes         Int?                      @map("max_message_bytes") @db.UnsignedInt
+  /// Silence alert threshold; NULL = no silence alert.
+  silenceAlertMinutes     Int?                      @default(240) @map("silence_alert_minutes") @db.UnsignedInt
+  addressVersion          Int                       @default(1) @map("address_version") @db.UnsignedSmallInt
+  /// Hex SHA-256 of the lower-case local part of the current intake address.
+  addressHash             String                    @unique @map("address_hash") @db.Char(64)
+  previousAddressHash     String?                   @unique @map("previous_address_hash") @db.Char(64)
+  headerTokenHash         String?                   @map("header_token_hash") @db.Char(64)
+  previousHeaderTokenHash String?                   @map("previous_header_token_hash") @db.Char(64)
+  previousValidUntil      DateTime?                 @map("previous_valid_until") @db.DateTime(3)
+  /// First accepted intake message (`pending_verification` → `active`).
+  verifiedAt              DateTime?                 @map("verified_at") @db.DateTime(3)
+  lastAcceptedAt          DateTime?                 @map("last_accepted_at") @db.DateTime(3)
+  lastRefusedAt           DateTime?                 @map("last_refused_at") @db.DateTime(3)
+  /// `refused_network`, `proof_tenant_header`, … (codes only).
+  lastRefusalCode         String?                   @map("last_refusal_code") @db.VarChar(64)
+  healthStatus            JournalIntakeHealthStatus @default(unknown) @map("health_status")
+  healthChangedAt         DateTime?                 @map("health_changed_at") @db.DateTime(3)
+  healthAlertedAt         DateTime?                 @map("health_alerted_at") @db.DateTime(3)
+  attestations            Json?
+  createdByUserId         BigInt?                   @map("created_by_user_id") @db.UnsignedBigInt
+  disabledAt              DateTime?                 @map("disabled_at") @db.DateTime(3)
+  disabledByUserId        BigInt?                   @map("disabled_by_user_id") @db.UnsignedBigInt
+  rowVersion              Int                       @default(1) @map("row_version") @db.UnsignedInt
+  createdAt               DateTime                  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime                  @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  providerConnection ProviderConnection?    @relation(fields: [providerConnectionId], references: [id], onDelete: Restrict)
+  counters           JournalIntakeCounter[]
+
+  @@unique([organizationId, displayName])
+  @@index([organizationId, status])
+  @@index([status, healthStatus])
+  @@index([providerConnectionId])
+  @@map("journal_intake_sources")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core, like email_messages; step
+/// 8.6 D2.6, D3). What the registry cannot hold about a journal intake message: the journal
+/// envelope with fields (`journal-envelope/1`, BCC included), the passing proof
+/// (`journal-intake-proof/1`), the format, the outer report's SHA-256 and size and the
+/// organization's scan choice at commit. Written once by the smtp-adapter journal LMTP in the
+/// message's commit transaction; read by the email-worker and the archive-worker. Addresses and
+/// codes only. No foreign keys.
+model JournalIntakeMessage {
+  /// email_messages.id (registry id).
+  messageId       BigInt                  @map("message_id") @db.UnsignedBigInt
+  receivedAt      DateTime                @map("received_at") @db.DateTime(3)
+  organizationId  BigInt                  @map("organization_id") @db.UnsignedBigInt
+  /// journal_intake_sources.id (no FK: partitioned).
+  sourceId        BigInt                  @map("source_id") @db.UnsignedBigInt
+  kind            JournalIntakeSourceKind
+  format          JournalIntakeFormat
+  /// `journal-envelope/1`.
+  envelope        Json
+  /// `journal-intake-proof/1` (only passing proofs are stored).
+  proof           Json
+  /// Hex SHA-256 of the received (outer) message: the report for report kinds, else the copy.
+  reportSha256    String                  @map("report_sha256") @db.Char(64)
+  reportSizeBytes Int                     @map("report_size_bytes") @db.UnsignedInt
+  /// `archive-settings/1` `intake.scanEnabled` of the organization at commit.
+  scanRequested   Boolean                 @default(false) @map("scan_requested")
+  createdAt       DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@id([messageId, receivedAt])
+  @@index([organizationId, receivedAt])
+  @@index([sourceId, receivedAt])
+  @@map("journal_intake_messages")
+}
+
+/// Daily journal intake counters per source (step 8.6 D2.8), upserted additively by the
+/// smtp-adapter's counter flush (`(source_id, day)`); pruned after 400 days by the archive-worker
+/// lifecycle maintenance. Refusals before a source is matched are counted in metrics only.
+model JournalIntakeCounter {
+  id                 BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId     BigInt   @map("organization_id") @db.UnsignedBigInt
+  sourceId           BigInt   @map("source_id") @db.UnsignedBigInt
+  /// UTC day.
+  day                DateTime @db.Date
+  accepted           Int      @default(0) @db.UnsignedInt
+  duplicates         Int      @default(0) @db.UnsignedInt
+  refusedAddress     Int      @default(0) @map("refused_address") @db.UnsignedInt
+  refusedNetwork     Int      @default(0) @map("refused_network") @db.UnsignedInt
+  refusedTls         Int      @default(0) @map("refused_tls") @db.UnsignedInt
+  refusedSize        Int      @default(0) @map("refused_size") @db.UnsignedInt
+  refusedRate        Int      @default(0) @map("refused_rate") @db.UnsignedInt
+  refusedUnavailable Int      @default(0) @map("refused_unavailable") @db.UnsignedInt
+  droppedProof       Int      @default(0) @map("dropped_proof") @db.UnsignedInt
+  unwrapFailed       Int      @default(0) @map("unwrap_failed") @db.UnsignedInt
+  bytes              BigInt   @default(0) @db.UnsignedBigInt
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  source JournalIntakeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, day])
+  @@index([organizationId, day])
+  @@map("journal_intake_counters")
+}
+
+/// Cross-source dedupe keys (step 8.6 D7, ADR-0088; transient): one row per archive record with a
+/// Message-ID and per stored content variant. `message_id_hash` = SHA-256 of `archive-dedupe/1`
+/// over the organization and the Message-ID, `header_fingerprint` = `archive-fingerprint/1`,
+/// `body_sha256` = SHA-256 of the bytes after the header/body separator. Lookups and the capture's
+/// gap lock use `(organization_id, message_id_hash, header_fingerprint)`. Rows older than
+/// ARCHIVE_DEDUPE_WINDOW_HOURS are pruned by the archive-worker lifecycle role; disposal deletes
+/// the record's rows. No foreign keys (the record is partitioned).
+model ArchiveDedupeKey {
+  id                BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId    BigInt   @map("organization_id") @db.UnsignedBigInt
+  messageIdHash     String   @map("message_id_hash") @db.Char(64)
+  headerFingerprint String   @map("header_fingerprint") @db.Char(64)
+  bodySha256        String   @map("body_sha256") @db.Char(64)
+  /// email_archives.id / received_at of the record.
+  archiveId         BigInt   @map("archive_id") @db.UnsignedBigInt
+  archiveReceivedAt DateTime @map("archive_received_at") @db.DateTime(3)
+  hasGateway        Boolean  @default(false) @map("has_gateway")
+  hasIntake         Boolean  @default(false) @map("has_intake")
+  createdAt         DateTime @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@index([organizationId, messageIdHash, headerFingerprint])
+  @@index([archiveId, archiveReceivedAt])
+  @@index([createdAt])
+  @@map("archive_dedupe_keys")
+}
+
+/// PARTITIONED by RANGE COLUMNS(archive_received_at), monthly, never auto-dropped (compliance, like
+/// email_archives; step 8.6 D7, ADR-0088). One row per message merged into another message's
+/// archive record: its source, sizes and hashes, whether its body was stored as a content variant
+/// and how many recipients it added. Inserted in the merge transaction by the archive-worker;
+/// deleted only by the record's disposal. Keeps the merged message's `message_identities` row
+/// alive (registry purge). No foreign keys.
+model ArchiveRecordSource {
+  id                BigInt              @default(autoincrement()) @db.UnsignedBigInt
+  /// email_archives.received_at of the record (partition key).
+  archiveReceivedAt DateTime            @map("archive_received_at") @db.DateTime(3)
+  organizationId    BigInt              @map("organization_id") @db.UnsignedBigInt
+  /// email_archives.id of the record.
+  archiveId         BigInt              @map("archive_id") @db.UnsignedBigInt
+  /// The merged message (registry id, its received_at and public id).
+  messageId         BigInt              @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt DateTime            @map("message_received_at") @db.DateTime(3)
+  messagePublicId   String              @map("message_public_id") @db.Char(36)
+  source            MessageIngestSource
+  /// journal_intake_sources.id for an intake copy.
+  intakeSourceId    BigInt?             @map("intake_source_id") @db.UnsignedBigInt
+  emlSha256         String              @map("eml_sha256") @db.Char(64)
+  sizeBytes         Int                 @map("size_bytes") @db.UnsignedInt
+  bodySha256        String              @map("body_sha256") @db.Char(64)
+  /// The merged copy's EML was stored as a content variant of the record.
+  contentVariant    Boolean             @default(false) @map("content_variant")
+  recipientsAdded   Int                 @default(0) @map("recipients_added") @db.UnsignedSmallInt
+  mergedAt          DateTime            @map("merged_at") @db.DateTime(3)
+
+  @@id([id, archiveReceivedAt])
+  @@unique([messageId, messageReceivedAt, archiveReceivedAt])
+  @@index([organizationId, archiveId, archiveReceivedAt])
+  @@map("archive_record_sources")
 }

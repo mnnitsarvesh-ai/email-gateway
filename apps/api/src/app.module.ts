@@ -30,6 +30,7 @@ import { DeliveriesModule } from './modules/deliveries/deliveries.module';
 import { DomainDestinationsModule } from './modules/domain-destinations/domain-destinations.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { EdiscoveryModule } from './modules/ediscovery/ediscovery.module';
+import { JournalingModule } from './modules/journaling/journaling.module';
 import { IncidentsModule } from './modules/incidents/incidents.module';
 import { LoginAuditModule } from './modules/login-audit/login-audit.module';
 import { MessagesModule } from './modules/messages/messages.module';
@@ -133,6 +134,8 @@ export class AppModule {
         // content access, downloads) and legal holds / eDiscovery (cases, searches, exports).
         ArchiveModule,
         EdiscoveryModule,
+        // Step 8.6: Journaling (capture settings, journal intake sources).
+        JournalingModule,
         // Step 8.4: security incidents shared by ATO and ATP (generic routes, category registry,
         // the transactional stores) and account takeover (overview, accounts, evidence,
         // responses, restrictions, settings, rules).

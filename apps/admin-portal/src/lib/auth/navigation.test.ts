@@ -6,6 +6,7 @@ import {
   NAV_ITEMS,
   firstPermittedHref,
   gateForPath,
+  hiddenForProfile,
   navItemForPath,
   visibleNavigation,
 } from '@/lib/navigation';
@@ -67,16 +68,21 @@ describe('navigation model (design P11)', () => {
         continue;
       }
       const actual = [
-        ...new Set(
-          item.gate.flatMap(
+        ...new Set([
+          ...item.gate.flatMap(
             (op) => operations[op].permissions?.flatMap((r) => r.permissions) ?? [],
           ),
-        ),
+          // Step 8.6: permissions an item needs on top of its gate (Access audit).
+          ...(item.requires ?? []),
+        ]),
       ].sort();
       expect(actual, item.href).toEqual(expected);
     }
   });
 
+  // Step 8.6: organization admins have no archive access (Search, Legal holds, eDiscovery and
+  // Access audit need the compliance_officer role); the Access audit item needs audit:read and
+  // archive:search.
   const expectedVisible: Record<string, string[]> = {
     super_admin: [
       'dashboard',
@@ -99,6 +105,7 @@ describe('navigation model (design P11)', () => {
       'retention',
       'legal-holds',
       'ediscovery',
+      'access-audit',
       'domains',
       'users',
       'roles',
@@ -152,10 +159,7 @@ describe('navigation model (design P11)', () => {
       'ato-responses',
       'ato-settings',
       'ato-providers',
-      'archive',
       'retention',
-      'legal-holds',
-      'ediscovery',
       'domains',
       'users',
       'roles',
@@ -201,6 +205,7 @@ describe('navigation model (design P11)', () => {
       'ato-providers',
       'archive',
       'retention',
+      'access-audit',
       'domains',
       'organizations',
       'integrations',
@@ -240,6 +245,7 @@ describe('navigation model (design P11)', () => {
       'retention',
       'legal-holds',
       'ediscovery',
+      'access-audit',
       'domains',
       'users',
       'roles',
@@ -269,6 +275,23 @@ describe('navigation model (design P11)', () => {
       'settings',
     ],
     mailbox_user: ['quarantine', 'settings'],
+    compliance_officer: [
+      'dashboard',
+      'reports',
+      'mail-servers',
+      'url-protection',
+      'archive',
+      'retention',
+      'legal-holds',
+      'ediscovery',
+      'access-audit',
+      'domains',
+      'users',
+      'organizations',
+      'audit-logs',
+      'billing',
+      'settings',
+    ],
   };
 
   it.each(SYSTEM_ROLE_KEYS)('shows %s exactly the items its permissions allow', (role) => {
@@ -282,6 +305,71 @@ describe('navigation model (design P11)', () => {
     expect(firstPermittedHref(ROLE_PERMISSIONS.organization_admin)).toBe('/dashboard');
     expect(firstPermittedHref(ROLE_PERMISSIONS.mailbox_user)).toBe('/quarantine');
     expect(firstPermittedHref([])).toBe('/settings');
+  });
+
+  // Step 8.6 (D13, ADR-0090): archive-only organizations see no gateway pages.
+  const ARCHIVE_ONLY_HIDDEN = [
+    'dashboard',
+    'reports',
+    'messages',
+    'quarantine',
+    'mail-servers',
+    'incidents',
+    'policies',
+    'policy-builder',
+    'threat-intelligence',
+    'url-protection',
+    'attachments',
+  ];
+
+  it.each(SYSTEM_ROLE_KEYS)(
+    'hides the gateway pages from %s of an archive-only organization',
+    (role) => {
+      const visible = visibleNavigation(ROLE_PERMISSIONS[role], 'archive_only').flatMap((s) =>
+        s.items.map((i) => i.id),
+      );
+      expect(visible).toEqual(
+        (expectedVisible[role] ?? []).filter((id) => !ARCHIVE_ONLY_HIDDEN.includes(id)),
+      );
+      expect(
+        NAV_ITEMS.filter((i) => i.profiles?.includes('archive_only') === false)
+          .map((i) => i.id)
+          .sort(),
+      ).toEqual([...ARCHIVE_ONLY_HIDDEN].sort());
+    },
+  );
+
+  it('lands archive-only users on Archive search, or Settings → Journaling without archive access', () => {
+    expect(firstPermittedHref(ROLE_PERMISSIONS.compliance_officer, 'archive_only')).toBe(
+      '/archive',
+    );
+    expect(firstPermittedHref(ROLE_PERMISSIONS.organization_admin, 'archive_only')).toBe(
+      '/settings?tab=journaling',
+    );
+    expect(firstPermittedHref(ROLE_PERMISSIONS.organization_admin, 'gateway')).toBe('/dashboard');
+    expect(firstPermittedHref(ROLE_PERMISSIONS.mailbox_user, 'archive_only')).toBe('/settings');
+    expect(hiddenForProfile('/messages/0193', 'archive_only')).toBe(true);
+    expect(hiddenForProfile('/policies/builder', 'archive_only')).toBe(true);
+    expect(hiddenForProfile('/archive/0193', 'archive_only')).toBe(false);
+    expect(hiddenForProfile('/settings', 'archive_only')).toBe(false);
+    expect(hiddenForProfile('/messages', 'gateway')).toBe(false);
+  });
+
+  it('shows the Archive section with the access audit only to the archive audience (step 8.6)', () => {
+    const section = (permissions: readonly string[]) =>
+      visibleNavigation(permissions)
+        .find((s) => s.id === 'archive')
+        ?.items.map((i) => i.label) ?? [];
+    expect(section(ROLE_PERMISSIONS.compliance_officer)).toEqual([
+      'Search',
+      'Retention and lock',
+      'Legal holds',
+      'eDiscovery',
+      'Access audit',
+    ]);
+    expect(section(ROLE_PERMISSIONS.organization_admin)).toEqual(['Retention and lock']);
+    expect(section(['audit:read'])).toEqual([]);
+    expect(navItemForPath('/archive/access-audit')?.id).toBe('access-audit');
   });
 
   it('finds the owning item of nested routes (longest match)', () => {

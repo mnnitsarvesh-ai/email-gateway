@@ -42,7 +42,7 @@ export class NotificationMetrics {
     );
     this.alertMessages = metrics.counter(
       'notification_alert_messages_total',
-      'Security alert events handled (step 6.2 N4), by kind (threat_detected, domain_dns_failed, webhook_disabled, integration_unhealthy) and result (sent, no_recipients, disabled, failed)',
+      'Security alert events handled (step 6.2 N4), by kind (threat_detected, domain_dns_failed, webhook_disabled, integration_unhealthy, journal_intake_silent) and result (sent, no_recipients, disabled, failed)',
       ['kind', 'result'],
     );
     this.alertsSuppressed = metrics.counter(

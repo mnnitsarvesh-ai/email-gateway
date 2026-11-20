@@ -23,6 +23,8 @@ export const MESSAGE_STATUSES = [
   'delivered',
   'archived',
   'expired',
+  // Step 8.6 (ADR-0087): the final state of journal intake messages (appended, as in Prisma).
+  'journaled',
 ] as const;
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
@@ -34,6 +36,8 @@ export const RECIPIENT_STATUSES = [
   'deferred',
   'failed',
   'bounced',
+  // Step 8.6: the recipients of a journal intake message (appended, as in Prisma).
+  'journaled',
 ] as const;
 export type RecipientStatus = (typeof RECIPIENT_STATUSES)[number];
 
@@ -96,3 +100,61 @@ export type EdiscoveryReviewTag = (typeof EDISCOVERY_REVIEW_TAGS)[number];
 
 export const ARCHIVE_DOWNLOAD_KINDS = ['message', 'export'] as const;
 export type ArchiveDownloadKind = (typeof ARCHIVE_DOWNLOAD_KINDS)[number];
+
+// ---------------------------------------------------------------------------------------------
+// Step 8.6: journal-only intake and cross-source dedupe (docs/plan/steps/27-…md D1–D3, D7, §4.2)
+// ---------------------------------------------------------------------------------------------
+
+/** `email_messages.ingest_source` (absent = `gateway`). */
+export const INGEST_SOURCES = ['gateway', 'journal_intake'] as const;
+export type IngestSource = (typeof INGEST_SOURCES)[number];
+
+/** `journal_intake_sources.kind`. */
+export const INTAKE_SOURCE_KINDS = [
+  'microsoft_365_journal',
+  'google_workspace_copy',
+  'exchange_onprem_journal',
+  'smtp_bcc',
+] as const;
+export type IntakeSourceKind = (typeof INTAKE_SOURCE_KINDS)[number];
+
+/** Kinds whose messages arrive as Exchange journal reports (unwrapped, D2.6). */
+export const INTAKE_REPORT_KINDS: readonly IntakeSourceKind[] = Object.freeze([
+  'microsoft_365_journal',
+  'exchange_onprem_journal',
+]);
+/** Kinds whose messages arrive as plain copies (stored as received, format `copy`). */
+export const INTAKE_COPY_KINDS: readonly IntakeSourceKind[] = Object.freeze([
+  'google_workspace_copy',
+  'smtp_bcc',
+]);
+
+/** `journal_intake_messages.format`. */
+export const INTAKE_FORMATS = ['journal_report', 'copy', 'journal_report_unparsed'] as const;
+export type IntakeFormat = (typeof INTAKE_FORMATS)[number];
+
+/** Where an intake recipient came from (`journal-envelope/1`, `archive-parties/1`). */
+export const INTAKE_RECIPIENT_FIELDS = [
+  'to',
+  'cc',
+  'bcc',
+  'recipient',
+  'envelope',
+  'header',
+] as const;
+export type IntakeRecipientField = (typeof INTAKE_RECIPIENT_FIELDS)[number];
+
+/**
+ * DKIM evidence results of the provider proof (`DkimProofResult` of `@email-gateway/mail-routing`,
+ * step 8.2), restated because this package has no dependency on it.
+ */
+export const PROVIDER_DKIM_RESULTS = [
+  'aligned_pass',
+  'unaligned_pass',
+  'fail',
+  'none',
+  'temperror',
+  'replayed',
+  'stale',
+] as const;
+export type ProviderDkimResult = (typeof PROVIDER_DKIM_RESULTS)[number];

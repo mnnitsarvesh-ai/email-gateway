@@ -99,6 +99,7 @@ describe('archive-settings/1', () => {
       scope: { mode: 'all', domainIds: [], departmentIds: [], userIds: [], addresses: [] },
       policyArchive: { enabled: true },
       access: { previewEnabled: true, downloadEnabled: false },
+      intake: { scanEnabled: false },
     });
     const r = resolveArchiveSettings({
       directions: { internal: false },

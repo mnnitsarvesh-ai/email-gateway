@@ -1,4 +1,5 @@
 import { ConflictException, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import { CodedHttpException } from '../../http/coded-exception';
 
 export const DOMAIN_NOT_FOUND = 'Domain not found';
 export const DOMAIN_ALREADY_EXISTS = 'Domain already exists';
@@ -42,3 +43,12 @@ export const RECIPIENT_MODE_NOT_IMPLEMENTED = 'Not implemented';
 export const ALLOW_LIST_EMPTY = 'Add recipients before enforcing the allow-list';
 export const recipientLimitReached = (max: number): ConflictException =>
   new ConflictException(`Recipient limit reached: at most ${max} per domain`);
+
+/** Step 8.6 D13 (ADR-0090): mail flow on a domain of an archive-only organization. */
+export const MAIL_FILTERING_NOT_ENABLED = 'mail_filtering_not_enabled';
+export const mailFilteringNotEnabled = (): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.FORBIDDEN,
+    MAIL_FILTERING_NOT_ENABLED,
+    'The organization has the archive-only service profile: mail filtering is not enabled',
+  );

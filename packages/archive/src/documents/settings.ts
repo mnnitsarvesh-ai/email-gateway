@@ -43,6 +43,11 @@ export const archiveSettingsSchema = z.strictObject({
       downloadEnabled: z.boolean().optional(),
     })
     .optional(),
+  /**
+   * Step 8.6 D8: scanning of journal intake messages (default off). Applies to messages committed
+   * afterwards (`journal_intake_messages.scan_requested` is the per-message snapshot).
+   */
+  intake: z.strictObject({ scanEnabled: z.boolean().optional() }).optional(),
 });
 export type ArchiveSettingsDocument = z.infer<typeof archiveSettingsSchema>;
 
@@ -59,6 +64,8 @@ export interface ResolvedArchiveSettings {
   };
   policyArchive: { enabled: boolean };
   access: { previewEnabled: boolean; downloadEnabled: boolean };
+  /** Step 8.6 D8. */
+  intake: { scanEnabled: boolean };
 }
 
 /** The defaults of A22 (product owner decision 2). */
@@ -69,6 +76,7 @@ export const ARCHIVE_SETTINGS_DEFAULTS: Readonly<ResolvedArchiveSettings> =
     scope: { mode: 'all', domainIds: [], departmentIds: [], userIds: [], addresses: [] },
     policyArchive: { enabled: true },
     access: { previewEnabled: true, downloadEnabled: false },
+    intake: { scanEnabled: false },
   });
 
 export const ARCHIVE_SETTINGS_EXAMPLE: ArchiveSettingsDocument = {
@@ -96,6 +104,7 @@ export function resolveArchiveSettings(raw: unknown): ResolvedArchiveSettings {
       scope: { ...d.scope, domainIds: [], departmentIds: [], userIds: [], addresses: [] },
       policyArchive: { ...d.policyArchive },
       access: { ...d.access },
+      intake: { ...d.intake },
     };
   }
   const parsed = archiveSettingsSchema.safeParse(raw);
@@ -124,6 +133,7 @@ export function resolveArchiveSettings(raw: unknown): ResolvedArchiveSettings {
       previewEnabled: s.access?.previewEnabled ?? d.access.previewEnabled,
       downloadEnabled: s.access?.downloadEnabled ?? d.access.downloadEnabled,
     },
+    intake: { scanEnabled: s.intake?.scanEnabled ?? d.intake.scanEnabled },
   };
 }
 

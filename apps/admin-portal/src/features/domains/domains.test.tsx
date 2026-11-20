@@ -5,10 +5,12 @@ import {
   currentTestUrl,
   expectNoAxeViolations,
   expectRequestMatchesContract,
+  makeMe,
   mockApi,
   noContentResponse,
   okJson,
   renderWithProviders,
+  TEST_ORG,
 } from '@/test';
 import { DomainDetailPage } from './domain-detail-page';
 import { DomainsPage } from './domains-page';
@@ -293,6 +295,19 @@ describe('DomainDetailPage', () => {
     await waitFor(() => expect(rotateBody).toEqual({ algorithm: 'rsa_2048' }));
     expectRequestMatchesContract('DomainDnsController_rotate_v1', rotateBody);
     expect(await screen.findByText('v=DKIM1; p=NEWKEY')).toBeInTheDocument();
+  });
+
+  it('marks MX, SPF and DKIM "not required" for an archive-only organization (step 8.6)', async () => {
+    mockDetail();
+    renderWithProviders(<DomainDetailPage domainId={DOMAIN_ID} />, {
+      me: makeMe({ overrides: { organization: { ...TEST_ORG, serviceProfile: 'archive_only' } } }),
+      route: `/domains/${DOMAIN_ID}?tab=dns`,
+    });
+    const mx = await screen.findByRole('listitem', { name: 'MX record' });
+    expect(within(mx).getByText('Not required for archive-only')).toBeInTheDocument();
+    expect(screen.getByText(/only the ownership record is needed/)).toBeInTheDocument();
+    const ownership = screen.getByRole('listitem', { name: 'Ownership record' });
+    expect(within(ownership).queryByText('Not required for archive-only')).not.toBeInTheDocument();
   });
 
   it('saves recipient validation, adds and removes registry entries (contracts)', async () => {

@@ -59,6 +59,7 @@ describe('step 6.2 vocabularies', () => {
       'domain_dns_failed',
       'webhook_disabled',
       'integration_unhealthy',
+      'journal_intake_silent',
     ]);
     expect(NOTIFICATION_ALERT_SEVERITY_VALUES).toEqual(['info', 'low', 'medium', 'high']);
   });
@@ -207,6 +208,25 @@ describe('notification.alert_requested.v1 (N2, §4.1)', () => {
         refs: { webhookEventId: uuid, connectionId: 'not-a-uuid' },
       }),
     ).toBe(false);
+    // Step 8.6 D9: journal_intake_silent names the intake source (public id).
+    expect(
+      okAlert({ ...base, kind: 'journal_intake_silent', refs: { intakeSourceId: uuid } }),
+    ).toBe(true);
+    expect(
+      okAlert({
+        ...base,
+        kind: 'journal_intake_silent',
+        severity: 'medium',
+        refs: { intakeSourceId: uuid },
+      }),
+    ).toBe(true);
+    expect(okAlert({ ...base, kind: 'journal_intake_silent', refs: {} })).toBe(false);
+    expect(
+      okAlert({ ...base, kind: 'journal_intake_silent', refs: { intakeSourceId: '17' } }),
+    ).toBe(false);
+    expect(okAlert({ ...base, kind: 'journal_intake_silent', refs: { connectionId: uuid } })).toBe(
+      false,
+    );
     // messageId and receivedAt go together, whatever the kind.
     expect(
       okAlert({

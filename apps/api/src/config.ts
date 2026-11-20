@@ -1393,6 +1393,46 @@ export function validateProviderConfig(
   }
 }
 
+/**
+ * Journal-only intake, api side (step 8.6 D1, §4.4, docs/plan/steps/27-journal-intake-and-archive-split.md;
+ * ADR-0087): the platform intake domain (empty = intake off: source creation answers
+ * `503 journal_intake_unavailable`; tenant domains equal to or under it are refused), the HMAC
+ * secret the api derives intake addresses and Google header tokens from (the database and the
+ * smtp-adapter hold SHA-256 hashes only), the platform size ceiling, the rotation overlap and the
+ * per-organization source limit. Start-up errors name the key, never the value.
+ */
+export const journalIntakeApiConfigShape = {
+  JOURNAL_INTAKE_DOMAIN: multiLabelDnsName.optional(),
+  /** 64 hex characters (32 bytes); required when JOURNAL_INTAKE_DOMAIN is set. */
+  JOURNAL_INTAKE_ADDRESS_SECRET: aesKey.optional(),
+  JOURNAL_INTAKE_MAX_MESSAGE_BYTES: int(1024, 157_286_400).default(52_428_800),
+  JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS: int(0, 90).default(7),
+  JOURNAL_INTAKE_MAX_SOURCES_PER_ORG: int(1, 1000).default(20),
+};
+
+export type JournalIntakeApiConfigKeys = {
+  [K in keyof typeof journalIntakeApiConfigShape]: z.output<
+    (typeof journalIntakeApiConfigShape)[K]
+  >;
+};
+
+/** JOURNAL_INTAKE_ADDRESS_SECRET is required when the intake domain is configured. */
+export function validateJournalIntakeConfig(
+  cfg: {
+    JOURNAL_INTAKE_DOMAIN?: string | undefined;
+    JOURNAL_INTAKE_ADDRESS_SECRET?: string | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (cfg.JOURNAL_INTAKE_DOMAIN !== undefined && cfg.JOURNAL_INTAKE_ADDRESS_SECRET === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['JOURNAL_INTAKE_ADDRESS_SECRET'],
+      message: 'is required when JOURNAL_INTAKE_DOMAIN is set',
+    });
+  }
+}
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -1429,6 +1469,8 @@ export const apiConfigSchema = baseConfigSchema
   .extend(atoApiConfigShape)
   // Step 8.2 §4.4: provider connections (api encrypts credentials; never calls a provider).
   .extend(providerApiConfigShape)
+  // Step 8.6 §4.4: journal intake (address derivation, limits); empty domain = intake off.
+  .extend(journalIntakeApiConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -1458,6 +1500,7 @@ export const apiConfigSchema = baseConfigSchema
     validateArchiveTestSeam(cfg, ctx);
     validateArchiveApiConfig(cfg, ctx);
     validateProviderConfig(cfg, ctx);
+    validateJournalIntakeConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

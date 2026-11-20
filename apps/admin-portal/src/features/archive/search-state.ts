@@ -6,6 +6,7 @@ import {
   ARCHIVE_FINAL_ACTIONS,
   ARCHIVE_RECORD_STATUSES,
   ARCHIVE_SEARCH_MAX_RANGE_DAYS,
+  ARCHIVE_INGEST_SOURCES,
   ARCHIVE_SOURCES,
   ARCHIVE_VERDICTS,
 } from './model';
@@ -82,6 +83,8 @@ export const ARCHIVE_URL_SHAPE = {
   direction: enumList(ARCHIVE_DIRECTIONS),
   category: enumList(ARCHIVE_CATEGORIES),
   source: enumList(ARCHIVE_SOURCES),
+  /** Step 8.6: one copy source (`gateway`, `journal_intake`). */
+  ingestSource: z.enum(ARCHIVE_INGEST_SOURCES).optional().catch(undefined),
   status: enumList(ARCHIVE_RECORD_STATUSES),
   verdict: enumList(ARCHIVE_VERDICTS),
   finalAction: enumList(ARCHIVE_FINAL_ACTIONS),
@@ -223,6 +226,7 @@ export function archiveSearchQuery(state: ArchiveSearchState, now: number): Arch
   list('direction', state.direction);
   list('category', state.category);
   list('source', state.source);
+  if (state.ingestSource) query.ingestSource = state.ingestSource;
   list('status', state.status);
   list('verdict', state.verdict);
   list('finalAction', state.finalAction);

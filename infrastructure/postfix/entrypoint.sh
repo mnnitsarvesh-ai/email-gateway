@@ -27,6 +27,10 @@ set -eu
 : "${POSTFIX_MAXIMAL_QUEUE_LIFETIME:=5d}"
 : "${POSTFIX_TLS_CERT_PATH:=/etc/ssl/certs/ssl-cert-snakeoil.pem}"
 : "${POSTFIX_TLS_KEY_PATH:=/etc/ssl/private/ssl-cert-snakeoil.key}"
+# Step 8.6 (ADR-0087): the platform's journal intake domain; empty = intake off.
+: "${POSTFIX_JOURNAL_INTAKE_DOMAIN:=}"
+# Set by infrastructure/postfix/test-render.sh only: render, check, print, exit (no daemon).
+: "${POSTFIX_RENDER_CHECK:=false}"
 
 require_hostname POSTFIX_MYHOSTNAME "$POSTFIX_MYHOSTNAME"
 require_hostname RSPAMD_AUTHSERV_ID "$RSPAMD_AUTHSERV_ID"
@@ -49,6 +53,10 @@ require_time POSTFIX_QUEUE_RUN_DELAY "$POSTFIX_QUEUE_RUN_DELAY"
 require_time POSTFIX_MAXIMAL_QUEUE_LIFETIME "$POSTFIX_MAXIMAL_QUEUE_LIFETIME"
 require_readable POSTFIX_TLS_CERT_PATH "$POSTFIX_TLS_CERT_PATH"
 require_readable POSTFIX_TLS_KEY_PATH "$POSTFIX_TLS_KEY_PATH"
+JOURNAL_INTAKE_DOMAIN=$(printf '%s' "$POSTFIX_JOURNAL_INTAKE_DOMAIN" | tr 'A-Z' 'a-z')
+JOURNAL_INTAKE_DOMAIN=${JOURNAL_INTAKE_DOMAIN%.}
+[ -z "$JOURNAL_INTAKE_DOMAIN" ] || require_mail_domain POSTFIX_JOURNAL_INTAKE_DOMAIN "$JOURNAL_INTAKE_DOMAIN"
+require_enum POSTFIX_RENDER_CHECK "$POSTFIX_RENDER_CHECK" true false
 
 postconf -e \
   "myhostname=${POSTFIX_MYHOSTNAME}" \
@@ -68,6 +76,27 @@ postconf -e \
   "bounce_queue_lifetime=${POSTFIX_MAXIMAL_QUEUE_LIFETIME}" \
   "smtpd_tls_cert_file=${POSTFIX_TLS_CERT_PATH}" \
   "smtpd_tls_key_file=${POSTFIX_TLS_KEY_PATH}"
+
+# Journal intake (step 8.6 D2.1, ADR-0087). With an intake domain: it is a relay domain of its
+# own (before the tenant socketmap, so the adapter's relay_domain map is never asked for it) and
+# transport_maps routes it to the journal LMTP listener (:10053) instead of relay_transport
+# (:10050); the RCPT policy (policy_context=inbound) decides every intake recipient. The inbound
+# smtpd also asks clients for a certificate (never required by Postfix), so sources with
+# configured certificate fingerprints can be matched (ccert_fingerprint). The inline table is
+# written `key=value` without blanks around `=`: Postfix's inline parser reads blanks there as
+# part of the key. Without one: exactly
+# the step 2.2 rendering. The lmtp service of master.cf is reused (no new transport).
+if [ -n "$JOURNAL_INTAKE_DOMAIN" ]; then
+  postconf -e \
+    "relay_domains=${JOURNAL_INTAKE_DOMAIN}, socketmap:inet:\${smtp_adapter_host}:10041:relay_domain" \
+    "transport_maps=inline:{ ${JOURNAL_INTAKE_DOMAIN}=lmtp:inet:\${smtp_adapter_host}:10053 }" \
+    "smtpd_tls_ask_ccert=yes"
+else
+  postconf -e \
+    "relay_domains=socketmap:inet:\${smtp_adapter_host}:10041:relay_domain" \
+    "transport_maps="
+  postconf -X smtpd_tls_ask_ccert
+fi
 
 # Forged result headers (ADR-0027 decision 3, main.cf header_checks): removed by cleanup before
 # the message is queued, whether or not the milter answers. Our authserv-id is the first token of
@@ -108,6 +137,14 @@ check_output=$(postfix check 2>&1) || {
 if [ -n "$check_output" ]; then
   printf '%s\n' "$check_output" >&2
   die "postfix check reported warnings"
+fi
+
+if [ "$POSTFIX_RENDER_CHECK" = true ]; then
+  postconf relay_domains transport_maps smtpd_tls_ask_ccert
+  postconf -x transport_maps
+  # The table must answer (a syntax error is only a lookup failure, 451, at run time).
+  [ -z "$JOURNAL_INTAKE_DOMAIN" ] || postmap -q "$JOURNAL_INTAKE_DOMAIN" "$(postconf -xh transport_maps)"
+  exit 0
 fi
 
 exec postfix start-fg

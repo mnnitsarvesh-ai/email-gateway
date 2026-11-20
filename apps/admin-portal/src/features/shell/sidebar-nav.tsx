@@ -4,23 +4,28 @@ import { ShieldIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { navItemForPath, visibleNavigation } from '@/lib/navigation';
+import { navItemForPath, visibleNavigation, type ServiceProfile } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
 import { AtoAttentionBadge } from './attention-badge';
 
-/** Permission-filtered navigation (design P11); `collapsed` renders the icon rail with tooltips. */
+/**
+ * Permission-filtered navigation (design P11); `collapsed` renders the icon rail with tooltips.
+ * The organization's service profile hides the gateway pages of archive-only plans (step 8.6).
+ */
 export function SidebarNav({
   permissions,
+  profile = 'gateway',
   collapsed,
   onNavigate,
 }: {
   permissions: readonly string[];
+  profile?: ServiceProfile;
   collapsed: boolean;
   onNavigate?: () => void;
 }) {
   const pathname = usePathname();
   const active = navItemForPath(pathname);
-  const sections = visibleNavigation(permissions);
+  const sections = visibleNavigation(permissions, profile);
   return (
     <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 py-3">
       {sections.map((section) => (

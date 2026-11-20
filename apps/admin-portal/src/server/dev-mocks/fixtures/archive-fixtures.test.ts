@@ -101,8 +101,8 @@ describe('archive dev fixtures (step 8.1 WP5)', () => {
     expect([...fromSpec].sort()).toEqual([...ARCHIVE_OPERATIONS].sort());
   });
 
-  it('answer every operation with an OpenAPI-valid body (MFA organization admin)', async () => {
-    const t = await login('mfa.organization_admin@example.com');
+  it('answer every operation with an OpenAPI-valid body (MFA compliance officer, step 8.6)', async () => {
+    const t = await login('mfa.compliance_officer@example.com');
     const check = (op: OperationId, res: { status: number; body: unknown }) =>
       expect(responseErrors(op, res.status, res.body), op).toEqual([]);
     let key = 0;
@@ -115,7 +115,10 @@ describe('archive dev fixtures (step 8.1 WP5)', () => {
         t,
         'PUT',
         '/archive/settings',
-        { expectedRowVersion: settings.body.rowVersion, enabled: true },
+        {
+          expectedRowVersion: settings.body.rowVersion,
+          settings: { access: { previewEnabled: true, downloadEnabled: true } },
+        },
         k(),
       ),
     );
@@ -362,13 +365,13 @@ describe('archive dev fixtures (step 8.1 WP5)', () => {
   });
 
   it('requires MFA, refuses content under an override, keeps CAS and replays Idempotency-Keys', async () => {
-    const noMfa = await login('organization_admin@example.com');
+    const noMfa = await login('compliance_officer@example.com');
     const id = (await call(noMfa, 'GET', `/archive/messages?${range()}`)).body.data[0]
       .messageId as string;
     expect((await call(noMfa, 'GET', `/archive/messages/${id}/preview`)).body.code).toBe(
       'mfa_required',
     );
-    const t = await login('mfa.organization_admin@example.com');
+    const t = await login('mfa.compliance_officer@example.com');
     const settings = await call(t, 'GET', '/archive/settings');
     const stale = await call(
       t,

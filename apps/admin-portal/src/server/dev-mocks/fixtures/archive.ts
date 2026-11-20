@@ -140,6 +140,7 @@ function summaryOf(detail: Detail): Summary {
     direction: detail.direction,
     category: detail.category,
     sources: detail.sources,
+    ingestSources: detail.ingestSources,
     status: detail.status,
     envelopeFrom: detail.envelopeFrom,
     headerFrom: detail.headerFrom,
@@ -213,6 +214,7 @@ function buildOrg(organizationId: string): OrgArchive {
       scope: { mode: 'all', domainIds: [], departmentIds: [], userIds: [], addresses: [] },
       policyArchive: { enabled: true },
       access: { previewEnabled: true, downloadEnabled: true },
+      intake: { scanEnabled: false },
     },
     generation: 4,
     journalEnabledAt: iso(anchor - 90 * DAY),
@@ -275,13 +277,48 @@ function buildOrg(organizationId: string): OrgArchive {
       ? iso(anchor - 2 * DAY)
       : iso(receivedMs + policy.retentionDays * DAY);
     const attachments = i % 3 === 0 ? ['EXAMPLE-report.pdf'] : [];
+    // Step 8.6: every 7th record arrived only through journal intake, every 7th + 2 was captured
+    // by the gateway and a journal intake copy was merged into it (every 14th + 4 with a
+    // differing body stored as a content variant).
+    const intakeOnly = i % 7 === 2;
+    const merged = i % 7 === 4;
+    const ingestSources: Detail['ingestSources'] = intakeOnly
+      ? ['journal_intake']
+      : merged
+        ? ['gateway', 'journal_intake']
+        : ['gateway'];
+    const intake: Detail['intake'] =
+      intakeOnly || merged
+        ? {
+            kind: 'microsoft_365_journal',
+            sourceId: stableUuid(`${organizationId}:intake:m365`),
+            sourceDisplayName: 'EXAMPLE Microsoft 365 journal',
+          }
+        : null;
+    const mergedCopies: Detail['mergedCopies'] = merged
+      ? [
+          {
+            id: stableUuid(`${messageId}:merged:1`),
+            source: 'journal_intake',
+            receivedAt: iso(receivedMs + 45_000),
+            mergedAt: iso(receivedMs + 150_000),
+            sizeBytes: 4096 + i * 37 + 211,
+            sha256: sha(`${messageId}:merged:1`),
+            contentVariant: i % 14 === 4,
+            recipientsAdded: 1,
+          },
+        ]
+      : [];
     const detail: Detail = {
       messageId,
       receivedAt: iso(receivedMs),
       capturedAt: iso(receivedMs + 90_000),
       direction,
-      category: i % 11 === 7 ? 'quarantined' : 'delivered',
-      sources: i % 5 === 0 ? ['journal', 'policy'] : ['journal'],
+      category: i % 11 === 7 && !intakeOnly ? 'quarantined' : 'delivered',
+      sources: i % 5 === 0 && !intakeOnly ? ['journal', 'policy'] : ['journal'],
+      ingestSources,
+      intake,
+      mergedCopies,
       status: review ? 'expiry_review' : 'active',
       envelopeFrom: from,
       headerFrom: from,
@@ -303,14 +340,30 @@ function buildOrg(organizationId: string): OrgArchive {
       parties: {
         envelopeFrom: from,
         headerFrom: from,
-        recipients: recipients.map((address, seq) => ({
-          seq,
-          address: maskAddress(address),
-          direction,
-          status: 'delivered',
-          finalAction: 'deliver',
-        })),
-        recipientCount: recipients.length,
+        recipients: [
+          ...recipients.map((address, seq) => ({
+            seq,
+            address: maskAddress(address),
+            direction,
+            status: intakeOnly ? 'journaled' : 'delivered',
+            finalAction: intakeOnly ? null : 'deliver',
+            ...(intake ? { field: 'to' as const, ingestSources } : {}),
+          })),
+          ...(intake
+            ? [
+                {
+                  seq: recipients.length,
+                  address: maskAddress(`legal.review@${domain}`),
+                  direction: 'internal' as const,
+                  status: 'journaled',
+                  finalAction: null,
+                  field: 'bcc' as const,
+                  ingestSources: ['journal_intake' as const],
+                },
+              ]
+            : []),
+        ],
+        recipientCount: recipients.length + (intake ? 1 : 0),
         recipientsTruncated: false,
       },
       capture: {
@@ -320,8 +373,8 @@ function buildOrg(organizationId: string): OrgArchive {
           policy: i % 5 === 0,
           policyRuleRef: i % 5 === 0 ? 'EXAMPLE-policy#1/archive' : null,
         },
-        messageState: 'delivered',
-        messageStateReason: 'delivery_complete',
+        messageState: intakeOnly ? 'journaled' : 'delivered',
+        messageStateReason: intakeOnly ? 'intake_unscanned' : 'delivery_complete',
         settingsGeneration: 3,
         outcomeRefreshedAt: null,
       },
@@ -513,6 +566,29 @@ function orgOf(request: FixtureRequest): OrgArchive {
   }
   advanceJobs(org);
   return org;
+}
+
+/**
+ * The archive settings row of the caller's organization (step 8.6: Journaling and the Archive
+ * edit the same row; the journaling fixtures read and write it through this accessor).
+ */
+export function archiveSettingsRow(request: FixtureRequest): {
+  get: () => Settings;
+  set: (next: Settings) => void;
+  defaultPolicyLive: () => boolean;
+} {
+  const org = orgOf(request);
+  return {
+    get: () => org.settings,
+    set: (next) => {
+      org.settings = next;
+    },
+    defaultPolicyLive: () =>
+      Boolean(
+        org.settings.defaultRetentionPolicyId &&
+        livePolicies(org).some((p) => p.id === org.settings.defaultRetentionPolicyId),
+      ),
+  };
 }
 
 /** Resets the in-memory archive (tests). */
@@ -817,6 +893,8 @@ function searchRecords(request: FixtureRequest, org: OrgArchive): FixtureRespons
       if (lists.direction!.length && !lists.direction!.includes(d.direction)) return false;
       if (lists.category!.length && !lists.category!.includes(d.category)) return false;
       if (lists.source!.length && !d.sources.some((s) => lists.source!.includes(s))) return false;
+      const ingest = q.get('ingestSource');
+      if (ingest && !d.ingestSources.some((s) => s === ingest)) return false;
       if (lists.status!.length && !lists.status!.includes(d.status)) return false;
       if (lists.verdict!.length && !lists.verdict!.includes(d.verdict ?? '')) return false;
       if (lists.finalAction!.length && !lists.finalAction!.includes(d.finalAction ?? ''))
@@ -892,8 +970,40 @@ function journalOf(record: Record_): SuccessBody<'ArchiveMessagesController_jour
         address: r.address,
         direction: r.direction,
         status: r.status,
+        ...(r.field ? { field: r.field } : {}),
       })),
     },
+    intake: d.intake?.sourceId
+      ? {
+          sourceId: d.intake.sourceId,
+          kind: d.intake.kind ?? 'microsoft_365_journal',
+          format: 'journal_report',
+          envelope: {
+            sender: d.envelopeFrom,
+            onBehalfOf: null,
+            messageId: d.internetMessageId,
+            recipients: d.parties.recipients
+              .filter((r) => r.field)
+              .map((r) => ({
+                address: r.address,
+                field: r.field ?? 'to',
+                ...(r.field === 'bcc'
+                  ? { expandedFrom: maskAddress(`legal@corp.example.test`) }
+                  : {}),
+              })),
+            truncated: false,
+          },
+          envelopeMismatch: false,
+          proof: {
+            network: 'provider_egress',
+            tls: true,
+            clientCert: 'n/a',
+            tenantHeader: 'match',
+            headerToken: 'n/a',
+            dkim: 'pass',
+          },
+        }
+      : null,
     headers: [
       { name: 'From', value: d.headerFrom, masked: false },
       { name: 'To', value: null, masked: true },
@@ -1044,6 +1154,29 @@ function settingsUpdate(request: FixtureRequest, org: OrgArchive): FixtureRespon
       { currentRowVersion: s.rowVersion },
     );
   }
+  // Step 8.6: per changed path (journaling paths → journal:manage, archive paths → archive:manage).
+  const changed = (a: unknown, b: unknown) =>
+    b !== undefined && JSON.stringify(a) !== JSON.stringify(b);
+  const paths: { path: string; permission: string }[] = [];
+  const journal = (path: string, a: unknown, b: unknown) => {
+    if (changed(a, b) && !has(request, 'journal:manage'))
+      paths.push({ path, permission: 'journal:manage' });
+  };
+  const archive = (path: string, a: unknown, b: unknown) => {
+    if (changed(a, b) && !has(request, 'archive:manage'))
+      paths.push({ path, permission: 'archive:manage' });
+  };
+  journal('enabled', s.enabled, body.enabled);
+  for (const key of ['directions', 'include', 'scope', 'policyArchive', 'intake'] as const)
+    journal(`settings.${key}`, s.settings[key], body.settings?.[key]);
+  archive('immutability', s.immutability, body.immutability);
+  archive('defaultRetentionPolicyId', s.defaultRetentionPolicyId, body.defaultRetentionPolicyId);
+  archive('settings.access', s.settings.access, body.settings?.access);
+  if (paths.length > 0) {
+    return apiError(403, 'archive_settings_forbidden_path', 'You may not change these paths', {
+      paths,
+    });
+  }
   const immutability = body.immutability ?? s.immutability;
   if (s.immutability === 'compliance' && immutability !== 'compliance') {
     return apiError(
@@ -1095,6 +1228,7 @@ function settingsUpdate(request: FixtureRequest, org: OrgArchive): FixtureRespon
       scope: { ...s.settings.scope, ...next.scope },
       policyArchive: { ...s.settings.policyArchive, ...next.policyArchive },
       access: { ...s.settings.access, ...next.access },
+      intake: { ...s.settings.intake, ...next.intake },
     },
     generation: s.generation + 1,
     journalEnabledAt: enabled && !s.enabled ? iso(Date.now()) : s.journalEnabledAt,
@@ -1377,8 +1511,18 @@ export const fixtures: FixtureHandlers = {
           { reason: 'malicious' },
         );
       }
+      const variantId = bodyOf(request).variant;
+      const variant =
+        typeof variantId === 'string'
+          ? record.detail.mergedCopies.find((c) => c.id === variantId && c.contentVariant)
+          : undefined;
+      if (typeof variantId === 'string' && !variant) {
+        return apiError(404, 'archive_variant_not_found', 'Content variant not found');
+      }
       const token = grantToken();
-      const filename = `archive-${record.detail.messageId}.eml`;
+      const filename = variant
+        ? `archive-${record.detail.messageId}.variant-1.eml`
+        : `archive-${record.detail.messageId}.eml`;
       org.grants.set(token, {
         userId: principalOf(request).userId,
         used: false,
@@ -1392,8 +1536,8 @@ export const fixtures: FixtureHandlers = {
             token,
             expiresAt: iso(Date.now() + 60_000),
             filename,
-            sizeBytes: record.detail.sizeBytes,
-            sha256: record.detail.integrity.sha256,
+            sizeBytes: variant?.sizeBytes ?? record.detail.sizeBytes,
+            sha256: variant?.sha256 ?? record.detail.integrity.sha256,
           },
           201,
         ),

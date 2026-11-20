@@ -150,6 +150,12 @@ describe('DisposalPipeline (A14)', () => {
         return Promise.resolve(1);
       },
       archiveIndexQueue: { count: () => Promise.resolve(opts.queued ?? 0) },
+      // Step 8.6: the record row (no merged copies) and its merged-copy rows (none).
+      emailArchive: {
+        findUnique: () => Promise.resolve(null),
+        count: () => Promise.resolve(0),
+      },
+      archiveRecordSource: { findMany: () => Promise.resolve([]) },
     };
     const { metrics, service } = testMetrics();
     const search = { count: () => Promise.resolve(opts.visible ? 1 : 0) };
@@ -322,6 +328,7 @@ describe('maintenance (A10, A15)', () => {
     const db = {
       emailArchive: { findMany: () => Promise.resolve([{ organizationId: ORG, objects }]) },
       archiveDisposal: { findMany: () => Promise.resolve([]) },
+      archiveRecordSource: { findMany: () => Promise.resolve([]) },
     };
     const reconciler = new OrphanReconciler(db as never, {
       storage: storage.asStorage(),

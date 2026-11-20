@@ -12,6 +12,7 @@ import { fixtures as dlpBec } from './fixtures/dlp-bec';
 import { fixtures as domains } from './fixtures/domains';
 import { fixtures as incidents } from './fixtures/incidents';
 import { fixtures as integrations } from './fixtures/integrations';
+import { fixtures as journaling } from './fixtures/journaling';
 import { fixtures as mailServers } from './fixtures/mail-servers';
 import { fixtures as messages } from './fixtures/messages';
 import { fixtures as organizations } from './fixtures/organizations';
@@ -48,7 +49,9 @@ export type { FixtureHandler, FixtureHandlers };
  * WP6) the 26 account takeover and 8 security incident operations; `provider-connections`
  * (step 8.2 WP6) the 24 Microsoft 365 and Google Workspace connection operations;
  * `ato-providers` (step 8.5 WP6) the 13 identity-provider operations and the identity-provider
- * behaviour of four 8.4 operations (settings, request, approve, roll back), so it follows `ato`.
+ * behaviour of four 8.4 operations (settings, request, approve, roll back), so it follows `ato`;
+ * `journaling` (step 8.6 WP6) the 12 journaling and intake-source operations over the archive
+ * settings row of `archive`.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -70,6 +73,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   quarantine,
   policies,
   archive,
+  journaling,
   ato,
   incidents,
   'provider-connections': providerConnections,

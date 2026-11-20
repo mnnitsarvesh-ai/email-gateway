@@ -7,12 +7,14 @@ export const TEST_ORG = {
   slug: 'alpha',
   name: 'Alpha Industries (example)',
   kind: 'customer' as const,
+  serviceProfile: 'gateway' as const,
 };
 export const TEST_PLATFORM_ORG = {
   id: '01930000-0000-7000-8000-000000000001',
   slug: 'platform',
   name: 'Gateway Platform Operations',
   kind: 'platform' as const,
+  serviceProfile: 'gateway' as const,
 };
 
 /** A `GET /auth/me` body for a system role (or explicit permissions). */

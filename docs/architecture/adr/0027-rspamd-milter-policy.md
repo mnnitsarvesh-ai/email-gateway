@@ -2,6 +2,8 @@
 
 **Status:** Accepted. Amends [ADR-0006](0006-postfix-mail-path.md) (the Rspamd milter no longer fails closed: `milter_default_action = accept`; the policy service still fails closed) and [ADR-0019](0019-smtp-gateway-topology.md) (inbound milter settings). Takes over the SMTP-time part of [ADR-0007](0007-security-engines.md). Design: [step 4.1](../../plan/steps/09-rspamd.md) §S11.
 
+Amended by [ADR-0087](0087-journal-intake-path.md) (step 8.6): decision 1 — SMTP-time actions are off for intake-only transactions (the Rspamd settings rule `journal_intake`, selected by the intake domain, applies no action); safe because intake transactions never mix tenants.
+
 **Context.** The inbound Postfix (`infrastructure/postfix/main.cf`) already uses the Rspamd proxy worker in milter mode (`smtpd_milters = inet:rspamd:11332`, `self_scan = yes`) with `milter_default_action = tempfail`, Rspamd rejecting at score ≥ 15 and adding `X-Spamd-Result` and `Authentication-Results`. Step 4.1 adds the authoritative post-queue scan (ADR-0026): every accepted message is scanned again from S3 with its trusted envelope and the result is recorded; a failed scan is `scan_failed`, never clean. The question is what the SMTP-time pass may still decide, and what happens to the SMTP session when Rspamd is unavailable.
 
 **Decision.**

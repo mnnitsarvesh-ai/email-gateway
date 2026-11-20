@@ -26,7 +26,8 @@ import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
 import { ApiError } from '@/lib/api/errors';
 import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
-import type { ListItem } from '@/lib/api/types';
+import type { ListItem, SuccessBody } from '@/lib/api/types';
+import { useCan } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { formatBytes, humanize } from '@/lib/format';
 import { CodeList, DetailList, EnumBadge, Section, YesNo } from '@/features/messages/controls';
@@ -34,11 +35,19 @@ import { RoundCard } from '@/features/messages/scan-details';
 import { FINAL_ACTION_TONE } from '@/features/messages/semantic';
 import { PreviewContent } from '@/features/quarantine/preview-panel';
 import { isUuid } from '@/features/domains/kit';
-import { ArchiveQueryError, Notice, RateLimited, ReasonDialog, ArchiveSubject } from './components';
+import {
+  ArchiveQueryError,
+  ArchiveSubject,
+  IngestSourcesBadges,
+  Notice,
+  RateLimited,
+  ReasonDialog,
+} from './components';
 import { GrantDownloadDialog } from './download-dialog';
 import { useArchiveReveal, useCountdown, type RevealedArchiveValues } from './hooks';
 import {
   CATEGORY_TONE,
+  INGEST_SOURCE_LABEL,
   LOCK_TONE,
   RECORD_STATUS_TONE,
   contentBlocker,
@@ -71,6 +80,7 @@ function ArchiveDetailsContent({ messageId }: { messageId: string }) {
   const reveal = useArchiveReveal(messageId);
   const revealed = reveal.values.get(messageId);
   const [downloadOpen, setDownloadOpen] = useState(false);
+  const [variantOpen, setVariantOpen] = useState<string | null>(null);
   const [disposeOpen, setDisposeOpen] = useState(false);
 
   if (detail.isLoading) return <LoadingState label="Loading the archived message" rows={8} />;
@@ -161,6 +171,11 @@ function ArchiveDetailsContent({ messageId }: { messageId: string }) {
       <PartiesSection record={record} revealed={revealed} />
       <RetentionSection record={record} access={access} />
       <IntegritySection record={record} />
+      <MergedCopiesSection
+        record={record}
+        canDownload={access.retrieve && record.status !== 'disposing'}
+        onDownloadVariant={(variant) => setVariantOpen(variant)}
+      />
       <JournalSection
         messageId={messageId}
         revealed={revealed}
@@ -181,6 +196,13 @@ function ArchiveDetailsContent({ messageId }: { messageId: string }) {
             onOpenChange={setDownloadOpen}
             title="Download the archived original"
             description="Confirm your identity to create a single-use download link valid for a short time. The original message (.eml) is saved, never opened in the portal; the download is recorded in the audit log."
+          />
+          <GrantDownloadDialog
+            target={{ kind: 'message', messageId, variant: variantOpen ?? undefined }}
+            open={variantOpen !== null}
+            onOpenChange={(open) => (!open ? setVariantOpen(null) : undefined)}
+            title="Download a content variant"
+            description="A merged copy of this message whose body differs from the primary copy (for example the journal copy of a message the gateway changed at delivery). Confirm your identity to create a single-use link; the download is recorded in the audit log."
           />
         </>
       ) : null}
@@ -217,6 +239,18 @@ function SummarySection({
             label: 'Captured by',
             value: <CodeList codes={record.sources.map(humanize)} />,
           },
+          {
+            label: 'Copies from',
+            value: <IngestSourcesBadges sources={record.ingestSources} />,
+          },
+          ...(record.intake
+            ? [
+                {
+                  label: 'Journal intake source',
+                  value: <IntakeSourceRef intake={record.intake} />,
+                },
+              ]
+            : []),
           {
             label: 'Record status',
             value: <EnumBadge value={record.status} tones={RECORD_STATUS_TONE} />,
@@ -322,6 +356,7 @@ function PartiesSection({
   revealed?: RevealedArchiveValues;
 }) {
   const parties = record.parties;
+  const withFields = parties.recipients.some((r) => r.field || r.ingestSources?.length);
   return (
     <Section
       title="Parties"
@@ -354,6 +389,11 @@ function PartiesSection({
               <th scope="col" className="px-3 py-2">
                 Direction
               </th>
+              {withFields ? (
+                <th scope="col" className="px-3 py-2">
+                  Field
+                </th>
+              ) : null}
               <th scope="col" className="px-3 py-2">
                 Status
               </th>
@@ -380,6 +420,16 @@ function PartiesSection({
                   <td className="px-3 py-2">
                     <DirectionBadge direction={recipient.direction} />
                   </td>
+                  {withFields ? (
+                    <td className="px-3 py-2 text-xs">
+                      {recipient.field ? FIELD_LABEL[recipient.field] : '—'}
+                      {recipient.ingestSources?.length ? (
+                        <span className="block text-muted-foreground">
+                          {recipient.ingestSources.map((s) => INGEST_SOURCE_LABEL[s]).join(', ')}
+                        </span>
+                      ) : null}
+                    </td>
+                  ) : null}
                   <td className="px-3 py-2">{humanize(recipient.status)}</td>
                   <td className="px-3 py-2">
                     <EnumBadge value={recipient.finalAction} tones={FINAL_ACTION_TONE} />
@@ -542,6 +592,131 @@ function OnDemand({
   return <>{children()}</>;
 }
 
+const FIELD_LABEL: Record<
+  NonNullable<ArchiveDetail['parties']['recipients'][number]['field']>,
+  string
+> = {
+  to: 'To',
+  cc: 'Cc',
+  bcc: 'Bcc',
+  recipient: 'Recipient',
+  envelope: 'Envelope',
+  header: 'Header',
+};
+
+const FORMAT_LABEL: Record<string, string> = {
+  journal_report: 'Journal report (unwrapped)',
+  copy: 'Copy (stored as received)',
+  journal_report_unparsed: 'Unrecognized journal report (stored as received)',
+};
+
+/** The journal intake source of a record (link for users who may read journaling). */
+function IntakeSourceRef({ intake }: { intake: NonNullable<ArchiveDetail['intake']> }) {
+  const canRead = useCan('IntakeSourcesController_get_v1');
+  const name = intake.sourceDisplayName ?? 'Unknown source';
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      {canRead && intake.sourceId ? (
+        <Link
+          href={`/settings/journaling/intake/${intake.sourceId}`}
+          className="text-primary underline-offset-4 hover:underline"
+        >
+          <UntrustedText value={name} maxLength={80} />
+        </Link>
+      ) : (
+        <UntrustedText value={name} maxLength={80} />
+      )}
+      {intake.kind ? (
+        <span className="text-xs text-muted-foreground">{humanize(intake.kind)}</span>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * Copies of the same message merged into this record (step 8.6 D7, ADR-0088): gateway and journal
+ * intake copies, or several journal reports. A copy whose body differs is stored as a content
+ * variant under the record's key and can be downloaded through the same re-authenticated grant.
+ */
+function MergedCopiesSection({
+  record,
+  canDownload,
+  onDownloadVariant,
+}: {
+  record: ArchiveDetail;
+  canDownload: boolean;
+  onDownloadVariant: (variant: string) => void;
+}) {
+  if (record.mergedCopies.length === 0) return null;
+  return (
+    <Section
+      title={`Merged copies (${record.mergedCopies.length})`}
+      description="Other copies of this message received through the gateway or journal intake. Their recipients are merged into the parties; retention and lock cover every copy."
+    >
+      <div className="overflow-x-auto rounded-md border">
+        <table className="w-full text-sm">
+          <caption className="sr-only">Merged copies</caption>
+          <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
+            <tr>
+              <th scope="col" className="px-3 py-2">
+                Received
+              </th>
+              <th scope="col" className="px-3 py-2">
+                From
+              </th>
+              <th scope="col" className="px-3 py-2">
+                Content
+              </th>
+              <th scope="col" className="px-3 py-2">
+                Recipients added
+              </th>
+              <th scope="col" className="px-3 py-2">
+                Size and SHA-256
+              </th>
+              <th scope="col" className="px-3 py-2">
+                <span className="sr-only">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {record.mergedCopies.map((copy) => (
+              <tr key={copy.id} className="border-t align-top">
+                <td className="px-3 py-2">
+                  <DateTime value={copy.receivedAt} mode="absolute" />
+                  <span className="block text-xs text-muted-foreground">
+                    merged <DateTime value={copy.mergedAt} />
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  <IngestSourcesBadges sources={[copy.source]} />
+                </td>
+                <td className="px-3 py-2 text-xs">
+                  {copy.contentVariant ? 'Different body (stored as a variant)' : 'Same body'}
+                </td>
+                <td className="px-3 py-2 tabular-nums">{copy.recipientsAdded}</td>
+                <td className="px-3 py-2 text-xs">
+                  {formatBytes(copy.sizeBytes)}
+                  <span className="block font-mono break-all text-muted-foreground">
+                    {copy.sha256}
+                  </span>
+                </td>
+                <td className="px-3 py-2">
+                  {copy.contentVariant && canDownload ? (
+                    <Button variant="outline" size="sm" onClick={() => onDownloadVariant(copy.id)}>
+                      <DownloadIcon aria-hidden />
+                      Download variant
+                    </Button>
+                  ) : null}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Section>
+  );
+}
+
 function JournalSection({
   messageId,
   revealed,
@@ -625,6 +800,7 @@ function JournalContent({
           },
         ]}
       />
+      {j.intake ? <JournalIntakeBlock intake={j.intake} /> : null}
       <div className="grid gap-1">
         <h3 className="text-sm font-semibold">Envelope recipients</h3>
         <ul className="grid gap-1 text-sm">
@@ -640,6 +816,9 @@ function JournalContent({
                   kind="address"
                 />
                 <DirectionBadge direction={r.direction} />
+                {r.field ? (
+                  <span className="text-xs font-medium">{FIELD_LABEL[r.field]}</span>
+                ) : null}
                 <span className="text-xs text-muted-foreground">{humanize(r.status)}</span>
               </li>
             );
@@ -718,6 +897,86 @@ function JournalContent({
             ))}
           </ul>
         )}
+      </div>
+    </div>
+  );
+}
+
+type JournalIntake = NonNullable<SuccessBody<'ArchiveMessagesController_journal_v1'>['intake']>;
+
+/** The journal intake facts of the copy (step 8.6 D6): envelope with fields and proof codes. */
+function JournalIntakeBlock({ intake }: { intake: JournalIntake }) {
+  return (
+    <div className="grid gap-2 rounded-md border p-3">
+      <h3 className="text-sm font-semibold">Journal intake</h3>
+      <DetailList
+        items={[
+          { label: 'Source kind', value: humanize(intake.kind) },
+          { label: 'Format', value: FORMAT_LABEL[intake.format] ?? humanize(intake.format) },
+          {
+            label: 'Journal sender',
+            value: <UntrustedText value={intake.envelope.sender} emptyLabel="Not stated" />,
+          },
+          ...(intake.envelope.onBehalfOf
+            ? [
+                {
+                  label: 'On behalf of',
+                  value: <UntrustedText value={intake.envelope.onBehalfOf} />,
+                },
+              ]
+            : []),
+          {
+            label: 'Proof',
+            value: (
+              <CodeList
+                codes={[
+                  `network ${intake.proof.network}`,
+                  `TLS ${intake.proof.tls ? 'yes' : 'no'}`,
+                  `tenant header ${intake.proof.tenantHeader}`,
+                  `header token ${intake.proof.headerToken}`,
+                  `DKIM ${intake.proof.dkim}`,
+                  `client certificate ${intake.proof.clientCert}`,
+                ]}
+              />
+            ),
+          },
+          ...(intake.envelopeMismatch
+            ? [
+                {
+                  label: 'Envelope Message-ID',
+                  value: 'Differs from the archived message (recorded, not refused)',
+                },
+              ]
+            : []),
+        ]}
+      />
+      <div className="grid gap-1">
+        <h4 className="text-xs font-semibold">
+          Journal envelope recipients ({intake.envelope.recipients.length}
+          {intake.envelope.truncated ? ', truncated' : ''})
+        </h4>
+        <p className="text-xs text-muted-foreground">
+          The recipients your mail system reported, including Bcc and expanded distribution lists
+          (masked).
+        </p>
+        <ul className="grid gap-1 text-sm">
+          {intake.envelope.recipients.map((r, index) => (
+            <li key={`${r.address}-${index}`} className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium">{FIELD_LABEL[r.field]}</span>
+              <SensitiveValue value={r.address} masked kind="address" />
+              {r.expandedFrom ? (
+                <span className="text-xs text-muted-foreground">
+                  expanded from <SensitiveValue value={r.expandedFrom} masked kind="address" />
+                </span>
+              ) : null}
+              {r.forwardedFrom ? (
+                <span className="text-xs text-muted-foreground">
+                  forwarded from <SensitiveValue value={r.forwardedFrom} masked kind="address" />
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );

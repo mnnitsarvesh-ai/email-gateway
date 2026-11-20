@@ -52,6 +52,35 @@ describe('projection rules (W3)', () => {
     });
   });
 
+  it('journal intake (step 8.6 D4): received.v1 with ingestSource journal_intake projects nothing', () => {
+    expect(
+      projectCandidates(
+        sourceEvent(EventTypes.MessageReceived, {
+          direction: 'inbound',
+          ingestSource: 'journal_intake',
+        }),
+      ),
+    ).toEqual([]);
+    // An explicit `gateway` (or no field) keeps email.received.
+    expect(
+      summary(EventTypes.MessageReceived, { direction: 'inbound', ingestSource: 'gateway' }),
+    ).toEqual([{ type: 'email.received', subKey: '', severity: 'info', alert: null }]);
+  });
+
+  it.each([
+    'intake_unscanned',
+    'intake_parse_failed',
+    'intake_scan_complete',
+    'intake_scan_failed',
+  ])(
+    'journal intake (step 8.6 D4): state_changed.v1 to journaled (%s) projects nothing',
+    (reasonCode) => {
+      expect(summary(EventTypes.MessageStateChanged, { state: 'journaled', reasonCode })).toEqual(
+        [],
+      );
+    },
+  );
+
   it.each([
     ['clean', 'info'],
     ['unknown', 'info'],

@@ -89,12 +89,18 @@ export class PrismaLifecycleStore implements LifecycleStore {
   /**
    * L13 step 1: overdue messages of one state and one shard (`MOD(id, n) = i`), oldest first.
    * The deadline is passed in seconds (hours × 3600; integration tests use seconds).
+   *
+   * Journal intake messages (`ingest_source = journal_intake`, step 8.6 D4) are never expired:
+   * they end only in `journaled` (E30–E32 from the email-worker), which the archive capture waits
+   * for; an `expired` intake message would never be archived. A delayed intake message stays in
+   * its state (counted by `lifecycle_stuck_messages`) until the MIME or scan stage finishes it.
    */
   async expiryCandidates(query: ExpiryCandidatesQuery): Promise<LifecycleCandidate[]> {
     const rows = await this.prisma.$queryRaw<CandidateRow[]>`
       SELECT id, received_at, organization_id, status, version, status_changed_at
       FROM email_messages
       WHERE status = ${query.state}
+        AND ingest_source = 'gateway'
         AND status_changed_at < NOW(3) - INTERVAL ${query.olderThanSeconds} SECOND
         AND status_changed_at >= NOW(3) - INTERVAL ${query.lookbackDays} DAY
         AND MOD(id, ${query.shard.count}) = ${query.shard.index}

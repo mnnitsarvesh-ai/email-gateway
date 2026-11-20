@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-11-17, after the step 8.1 local verification: expiry and disposal consistent across the archive bucket, the (simulated) replica bucket, OpenSearch, MySQL and the disposal log; a legal hold blocking expiry until released; the 5.3 Q17 binding in the api and policy-engine suites; record [docs/plan/steps/23-journaling-archiving.md](../../plan/steps/23-journaling-archiving.md) §13, §14). Proposed by the step 8.1 architect on 2026-11-16 (design A11–A15, A23, A24). Supersedes no ADR decision. Takes over the step 5.3 binding (contracts §29) and changes the Q17 rules accordingly (`409 quarantine_retention_active` is no longer produced). Implementation notes: an Object Lock still running counts as retention (WP2 D8); api-written disposal decisions leave `replica_status` to the worker (WP4 D7). **Not verified:** S3 cross-region replication (10.2).
 
+Amended by [ADR-0088](0088-archive-cross-source-dedupe.md) (step 8.6): disposal of a record also deletes its content variants, merged copies' journal objects, its `archive_record_sources` rows and its dedupe rows; holds evaluate the merged parties.
+
 **Context.** Retention must be configurable per tenant, per direction or category; legal holds must block deletion and expiry; deletion, retention and hold operations must be consistent across replicated storage (S3 versions and replicated buckets, the MySQL writer and its replica, the search index) with reconciliation and an audit trail. Step 5.3 already refuses quarantine deletes under holds read with a conservative criteria subset, and the organization deletion of step 1.2 is blocked by active holds and waits for the latest archive retention.
 
 **Decision.**

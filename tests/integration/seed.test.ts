@@ -115,26 +115,31 @@ describe('db:seed', () => {
     expect(second.status, second.output).toBe(0);
     expect(await counts()).toEqual(afterFirst);
 
+    // Step 8.6: 72 permissions (journal:read, journal:manage), 10 system roles
+    // (compliance_officer), two more limits (journal intake) and one more feature (journal_intake).
     expect(afterFirst).toMatchObject({
-      permissions: 70,
-      systemRoles: 9,
+      permissions: 72,
+      systemRoles: 10,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
-      demoUserRoles: 2,
-      demoLimits: 11,
-      demoFeatures: 12,
+      demoLimits: 13,
+      demoFeatures: 13,
       demoDeployments: 1,
       demoDomains: 1,
       demoPolicies: 1,
       platformUsers: 1,
       platformUserRoles: 1,
       platformSettings: 1,
-      platformLimits: 11,
-      platformFeatures: 12,
+      platformLimits: 13,
+      platformFeatures: 13,
       platformDeployments: 1,
     });
+    // The demo admin's organization_admin + analyst's role (2); on a schema where the demo admin
+    // existed before migration 20261120053633_journal_intake the admin also holds the migrated
+    // compliance_officer assignment (3, ADR-0089); a clean CI schema seeds after the migration (2).
+    expect([2, 3]).toContain(afterFirst.demoUserRoles);
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
     // Step 5.2 §3: one policy-dsl/1 version on a fresh database; a database migrated from the
     // step 1.1 seed also keeps its retired legacy version 1 (superseded, never deleted).
@@ -377,7 +382,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 70 permissions and the 9 system roles (D8 + mailbox_user, 5.3), with their permissions', async () => {
+  it('seeds exactly the 72 permissions and the 10 system roles (D8 + mailbox_user, 5.3, compliance_officer, 8.6), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());
@@ -430,9 +435,10 @@ describe('db:seed', () => {
       'organization_admin',
       'super_admin',
     ]);
-    // Every built-in role reads delivery status, except the end-user role (step 5.3 Q15).
+    // Every built-in role reads delivery status, except the end-user role (step 5.3 Q15) and
+    // the archive role compliance_officer (step 8.6 D12: its set is exact, WP1 deviation 3).
     expect(holders('delivery:read')).toEqual(
-      SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user').sort(),
+      SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user' && k !== 'compliance_officer').sort(),
     );
     // Step 3.3 (L10.2): the administrative rescan.
     expect(holders('message:rescan')).toEqual([
@@ -572,32 +578,53 @@ describe('db:seed', () => {
       'super_admin',
     ]);
     expect(holders('webhook:manage')).toEqual(['organization_admin', 'super_admin']);
-    // Step 7.2 (§2 E5, §3.5): the audited reveal of masked message metadata.
+    // Step 7.2 (§2 E5, §3.5): the audited reveal of masked message metadata (step 8.6: and the
+    // archive role compliance_officer).
     expect(holders('message:reveal')).toEqual([
       'compliance_auditor',
+      'compliance_officer',
       'organization_admin',
       'security_analyst',
       'super_admin',
     ]);
     // Step 8.1 (A20): archive search, retrieval, management and eDiscovery; none read-only.
+    // Step 8.6 (ADR-0089): archive access moved from organization_admin to compliance_officer.
     expect(holders('archive:search')).toEqual([
       'compliance_auditor',
-      'organization_admin',
+      'compliance_officer',
       'security_analyst',
       'super_admin',
     ]);
     expect(holders('archive:retrieve')).toEqual([
       'compliance_auditor',
-      'organization_admin',
+      'compliance_officer',
       'super_admin',
     ]);
-    expect(holders('archive:manage')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('archive:manage')).toEqual(['compliance_officer', 'super_admin']);
     expect(holders('ediscovery:manage')).toEqual([
       'compliance_auditor',
+      'compliance_officer',
+      'super_admin',
+    ]);
+    expect(holders('archive:legal_hold')).toEqual(['compliance_officer', 'super_admin']);
+    // Step 8.6 (D12): journaling for IT and mail administrators; journal:read with the read set.
+    expect(holders('journal:manage')).toEqual([
+      'domain_admin',
       'organization_admin',
       'super_admin',
     ]);
-    expect(holders('archive:legal_hold')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('journal:read')).toEqual(
+      [
+        'compliance_auditor',
+        'compliance_officer',
+        'domain_admin',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
     const settingsManage = await prisma.permission.findUniqueOrThrow({
       where: { key: 'settings:manage' },
     });

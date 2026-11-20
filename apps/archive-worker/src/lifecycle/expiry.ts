@@ -13,7 +13,8 @@ import type { ArchiveMetrics } from '../metrics/archive-metrics';
 import { archiveOrganizations, type Db, systemAudit } from '../shared/db';
 import { errorFields } from '../shared/errors';
 import type { ArchiveStorage } from '../storage/archive-storage';
-import { decideDisposal, recordVersions } from './disposal';
+import { recordVersionsWithMerged } from '../storage/record-versions';
+import { decideDisposal } from './disposal';
 
 export const LIFECYCLE_LOCK = 'eg:archive-lifecycle';
 export const LIFECYCLE_RUN_ACTION = 'archive.lifecycle_run';
@@ -297,7 +298,7 @@ export async function applyExpiryDecision(
     return;
   }
   if (decision.lockUntil !== null && record.lockMode !== 'none') {
-    for (const v of recordVersions(record)) {
+    for (const v of recordVersionsWithMerged(record)) {
       try {
         await input.storage.putRetention(input.storage.buckets.archive, v.key, v.versionId, {
           mode: record.lockMode,

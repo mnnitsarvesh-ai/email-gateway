@@ -97,6 +97,17 @@ describe('HeaderScanner', () => {
     ]);
   });
 
+  it('collects X-EG-Journal-Token values, folded and in any case (step 8.6)', () => {
+    const meta = scan(
+      'X-EG-Journal-Token: abcdefghijklmnopqrstuvwxyz\r\nx-eg-journal-token:\r\n second\r\n\r\n',
+    );
+    expect(meta.journalTokens).toEqual(['abcdefghijklmnopqrstuvwxyz', 'second']);
+    expect(scan('Subject: x\r\n\r\n').journalTokens).toBeUndefined();
+    expect(scan(`X-EG-Journal-Token: ${'t'.repeat(300)}\r\n\r\n`).journalTokens![0]).toHaveLength(
+      256,
+    );
+  });
+
   it('helpers', () => {
     expect(headerAddress('Bob <bob@x.test> (comment)')).toBe('bob@x.test');
     expect(headerAddress(' bare@x.test ')).toBe('bare@x.test');

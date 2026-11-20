@@ -60,7 +60,12 @@ export function reauthBody(
 }
 
 type Target =
-  | { readonly kind: 'message'; readonly messageId: string }
+  | {
+      readonly kind: 'message';
+      readonly messageId: string;
+      /** Step 8.6: a merged copy's id to download its stored content variant instead. */
+      readonly variant?: string;
+    }
   | { readonly kind: 'export'; readonly caseId: string; readonly exportId: string };
 
 /**
@@ -113,7 +118,10 @@ export function GrantDownloadDialog({
     const body = reauthBody(values);
     const outcome =
       target.kind === 'message'
-        ? await messageGrant.submit({ path: { messageId: target.messageId }, body })
+        ? await messageGrant.submit({
+            path: { messageId: target.messageId },
+            body: target.variant ? { ...body, variant: target.variant } : body,
+          })
         : await exportGrant.submit({
             path: { caseId: target.caseId, exportId: target.exportId },
             body,

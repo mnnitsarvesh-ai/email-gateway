@@ -133,6 +133,20 @@ describe('expiry sweeper (L13) on the writer', () => {
     expect(await metricValue(service, 'lifecycle_expiry_shards_held')).toBe(0);
   });
 
+  it('never expires a journal intake message (step 8.6 D4: it ends only in journaled)', async () => {
+    const intake = await fixtures.message(org, { state: 'persisted', idleSeconds: 120 });
+    await fixtures.prisma.emailMessage.update({
+      where: { id_receivedAt: { id: intake.id, receivedAt: intake.receivedAt } },
+      data: { ingestSource: 'journal_intake' },
+    });
+    const gateway = await fixtures.message(org, { state: 'persisted', idleSeconds: 120 });
+    const { sweeper } = harness({ shards: 1, maxHeldShards: 1 });
+    await sweeper.runShard(0);
+    await sweeper.stop();
+    expect((await row(intake)).status).toBe('persisted');
+    expect((await row(gateway)).status).toBe('expired');
+  });
+
   it('skips a row whose version changed between the read and the lock', async () => {
     const m = await fixtures.message(org, { state: 'approved', idleSeconds: 120 });
     let raced = false;

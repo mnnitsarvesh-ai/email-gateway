@@ -1,4 +1,5 @@
 import {
+  archivePartiesSchema,
   type ArchiveRecordObjects,
   archiveRecordObjectsSchema,
   type ArchiveScanRounds,
@@ -11,7 +12,7 @@ import {
   QUARANTINE_WAIT_MAX_DAYS,
   unwrapRecordKey,
 } from '@email-gateway/archive';
-import { backoffDelay } from '@email-gateway/common';
+import { backoffDelay, uuidv7 } from '@email-gateway/common';
 import { Prisma, type PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import type { TenantKeyService } from '../keys/tenant-keys';
@@ -30,6 +31,7 @@ import {
   LOCK_FLOOR_MS,
   type ObjectLockSpec,
 } from '../storage/archive-storage';
+import { refreshMergedParties } from './dedupe';
 import { type CaptureExecutor, type ClaimedIntent, writeScanSnapshot } from './executor';
 import { FactsReader, isMalicious, type MessageFacts, partiesOf, sameParties } from './facts';
 import type { OrgContextCache } from './org-context';
@@ -63,6 +65,10 @@ interface IntentRow extends ClaimedIntent {
   createdAt: Date;
   capturedAt: Date | null;
   archiveId: bigint | null;
+  /** Step 8.6: the record's `received_at` of a merged intent (NULL = the intent's own). */
+  archiveReceivedAt: Date | null;
+  /** Step 8.6: the intent's message was merged into another message's record. */
+  merged: boolean;
 }
 
 export type IntentOutcome =
@@ -161,10 +167,13 @@ export class CaptureScheduler {
           created_at: Date;
           captured_at: Date | null;
           archive_id: bigint | number | null;
+          archive_received_at: Date | null;
+          merged: number | boolean;
         }>
       >`
         SELECT id, received_at, organization_id, message_id, status, source_journal,
-          source_policy, policy_rule_ref, category, attempts, created_at, captured_at, archive_id
+          source_policy, policy_rule_ref, category, attempts, created_at, captured_at, archive_id,
+          archive_received_at, merged
         FROM archive_capture_intents WHERE ${keys}`;
       return rows.map((r) => ({
         id: big(r.id),
@@ -181,6 +190,8 @@ export class CaptureScheduler {
         createdAt: r.created_at,
         capturedAt: r.captured_at,
         archiveId: r.archive_id === null ? null : big(r.archive_id),
+        archiveReceivedAt: r.archive_received_at,
+        merged: Boolean(Number(r.merged)),
       }));
     });
   }
@@ -221,6 +232,7 @@ export class CaptureScheduler {
               statusChangedAt: facts.message.statusChangedAt,
               direction: facts.message.direction,
               recipients: facts.recipients,
+              ingestSource: facts.message.ingestSource,
             },
       intentCreatedAt: intent.createdAt,
       waitsSoFar: waitsFromElapsed(now.getTime() - intent.createdAt.getTime()),
@@ -274,22 +286,47 @@ export class CaptureScheduler {
       const seconds = Number(process.hrtime.bigint() - started) / 1e9;
       if (result.status === 'lost_race') {
         // A record of this message already exists (another claim after a lease expiry, or an
-        // intent re-created after its partition was dropped): link it and refresh from there.
+        // intent re-created after its partition was dropped), or the message was already merged
+        // into another record (step 8.6): link it and refresh from there.
         const existing = await this.prisma.emailArchive.findUnique({
           where: {
             messageId_receivedAt: { messageId: intent.messageId, receivedAt: intent.receivedAt },
           },
           select: { id: true, organizationId: true, archivedAt: true },
         });
-        if (existing === null || existing.organizationId !== intent.organizationId) {
-          await this.update(intent, Prisma.sql`next_check_at = ${now}`);
-        } else {
+        const mergedInto =
+          existing === null
+            ? await this.prisma.archiveRecordSource.findFirst({
+                where: {
+                  messageId: intent.messageId,
+                  messageReceivedAt: intent.receivedAt,
+                  organizationId: intent.organizationId,
+                },
+                select: {
+                  organizationId: true,
+                  archiveId: true,
+                  archiveReceivedAt: true,
+                  mergedAt: true,
+                },
+              })
+            : null;
+        if (existing !== null && existing.organizationId === intent.organizationId) {
           await this.update(
             intent,
             Prisma.sql`status = 'captured_open', archive_id = ${existing.id},
               captured_at = ${existing.archivedAt}, category = ${decision.category},
               next_check_at = ${now}`,
           );
+        } else if (mergedInto !== null && mergedInto.organizationId === intent.organizationId) {
+          await this.update(
+            intent,
+            Prisma.sql`status = 'captured_open', archive_id = ${mergedInto.archiveId},
+              archive_received_at = ${mergedInto.archiveReceivedAt}, merged = 1,
+              captured_at = ${mergedInto.mergedAt}, category = ${decision.category},
+              next_check_at = ${now}`,
+          );
+        } else {
+          await this.update(intent, Prisma.sql`next_check_at = ${now}`);
         }
         return 'lost_race';
       }
@@ -403,14 +440,31 @@ export class CaptureScheduler {
    * rounds or risk revisions frozen as new snapshot objects (≤ 16 links; never the EML or the
    * journal object). Changes enqueue an index upsert in the same transaction. The intent closes
    * after the final +24 h check or the outcome window.
+   *
+   * Step 8.6 (D7, ADR-0088): a merged intent reads its record by `(archive_id,
+   * archive_received_at)` and its facts by its own message. A gateway copy is authoritative for the
+   * record's security outcome (state, verdict, action, risk, malicious, category, scan links; a
+   * merged gateway copy's snapshots are encrypted under the record's subject); an intake copy never
+   * overwrites a record that has a gateway copy, and only its parties are refreshed. The parties of
+   * a record with merged copies are refreshed by address into the merged parties.
    */
   private async refresh(intent: IntentRow): Promise<IntentOutcome> {
     const now = this.now();
-    const record = await this.prisma.emailArchive.findUnique({
-      where: {
-        messageId_receivedAt: { messageId: intent.messageId, receivedAt: intent.receivedAt },
-      },
-    });
+    const record =
+      intent.merged && intent.archiveId !== null
+        ? await this.prisma.emailArchive.findUnique({
+            where: {
+              id_receivedAt: {
+                id: intent.archiveId,
+                receivedAt: intent.archiveReceivedAt ?? intent.receivedAt,
+              },
+            },
+          })
+        : await this.prisma.emailArchive.findUnique({
+            where: {
+              messageId_receivedAt: { messageId: intent.messageId, receivedAt: intent.receivedAt },
+            },
+          });
     if (
       record === null ||
       record.organizationId !== intent.organizationId ||
@@ -430,10 +484,14 @@ export class CaptureScheduler {
       );
       return 'closed';
     }
+    const m = facts.message;
+    const copySource = m.ingestSource;
+    // Step 8.6 D7: who may change the record's security outcome.
+    const authoritative = copySource === 'gateway' || (!intent.merged && !record.sourceGateway);
     const objects = archiveRecordObjectsSchema.parse(record.objects);
     const links = archiveScanRoundsSchema.parse(record.scanRounds);
     const linked = new Set(links.map((l) => `${l.round}:${l.revision}`));
-    const rounds = await this.reader.terminalRounds(this.prisma, facts.message);
+    const rounds = authoritative ? await this.reader.terminalRounds(this.prisma, m) : [];
     const newest = rounds[0];
     const added: { refs: ArchiveRecordObjects['scans']; links: ArchiveScanRounds } = {
       refs: [],
@@ -473,10 +531,12 @@ export class CaptureScheduler {
           facts,
           round: newest,
           dek,
-          captureId: objects.captureId,
+          // A merged copy's snapshots lie under its own message prefix, under the record subject.
+          captureId: intent.merged ? uuidv7(now.getTime()) : objects.captureId,
           frozenAt: now,
           lock,
           chunkBytes: this.options.chunkBytes,
+          ...(intent.merged ? { subjectId: record.messagePublicId } : {}),
         });
         added.refs.push(snap.ref);
         added.links.push(snap.link);
@@ -485,21 +545,30 @@ export class CaptureScheduler {
         dek.fill(0);
       }
     }
-    const m = facts.message;
-    const parties = partiesOf(facts);
-    const malicious = record.malicious || isMalicious(m, rows);
+    const intake = await this.reader.intake(this.prisma, m);
+    const fresh = partiesOf(facts, intake);
+    const storedParties = archivePartiesSchema.safeParse(record.parties);
+    const parties =
+      (record.mergedCount > 0 || intent.merged) && storedParties.success
+        ? refreshMergedParties(storedParties.data, fresh, copySource)
+        : fresh;
+    const malicious = authoritative ? record.malicious || isMalicious(m, rows) : record.malicious;
     const category =
-      record.category === 'quarantined'
-        ? (categoryOf({ ...m, recipients: facts.recipients }) ?? record.category)
+      authoritative && record.category === 'quarantined'
+        ? (categoryOf({ ...m, recipients: facts.recipients, ingestSource: m.ingestSource }) ??
+          record.category)
         : record.category;
+    const outcomeChanged =
+      authoritative &&
+      (record.messageState !== m.status ||
+        (record.messageStateReason ?? null) !== (m.statusReason ?? null) ||
+        (record.finalVerdict ?? null) !== (m.finalVerdict ?? null) ||
+        (record.finalAction ?? null) !== (m.finalAction ?? null) ||
+        (record.riskScore ?? null) !== (m.riskScore ?? null));
     const changed =
       added.refs.length > 0 ||
-      record.messageState !== m.status ||
-      (record.messageStateReason ?? null) !== (m.statusReason ?? null) ||
+      outcomeChanged ||
       !sameParties(record.parties, parties) ||
-      (record.finalVerdict ?? null) !== (m.finalVerdict ?? null) ||
-      (record.finalAction ?? null) !== (m.finalAction ?? null) ||
-      (record.riskScore ?? null) !== (m.riskScore ?? null) ||
       record.malicious !== malicious ||
       (intent.sourcePolicy && !record.capturedByPolicy) ||
       (intent.sourceJournal && !record.capturedByJournal) ||
@@ -528,13 +597,20 @@ export class CaptureScheduler {
             updatedAt: record.updatedAt,
           },
           data: {
-            messageState: m.status,
-            messageStateReason: m.statusReason?.slice(0, 64) ?? null,
+            ...(authoritative
+              ? {
+                  messageState: m.status,
+                  messageStateReason: m.statusReason?.slice(0, 64) ?? null,
+                  finalVerdict: m.finalVerdict,
+                  finalAction: m.finalAction,
+                  riskScore: m.riskScore,
+                }
+              : {}),
             parties,
+            ...(record.mergedCount > 0 || intent.merged
+              ? { recipientCount: Math.min(parties.recipients.length, 65_535) }
+              : {}),
             category,
-            finalVerdict: m.finalVerdict,
-            finalAction: m.finalAction,
-            riskScore: m.riskScore,
             malicious,
             capturedByJournal: record.capturedByJournal || intent.sourceJournal,
             capturedByPolicy: record.capturedByPolicy || intent.sourcePolicy,

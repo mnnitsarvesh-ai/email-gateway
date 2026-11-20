@@ -25,6 +25,8 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     sizeBytes: 1024,
     envelopeFrom: 'sender@example.com',
     recipientCount: 1,
+    // Step 8.6 (optional; absent = gateway): `journal_intake` for journal intake copies.
+    ingestSource: 'gateway',
   },
   'mail.message.parsed.v1': {
     messageId,

@@ -418,6 +418,8 @@ describe('sensitive message metadata (e2e, dependencies stubbed)', () => {
       'organization_admin',
       'security_analyst',
       'compliance_auditor',
+      // Step 8.6 D12: the compliance officer reveals (archived) mail.
+      'compliance_officer',
     ]);
 
     it.each(SYSTEM_ROLES.map((r) => [r.key, [...r.permissions] as string[]] as const))(

@@ -290,7 +290,7 @@ describe('report statements (EXPLAIN FORMAT=JSON)', () => {
     ]) {
       const { tables, text } = await explain(ctx, sql);
       const t = tables.find((x) => x.table_name === 'email_messages')!;
-      expect(t.key, text).toBe('email_messages_org_received_dir_verdict_idx');
+      expect(t.key, text).toBe('email_messages_org_received_dir_verdict_src_idx');
       expect(t.access_type).toBe('range');
       expect(t.using_index, text).toBe(true);
       expect(t.partitions!.length).toBeLessThan(all.length);
@@ -302,7 +302,7 @@ describe('report statements (EXPLAIN FORMAT=JSON)', () => {
     // The threats outcomes (verdict x action) are index-only too: final_action is covered.
     const outcomes = await explain(ctx, reportSql.outcomes(scopeOf(), window(), 10_000));
     const m = outcomes.tables.find((x) => x.table_name === 'email_messages')!;
-    expect(m.key, outcomes.text).toBe('email_messages_org_received_dir_verdict_idx');
+    expect(m.key, outcomes.text).toBe('email_messages_org_received_dir_verdict_src_idx');
     expect(m.access_type).toBe('range');
     expect(m.using_index, outcomes.text).toBe(true);
     const quarantine = await explain(ctx, reportSql.quarantine(scopeOf(), window(), 10_000));
@@ -731,7 +731,7 @@ describe('step 7.1 reports (docs/plan/steps/20-admin-portal.md §3.3)', () => {
       [
         'email_messages',
         reportSql.domainVerdicts(scope, window, 10_000),
-        'email_messages_org_received_dir_verdict_idx',
+        'email_messages_org_received_dir_verdict_src_idx',
       ],
     ] as const) {
       const { tables, text } = await explain(ctx, sql);

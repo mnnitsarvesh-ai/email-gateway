@@ -9,7 +9,7 @@ import {
   PROVIDER_PROOF_FAILED,
   type SmtpReply,
 } from '../shared/replies';
-import type { IngestDirection } from './ingestion-keys';
+import type { GatewayDirection } from './ingestion-keys';
 
 /** An accepted LMTP recipient with its owning organization (D7 step 1). */
 export interface IngestRecipient {
@@ -75,7 +75,7 @@ export interface LoopGuardOptions {
   secret: string;
   gatewayId: string;
   maxPasses: number;
-  direction: IngestDirection;
+  direction: GatewayDirection;
 }
 
 /**

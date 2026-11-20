@@ -19,6 +19,11 @@ import {
   type SmtpAdapterConfig,
 } from './config';
 import { INGESTION_HEALTH_INDICATORS, IngestionModule } from './ingestion/ingestion.module';
+import { journalIntakeDomain } from './journal-intake/journal-intake.config';
+import {
+  JOURNAL_INTAKE_HEALTH_INDICATORS,
+  JournalIntakeModule,
+} from './journal-intake/journal-intake.module';
 import { PolicyModule } from './policy/policy.module';
 import { PolicyServerService } from './policy/policy-server.service';
 import { ProviderRelayModule } from './provider-relay/provider-relay.module';
@@ -65,7 +70,9 @@ export class AdapterCoreModule {
  *
  * - policy delegation (:10040, D4/D11), socketmap tables (:10041, D2/D11), Dovecot SASL
  *   (:10042, D10) — in-session, fail closed;
- * - LMTP ingestion (:10050 inbound, :10051 outbound, D7) and bounce notices (:10052, D13).
+ * - LMTP ingestion (:10050 inbound, :10051 outbound, D7) and bounce notices (:10052, D13);
+ * - step 8.6 journal intake (:10053 LMTP and the intake branch of the policy, ADR-0087), only
+ *   while JOURNAL_INTAKE_ENABLED and JOURNAL_INTAKE_DOMAIN are set.
  *
  * Data plane: the MySQL **writer** only (no PrismaReadService, ADR-0014). Every listener closes
  * its connections on shutdown (Nest shutdown hooks, `bootstrapService`).
@@ -79,6 +86,7 @@ export class AppModule {
       internalNetworks: config.SMTP_INTERNAL_CLIENT_NETWORKS,
       logLevel: config.LOG_LEVEL,
     };
+    const intake = journalIntakeDomain(config) !== null;
     return {
       module: AppModule,
       imports: [
@@ -91,6 +99,8 @@ export class AppModule {
         SmtpSharedModule,
         // Step 8.2 D7/D8/D10: provider relay (before the policy and ingestion that use it).
         ProviderRelayModule,
+        // Step 8.6 D2: journal intake (before the policy that uses it); absent while off.
+        ...(intake ? [JournalIntakeModule.forRoot(lmtp)] : []),
         PolicyModule,
         SocketmapModule,
         SaslModule,
@@ -107,6 +117,7 @@ export class AppModule {
             SaslServerService,
             ...INGESTION_HEALTH_INDICATORS,
             ...BOUNCES_HEALTH_INDICATORS,
+            ...(intake ? JOURNAL_INTAKE_HEALTH_INDICATORS : []),
           ],
         }),
       ],

@@ -3,6 +3,7 @@ import { canonicalJson } from '../documents/canonical';
 import type { ArchiveSearchCriteria } from '../documents/search';
 import { type HoldSearchCriteria, holdBound } from '../holds/matcher';
 import { isUuid, type NumericId } from '../ids';
+import type { IngestSource } from '../vocabulary';
 import { messageIdKey } from './document';
 import { organizationTerm } from './names';
 
@@ -37,8 +38,14 @@ export class ArchiveSearchQueryError extends Error {
   }
 }
 
-/** Filters: `archive-search/1` plus `legalHold` of `GET /archive/messages`. */
-export type ArchiveSearchFilters = ArchiveSearchCriteria & { legalHold?: boolean };
+/**
+ * Filters: `archive-search/1` plus `legalHold` and (step 8.6) `source` of `GET /archive/messages`
+ * (eDiscovery criteria have no `source`, design §8).
+ */
+export type ArchiveSearchFilters = ArchiveSearchCriteria & {
+  legalHold?: boolean;
+  source?: IngestSource;
+};
 
 /** Fields the search responses read (`_source.includes`). */
 export const ARCHIVE_SEARCH_SOURCE_FIELDS = Object.freeze([
@@ -65,6 +72,7 @@ export const ARCHIVE_SEARCH_SOURCE_FIELDS = Object.freeze([
   'retain_until',
   'legal_hold',
   'lock_mode',
+  'ingest_sources',
 ] as const);
 
 /** Filters that would confirm a masked value (ADR-0062 decision 6). */
@@ -246,6 +254,22 @@ export function buildArchiveSearchQuery(input: ArchiveSearchQueryInput): Record<
   }
   if (c.malicious !== undefined) filter.push({ term: { malicious: c.malicious } });
   if (c.legalHold !== undefined) filter.push({ term: { legal_hold: c.legalHold } });
+  if (c.source === 'journal_intake') {
+    filter.push({ term: { ingest_sources: 'journal_intake' } });
+  } else if (c.source === 'gateway') {
+    // Documents indexed before mapping revision 2 have no `ingest_sources`: they are gateway records.
+    filter.push({
+      bool: {
+        should: [
+          { term: { ingest_sources: 'gateway' } },
+          { bool: { must_not: [{ exists: { field: 'ingest_sources' } }] } },
+        ],
+        minimum_should_match: 1,
+      },
+    });
+  } else if (c.source !== undefined) {
+    throw new TypeError('source must be gateway or journal_intake');
+  }
   if (c.holdId !== undefined) {
     const hold = input.hold;
     if (hold === undefined || hold === null) {

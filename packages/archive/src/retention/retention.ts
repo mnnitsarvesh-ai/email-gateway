@@ -29,8 +29,8 @@ export interface RetentionPolicyCandidate {
 
 /** Facts of a record (at capture) that retention criteria test. */
 export interface RetentionRecordFacts {
-  /** The message direction plus every recipient direction. */
-  directions: readonly MessageDirection[];
+  /** The message direction plus every recipient direction (NULL = unknown, ignored; 8.6 D3). */
+  directions: readonly (MessageDirection | null)[];
   category: ArchiveCategory;
   sources: { journal: boolean; policy: boolean };
   policyRuleRef: string | null;
@@ -52,7 +52,10 @@ export function retentionCriteriaMatch(criteria: unknown, facts: RetentionRecord
     ...(facts.sources.policy ? (['policy'] as const) : []),
   ];
   return (
-    any(c.directions, facts.directions) &&
+    any(
+      c.directions,
+      facts.directions.filter((d): d is MessageDirection => d !== null),
+    ) &&
     any(c.categories, [facts.category]) &&
     any(c.sources, sources) &&
     any(c.policyRuleRefs, facts.policyRuleRef === null ? [] : [facts.policyRuleRef]) &&

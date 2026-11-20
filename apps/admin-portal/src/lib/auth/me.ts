@@ -60,7 +60,14 @@ export function useHasPermission(...required: readonly string[]): boolean {
   return me.isSuccess && required.every((permission) => permissions.has(permission));
 }
 
-/** Starts an audited tenant override; every query cache is cleared on success (P11). */
+/**
+ * Whether the acting organization is on the archive-only plan (step 8.6 D13, ADR-0090): journal
+ * intake and the archive, no mail through the gateway. `false` while `GET /auth/me` loads.
+ */
+export function useArchiveOnly(): boolean {
+  return useMe().data?.organization.serviceProfile === 'archive_only';
+}
+
 /**
  * Drops every cached tenant response when the acting tenant changes (design P11): inactive
  * queries are removed, mounted ones are reset and refetched at once. `clear()` alone left

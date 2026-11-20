@@ -33,6 +33,7 @@ function facts(eml: Buffer, overrides: Partial<MessageFacts['message']> = {}): M
       receivedAt,
       organizationId: ORG,
       publicId: PUBLIC,
+      ingestSource: 'gateway',
       direction: 'inbound',
       status: 'delivered',
       statusReason: 'delivery_complete',

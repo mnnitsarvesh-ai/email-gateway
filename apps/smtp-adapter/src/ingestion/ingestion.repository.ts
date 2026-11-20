@@ -5,7 +5,7 @@ import { Prisma } from '@email-gateway/database';
 import { EventTypes, messageReceivedV1 } from '@email-gateway/event-contracts';
 import type { RoutedDirection } from '@email-gateway/mail-routing';
 import { initialLifecycle, writeInitialHistory } from '@email-gateway/message-lifecycle';
-import type { IngestDirection } from './ingestion-keys';
+import type { GatewayDirection } from './ingestion-keys';
 
 export const MESSAGE_AGGREGATE_TYPE = 'message';
 export const SOURCE_SERVICE = 'smtp-adapter';
@@ -21,7 +21,7 @@ export interface IngestCommit {
    * and the S3 object key and is what the loop check counts (2.2 D7, D8, D14); it is kept in
    * the `received` event details as `direction`.
    */
-  direction: IngestDirection;
+  direction: GatewayDirection;
   /**
    * `email_messages.direction` and the `mail.message.received.v1` payload direction (step 2.3
    * R1): `internal` when the listener is outbound and every recipient is internal, else the

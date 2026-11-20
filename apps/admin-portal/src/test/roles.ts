@@ -1,7 +1,8 @@
 /**
- * Permission sets of the 9 system roles, transcribed from the matrix in docs/security/rbac.md
+ * Permission sets of the 10 system roles, transcribed from the matrix in docs/security/rbac.md
  * (`roles.test.ts` parses the document and asserts equality, so a catalogue change fails here).
- * Used by tests (navigation gating, `<Can>`) and by the dev fixture `me` of each role.
+ * Used by tests (navigation gating, `<Can>`) and by the dev fixture `me` of each role. Step 8.6
+ * added `compliance_officer` (archive access) and `journal:read` / `journal:manage`.
  */
 export const SYSTEM_ROLE_KEYS = [
   'super_admin',
@@ -13,6 +14,7 @@ export const SYSTEM_ROLE_KEYS = [
   'compliance_auditor',
   'read_only_user',
   'mailbox_user',
+  'compliance_officer',
 ] as const;
 
 export type SystemRoleKey = (typeof SYSTEM_ROLE_KEYS)[number];
@@ -92,6 +94,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:configure',
     'integration:read',
     'integration:manage',
+    'journal:read',
+    'journal:manage',
   ],
   platform_admin: [
     'organization:read',
@@ -117,6 +121,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'threat_intel:read',
     'ato:read',
     'integration:read',
+    'journal:read',
   ],
   organization_admin: [
     'organization:read',
@@ -143,8 +148,6 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'report:read',
     'audit:read',
     'archive:read',
-    'archive:export',
-    'archive:legal_hold',
     'webhook:manage',
     'settings:manage',
     'domain:dkim_rotate',
@@ -172,16 +175,14 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:suppression_manage',
     'webhook:read',
     'message:reveal',
-    'archive:search',
-    'archive:retrieve',
-    'archive:manage',
-    'ediscovery:manage',
     'ato:read',
     'ato:manage',
     'ato:respond',
     'ato:configure',
     'integration:read',
     'integration:manage',
+    'journal:read',
+    'journal:manage',
   ],
   domain_admin: [
     'organization:read',
@@ -200,6 +201,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:suppression_manage',
     'integration:read',
     'integration:manage',
+    'journal:read',
+    'journal:manage',
   ],
   security_analyst: [
     'organization:read',
@@ -235,6 +238,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:manage',
     'ato:respond',
     'integration:read',
+    'journal:read',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -274,6 +278,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ediscovery:manage',
     'ato:read',
     'integration:read',
+    'journal:read',
   ],
   read_only_user: [
     'organization:read',
@@ -289,10 +294,36 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'connector:read',
     'delivery:read',
     'integration:read',
+    'journal:read',
   ],
   mailbox_user: ['quarantine:self'],
+  compliance_officer: [
+    'organization:read',
+    'user:read',
+    'domain:read',
+    'report:read',
+    'audit:read',
+    'archive:read',
+    'archive:export',
+    'archive:legal_hold',
+    'message:reveal',
+    'archive:search',
+    'archive:retrieve',
+    'archive:manage',
+    'ediscovery:manage',
+    'journal:read',
+  ],
 };
 
 export function permissionsOf(role: SystemRoleKey): string[] {
   return [...ROLE_PERMISSIONS[role]];
 }
+
+/**
+ * What an organization admin that existed before step 8.6 holds after the grant-preserving
+ * migration (`organization_admin` + the migrated `compliance_officer` assignment, ADR-0089).
+ * New admins hold `organization_admin` only (no archive access).
+ */
+export const MIGRATED_ADMIN_PERMISSIONS: readonly string[] = [
+  ...new Set([...ROLE_PERMISSIONS.organization_admin, ...ROLE_PERMISSIONS.compliance_officer]),
+];

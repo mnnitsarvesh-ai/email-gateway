@@ -5,7 +5,11 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { indexTemplateName } from '@email-gateway/archive';
+import {
+  indexTemplateName,
+  JOURNAL_INTAKE_PROOF_EXAMPLE,
+  type IntakeRecipientField,
+} from '@email-gateway/archive';
 import { OpenSearchService } from '@email-gateway/common';
 import {
   type MessageDirection,
@@ -58,6 +62,71 @@ export interface MessageOptions {
 }
 
 const sha256 = (b: Buffer | string): string => createHash('sha256').update(b).digest('hex');
+
+/** One copy of a message for the step 8.6 dedupe suites (gateway or journal intake). */
+export interface CopySpec {
+  ingestSource: 'gateway' | 'journal_intake';
+  /** The Message-ID header value without angle brackets. */
+  messageId: string;
+  /** The Date header (RFC 5322). */
+  date: string;
+  from: string;
+  to: string[];
+  cc?: string[];
+  body: string;
+  attachment: Buffer;
+  /** Header lines prepended to the copy (a provider stamp, a gateway Received line). */
+  extraHeaders?: string[];
+  /** Registry recipients; default: To + Cc. */
+  recipients?: Array<{
+    address: string;
+    direction: MessageDirection | null;
+    field?: IntakeRecipientField;
+  }>;
+  /** Journal envelope recipients beyond the registry ones (intake: BCC custodians). */
+  bcc?: string[];
+  direction?: MessageDirection;
+  status?: MessageStatus;
+  /** Gateway facts (an intake copy has none). */
+  finalVerdict?: 'clean' | 'phishing' | 'spam';
+  riskScore?: number;
+  /** Journal intake source of an intake copy (internal id). */
+  sourceId?: bigint;
+  scanRequested?: boolean;
+  ageSeconds?: number;
+}
+
+/** A synthetic copy: the given headers, a text body and one base64 attachment. */
+export function copyEml(spec: CopySpec): Buffer {
+  const attachment = spec.attachment.toString('base64').replace(/(.{76})/g, '$1\r\n');
+  return Buffer.from(
+    [
+      ...(spec.extraHeaders ?? []),
+      `From: Sender <${spec.from}>`,
+      `To: ${spec.to.join(', ')}`,
+      ...(spec.cc && spec.cc.length > 0 ? [`Cc: ${spec.cc.join(', ')}`] : []),
+      'Subject: Dedupe test',
+      `Date: ${spec.date}`,
+      `Message-ID: <${spec.messageId}>`,
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="b1"',
+      '',
+      '--b1',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      spec.body,
+      '--b1',
+      'Content-Type: application/octet-stream; name="report.bin"',
+      'Content-Disposition: attachment; filename="report.bin"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      attachment,
+      '--b1--',
+      '',
+    ].join('\r\n'),
+    'utf8',
+  );
+}
 const pad = (n: number, w = 2): string => String(n).padStart(w, '0');
 
 /** A synthetic RFC 5322 message with a text body and one attachment (no real content). */
@@ -515,6 +584,205 @@ export class Fixtures {
     });
   }
 
+  /** A journal intake source of the organization (step 8.6), as the api creates it. */
+  async intakeSource(
+    organizationId: bigint,
+    options: {
+      kind?:
+        'microsoft_365_journal' | 'google_workspace_copy' | 'exchange_onprem_journal' | 'smtp_bcc';
+      status?: 'pending_verification' | 'active' | 'paused';
+      silenceAlertMinutes?: number | null;
+      verifiedAt?: Date | null;
+      lastAcceptedAt?: Date | null;
+      lastRefusedAt?: Date | null;
+      healthStatus?: 'unknown' | 'healthy' | 'silent' | 'failing' | 'paused';
+    } = {},
+  ): Promise<{ id: bigint; publicId: string }> {
+    this.counter += 1;
+    return this.prisma.journalIntakeSource.create({
+      data: {
+        organizationId,
+        kind: options.kind ?? 'smtp_bcc',
+        displayName: `it-source-${this.suffix}-${this.counter}`,
+        status: options.status ?? 'active',
+        networks: { v: 1, cidrs: ['198.51.100.0/24'] },
+        silenceAlertMinutes:
+          options.silenceAlertMinutes === undefined ? 240 : options.silenceAlertMinutes,
+        addressHash: sha256(`it-address-${randomUUID()}`),
+        verifiedAt:
+          options.verifiedAt === undefined ? new Date(Date.now() - 86_400_000) : options.verifiedAt,
+        lastAcceptedAt: options.lastAcceptedAt === undefined ? new Date() : options.lastAcceptedAt,
+        lastRefusedAt: options.lastRefusedAt ?? null,
+        healthStatus: options.healthStatus ?? 'unknown',
+      },
+      select: { id: true, publicId: true },
+    });
+  }
+
+  /**
+   * One copy of a message as the gateway (smtp-adapter + MIME + delivery) or the journal intake
+   * LMTP (step 8.6 `JournalIntakeRepository`: `ingest_source = journal_intake`, recipients
+   * `journaled`, a `journal_intake_messages` row) and the MIME stage would have written it: the
+   * EML in the mail bucket, the registry row, message, recipients, parse row, headers and the
+   * attachment row with the attachment's real SHA-256.
+   */
+  async copy(organizationId: bigint, spec: CopySpec): Promise<SeededMessage> {
+    this.counter += 1;
+    const intake = spec.ingestSource === 'journal_intake';
+    const now = Date.now();
+    const receivedAt = new Date(
+      Math.floor((now - (spec.ageSeconds ?? 300) * 1000) / 1000) * 1000 + (this.counter % 1000),
+    );
+    const createdAt = new Date(receivedAt.getTime() + 1_000);
+    const eml = copyEml(spec);
+    const emlSha256 = sha256(eml);
+    const direction = spec.direction ?? 'inbound';
+    const recipients: NonNullable<CopySpec['recipients']> =
+      spec.recipients ??
+      [...spec.to, ...(spec.cc ?? [])].map((address) => ({
+        address,
+        direction: intake ? null : direction,
+      }));
+    const status = spec.status ?? (intake ? 'journaled' : 'delivered');
+    const identity = await this.prisma.messageIdentity.create({
+      data: { organizationId, ingestKey: `it-arch-${randomUUID()}`, receivedAt },
+      select: { id: true, publicId: true },
+    });
+    const day = `${receivedAt.getUTCFullYear()}/${pad(receivedAt.getUTCMonth() + 1)}/${pad(receivedAt.getUTCDate())}`;
+    const emlKey = `org/${organizationId}/eml/${day}/${identity.id}.eml`;
+    await this.put(this.mailBucket, emlKey, eml);
+    await this.prisma.emailMessage.create({
+      data: {
+        id: identity.id,
+        receivedAt,
+        organizationId,
+        direction,
+        status,
+        statusReason: intake ? 'intake_unscanned' : 'delivery_complete',
+        statusChangedAt: createdAt,
+        lifecycleRound: 0,
+        internetMessageId: `<${spec.messageId}>`,
+        envelopeFrom: spec.from,
+        headerFrom: `Sender <${spec.from}>`,
+        subject: 'Dedupe test',
+        sizeBytes: eml.length,
+        recipientCount: recipients.length,
+        attachmentCount: 1,
+        emlObjectKey: emlKey,
+        emlSha256,
+        clientIp: '192.0.2.10',
+        clientHelo: 'mail.partner.example',
+        finalVerdict: intake ? null : (spec.finalVerdict ?? 'clean'),
+        finalAction: intake ? null : 'deliver',
+        riskScore: intake ? null : (spec.riskScore ?? 120),
+        ingestSource: spec.ingestSource,
+        createdAt,
+      },
+    });
+    for (const [seq, r] of recipients.entries()) {
+      await this.prisma.emailRecipient.create({
+        data: {
+          receivedAt,
+          messageId: identity.id,
+          organizationId,
+          rcptSeq: seq,
+          address: r.address,
+          direction: r.direction,
+          status: intake ? 'journaled' : 'delivered',
+          finalAction: intake ? null : 'deliver',
+        },
+      });
+    }
+    const base = { receivedAt, messageId: identity.id, organizationId };
+    const textKey = `org/${organizationId}/part/${day}/${identity.id}/1.text`;
+    await this.put(this.mailBucket, textKey, Buffer.from(spec.body, 'utf8'));
+    await this.prisma.emailMessageParse.create({
+      data: {
+        ...base,
+        status: 'parsed',
+        attempts: 1,
+        parserVersion: 'it/1',
+        partCount: 3,
+        attachmentCount: 1,
+        textBodyObjectKey: textKey,
+        startedAt: createdAt,
+        completedAt: createdAt,
+      },
+    });
+    await this.prisma.emailHeader.createMany({
+      data: [
+        { ...base, seq: 0, name: 'From', value: `Sender <${spec.from}>` },
+        { ...base, seq: 1, name: 'Subject', value: 'Dedupe test' },
+      ],
+    });
+    await this.prisma.emailAttachment.create({
+      data: {
+        ...base,
+        partIndex: 2,
+        filename: 'report.bin',
+        declaredContentType: 'application/octet-stream',
+        detectedContentType: 'application/octet-stream',
+        sizeBytes: spec.attachment.length,
+        sha256: sha256(spec.attachment),
+      },
+    });
+    if (intake) {
+      const fields = recipients.map((r) => ({
+        address: r.address,
+        field: r.field ?? (spec.cc?.includes(r.address) ? 'cc' : 'to'),
+      }));
+      await this.prisma.journalIntakeMessage.create({
+        data: {
+          ...base,
+          sourceId: spec.sourceId ?? 0n,
+          kind: 'microsoft_365_journal',
+          format: 'journal_report',
+          envelope: {
+            v: 1,
+            sender: spec.from,
+            onBehalfOf: null,
+            messageId: `<${spec.messageId}>`,
+            recipients: [
+              ...fields,
+              ...(spec.bcc ?? []).map((address) => ({ address, field: 'bcc' })),
+            ],
+            truncated: false,
+            envelopeMismatch: false,
+          },
+          proof: JOURNAL_INTAKE_PROOF_EXAMPLE,
+          reportSha256: sha256(`report-${identity.id}`),
+          reportSizeBytes: eml.length + 512,
+          scanRequested: spec.scanRequested ?? false,
+          createdAt,
+        },
+      });
+      // The BCC custodians are registry recipients too (D3: the journal envelope recipients).
+      for (const [i, address] of (spec.bcc ?? []).entries()) {
+        await this.prisma.emailRecipient.create({
+          data: {
+            receivedAt,
+            messageId: identity.id,
+            organizationId,
+            rcptSeq: recipients.length + i,
+            address,
+            direction: null,
+            status: 'journaled',
+          },
+        });
+      }
+    }
+    return {
+      id: identity.id,
+      receivedAt,
+      organizationId,
+      publicId: identity.publicId,
+      emlKey,
+      eml,
+      emlSha256,
+      scanId: null,
+    };
+  }
+
   /** Every version (and delete marker) under a prefix of a bucket, removed with governance bypass. */
   async purgeBucketPrefix(bucket: string, prefix: string): Promise<{ left: number }> {
     let left = 0;
@@ -584,6 +852,14 @@ export class Fixtures {
       await p.ediscoveryCustodian.deleteMany({ where });
       await p.ediscoveryCase.deleteMany({ where });
       await p.archiveIndexQueue.deleteMany({ where });
+      // Step 8.6 tables (the worker writes them; the suites seed sources and intake messages).
+      await p.archiveRecordSource.deleteMany({ where });
+      await p.archiveDedupeKey.deleteMany({ where });
+      await p.journalIntakeMessage.deleteMany({ where });
+      await p.journalIntakeCounter.deleteMany({ where });
+      await p.journalIntakeSource.deleteMany({ where });
+      await p.notificationAlertWindow.deleteMany({ where });
+      await p.messageOutbox.deleteMany({ where });
       await p.archiveIndexCheck.deleteMany({ where });
       await p.archiveDisposal.deleteMany({ where });
       await p.emailArchive.deleteMany({ where });

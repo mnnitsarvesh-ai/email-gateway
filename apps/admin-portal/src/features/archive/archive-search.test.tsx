@@ -9,6 +9,7 @@ import {
   mockApi,
   okJson,
   renderWithProviders,
+  MIGRATED_ADMIN_PERMISSIONS,
 } from '@/test';
 import { ArchiveSearchPage } from './archive-search-page';
 import {
@@ -166,6 +167,7 @@ describe('/archive page (A17, A28)', () => {
     mockSearch(undefined, { capture });
     const { container } = renderWithProviders(<ArchiveSearchPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive?direction=inbound&sender=sender@partner.example.test',
     });
     expect(await screen.findAllByRole('link', { name: /open archived message/ })).toHaveLength(2);
@@ -229,6 +231,7 @@ describe('/archive page (A17, A28)', () => {
     const queryClient = createTestQueryClient();
     const { user } = renderWithProviders(<ArchiveSearchPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive',
       queryClient,
     });
@@ -249,7 +252,11 @@ describe('/archive page (A17, A28)', () => {
 
   it('shows the index-lag banner from X-EG-Index-Lag-Seconds', async () => {
     mockSearch(undefined, { lag: '600' });
-    renderWithProviders(<ArchiveSearchPage />, { role: 'organization_admin', route: '/archive' });
+    renderWithProviders(<ArchiveSearchPage />, {
+      role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
+      route: '/archive',
+    });
     expect(await screen.findByText(/search index is about 10 minutes behind/)).toBeInTheDocument();
   });
 
@@ -266,7 +273,11 @@ describe('/archive page (A17, A28)', () => {
       },
       LegalHoldsController_list_v1: () => okJson({ data: [], nextCursor: null }),
     });
-    renderWithProviders(<ArchiveSearchPage />, { role: 'organization_admin', route: '/archive' });
+    renderWithProviders(<ArchiveSearchPage />, {
+      role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
+      route: '/archive',
+    });
     expect(
       await screen.findByText('Archive search is temporarily unavailable'),
     ).toBeInTheDocument();
@@ -280,7 +291,11 @@ describe('/archive page (A17, A28)', () => {
         apiErrorJson(429, 'rate_limited', 'Too many requests', { headers: { 'retry-after': '3' } }),
       LegalHoldsController_list_v1: () => okJson({ data: [], nextCursor: null }),
     });
-    renderWithProviders(<ArchiveSearchPage />, { role: 'organization_admin', route: '/archive' });
+    renderWithProviders(<ArchiveSearchPage />, {
+      role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
+      route: '/archive',
+    });
     expect(await screen.findByText(/Try again in 3 s/)).toBeInTheDocument();
     await act(async () => {
       await new Promise((r) => setTimeout(r, 1100));
@@ -292,6 +307,7 @@ describe('/archive page (A17, A28)', () => {
     mockSearch();
     const { user } = renderWithProviders(<ArchiveSearchPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive',
     });
     await screen.findAllByRole('link', { name: /open archived message/ });

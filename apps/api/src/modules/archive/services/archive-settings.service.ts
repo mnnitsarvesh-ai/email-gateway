@@ -32,8 +32,10 @@ import {
   ARCHIVING_FEATURE,
   type ArchiveConfig,
 } from '../archive.constants';
+import { changedSettingsPaths, forbiddenSettingsPaths } from '../domain/settings-paths';
 import {
   archiveSettingsConflict,
+  archiveSettingsForbiddenPath,
   archivingNotEnabled,
   defaultRetentionRequired,
   immutabilityDowngradeForbidden,
@@ -153,11 +155,7 @@ export class ArchiveSettingsService {
     return this.view(row, entitled, lockAvailable);
   }
 
-  private view(
-    row: SettingsRow | null,
-    entitled: boolean,
-    lockAvailable: boolean,
-  ): ArchiveSettingsView {
+  view(row: SettingsRow | null, entitled: boolean, lockAvailable: boolean): ArchiveSettingsView {
     return {
       enabled: row?.enabled ?? false,
       entitled,
@@ -172,33 +170,85 @@ export class ArchiveSettingsService {
     };
   }
 
-  /** `PUT /archive/settings` (#2; A10, A22). */
-  async update(
+  /** `PUT /archive/settings` (#2; A10, A22; step 8.6 per-path authorization). */
+  update(
     principal: Principal,
     scope: TenantScope,
     idempotencyKey: unknown,
     body: UpdateArchiveSettingsBody,
     sourceIp: string | null,
   ): Promise<IdempotentResult<ArchiveSettingsView>> {
+    return this.applyUpdate(principal, scope, idempotencyKey, sourceIp, {
+      area: 'archive',
+      operation: ARCHIVE_OPERATIONS.settingsUpdate,
+      fingerprintBody: body,
+      change: () => body,
+      viewOf: (row, entitled, lockAvailable) => this.view(row, entitled, lockAvailable),
+    });
+  }
+
+  /**
+   * The shared settings update (step 8.6 D11): `PUT /archive/settings` and
+   * `PUT /journaling/settings` write the same row with the same `row_version`, rules and audit
+   * action. In one writer transaction under the organization and settings locks: CAS on
+   * `rowVersion`, the change built from the stored row (`change`), the changed paths authorized
+   * one by one (`403 archive_settings_forbidden_path`), then the 8.1 rules.
+   */
+  async applyUpdate<T>(
+    principal: Principal,
+    scope: TenantScope,
+    idempotencyKey: unknown,
+    sourceIp: string | null,
+    request: {
+      area: 'archive' | 'journaling';
+      operation: string;
+      fingerprintBody: unknown;
+      /** The full PUT body against the locked stored row (journaling merges `access` in). */
+      change: (current: SettingsRow | null) => UpdateArchiveSettingsBody;
+      viewOf: (row: SettingsRow | null, entitled: boolean, lockAvailable: boolean) => T;
+    },
+  ): Promise<IdempotentResult<T>> {
     const key = parseIdempotencyKey(idempotencyKey);
     const lockAvailable = await this.objects.objectLockAvailable();
-    const operation = ARCHIVE_OPERATIONS.settingsUpdate;
-    return this.idempotency.execute<ArchiveSettingsView>(
+    const operation = request.operation;
+    return this.idempotency.execute<T>(
       {
         organizationId: scope.organizationId,
         principal: principalKey(principal),
         operation,
         key,
         resourceId: '-',
-        fingerprint: requestFingerprint({ operation, resourceId: '-', body }),
+        fingerprint: requestFingerprint({
+          operation,
+          resourceId: '-',
+          body: request.fingerprintBody,
+        }),
       },
       async (tx) => {
         await this.limits.lockOrganization(tx, scope.organizationId);
         const current = await this.configs.lockSettings(tx, scope);
         const currentVersion = current?.rowVersion ?? 0;
+        const body = request.change(current);
         if (currentVersion !== body.expectedRowVersion) {
           throw archiveSettingsConflict(currentVersion);
         }
+        // Step 8.6 D11: every changed path needs its own permission (before any other rule).
+        const paths = changedSettingsPaths(
+          {
+            enabled: current?.enabled ?? false,
+            immutability: current?.objectLockMode ?? 'none',
+            defaultRetentionPolicyId: current?.defaultRetentionPolicyPublicId ?? null,
+            document: current?.settings ?? null,
+          },
+          {
+            enabled: body.enabled,
+            immutability: body.immutability,
+            defaultRetentionPolicyId: body.defaultRetentionPolicyId,
+            document: body.settings,
+          },
+        );
+        const forbidden = forbiddenSettingsPaths(paths, principal.permissions);
+        if (forbidden.length > 0) throw archiveSettingsForbiddenPath(forbidden);
         const entitled = await this.features.isEnabled(scope.organizationId, ARCHIVING_FEATURE, tx);
         const next = await this.nextState(tx, scope, current, body);
         const decision = validateArchiveSettingsChange(
@@ -237,7 +287,7 @@ export class ArchiveSettingsService {
             : canonicalSha256(current.settings);
         if (body.settings !== undefined && nextSha !== currentSha) changed.push('settings');
         if (changed.length === 0) {
-          return { statusCode: 200, body: this.view(current, entitled, lockAvailable) };
+          return { statusCode: 200, body: request.viewOf(current, entitled, lockAvailable) };
         }
         const now = this.now();
         const written = await this.configs.writeSettings(tx, scope, current, {
@@ -261,7 +311,9 @@ export class ArchiveSettingsService {
             resourceId: '-',
             sourceIp,
             metadata: {
+              area: request.area,
               changedPaths: changed.sort(),
+              settingsPaths: [...paths].sort(),
               enabled: next.enabled,
               immutability: next.immutability,
               enabling: decision.enabling,
@@ -273,7 +325,7 @@ export class ArchiveSettingsService {
           },
           tx,
         );
-        return { statusCode: 200, body: this.view(after, entitled, lockAvailable) };
+        return { statusCode: 200, body: request.viewOf(after, entitled, lockAvailable) };
       },
       { timeoutMs: ARCHIVE_TX_TIMEOUT_MS },
     );

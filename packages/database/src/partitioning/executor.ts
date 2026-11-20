@@ -434,6 +434,8 @@ export const REGISTRY_PURGE_SQL =
   `DELETE FROM ${q('message_identities')} WHERE ${q('id')} >= ? AND ${q('id')} < ?` +
   ` AND NOT EXISTS (SELECT 1 FROM ${q('email_archives')} a` +
   ` WHERE a.${q('message_id')} = ${q('message_identities')}.${q('id')} AND a.${q('deleted_at')} IS NULL)` +
+  ` AND NOT EXISTS (SELECT 1 FROM ${q('archive_record_sources')} rs` +
+  ` WHERE rs.${q('message_id')} = ${q('message_identities')}.${q('id')})` +
   ` AND NOT EXISTS (SELECT 1 FROM ${q('quarantine_messages')} qm` +
   ` WHERE qm.${q('message_id')} = ${q('message_identities')}.${q('id')})`;
 
@@ -450,9 +452,11 @@ const toBigInt = (v: bigint | number | string | null | undefined) =>
  * Deletes registry rows (message_identities) whose message partitions were dropped (D3.4).
  *
  * Registry ids are allocated in time order, so every id below MIN(email_messages.id) belongs to
- * a message whose core rows are gone. A row is kept while a live email_archives row or any
- * quarantine_messages row references it: archives are never auto-dropped and quarantine can
- * outlive the core tier, and both are reached by message public id through the registry.
+ * a message whose core rows are gone. A row is kept while a live email_archives row, any
+ * archive_record_sources row (a copy merged into another message's archive record, step 8.6
+ * ADR-0088; deleted only by that record's disposal) or any quarantine_messages row references it:
+ * archives are never auto-dropped and quarantine can outlive the core tier, and all are reached
+ * by message public id through the registry.
  *
  * The purge walks id ranges of `batchSize` from a watermark (maintenance_watermarks), so the
  * rows it keeps are examined once rather than on every run. Whoever later deletes the last

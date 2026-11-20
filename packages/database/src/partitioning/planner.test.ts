@@ -36,10 +36,27 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 39 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2, 8.1 and 8.4) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(39);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(39);
+  it('lists the 41 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2, 8.1, 8.4 and 8.6) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(41);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(41);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
+    // Step 8.6 (§3.2): journal intake messages live as long as email_messages (core); the
+    // merged copies of an archive record are compliance data, never dropped.
+    expect(byTable.journal_intake_messages).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.journal_intake_messages!.guard).toBeUndefined();
+    expect(byTable.archive_record_sources).toMatchObject({
+      column: 'archive_received_at',
+      granularity: 'month',
+      retention: null,
+      drop: false,
+      tier: 'compliance',
+    });
     // Step 8.4 (§3.3, D22): the four account takeover tables, monthly, dropped after retention.
     expect(
       Object.fromEntries(

@@ -21,3 +21,21 @@ export const ARCHIVE_INDEX_VERSION = 1;
 export const ARCHIVE_DOWNLOAD_TOKEN_VERSION = 'v1';
 /** `generator` of export manifests. */
 export const ARCHIVE_EXPORT_GENERATOR = 'archive-worker';
+
+// Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md §4.2).
+/** `journal_intake_messages.envelope`. */
+export const JOURNAL_ENVELOPE_VERSION = 'journal-envelope/1';
+/** `journal_intake_messages.proof` (only passing proofs are stored). */
+export const JOURNAL_INTAKE_PROOF_VERSION = 'journal-intake-proof/1';
+/** `journal_intake_sources.networks`. */
+export const INTAKE_NETWORKS_VERSION = 'intake-networks/1';
+/** The header fingerprint of cross-source dedupe (D7). */
+export const ARCHIVE_FINGERPRINT_VERSION = 'archive-fingerprint/1';
+/** The Message-ID key derivation of cross-source dedupe (D7). */
+export const ARCHIVE_DEDUPE_KEY_VERSION = 'archive-dedupe/1';
+/**
+ * Revision of the index mapping inside `ARCHIVE_INDEX_VERSION` (`_meta.mappingRevision`). 2 adds
+ * the keyword field `ingest_sources` (step 8.6): an additive `PUT <index>/_mapping`
+ * (`buildIndexMappingUpdate`) upgrades existing indices; the index names stay `-v1-`.
+ */
+export const ARCHIVE_INDEX_MAPPING_REVISION = 2;

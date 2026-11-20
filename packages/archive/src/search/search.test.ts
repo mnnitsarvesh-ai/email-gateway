@@ -138,6 +138,7 @@ describe('index template (§4.3)', () => {
         'legal_hold',
         'lock_mode',
         'indexed_at',
+        'ingest_sources',
       ].sort(),
     );
     expect(() => buildIndexTemplate({ prefix: 'eg-archive', shards: 0, replicas: 0 })).toThrow(

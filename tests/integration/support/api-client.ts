@@ -34,7 +34,8 @@ export interface ApiSession {
   /** PUT; `headers` e.g. an `Idempotency-Key` (step 8.1 `PUT /archive/settings`). */
   put(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   post(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
-  patch(path: string, body: unknown): Promise<ApiResponse>;
+  /** PATCH; `headers` e.g. an `Idempotency-Key` (step 8.6 intake source updates). */
+  patch(path: string, body: unknown, headers?: Record<string, string>): Promise<ApiResponse>;
   /**
    * DELETE; `headers` e.g. an `Idempotency-Key` (step 6.2 `DELETE /webhooks/{id}`); `body` for
    * deletes that carry one (step 8.2 disconnect: `{ impactToken, confirm }`).
@@ -73,7 +74,15 @@ export async function apiSession(
   prisma: PrismaClient,
   organization: { id: bigint; slug: string },
   roleKey: string,
-  options: { mfa?: boolean; email?: string } = {},
+  options: {
+    mfa?: boolean;
+    email?: string;
+    /**
+     * Further system roles of the same user (step 8.6: an organization admin that existed before
+     * the split also holds the migrated `compliance_officer` assignment, ADR-0089).
+     */
+    extraRoles?: readonly string[];
+  } = {},
 ): Promise<ApiSession> {
   const email = options.email ?? `it-${randomBytes(6).toString('hex')}@routing.integration.test`;
   const password = `It-${randomBytes(18).toString('base64url')}!9a`;
@@ -109,6 +118,15 @@ export async function apiSession(
   await prisma.userRole.create({
     data: { userId: user.id, roleId: role.id, organizationId: organization.id },
   });
+  for (const extra of options.extraRoles ?? []) {
+    const extraRole = await prisma.role.findFirstOrThrow({
+      where: { key: extra, organizationId: null },
+      select: { id: true },
+    });
+    await prisma.userRole.create({
+      data: { userId: user.id, roleId: extraRole.id, organizationId: organization.id },
+    });
+  }
   const mfaKey = options.mfa ? randomBytes(20) : undefined;
   if (mfaKey) {
     await prisma.user.update({
@@ -192,7 +210,7 @@ export async function apiSession(
     },
     put: (path, body, headers) => call('PUT', path, body, headers),
     post: (path, body, headers) => call('POST', path, body, headers),
-    patch: (path, body) => call('PATCH', path, body),
+    patch: (path, body, headers) => call('PATCH', path, body, headers),
     delete: (path, headers, body) => call('DELETE', path, body, headers),
     reauth: async () => ({
       password,

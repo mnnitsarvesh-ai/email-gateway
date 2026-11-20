@@ -46,5 +46,8 @@ export const TEST_DOMAIN_ENV: Record<string, string> = {
   GATEWAY_EGRESS_NETWORKS: '192.0.2.10/32,2001:db8::10/128',
   GATEWAY_RELAY_HOSTS: 'out1.mail-gateway.test,out2.mail-gateway.test',
   GATEWAY_RELAY_TLS_NAME: 'out.mail-gateway.test',
+  // Step 8.6 §4.4: journal intake on (a `.test` intake domain, a fresh address secret).
+  JOURNAL_INTAKE_DOMAIN: 'journal.gateway.test',
+  JOURNAL_INTAKE_ADDRESS_SECRET: randomBytes(32).toString('hex'),
   ...TEST_GENEROUS_RATE_LIMITS,
 };

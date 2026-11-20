@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 
 type Client = Prisma.TransactionClient;
 
@@ -51,6 +52,9 @@ export class ScanTrainingRepository {
         id: identity.id,
         receivedAt: identity.receivedAt,
         organizationId: organization.id,
+        // Step 8.6 D5: journal intake mail is archive-only customer mail; it never trains the
+        // shared classifiers (404 message_not_found).
+        ...GATEWAY_MESSAGE_WHERE,
       },
       select: { id: true, receivedAt: true, organizationId: true, emlObjectKey: true },
     });

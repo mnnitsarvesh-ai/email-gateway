@@ -1,5 +1,6 @@
 import {
   archiveDayPrefixOf,
+  disposalObjectsSchema,
   type ObjectLockMode,
   readDisposalObjects,
 } from '@email-gateway/archive';
@@ -21,7 +22,8 @@ import {
   LOCK_FLOOR_MS,
   type ObjectLockState,
 } from '../storage/archive-storage';
-import { type DisposalObjects, documentVisible, recordVersions } from './disposal';
+import { recordVersionsWithMerged } from '../storage/record-versions';
+import { type DisposalObjects, documentVisible } from './disposal';
 
 const DAY_MS = 86_400_000;
 /** Orphans are versions older than this that no record or open disposal references (A15). */
@@ -137,7 +139,7 @@ export class LockPass {
           now.getTime() + LOCK_FLOOR_MS,
         ),
       );
-      for (const v of recordVersions(record)) {
+      for (const v of recordVersionsWithMerged(record)) {
         await this.options.storage.putRetention(
           this.options.storage.buckets.archive,
           v.key,
@@ -288,7 +290,30 @@ export class OrphanReconciler {
     });
     const referenced = new Set<string>();
     for (const r of records) {
-      for (const v of recordVersions(r)) referenced.add(`${v.key}\0${v.versionId}`);
+      for (const v of recordVersionsWithMerged(r)) referenced.add(`${v.key}\0${v.versionId}`);
+    }
+    // Step 8.6 D7: objects of a merged copy lie under the merged message's prefix and are named
+    // by the record it was merged into (`archive_record_sources` → the record's `objects`).
+    const mergedSources = await this.prisma.archiveRecordSource.findMany({
+      where: {
+        organizationId,
+        messageReceivedAt: { gte: dayStart, lt: dayEnd },
+        messagePublicId: { in: messages },
+      },
+      select: { organizationId: true, archiveId: true, archiveReceivedAt: true },
+    });
+    const owners = mergedSources.filter((x) => x.organizationId === organizationId);
+    if (owners.length > 0) {
+      const ownerRecords = await this.prisma.emailArchive.findMany({
+        where: {
+          organizationId,
+          OR: owners.map((o) => ({ id: o.archiveId, receivedAt: o.archiveReceivedAt })),
+        },
+        select: { organizationId: true, objects: true },
+      });
+      for (const r of ownerRecords) {
+        for (const v of recordVersionsWithMerged(r)) referenced.add(`${v.key}\0${v.versionId}`);
+      }
     }
     const open = await this.prisma.archiveDisposal.findMany({
       where: {
@@ -299,9 +324,21 @@ export class OrphanReconciler {
       select: { messagePublicId: true, objects: true },
     });
     const disposing = new Set(open.map((d) => d.messagePublicId));
+    // A disposal in progress of a record with merged copies covers their prefixes too.
+    const disposingKeys = new Set<string>();
+    for (const d of await this.prisma.archiveDisposal.findMany({
+      where: { organizationId, state: { in: ['shredded', 'objects_deleted', 'index_deleted'] } },
+      select: { objects: true },
+      take: 1_000,
+    })) {
+      const parsed = disposalObjectsSchema.safeParse(
+        typeof d.objects === 'string' ? (JSON.parse(d.objects) as unknown) : d.objects,
+      );
+      if (parsed.success) for (const v of parsed.data.versions) disposingKeys.add(v.key);
+    }
     let lockedUntil = 0;
     for (const c of candidates) {
-      if (disposing.has(c.message)) continue;
+      if (disposing.has(c.message) || disposingKeys.has(c.key)) continue;
       if (!c.deleteMarker && referenced.has(`${c.key}\0${c.versionId}`)) continue;
       try {
         const result = await storage.deleteVersion(storage.buckets.archive, c.key, c.versionId, {

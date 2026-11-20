@@ -28,6 +28,7 @@ import { DomainsService } from '../../../src/modules/domains/services/domains.se
 import { InMemoryKeyValueStore } from '../in-memory-key-value-store';
 import { TEST_DOMAIN_ENV } from '../test-env';
 import { InMemoryDomainStore } from './in-memory-domain-store';
+import type { OrganizationFeaturesService } from '../../../src/tenancy/organization-features.service';
 
 export function testConfig(env: Record<string, string> = {}): ApiConfig {
   return loadApiConfig({
@@ -206,6 +207,11 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     configuration,
     events,
   );
+  // Step 8.6 D13: the service profile of the organization (`gateway` unless a test says so).
+  const profile: { value: 'gateway' | 'archive_only' } = { value: 'gateway' };
+  const features = {
+    serviceProfile: () => Promise.resolve(profile.value),
+  } as unknown as OrganizationFeaturesService;
   const service = new DomainsService(
     config,
     transactions,
@@ -218,6 +224,7 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     ownership,
     configuration,
     events,
+    features,
   );
   const scheduler = new DomainCheckScheduler(config, kv, jobs, verification, rotation);
   return {
@@ -234,6 +241,8 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     verification,
     rotation,
     service,
+    /** Step 8.6: the organization's service profile seen by `DomainsService`. */
+    profile,
     scheduler,
     gatewayHosts,
     repos: { domains, verifications, records, keys, mx, ownership, jobs },

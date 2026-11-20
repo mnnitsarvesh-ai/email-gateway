@@ -2,6 +2,10 @@ import {
   ARCHIVE_CATEGORIES,
   ARCHIVE_RECORD_STATUSES,
   archiveRetentionCriteriaSchema,
+  INGEST_SOURCES,
+  INTAKE_FORMATS,
+  INTAKE_RECIPIENT_FIELDS,
+  INTAKE_SOURCE_KINDS,
   archiveSettingsSchema,
   MESSAGE_ACTIONS,
   MESSAGE_DIRECTIONS,
@@ -50,6 +54,9 @@ const resolvedSettingsSchema = z.object({
   }),
   policyArchive: z.object({ enabled: z.boolean() }),
   access: z.object({ previewEnabled: z.boolean(), downloadEnabled: z.boolean() }),
+  intake: z
+    .object({ scanEnabled: z.boolean() })
+    .describe('Step 8.6 D8: scan journal intake messages (default false; `journal:manage`)'),
 });
 
 export const ArchiveSettingsViewSchema = z.object({
@@ -337,6 +344,12 @@ export const ArchiveMessageSchema = z.object({
   direction: z.enum(MESSAGE_DIRECTIONS),
   category: z.enum(ARCHIVE_CATEGORIES),
   sources: z.array(z.enum(['journal', 'policy'])),
+  ingestSources: z
+    .array(z.enum(INGEST_SOURCES))
+    .describe(
+      'Step 8.6: where the record’s copies came from (`gateway`, `journal_intake`); both when a ' +
+        'journal intake copy was merged into a gateway record (or the reverse)',
+    ),
   status: z.enum(ARCHIVE_RECORD_STATUSES),
   envelopeFrom: z.string().describe('Sender side: in clear (ADR-0062)'),
   headerFrom: z.string().nullable(),
@@ -368,6 +381,7 @@ export const ARCHIVE_SEARCH_LIST = defineListQuery({
     direction: { type: 'enum', values: MESSAGE_DIRECTIONS, maxValues: 3 },
     category: { type: 'enum', values: ARCHIVE_CATEGORIES, maxValues: 4 },
     source: { type: 'enum', values: ['journal', 'policy'] as const, maxValues: 2 },
+    ingestSource: { type: 'enum', values: INGEST_SOURCES, maxValues: 1 },
     status: { type: 'enum', values: ARCHIVE_RECORD_STATUSES, maxValues: 3 },
     sender: { type: 'email' },
     senderDomain: { type: 'domain' },
@@ -402,9 +416,20 @@ export const ArchiveMessageDetailSchema = ArchiveMessageSchema.extend({
       z.object({
         seq: z.number().int(),
         address: z.string().describe('Masked'),
-        direction: z.enum(MESSAGE_DIRECTIONS),
+        direction: z
+          .enum(MESSAGE_DIRECTIONS)
+          .nullable()
+          .describe('Null for an external recipient of an external journal intake sender (8.6)'),
         status: z.string(),
         finalAction: z.string().nullable(),
+        field: z
+          .enum(INTAKE_RECIPIENT_FIELDS)
+          .optional()
+          .describe('Step 8.6: the journal envelope field of an intake recipient'),
+        ingestSources: z
+          .array(z.enum(INGEST_SOURCES))
+          .optional()
+          .describe('Step 8.6: the copies that named this recipient (merged records)'),
       }),
     ),
     recipientCount: z.number().int(),
@@ -447,6 +472,36 @@ export const ArchiveMessageDetailSchema = ArchiveMessageSchema.extend({
   rounds: z.array(
     z.object({ round: z.number().int(), revision: z.number().int(), frozenAt: isoInstant }),
   ),
+  intake: z
+    .object({
+      sourceId: PublicIdSchema.nullable().describe('The journal intake source (null: unknown)'),
+      sourceDisplayName: z.string().nullable(),
+      kind: z.enum(INTAKE_SOURCE_KINDS).nullable(),
+    })
+    .nullable()
+    .describe(
+      'Step 8.6: the journal intake source of the record’s primary copy, or null for a gateway ' +
+        'record (format, envelope and proof are in the journal view)',
+    ),
+  mergedCopies: z
+    .array(
+      z.object({
+        id: PublicIdSchema.describe(
+          'Public id of the merged copy (`variant` of POST …/download-grants when ' +
+            '`contentVariant`)',
+        ),
+        receivedAt: isoInstant,
+        source: z.enum(INGEST_SOURCES),
+        sizeBytes: z.number().int(),
+        sha256,
+        contentVariant: z
+          .boolean()
+          .describe('The copy’s body differed: its EML is stored as a content variant'),
+        recipientsAdded: z.number().int(),
+        mergedAt: isoInstant,
+      }),
+    )
+    .describe('Step 8.6 D7: copies of the same message merged into this record (≤ 8)'),
 });
 export type ArchiveMessageDetailView = z.infer<typeof ArchiveMessageDetailSchema>;
 
@@ -473,11 +528,52 @@ export const ArchiveJournalViewSchema = z.object({
       z.object({
         seq: z.number().int(),
         address: z.string().describe('Masked'),
-        direction: z.enum(MESSAGE_DIRECTIONS),
+        direction: z
+          .enum(MESSAGE_DIRECTIONS)
+          .nullable()
+          .describe('Null for an external recipient of an external journal intake sender (8.6)'),
         status: z.string(),
+        field: z
+          .enum(INTAKE_RECIPIENT_FIELDS)
+          .optional()
+          .describe('Step 8.6: `to`, `cc`, `bcc`, `recipient`, `envelope` or `header`'),
       }),
     ),
   }),
+  intake: z
+    .object({
+      sourceId: PublicIdSchema,
+      kind: z.enum(INTAKE_SOURCE_KINDS),
+      format: z.enum(INTAKE_FORMATS),
+      envelope: z.object({
+        sender: z.string().nullable().describe('Sender side: in clear (ADR-0062)'),
+        onBehalfOf: z.string().nullable(),
+        messageId: z.string().nullable(),
+        recipients: z.array(
+          z.object({
+            address: z.string().describe('Masked'),
+            field: z.enum(INTAKE_RECIPIENT_FIELDS),
+            expandedFrom: z.string().optional().describe('Masked distribution list'),
+            forwardedFrom: z.string().optional().describe('Masked'),
+          }),
+        ),
+        truncated: z.boolean(),
+      }),
+      envelopeMismatch: z.boolean(),
+      proof: z.object({
+        network: z.string(),
+        tls: z.boolean(),
+        clientCert: z.string(),
+        tenantHeader: z.string(),
+        headerToken: z.string(),
+        dkim: z.string(),
+      }),
+    })
+    .nullable()
+    .describe(
+      'Step 8.6: the journal envelope (BCC included; addresses masked) and the sender proof ' +
+        'codes of a journal intake copy; null for a gateway capture',
+    ),
   headers: z.array(
     z.object({
       name: z.string(),
@@ -556,6 +652,10 @@ export const ArchivePreviewSchema = quarantinePreviewSchema;
 
 export const DownloadGrantBodySchema = z.strictObject({
   password: z.string().min(1).max(1024).describe('The caller’s password (re-authorization)'),
+  variant: PublicIdSchema.optional().describe(
+    'Step 8.6: the `mergedCopies[].id` of a content variant to download instead of the ' +
+      'primary copy',
+  ),
   totpCode: z
     .string()
     .regex(/^[0-9]{6}$/)
@@ -596,6 +696,7 @@ const ID = {
   domain: '0193a1c2-5555-7a00-8000-000000000001',
   hold: '0193a1c2-6666-7a00-8000-000000000001',
   case: '0193a1c2-7777-7a00-8000-000000000001',
+  mergedCopy: '0193a1c2-9999-7a00-8000-000000000001',
 } as const;
 export const ARCHIVE_EXAMPLE_IDS = ID;
 
@@ -611,6 +712,7 @@ const settingsResolved = {
   },
   policyArchive: { enabled: true },
   access: { previewEnabled: true, downloadEnabled: false },
+  intake: { scanEnabled: false },
 };
 
 const policyView: RetentionPolicyView = {
@@ -647,6 +749,7 @@ const messageView: ArchiveMessageView = {
   direction: 'inbound',
   category: 'delivered',
   sources: ['journal'],
+  ingestSources: ['gateway', 'journal_intake'],
   status: 'active',
   envelopeFrom: 'sender@example.org',
   headerFrom: 'sender@example.org',
@@ -845,6 +948,19 @@ export const ARCHIVE_EXAMPLES = {
       keyVersion: 2,
     },
     rounds: [{ round: 1, revision: 1, frozenAt: '2026-11-16T10:17:02.900Z' }],
+    intake: null,
+    mergedCopies: [
+      {
+        id: ID.mergedCopy,
+        receivedAt: '2026-11-16T10:15:02.000Z',
+        source: 'journal_intake',
+        sizeBytes: 2211,
+        sha256: 'c'.repeat(64),
+        contentVariant: false,
+        recipientsAdded: 1,
+        mergedAt: '2026-11-16T10:19:00.000Z',
+      },
+    ],
   } satisfies ArchiveMessageDetailView,
   journal: {
     messageId: ID.message,
@@ -867,6 +983,7 @@ export const ARCHIVE_EXAMPLES = {
         { seq: 0, address: 'u***@example.com', direction: 'inbound', status: 'delivered' },
       ],
     },
+    intake: null,
     headers: [
       { name: 'From', value: 'Sender <sender@example.org>', masked: false },
       { name: 'Subject', value: null, masked: true },
@@ -965,7 +1082,10 @@ export const ARCHIVE_SEARCH_PARAMETERS: Record<string, string> = {
     '`from` (`400 archive_search_range_invalid`)',
   direction: '`inbound`, `outbound`, `internal`; comma list',
   category: '`delivered`, `rejected`, `quarantined`, `failed`; comma list',
-  source: '`journal`, `policy`; comma list',
+  source: '`journal`, `policy` (capture source); comma list',
+  ingestSource:
+    'Step 8.6: `gateway` or `journal_intake` (where a copy of the record came from; records ' +
+    'indexed before 8.6 are `gateway`)',
   status: '`active`, `expiry_review`, `disposing`; comma list',
   sender: 'Envelope sender or header From (exact address, case-insensitive)',
   senderDomain: 'Sender domain',

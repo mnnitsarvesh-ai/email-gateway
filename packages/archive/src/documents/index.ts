@@ -5,3 +5,4 @@ export * from './records';
 export * from './search';
 export * from './settings';
 export * from './disposal';
+export * from './parties-merge';

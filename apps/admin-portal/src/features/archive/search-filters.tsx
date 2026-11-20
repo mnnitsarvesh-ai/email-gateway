@@ -9,10 +9,12 @@ import {
   ARCHIVE_CATEGORIES,
   ARCHIVE_DIRECTIONS,
   ARCHIVE_FINAL_ACTIONS,
+  ARCHIVE_INGEST_SOURCES,
   ARCHIVE_RECORD_STATUSES,
   ARCHIVE_SEARCH_MAX_RANGE_DAYS,
   ARCHIVE_SOURCES,
   ARCHIVE_VERDICTS,
+  INGEST_SOURCE_LABEL,
 } from './model';
 import {
   ARCHIVE_RANGE_KINDS,
@@ -44,6 +46,7 @@ export function ArchiveFilters({
   maxDays = ARCHIVE_SEARCH_MAX_RANGE_DAYS,
   holdOptions,
   idPrefix = 'archive',
+  ingestSource = false,
 }: {
   state: ArchiveSearchState;
   setState: (patch: ArchiveSearchPatch) => void;
@@ -52,6 +55,8 @@ export function ArchiveFilters({
   /** Holds offered by the hold filter (id → name); without it the filter is not shown. */
   holdOptions?: readonly { id: string; name: string }[];
   idPrefix?: string;
+  /** Step 8.6: the copy-source filter (archive search only; eDiscovery searches every source). */
+  ingestSource?: boolean;
 }) {
   const risk = riskError(state);
   return (
@@ -76,6 +81,17 @@ export function ArchiveFilters({
           options={optionsOf(ARCHIVE_SOURCES)}
           onChange={(v) => setState({ source: v as ArchiveSearchState['source'] })}
         />
+        {ingestSource ? (
+          <FilterSelect
+            label="Copy source"
+            value={state.ingestSource}
+            options={ARCHIVE_INGEST_SOURCES.map((value) => ({
+              value,
+              label: INGEST_SOURCE_LABEL[value],
+            }))}
+            onChange={(v) => setState({ ingestSource: v as ArchiveSearchState['ingestSource'] })}
+          />
+        ) : null}
         <FilterMultiSelect
           label="Record status"
           values={state.status}

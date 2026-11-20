@@ -227,12 +227,19 @@ type RawLatency = { samples: unknown; sumUs: unknown } & Record<`le${number}`, u
 
 /**
  * The covering index of the message counts (step 6.1 §3.1):
- * `(organization_id, received_at, direction, final_verdict, final_action)`. Forced: with few
- * rows of an organization the optimizer may prefer `(organization_id, final_verdict,
- * received_at, id)`, which does not cover `direction` and reads every row; the covering index
- * keeps the traffic, direction and outcome counts index-only at any volume.
+ * `(organization_id, received_at, direction, final_verdict, final_action, domain_id,
+ * ingest_source)`. Forced: with few rows of an organization the optimizer may prefer
+ * `(organization_id, final_verdict, received_at, id)`, which does not cover `direction` and reads
+ * every row; the covering index keeps the traffic, direction and outcome counts index-only at any
+ * volume. Step 8.6 D5: rebuilt with `ingest_source` appended (new name, WP1 migration
+ * `journal_intake`) so excluding journal intake messages stays index-only.
  */
-const MESSAGE_COUNT_INDEX = Prisma.raw('FORCE INDEX (email_messages_org_received_dir_verdict_idx)');
+const MESSAGE_COUNT_INDEX = Prisma.raw(
+  'FORCE INDEX (email_messages_org_received_dir_verdict_src_idx)',
+);
+
+/** Step 8.6 D5: reports count gateway messages only (journal intake is archive-only). */
+const GATEWAY_ONLY = Prisma.raw(`AND ingest_source = 'gateway'`);
 
 /** Step 7.1 §3.2: `(organization_id, received_at, status, delivered_at)`, index-only. */
 const DELIVERY_REPORT_INDEX = Prisma.raw('FORCE INDEX (email_deliveries_org_received_status_idx)');
@@ -250,7 +257,7 @@ const PROCESSING_REPORT_INDEX = Prisma.raw(
  * organization id is selected and grouped on (it is constant) for the echo check (D15).
  */
 export const reportSql = {
-  /** Index-only over `email_messages_org_received_dir_verdict_idx`. */
+  /** Index-only over `email_messages_org_received_dir_verdict_src_idx`. */
   traffic(
     scope: TenantScope,
     range: ReportRange,
@@ -264,6 +271,7 @@ export const reportSql = {
       FROM email_messages ${MESSAGE_COUNT_INDEX}
       WHERE organization_id = ${scope.organizationId}
         AND received_at >= ${range.from} AND received_at < ${range.to}
+        ${GATEWAY_ONLY}
         ${direction === undefined ? Prisma.empty : Prisma.sql`AND direction = ${direction}`}
       GROUP BY organization_id, bucket, direction, verdict`;
   },
@@ -275,6 +283,7 @@ export const reportSql = {
       FROM email_messages ${MESSAGE_COUNT_INDEX}
       WHERE organization_id = ${scope.organizationId}
         AND received_at >= ${range.from} AND received_at < ${range.to}
+        ${GATEWAY_ONLY}
       GROUP BY organization_id, direction`;
   },
 
@@ -289,6 +298,7 @@ export const reportSql = {
       FROM email_messages ${MESSAGE_COUNT_INDEX}
       WHERE organization_id = ${scope.organizationId}
         AND received_at >= ${range.from} AND received_at < ${range.to}
+        ${GATEWAY_ONLY}
       GROUP BY organization_id, verdict, action`;
   },
 
@@ -371,6 +381,7 @@ export const reportSql = {
       FROM email_messages ${MESSAGE_COUNT_INDEX}
       WHERE organization_id = ${scope.organizationId}
         AND received_at >= ${range.from} AND received_at < ${range.to}
+        ${GATEWAY_ONLY}
         AND direction = 'inbound'
       GROUP BY organization_id, domainId, verdict`;
   },

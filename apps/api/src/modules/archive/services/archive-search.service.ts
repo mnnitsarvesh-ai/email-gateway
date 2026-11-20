@@ -272,6 +272,8 @@ export class ArchiveSearchService {
       }),
       ...(first(f.malicious) !== undefined && { malicious: first(f.malicious)! }),
       ...(first(f.legalHold) !== undefined && { legalHold: first(f.legalHold)! }),
+      // Step 8.6: the copy source (`gateway` also matches records indexed before 8.6).
+      ...(first(f.ingestSource) !== undefined && { source: first(f.ingestSource)! }),
       ...(first(f.holdId) !== undefined && { holdId: first(f.holdId)!.toLowerCase() }),
     };
     return criteria;

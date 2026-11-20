@@ -18,7 +18,12 @@ import {
 import { LMTP_TEMPFAIL, type SmtpReply } from '../shared/replies';
 import { EmlStore } from './eml-store';
 import type { HeaderMetadata } from './header-scanner';
-import { emlObjectKey, type IngestDirection, ingestKey, type QueueFileRef } from './ingestion-keys';
+import {
+  emlObjectKey,
+  type GatewayDirection,
+  ingestKey,
+  type QueueFileRef,
+} from './ingestion-keys';
 import { IngestionMetrics } from './ingestion.metrics';
 import { INGESTION_OPTIONS, type IngestionModuleOptions } from './ingestion.options';
 import { IngestionRepository, isUniqueViolation } from './ingestion.repository';
@@ -36,8 +41,8 @@ import {
 
 /** State of one LMTP transaction (MAIL FROM to the replies after DATA). */
 export interface IngestTransaction {
-  direction: IngestDirection;
-  ref: QueueFileRef;
+  direction: GatewayDirection;
+  ref: QueueFileRef<GatewayDirection>;
   envelopeFrom: string;
   clientIp: string | null;
   clientHelo: string | null;
@@ -81,7 +86,7 @@ export class IngestionService {
   }
 
   /** The LMTP handler of one listener. */
-  handler(direction: IngestDirection): LmtpHandler<IngestTransaction, IngestRecipient> {
+  handler(direction: GatewayDirection): LmtpHandler<IngestTransaction, IngestRecipient> {
     return {
       beginTransaction: (client, mailFrom) =>
         Promise.resolve().then(() => this.beginTransaction(direction, client, mailFrom)),
@@ -92,7 +97,7 @@ export class IngestionService {
   }
 
   beginTransaction(
-    direction: IngestDirection,
+    direction: GatewayDirection,
     client: LmtpClientInfo,
     mailFrom: string,
   ): IngestTransaction {

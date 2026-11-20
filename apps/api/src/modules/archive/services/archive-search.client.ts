@@ -14,6 +14,8 @@ export interface ArchiveSearchSource {
   direction?: string;
   category?: string;
   sources?: string[] | string;
+  /** Step 8.6 (mapping revision 2): `gateway`, `journal_intake`. */
+  ingest_sources?: string[] | string;
   status?: string;
   envelope_from?: string;
   header_from?: string | null;

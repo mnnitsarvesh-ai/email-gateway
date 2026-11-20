@@ -174,6 +174,9 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
   switch (event.eventType) {
     case EventTypes.MessageReceived: {
       const p = event.payload as MessageReceivedV1;
+      // Step 8.6 D4 (ADR-0087): a journal intake copy is archived, never a gateway message: no
+      // `email.received` for it (the provider already delivered it).
+      if (p.ingestSource === 'journal_intake') return [];
       return [
         {
           rule: 'received',
@@ -240,6 +243,7 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
     }
     case EventTypes.MessageStateChanged: {
       const p = event.payload as MessageStateChangedV1;
+      // Step 8.6: `journaled` (E30–E32, intake only) projects nothing (no rule of the W3 table).
       if (p.state === 'delivered') {
         return [
           {

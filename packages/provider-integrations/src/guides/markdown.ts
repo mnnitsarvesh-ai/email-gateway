@@ -1,4 +1,5 @@
-import type { SetupGuide, SetupGuideStep } from './setup-guide';
+import { type JournalIntakeGuide, JOURNAL_INTAKE_KIND_LABELS } from './journal-intake-guide';
+import type { SetupGuide, SetupGuideSection, SetupGuideStep } from './setup-guide';
 
 /** Escapes Markdown control characters in plain text (values come from configuration and rows). */
 const text = (value: string): string => value.replace(/([\\`*_[\]<>|#])/g, '\\$1');
@@ -44,25 +45,23 @@ function renderStep(step: SetupGuideStep, sectionNumber: number, index: number):
   return lines;
 }
 
-/** The Markdown download of a guide (D14, `text/markdown; charset=utf-8`). */
-export function renderSetupGuideMarkdown(guide: SetupGuide): string {
-  const provider = guide.provider === 'microsoft_365' ? 'Microsoft 365' : 'Google Workspace';
+/**
+ * The shared renderer of every guide (8.2 setup guides, 8.6 journal intake guides): the given
+ * head lines (title, generation line, notice; already Markdown), a contents list and the numbered
+ * sections with their steps, values, commands, warnings and attestations.
+ */
+export function renderGuideMarkdown(
+  head: readonly string[],
+  sections: readonly SetupGuideSection[],
+): string {
   const lines: string[] = [
-    `# ${provider} setup guide: ${text(guide.connection.displayName)}`,
-    '',
-    `Generated ${guide.generatedAt} (\`${guide.schema}\`).`,
-    ...(guide.connection.tenantId
-      ? [`Tenant: ${text(guide.connection.tenantName ?? '')} (\`${guide.connection.tenantId}\`).`]
-      : []),
-    '',
-    `> ${text(guide.notice)}`,
-    '',
+    ...head,
     '## Contents',
     '',
-    ...guide.sections.map((s) => `${s.number}. [${text(s.title)}](#${s.id})`),
+    ...sections.map((s) => `${s.number}. [${text(s.title)}](#${s.id})`),
     '',
   ];
-  for (const section of guide.sections) {
+  for (const section of sections) {
     lines.push(
       `<a id="${section.id}"></a>`,
       '',
@@ -78,6 +77,41 @@ export function renderSetupGuideMarkdown(guide: SetupGuide): string {
     .trimEnd()}\n`;
 }
 
+/** The Markdown download of a guide (D14, `text/markdown; charset=utf-8`). */
+export function renderSetupGuideMarkdown(guide: SetupGuide): string {
+  const provider = guide.provider === 'microsoft_365' ? 'Microsoft 365' : 'Google Workspace';
+  return renderGuideMarkdown(
+    [
+      `# ${provider} setup guide: ${text(guide.connection.displayName)}`,
+      '',
+      `Generated ${guide.generatedAt} (\`${guide.schema}\`).`,
+      ...(guide.connection.tenantId
+        ? [`Tenant: ${text(guide.connection.tenantName ?? '')} (\`${guide.connection.tenantId}\`).`]
+        : []),
+      '',
+      `> ${text(guide.notice)}`,
+      '',
+    ],
+    guide.sections,
+  );
+}
+
+/** The Markdown download of a journal intake guide (step 8.6 D10, `text/markdown`). */
+export function renderJournalIntakeGuideMarkdown(guide: JournalIntakeGuide): string {
+  return renderGuideMarkdown(
+    [
+      `# Journal intake setup guide: ${text(guide.source.displayName)}`,
+      '',
+      `Generated ${guide.generatedAt} (\`${guide.schema}\`).`,
+      `Source type: ${text(JOURNAL_INTAKE_KIND_LABELS[guide.kind])}.`,
+      '',
+      `> ${text(guide.notice)}`,
+      '',
+    ],
+    guide.sections,
+  );
+}
+
 /** `setup-<provider>-<connection-name-slug>.md` (D14). */
 export function setupGuideFileName(guide: Pick<SetupGuide, 'provider' | 'connection'>): string {
   const slug =
@@ -89,4 +123,18 @@ export function setupGuideFileName(guide: Pick<SetupGuide, 'provider' | 'connect
       .slice(0, 64) || 'connection';
   const provider = guide.provider === 'microsoft_365' ? 'microsoft-365' : 'google-workspace';
   return `setup-${provider}-${slug}.md`;
+}
+
+/** `journal-intake-<kind>-<source-name-slug>.md` (step 8.6 D10). */
+export function journalIntakeGuideFileName(
+  guide: Pick<JournalIntakeGuide, 'kind' | 'source'>,
+): string {
+  const slug =
+    guide.source.displayName
+      .normalize('NFKD')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 64) || 'source';
+  return `journal-intake-${guide.kind.replace(/_/g, '-')}-${slug}.md`;
 }

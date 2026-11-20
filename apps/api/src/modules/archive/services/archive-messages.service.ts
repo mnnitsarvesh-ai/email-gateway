@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
+  type ArchiveJournalIntake,
   decideExpiry,
   effectiveRetainUntil,
   legalHoldMatches,
@@ -88,6 +89,7 @@ import {
   ArchiveRecordsRepository,
   type MessageKeyRow,
   type RecordRow,
+  type RecordSourceRow,
 } from '../repositories/archive-records.repository';
 import { parsePublicId, refuseOverride, userIdOf } from './archive-common';
 import { ArchiveContentService } from './archive-content.service';
@@ -150,6 +152,56 @@ function snapshotRound(snapshot: ScanSnapshot, dlpVisible: boolean) {
     r.risk,
     r.policy === null ? [] : [r.policy],
   );
+}
+
+/** Step 8.6 D7: one merged copy of a record as the detail lists it. */
+function mergedCopyView(row: RecordSourceRow): ArchiveMessageDetailView['mergedCopies'][number] {
+  return {
+    id: row.messagePublicId,
+    receivedAt: row.messageReceivedAt.toISOString(),
+    source: row.source,
+    sizeBytes: row.sizeBytes,
+    sha256: row.emlSha256,
+    contentVariant: row.contentVariant,
+    recipientsAdded: row.recipientsAdded,
+    mergedAt: row.mergedAt.toISOString(),
+  };
+}
+
+/**
+ * Step 8.6 D6: the intake block of a journal object (envelope with fields, BCC included; every
+ * recipient address masked like the record's parties, ADR-0062; proof codes only).
+ */
+function intakeJournalView(
+  intake: ArchiveJournalIntake,
+): NonNullable<ArchiveJournalView['intake']> {
+  const e = intake.envelope;
+  return {
+    sourceId: intake.sourceId,
+    kind: intake.kind,
+    format: intake.format,
+    envelope: {
+      sender: e.sender,
+      onBehalfOf: e.onBehalfOf,
+      messageId: e.messageId,
+      recipients: e.recipients.slice(0, DETAIL_RECIPIENTS).map((r) => ({
+        address: maskAddress(r.address),
+        field: r.field,
+        ...(r.expandedFrom !== undefined && { expandedFrom: maskAddress(r.expandedFrom) }),
+        ...(r.forwardedFrom !== undefined && { forwardedFrom: maskAddress(r.forwardedFrom) }),
+      })),
+      truncated: e.truncated || e.recipients.length > DETAIL_RECIPIENTS,
+    },
+    envelopeMismatch: intake.envelopeMismatch,
+    proof: {
+      network: intake.proof.network,
+      tls: intake.proof.tls,
+      clientCert: intake.proof.clientCert,
+      tenantHeader: intake.proof.tenantHeader,
+      headerToken: intake.proof.headerToken,
+      dkim: intake.proof.dkim.result,
+    },
+  };
 }
 
 /**
@@ -240,11 +292,15 @@ export class ArchiveMessagesService {
     const record = await this.replicaRecord(scope, rawId);
     const holdsVisible =
       principal.permissions.has(P.legalHold) || principal.permissions.has(P.ediscovery);
-    const [policy, holds] = await Promise.all([
+    const [policy, holds, intakeSource, merged] = await Promise.all([
       record.retentionPolicyId === null
         ? Promise.resolve(null)
         : this.records.policyFacts(scope, record.retentionPolicyId),
       holdsVisible ? this.records.activeHolds(scope) : Promise.resolve(null),
+      record.intakeSourceId === null
+        ? Promise.resolve(null)
+        : this.records.intakeSourceRef(scope, record.intakeSourceId),
+      record.mergedCount > 0 ? this.records.recordSources(scope, record) : Promise.resolve([]),
     ]);
     const effective = effectiveRetainUntil({
       storedRetainUntil: record.retainUntil,
@@ -285,6 +341,8 @@ export class ArchiveMessagesService {
           direction: r.direction,
           status: r.status,
           finalAction: r.finalAction,
+          ...(r.field !== undefined && { field: r.field }),
+          ...(r.sources !== undefined && { ingestSources: [...r.sources] }),
         })),
         recipientCount: record.recipientCount,
         recipientsTruncated: parties.recipients.length > DETAIL_RECIPIENTS,
@@ -321,6 +379,16 @@ export class ArchiveMessagesService {
         keyVersion: record.keyVersion,
       },
       rounds: roundsOf(record),
+      // The primary copy came from journal intake (a gateway primary has no intake source).
+      intake:
+        record.intakeSourceId !== null || (record.sourceJournalIntake && !record.sourceGateway)
+          ? {
+              sourceId: intakeSource?.publicId ?? null,
+              sourceDisplayName: intakeSource?.displayName ?? null,
+              kind: intakeSource?.kind ?? null,
+            }
+          : null,
+      mergedCopies: merged.map(mergedCopyView),
     };
   }
 
@@ -366,8 +434,10 @@ export class ArchiveMessagesService {
           address: maskAddress(r.address),
           direction: r.direction,
           status: r.status,
+          ...(r.field !== undefined && { field: r.field }),
         })),
       },
+      intake: j.intake === undefined ? null : intakeJournalView(j.intake),
       headers: j.headers.map((h) =>
         classifyHeader(h.name) === 'safe'
           ? { name: h.name, value: h.value, masked: false }

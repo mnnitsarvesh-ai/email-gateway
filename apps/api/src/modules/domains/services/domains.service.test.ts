@@ -182,6 +182,45 @@ describe('DomainsService.create', () => {
     expect(bed.service.normalizeName('aprobe.gateway-ops.test')).toBe('aprobe.gateway-ops.test');
   });
 
+  it('refuses the journal intake domain and names under it with 422 domain_reserved (step 8.6 D1)', async () => {
+    const bed = createDomainTestbed({ JOURNAL_INTAKE_DOMAIN: 'journal.gateway-ops.test' });
+    for (const name of ['journal.gateway-ops.test', 'x.journal.gateway-ops.test']) {
+      const err = await createIn(bed, name).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CodedHttpException);
+      expect((err as CodedHttpException).getStatus()).toBe(422);
+      expect((err as CodedHttpException).code).toBe('domain_reserved');
+    }
+    expect(bed.store.domains).toEqual([]);
+    expect(bed.service.normalizeName('ajournal.gateway-ops.test')).toBe(
+      'ajournal.gateway-ops.test',
+    );
+  });
+
+  it('archive-only organizations get domains with inbound off; inbound true is 403 (step 8.6 D13)', async () => {
+    const bed = createDomainTestbed();
+    bed.profile.value = 'archive_only';
+    const created = await bed.service.create(
+      userPrincipal(ORG_A),
+      scopeA,
+      { name: 'archive-only.example.com' },
+      client,
+    );
+    expect(created).toMatchObject({ inboundEnabled: false, outboundEnabled: false });
+    const err = await bed.service
+      .create(
+        userPrincipal(ORG_A),
+        scopeA,
+        { name: 'other.example.com', inboundEnabled: true },
+        client,
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CodedHttpException);
+    expect((err as CodedHttpException).getStatus()).toBe(403);
+    expect((err as CodedHttpException).code).toBe('mail_filtering_not_enabled');
+    bed.profile.value = 'gateway';
+    expect(await createIn(bed, 'gateway.example.com')).toMatchObject({ inboundEnabled: true });
+  });
+
   it('rejects the gateway SPF include host and names under it', () => {
     const bed = createDomainTestbed({ GATEWAY_SPF_INCLUDE: 'spf.mail-gateway.test' });
     expect(() => bed.service.normalizeName('spf.mail-gateway.test')).toThrow(BadRequestException);

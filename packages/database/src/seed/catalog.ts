@@ -11,6 +11,11 @@
 export interface PermissionDef {
   key: string;
   description: string;
+  /**
+   * `permissions.category`; default the `resource` part of the key (`permissionCategory`). Step
+   * 8.6 (D12) files `journal:*` under `journaling`.
+   */
+  category?: string;
 }
 
 /** The permission catalog. `permissions` in MySQL is synchronised from this list. */
@@ -46,7 +51,13 @@ export const PERMISSIONS = Object.freeze([
   },
   { key: 'report:read', description: 'View dashboards and reports' },
   { key: 'audit:read', description: 'View the audit log' },
-  { key: 'archive:read', description: 'Search and view archived messages' },
+  // Step 8.6 (D12, ADR-0089): archive:read is configuration and status only (no records); record
+  // detail needs archive:search.
+  {
+    key: 'archive:read',
+    description:
+      'View archive configuration, retention policies, key versions and status (no records)',
+  },
   { key: 'archive:export', description: 'Export archived messages' },
   { key: 'archive:legal_hold', description: 'Create and release legal holds' },
   { key: 'webhook:manage', description: 'Create and edit webhook subscriptions' },
@@ -225,19 +236,22 @@ export const PERMISSIONS = Object.freeze([
   // archive:search, compliance_auditor archive:search, archive:retrieve and ediscovery:manage,
   // explicitly. None is in TENANT_READ_PERMISSIONS (read_only_user, platform_admin): searches
   // reveal who corresponded with whom, and archived content is customer-only.
+  // Step 8.6 (D12): archive:search also opens record detail, journal and security views.
   {
     key: 'archive:search',
-    description: 'Search archived and journaled messages (metadata, masked)',
+    description:
+      'Search archived messages and view their metadata, journal and security views (masked)',
   },
   {
     key: 'archive:retrieve',
     description: 'View the sanitized preview and download original archived messages (audited)',
   },
+  // Step 8.6 (D12): journaling capture settings moved to journal:manage.
   {
     key: 'archive:manage',
     description:
-      'Manage archive settings, retention policies, encryption keys, capture issues and ' +
-      'disposal of reviewed records',
+      'Manage retention policies, immutability, encryption keys, access settings and disposal ' +
+      'of reviewed records',
   },
   {
     key: 'ediscovery:manage',
@@ -285,6 +299,22 @@ export const PERMISSIONS = Object.freeze([
       'Connect, consent, upload credentials, validate and change Microsoft 365 and Google ' +
       'Workspace connections (step 8.2)',
   },
+  // Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md D12, ADR-0089): the
+  // Journaling half of the Journaling / Archive split (capture settings and journal intake
+  // sources). organization_admin and super_admin hold both through TENANT_PERMISSIONS /
+  // ALL_PERMISSIONS, domain_admin both explicitly; journal:read is in TENANT_READ_PERMISSIONS
+  // (platform_admin, compliance_auditor, read_only_user) and held by security_analyst and
+  // compliance_officer. Neither opens archived records (ARCHIVE_ACCESS_PERMISSIONS).
+  {
+    key: 'journal:read',
+    description: 'View journaling settings, journal intake sources and their health',
+    category: 'journaling',
+  },
+  {
+    key: 'journal:manage',
+    description: 'Manage journaling capture settings and journal intake sources',
+    category: 'journaling',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -292,6 +322,10 @@ export type PermissionKey = (typeof PERMISSIONS)[number]['key'];
 
 /** `resource` part of a `resource:action` key. */
 export const permissionCategory = (key: string): string => key.split(':', 1)[0]!;
+
+/** `permissions.category` of a catalog entry: its explicit category, else `permissionCategory`. */
+export const permissionCategoryOf = (permission: PermissionDef): string =>
+  permission.category ?? permissionCategory(permission.key);
 
 const ALL_PERMISSIONS: readonly PermissionKey[] = PERMISSIONS.map((p) => p.key);
 
@@ -322,9 +356,29 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'connector:read',
   'delivery:read',
   'integration:read',
+  // Step 8.6 (D12): journaling configuration and intake source health; never archived records.
+  'journal:read',
 ]);
 
-/** Keys of the 9 built-in system roles (D8; `mailbox_user` added in step 5.3 Q15). */
+/**
+ * Archive access (step 8.6 D12, ADR-0089): the permissions that open archived mail or govern it.
+ * Not held by organization_admin (an explicit, audited `compliance_officer` assignment grants
+ * them); assigning or removing a role that carries any of them is audited
+ * (`rbac.archive_access_granted|revoked`).
+ */
+export const ARCHIVE_ACCESS_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
+  'archive:search',
+  'archive:retrieve',
+  'archive:export',
+  'archive:legal_hold',
+  'archive:manage',
+  'ediscovery:manage',
+]);
+
+/**
+ * Keys of the 10 built-in system roles (D8; `mailbox_user` added in step 5.3 Q15,
+ * `compliance_officer` in step 8.6 D12).
+ */
 export const SYSTEM_ROLE_KEYS = Object.freeze([
   'super_admin',
   'platform_admin',
@@ -335,6 +389,7 @@ export const SYSTEM_ROLE_KEYS = Object.freeze([
   'compliance_auditor',
   'read_only_user',
   'mailbox_user',
+  'compliance_officer',
 ] as const);
 export type SystemRoleKey = (typeof SYSTEM_ROLE_KEYS)[number];
 
@@ -365,8 +420,8 @@ export interface RoleDef {
 }
 
 /**
- * The 9 built-in system roles (organization_id NULL, is_system true): the 8 of D8 plus
- * `mailbox_user` (step 5.3 Q15, Q25).
+ * The 10 built-in system roles (organization_id NULL, is_system true): the 8 of D8 plus
+ * `mailbox_user` (step 5.3 Q15, Q25) and `compliance_officer` (step 8.6 D12, ADR-0089).
  */
 export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
   {
@@ -397,10 +452,16 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
     ],
   },
   {
+    // Step 8.6 (D12, ADR-0089, PO decision 2): every tenant permission except archive access;
+    // journal:* included. The migration `journal_intake` granted compliance_officer to every
+    // organization admin of a customer organization existing then (grant-preserving).
     key: 'organization_admin',
     name: 'Organization Admin',
-    description: 'Every tenant permission within the organization',
-    permissions: TENANT_PERMISSIONS,
+    description:
+      'Every tenant permission within the organization except archive access (search, ' +
+      'retrieval, export, legal holds, archive management, eDiscovery: the compliance_officer ' +
+      'role)',
+    permissions: TENANT_PERMISSIONS.filter((key) => !ARCHIVE_ACCESS_PERMISSIONS.includes(key)),
   },
   {
     key: 'domain_admin',
@@ -423,6 +484,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'report:read',
       'integration:read',
       'integration:manage',
+      // Step 8.6 (D12): IT / mail administrators configure journaling and intake sources.
+      'journal:read',
+      'journal:manage',
     ],
   },
   {
@@ -463,6 +527,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'ato:manage',
       'ato:respond',
       'integration:read',
+      // Step 8.6 (D12).
+      'journal:read',
     ],
   },
   {
@@ -517,6 +583,25 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'their own verified address only (step 5.3)',
     permissions: ['quarantine:self'],
   },
+  {
+    // Step 8.6 (D12, ADR-0089): archive access for compliance staff; assigned explicitly (audited).
+    key: 'compliance_officer',
+    name: 'Compliance Officer',
+    description:
+      'Searches and views archived mail, runs eDiscovery, manages legal holds, retention and ' +
+      'archive access; reads the access audit',
+    permissions: [
+      'organization:read',
+      'user:read',
+      'domain:read',
+      'journal:read',
+      'archive:read',
+      ...ARCHIVE_ACCESS_PERMISSIONS,
+      'message:reveal',
+      'audit:read',
+      'report:read',
+    ],
+  },
 ]);
 
 export const LIMIT_KEYS = [
@@ -537,6 +622,12 @@ export const LIMIT_KEYS = [
   // outbound_recipients_per_minute (rounded down, at least 1). Organizations without a row fall
   // back to DELIVERY_RATE_TENANT_DOMAIN_RCPT_PER_MINUTE; 0 = no outbound delivery.
   'outbound_recipients_per_domain_per_minute',
+  // Step 8.6 (D2.2.6, D2.2.7, D13): journal intake messages per UTC minute per organization and
+  // the plan's size ceiling of one intake message (bytes), enforced by the smtp-adapter intake
+  // policy; 0 = no journal intake. The smaller of the source's, the plan's and the platform's
+  // (JOURNAL_INTAKE_MAX_MESSAGE_BYTES) size applies.
+  'journal_intake_messages_per_minute',
+  'journal_intake_max_message_bytes',
 ] as const;
 export type LimitKey = (typeof LIMIT_KEYS)[number];
 
@@ -556,6 +647,9 @@ export const FEATURE_KEYS = [
   // operator enables it per organization (`PUT /organizations/{id}/features/ato_detection`).
   // Plan defaults are a product-owner decision after calibration on real data.
   'ato_detection',
+  // Step 8.6 (D13, ADR-0090): journal-only intake (journal reports and copies on journal intake
+  // addresses). Enterprise, dedicated and archive_only; not trial or standard.
+  'journal_intake',
 ] as const;
 export type FeatureKey = (typeof FEATURE_KEYS)[number];
 
@@ -600,6 +694,8 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_minute: 60,
       outbound_recipients_per_domain_per_minute: 30,
       outbound_recipients_per_day: 2_000,
+      journal_intake_messages_per_minute: 0,
+      journal_intake_max_message_bytes: 0,
     },
     features: features(['inbound_filtering', 'bec_detection']),
   },
@@ -619,6 +715,8 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_minute: 300,
       outbound_recipients_per_domain_per_minute: 150,
       outbound_recipients_per_day: 50_000,
+      journal_intake_messages_per_minute: 0,
+      journal_intake_max_message_bytes: 0,
     },
     features: features([
       'inbound_filtering',
@@ -645,6 +743,8 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_minute: 1_200,
       outbound_recipients_per_domain_per_minute: 600,
       outbound_recipients_per_day: 500_000,
+      journal_intake_messages_per_minute: 6_000,
+      journal_intake_max_message_bytes: 50 * MiB,
     },
     features: features(FEATURE_KEYS.filter((key) => !OPERATOR_ENABLED_FEATURE_KEYS.includes(key))),
   },
@@ -664,8 +764,33 @@ export const PLANS: readonly PlanDef[] = Object.freeze([
       outbound_recipients_per_minute: 3_000,
       outbound_recipients_per_domain_per_minute: 1_500,
       outbound_recipients_per_day: 2_000_000,
+      journal_intake_messages_per_minute: 20_000,
+      journal_intake_max_message_bytes: 50 * MiB,
     },
     features: features(FEATURE_KEYS.filter((key) => !OPERATOR_ENABLED_FEATURE_KEYS.includes(key))),
+  },
+  {
+    // Step 8.6 (D13, ADR-0090, PO decision 1): journaling and archiving without mail filtering;
+    // no MX change. `serviceProfile` = archive_only (neither inbound nor outbound filtering).
+    code: 'archive_only',
+    name: 'Archive only',
+    description: 'Journal intake, journaling and archive without mail filtering',
+    limits: {
+      messages_per_day: 0,
+      max_domains: 100,
+      max_users: 10_000,
+      max_message_size_bytes: 50 * MiB,
+      api_requests_per_minute: 1_200,
+      quarantine_retention_days: 0,
+      archive_retention_days: 3_650,
+      inbound_recipients_per_minute: 0,
+      outbound_recipients_per_minute: 0,
+      outbound_recipients_per_domain_per_minute: 0,
+      outbound_recipients_per_day: 0,
+      journal_intake_messages_per_minute: 6_000,
+      journal_intake_max_message_bytes: 50 * MiB,
+    },
+    features: features(['archiving', 'journal_intake', 'api_access', 'sso', 'webhooks']),
   },
 ]);
 

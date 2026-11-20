@@ -10,6 +10,7 @@ import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { idempotencyKeyHash } from '../../../http/idempotency/idempotency-key';
 import type { IdempotentResult } from '../../../http/idempotency/idempotency.service';
 import type { ClientContext } from '../../auth/services/session.service';
+import { gatewayMessageState } from '../domain/gateway-states';
 import type { ReasonBody, ReleaseBody, ReleaseOutcome } from '../dto/quarantine.schemas';
 import {
   QUARANTINE_AUDIT,
@@ -367,7 +368,7 @@ export class QuarantineReleaseService {
       entry: locked.entry,
       messagePublicId: ids.get(locked.entry.messageId) ?? '',
       mode,
-      messageState: locked.snapshot.state,
+      messageState: gatewayMessageState(locked.snapshot.state),
       settings,
       now,
     });

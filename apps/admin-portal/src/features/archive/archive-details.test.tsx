@@ -9,6 +9,7 @@ import {
   mockApi,
   okJson,
   renderWithProviders,
+  MIGRATED_ADMIN_PERMISSIONS,
 } from '@/test';
 import type { Me } from '@/lib/api/types';
 import { ArchiveDetails } from './archive-details';
@@ -27,6 +28,8 @@ afterEach(() => vi.restoreAllMocks());
 const mfaAdmin = (overrides: Partial<Me> = {}) =>
   makeMe({
     role: 'organization_admin',
+    // Step 8.6: an existing admin keeps archive access through the migrated compliance_officer.
+    permissions: MIGRATED_ADMIN_PERMISSIONS,
     overrides: {
       mfaEnabled: true,
       session: { id: '01930000-0000-7000-8000-000000000501', mfaAuthenticated: true },
@@ -282,6 +285,7 @@ describe('/archive/[messageId] (A19, A28)', () => {
     mockDetail();
     const second = renderWithProviders(<ArchiveDetails messageId={MESSAGE_ID} />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
     });
     expect(
       await screen.findAllByText(/needs a session signed in with multi-factor authentication/),

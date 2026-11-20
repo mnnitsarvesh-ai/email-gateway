@@ -14,3 +14,6 @@ export * from './special-addresses';
 // relay rules (egress ranges, proof policy and evaluation, probe addresses) and the route token.
 export * from './provider-relay';
 export * from './route-token';
+// Step 8.6 (docs/plan/steps/27-journal-intake-and-archive-split.md D2.6, ADR-0087): journal
+// intake kinds and the content proof of the journal LMTP.
+export * from './journal-intake-proof';

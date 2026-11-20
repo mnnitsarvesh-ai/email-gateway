@@ -1,8 +1,10 @@
 import { FINAL_STATES, STATE_RANK, type ActorRole, type MessageState } from './states';
 import {
   findEdge,
+  INTAKE_ONLY_STATES,
   TRANSITIONS,
   type LifecycleReasonCode,
+  type MessageIngestSourceValue,
   type TransitionEdge,
 } from './transitions';
 
@@ -12,7 +14,9 @@ export type InvalidReason =
   | 'actor_not_allowed'
   | 'reason_not_allowed'
   | 'unexpected_from'
-  | 'future_round';
+  | 'future_round'
+  /** Step 8.6: a transition into `journaled` for a message that is not a journal intake copy. */
+  | 'ingest_source_not_allowed';
 
 export type Decision =
   | { result: 'apply'; edge: TransitionEdge; nextRound: number }
@@ -26,6 +30,11 @@ export interface LifecycleCurrent {
   state: MessageState | null;
   version: number;
   round: number;
+  /**
+   * `email_messages.ingest_source` (step 8.6). Absent = `gateway`: only a `journal_intake`
+   * message may enter `journaled` (INTAKE_ONLY_STATES).
+   */
+  ingestSource?: MessageIngestSourceValue;
 }
 
 /** The parts of a transition request the decision reads. */
@@ -59,7 +68,10 @@ const hasNewRoundEdge = (
  * 6. role or reason not on the edge → `invalid/actor_not_allowed` / `reason_not_allowed`; a
  *    reason the edge pairs with other roles only (`reasonRoles`, step 4.2 A13: E19 `scanner` only
  *    with `signature_rescan`, `operator` only with `admin_rescan`) → `invalid/reason_not_allowed`;
- * 7. `apply` (round + 1 on a re-entry edge).
+ * 7. an edge into an intake-only state (`journaled`, step 8.6) for a message whose ingest source
+ *    is not `journal_intake` → `invalid/ingest_source_not_allowed` (gateway messages can never
+ *    become `journaled`);
+ * 8. `apply` (round + 1 on a re-entry edge).
  *
  * Occurrence times are never compared (different clocks, ADR-0025).
  */
@@ -114,5 +126,12 @@ export function decideTransition(
     return { result: 'invalid', why: 'reason_not_allowed' };
   }
   // 7.
+  if (
+    INTAKE_ONLY_STATES.includes(edge.to) &&
+    (current.ingestSource ?? 'gateway') !== 'journal_intake'
+  ) {
+    return { result: 'invalid', why: 'ingest_source_not_allowed' };
+  }
+  // 8.
   return { result: 'apply', edge, nextRound: current.round + (edge.newRound ? 1 : 0) };
 }

@@ -3,6 +3,7 @@ import {
   type EmailEvent,
   type EmailMessageStatusHistory,
   type MessageDirection,
+  type MessageIngestSource,
   type MessageOutbox,
   type MessageStatus,
   PrismaClient,
@@ -50,6 +51,8 @@ export interface MessageOptions {
   statusChangedAt?: Date;
   /** received_at (default now). */
   receivedAt?: Date;
+  /** email_messages.ingest_source (step 8.6; default gateway). */
+  ingestSource?: MessageIngestSource;
 }
 
 /**
@@ -138,6 +141,7 @@ export class Fixtures {
           recipientCount: recipients.length,
           emlObjectKey,
           emlSha256: '0'.repeat(64),
+          ingestSource: options.ingestSource ?? 'gateway',
         },
       });
       if (state === 'received') {

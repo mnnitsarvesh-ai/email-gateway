@@ -1,12 +1,12 @@
 import type { Prisma } from '@email-gateway/database';
 import {
-  type AlertKind,
   ALERT_SCOPE_NONE,
   parseStoredEnvelope,
   type ResolvedNotificationSettings,
   resolveNotificationSettings,
   type WebhookEnvelope,
 } from '@email-gateway/webhooks';
+import type { SecurityAlertKind } from './alert-templates';
 import {
   findPermissionHolders,
   InconsistentNotificationReadError,
@@ -67,6 +67,16 @@ export interface AlertProviderConnection {
   healthStatus: string;
 }
 
+/** A journal intake source of the organization (step 8.6 D9): display and health fields only. */
+export interface AlertIntakeSource {
+  publicId: string;
+  displayName: string;
+  kind: string;
+  healthStatus: string;
+  lastAcceptedAt: Date | null;
+  silenceAlertMinutes: number | null;
+}
+
 /**
  * The writer reads of the security alerts (step 6.2 N3, N4), inside the consumer's idempotency
  * transaction, each scoped to the envelope's organization and echo-checked (4.2 §6, D15 of 6.1):
@@ -123,7 +133,7 @@ export class SecurityAlertReads {
   async windowEventCount(
     tx: Tx,
     organizationId: bigint,
-    kind: AlertKind,
+    kind: SecurityAlertKind,
     scopeKey: string,
     windowStart: Date,
   ): Promise<number | null> {
@@ -261,6 +271,15 @@ export class SecurityAlertReads {
     };
   }
 
+  /** A journal intake source of the organization by public id (step 8.6 D9). */
+  intakeSource(
+    tx: Tx,
+    organizationId: bigint,
+    publicId: string,
+  ): Promise<AlertIntakeSource | null> {
+    return readIntakeSource(tx, organizationId, publicId);
+  }
+
   /**
    * A provider connection of the organization by public id (step 8.2 D12): its name, provider and
    * current health only — never the tenant id, grants, credentials or attestations.
@@ -293,10 +312,50 @@ export class SecurityAlertReads {
   }
 }
 
+/**
+ * A journal intake source of the organization by public id (step 8.6 D9): display name, kind and
+ * health only — never its address hash, header token hash, networks or attestations.
+ */
+export async function readIntakeSource(
+  tx: Tx,
+  organizationId: bigint,
+  publicId: string,
+): Promise<AlertIntakeSource | null> {
+  const row = await tx.journalIntakeSource.findFirst({
+    where: { publicId, organizationId },
+    select: {
+      publicId: true,
+      organizationId: true,
+      displayName: true,
+      kind: true,
+      healthStatus: true,
+      lastAcceptedAt: true,
+      silenceAlertMinutes: true,
+    },
+  });
+  if (row === null) return null;
+  if (row.publicId !== publicId || row.organizationId !== organizationId) {
+    throw new InconsistentNotificationReadError('journal_intake_source');
+  }
+  return {
+    publicId: row.publicId,
+    displayName: row.displayName,
+    kind: row.kind,
+    healthStatus: row.healthStatus,
+    lastAcceptedAt: row.lastAcceptedAt,
+    silenceAlertMinutes: row.silenceAlertMinutes,
+  };
+}
+
 /** `notification_alert_windows.scope_key` of an alert (N2). */
 export function alertScopeKey(
-  kind: AlertKind,
-  scope: { domainPublicId?: string; subscriptionPublicId?: string; connectionPublicId?: string },
+  kind: SecurityAlertKind,
+  scope: {
+    domainPublicId?: string;
+    subscriptionPublicId?: string;
+    connectionPublicId?: string;
+    intakeSourcePublicId?: string;
+  },
 ): string {
   switch (kind) {
     case 'threat_detected':
@@ -307,5 +366,8 @@ export function alertScopeKey(
       return scope.subscriptionPublicId ?? ALERT_SCOPE_NONE;
     case 'integration_unhealthy':
       return scope.connectionPublicId ?? ALERT_SCOPE_NONE;
+    // Step 8.6 D9: one window per journal intake source (the archive-worker's scope key).
+    case 'journal_intake_silent':
+      return scope.intakeSourcePublicId ?? ALERT_SCOPE_NONE;
   }
 }

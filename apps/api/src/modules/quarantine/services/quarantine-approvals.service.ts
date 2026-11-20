@@ -12,6 +12,7 @@ import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { idempotencyKeyHash } from '../../../http/idempotency/idempotency-key';
 import type { IdempotentResult } from '../../../http/idempotency/idempotency.service';
 import type { ClientContext } from '../../auth/services/session.service';
+import { gatewayMessageState } from '../domain/gateway-states';
 import type { ApprovalRow } from '../domain/entry';
 import type { ApprovalDecisionResponse, ReasonBody } from '../dto/quarantine.schemas';
 import {
@@ -272,7 +273,7 @@ export class QuarantineApprovalsService {
       scope,
       entry: locked.entry,
       messagePublicId: ids.get(locked.entry.messageId) ?? '',
-      messageState: locked.snapshot.state,
+      messageState: gatewayMessageState(locked.snapshot.state),
       settings,
       now,
     };

@@ -79,6 +79,11 @@ import {
   SetCredentialsBodySchema,
   VerifyGrantBodySchema,
 } from '../src/modules/provider-connections/dto/provider-connections.schemas';
+import {
+  AttestationBodySchema as IntakeAttestationBodySchema,
+  CreateIntakeSourceBodySchema,
+  UpdateIntakeSourceBodySchema,
+} from '../src/modules/journaling/dto/journaling.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -184,6 +189,9 @@ const SECRET_BEARING_REDACTED_REPLAY = [
   // Step 8.2: the admin-consent URL (its single-use state) and the single-use probe address.
   'post /api/v1/provider-connections/:id/grants',
   'post /api/v1/provider-connections/:id/validations',
+  // Step 8.6 D11: the intake address (and Google header token) shown once on creation and rotation.
+  'post /api/v1/journaling/intake-sources',
+  'post /api/v1/journaling/intake-sources/:sourceId/rotate-address',
 ];
 
 /** §3.5: sensitive mutations keyed transactionally (IdempotencyService.execute). */
@@ -256,6 +264,17 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/ato/providers/:integrationId/backfill',
   'delete /api/v1/ato/providers/:integrationId',
   'post /api/v1/ato/accounts/:accountId/mailbox-state/refresh',
+  // Step 8.6 D11: the keyed journaling mutations (creation and rotation are ADR-0057 routes).
+  'put /api/v1/journaling/settings',
+  'post /api/v1/journaling/intake-sources',
+  'patch /api/v1/journaling/intake-sources/:sourceId',
+  'post /api/v1/journaling/intake-sources/:sourceId/rotate-address',
+];
+
+/** Step 8.6 D11: MFA mutations in the sensitive class without an Idempotency-Key. */
+const SENSITIVE_UNKEYED_8_6 = [
+  'delete /api/v1/journaling/intake-sources/:sourceId',
+  'post /api/v1/journaling/intake-sources/:sourceId/attestations',
 ];
 
 /**
@@ -455,6 +474,25 @@ const NEW_IN_8_2 = [
  * Step 8.5 §6 (docs/plan/steps/26-ato-provider-adapters.md): the 13 identity-provider and mailbox
  * state operations (examples required, no paged list, exactly the ato-providers manifest).
  */
+/**
+ * Step 8.6 D11 (docs/plan/steps/27-journal-intake-and-archive-split.md): the 12 journaling
+ * operations (examples required, one v1 list, exactly the journaling manifest).
+ */
+const NEW_IN_8_6 = [
+  'get /api/v1/journaling/settings',
+  'put /api/v1/journaling/settings',
+  'get /api/v1/journaling/status',
+  'get /api/v1/journaling/intake-sources',
+  'post /api/v1/journaling/intake-sources',
+  'get /api/v1/journaling/intake-sources/:sourceId',
+  'patch /api/v1/journaling/intake-sources/:sourceId',
+  'delete /api/v1/journaling/intake-sources/:sourceId',
+  'post /api/v1/journaling/intake-sources/:sourceId/rotate-address',
+  'get /api/v1/journaling/intake-sources/:sourceId/wizard',
+  'get /api/v1/journaling/intake-sources/:sourceId/setup-guide',
+  'post /api/v1/journaling/intake-sources/:sourceId/attestations',
+];
+
 const NEW_IN_8_5 = [
   'get /api/v1/ato/providers',
   'get /api/v1/ato/providers/requirements',
@@ -546,6 +584,10 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['ProviderMailFlowController.apply', ApplyBodySchema],
   ['ProviderAttestationsController.record', AttestationBodySchema],
   ['ProviderValidationsController.create', CreateValidationBodySchema],
+  // Step 8.6: the journaling mutations parse after the key checks.
+  ['IntakeSourcesController.create', CreateIntakeSourceBodySchema],
+  ['IntakeSourcesController.update', UpdateIntakeSourceBodySchema],
+  ['IntakeSourcesController.attest', IntakeAttestationBodySchema],
 ]);
 
 const BODY: number = RouteParamtypes.BODY;
@@ -678,15 +720,16 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (391 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (403 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
     // plus the validate and sample dry-run routes of step 7.3, plus the 41 archive, legal hold
     // and eDiscovery operations of step 8.1, plus the 26 account takeover and 8 security incident
     // operations of step 8.4, plus the 24 provider-connection operations of step 8.2, plus the 13
-    // identity-provider and mailbox state operations of step 8.5.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(391);
+    // identity-provider and mailbox state operations of step 8.5, plus the 12 journaling
+    // operations of step 8.6.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(403);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -781,7 +824,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2 and 8.5 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5 and 8.6 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -793,6 +836,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_8_4,
       ...NEW_IN_8_2,
       ...NEW_IN_8_5,
+      ...NEW_IN_8_6,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -861,6 +905,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [...NEW_IN_8_5].sort(),
     );
     expect(NEW_IN_8_5).toHaveLength(13);
+    // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
+    expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
+    expect(NEW_IN_8_6).toHaveLength(12);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -881,6 +928,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_8_4.includes(route), route).toBe(false);
       expect(NEW_IN_8_2.includes(route), route).toBe(false);
       expect(NEW_IN_8_5.includes(route), route).toBe(false);
+      expect(NEW_IN_8_6.includes(route), route).toBe(false);
     }
   });
 
@@ -932,7 +980,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_8_1.includes(key) ||
           NEW_IN_8_4.includes(key) ||
           NEW_IN_8_2.includes(key) ||
-          NEW_IN_8_5.includes(key)) &&
+          NEW_IN_8_5.includes(key) ||
+          NEW_IN_8_6.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -945,8 +994,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     for (const { route } of facts) if (route.cursor) counts[route.cursor] += 1;
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
     // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
-    // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 35 });
+    // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
+    // sources list of 8.6 are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 36 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1020,8 +1070,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations, plus
     // the 14 keyed ATO and incident mutations of step 8.4, plus the 12 keyed provider-connection
     // mutations of step 8.2, plus the 8 keyed identity-provider and mailbox state mutations of
-    // step 8.5.
-    expect(operations).toHaveLength(91);
+    // step 8.5, plus the 4 keyed journaling mutations of step 8.6.
+    expect(operations).toHaveLength(95);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {
@@ -1070,6 +1120,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           ...SENSITIVE_LEGACY,
           ...SECRET_BEARING,
           ...SECRET_BEARING_REDACTED_REPLAY,
+          ...SENSITIVE_UNKEYED_8_6,
         ]),
       ].sort(),
     );

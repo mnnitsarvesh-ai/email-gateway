@@ -22,6 +22,7 @@ const DOMAIN_PUBLIC = WEBHOOK_EXAMPLE_DATA['domain.dns.failed'].domain.id;
 const SUBSCRIPTION = '0192f0c4-aaaa-7bbb-8ccc-000000000001';
 const CONNECTION = WEBHOOK_EXAMPLE_DATA['integration.health_changed'].connection.id;
 const RECEIVED = '2026-11-13T09:14:02.481Z';
+const INTAKE_SOURCE = '0192f0c4-bbbb-7ccc-8ddd-000000000086';
 const WINDOW = { from: '2026-11-13T09:00:00.000Z', to: '2026-11-13T10:00:00.000Z' };
 
 let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
@@ -50,7 +51,9 @@ function alert(
         ? { webhookEventId: dnsStored().eventId, domainId: '31' }
         : kind === 'integration_unhealthy'
           ? { webhookEventId: integrationStored().eventId, connectionId: CONNECTION }
-          : { subscriptionId: SUBSCRIPTION };
+          : kind === 'journal_intake_silent'
+            ? { intakeSourceId: INTAKE_SOURCE }
+            : { subscriptionId: SUBSCRIPTION };
   return {
     eventId: EVENT_ID,
     eventType: 'notification.alert_requested.v1',
@@ -59,7 +62,7 @@ function alert(
     organizationId: '7',
     payload: {
       kind,
-      severity: kind === 'webhook_disabled' ? 'medium' : 'high',
+      severity: kind === 'webhook_disabled' || kind === 'journal_intake_silent' ? 'medium' : 'high',
       refs,
       window: WINDOW,
       counts: { suppressedBefore: 3 },
@@ -146,6 +149,7 @@ const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
   'domain:manage': [{ id: 13n, email: 'dom@acme.example' }],
   'webhook:manage': [{ id: 14n, email: 'hook@acme.example' }],
   'integration:read': [{ id: 15n, email: 'ops@acme.example' }],
+  'journal:manage': [{ id: 16n, email: 'it@acme.example' }],
 };
 
 function setup(options: SetupOptions = {}) {
@@ -204,6 +208,20 @@ function setup(options: SetupOptions = {}) {
         disabledReason: 'sustained_failure',
       }),
     ),
+    intakeSource: vi.fn((_tx: unknown, _org: bigint, publicId: string) =>
+      Promise.resolve(
+        publicId === INTAKE_SOURCE
+          ? {
+              publicId: INTAKE_SOURCE,
+              displayName: 'Contoso journal',
+              kind: 'microsoft_365_journal',
+              healthStatus: 'silent',
+              lastAcceptedAt: new Date('2026-11-13T05:00:00.000Z'),
+              silenceAlertMinutes: 240,
+            }
+          : null,
+      ),
+    ),
     providerConnection: vi.fn(
       (_tx: unknown, _org: bigint, publicId: string) =>
         Promise.resolve(
@@ -246,6 +264,86 @@ function setup(options: SetupOptions = {}) {
 
 // resolveNotificationSettings is pure; the reads fake returns it like the real reads do.
 const resolve = (stored: unknown) => resolveNotificationSettings(stored ?? null).settings;
+
+describe('AlertNotificationHandler journal_intake_silent (step 8.6 D9)', () => {
+  it('silent (medium): journal:manage holders + contact, source name and kind, intake link, no address', async () => {
+    const s = setup();
+    expect(await s.handler.handle(alert('journal_intake_silent'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'journal:manage', 50, null);
+    expect(s.reads.intakeSource).toHaveBeenCalledWith(tx, 7n, INTAKE_SOURCE);
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['it@acme.example', 'secops@acme.example']);
+    expect(mail.subject).toBe(
+      '[Email Gateway] Security alert (medium): journal intake source needs attention',
+    );
+    expect(mail.text).toContain('Alert: Journal intake source silent or failing');
+    expect(mail.text).toContain(`Journal intake source: Contoso journal (${INTAKE_SOURCE})`);
+    expect(mail.text).toContain('Source kind: Microsoft 365 journaling');
+    expect(mail.text).toContain('Problem: silent.');
+    expect(mail.text).toContain('(240 minutes)');
+    expect(mail.text).toContain('Health now: silent');
+    expect(mail.text).toContain('Last accepted message: 2026-11-13T05:00:00.000Z');
+    expect(mail.text).toContain(
+      `Details: https://portal.example/settings/journaling/intake/${INTAKE_SOURCE}`,
+    );
+    expect(mail.text).not.toContain('@');
+    expect(mail.text).not.toContain('journal-');
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'journal_intake_silent',
+      INTAKE_SOURCE,
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'journal_intake_silent', result: 'sent' }]);
+  });
+
+  it('failing (high): the failing text', async () => {
+    const s = setup();
+    await s.handler.handle(alert('journal_intake_silent', { severity: 'high' }), tx);
+    expect(s.sent[0]!.subject).toContain('(high)');
+    expect(s.sent[0]!.text).toContain('Problem: failing.');
+    expect(s.sent[0]!.text).not.toContain('Problem: silent.');
+  });
+
+  it('is sent even when every tenant-configurable alert kind is switched off', async () => {
+    const s = setup({
+      settings: {
+        alerts: {
+          threatDetected: { enabled: false },
+          domainDnsFailed: { enabled: false },
+          webhookDisabled: { enabled: false },
+        },
+      },
+    });
+    expect(await s.handler.handle(alert('journal_intake_silent'), tx)).toBe('sent');
+  });
+
+  it('a missing or foreign source dead-letters; no mail', async () => {
+    const s = setup();
+    await expect(
+      s.handler.handle(alert('journal_intake_silent', { refs: {} }), tx),
+    ).rejects.toThrow('alert_refs_missing');
+    await expect(
+      s.handler.handle(
+        alert('journal_intake_silent', {
+          refs: { intakeSourceId: '0192f0c4-bbbb-7ccc-8ddd-000000000099' },
+        }),
+        tx,
+      ),
+    ).rejects.toThrow('intake_source_not_found');
+    expect(s.sent).toEqual([]);
+    expect(s.counts).toEqual([
+      { kind: 'journal_intake_silent', result: 'failed' },
+      { kind: 'journal_intake_silent', result: 'failed' },
+    ]);
+  });
+
+  it('no journal:manage holder and no contact: no_recipients', async () => {
+    const s = setup({ holders: {}, contact: null });
+    expect(await s.handler.handle(alert('journal_intake_silent'), tx)).toBe('no_recipients');
+  });
+});
 
 describe('AlertNotificationHandler (step 6.2 N3, N4)', () => {
   it('integration_unhealthy (step 8.2 D12): integration:read holders, check titles, health link', async () => {

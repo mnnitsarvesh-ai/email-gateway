@@ -3,7 +3,8 @@
  * entries whose gate operations the user may call, evaluated from the OpenAPI snapshot's
  * `x-eg-permissions` and the user's `GET /auth/me` permissions (not from the portal's code);
  * `/` lands on the first permitted entry; direct URLs of hidden pages show the 403 page; actions
- * the role cannot perform are not offered.
+ * the role cannot perform are not offered. Step 8.6: the Archive section (Search, Retention and
+ * lock, Legal holds, eDiscovery, Access audit) and the compliance officer role.
  */
 import type { Page } from '@playwright/test';
 import { signIn } from '../support/auth';
@@ -31,6 +32,8 @@ const ROLES: Array<{ key: UserKey; role: string; minVisible: number }> = [
   { key: 'alphaReadOnly', role: 'read_only_user', minVisible: 10 },
   { key: 'alphaMailbox', role: 'mailbox_user', minVisible: 2 },
   { key: 'platformAdmin', role: 'platform_admin', minVisible: 10 },
+  // Step 8.6: the archive role (Archive section incl. Access audit, no gateway mail pages).
+  { key: 'alphaCompliance', role: 'compliance_officer', minVisible: 10 },
 ];
 
 for (const { key, role, minVisible } of ROLES) {

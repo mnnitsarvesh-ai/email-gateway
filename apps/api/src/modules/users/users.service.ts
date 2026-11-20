@@ -25,8 +25,13 @@ import {
 } from '../auth/services/session.service';
 import type { IssuedUserToken } from '../auth/services/user-token.service';
 import {
+  archiveAccessChanges,
+  archiveAccessOf,
+  type AssignmentActor,
   assertCanManageUser,
   assertNoEscalation,
+  forAssignment,
+  type RolePermissionSet,
   violatesLastAdministrator,
 } from '../roles/role-rules';
 import type { RoleRecord } from '../roles/roles.repository';
@@ -124,6 +129,14 @@ export function changedRoles(
 const isSelf = (principal: Principal, user: UserRecord): boolean =>
   principal.kind === 'user' && principal.userId === user.id;
 
+/** The role-assignment actor of the archive delegation rule (step 8.6 D12). */
+const assignmentActor = (principal: Principal, self: boolean): AssignmentActor => ({
+  permissions: principal.permissions,
+  kind: principal.kind,
+  mfaAuthenticated: principal.kind === 'user' && principal.mfaAuthenticated,
+  self,
+});
+
 const actorUserId = (principal: Principal): bigint | null =>
   principal.kind === 'user' ? principal.userId : null;
 
@@ -199,7 +212,10 @@ export class UsersService {
         throw new ConflictException('A user with this email already exists');
       }
       const roles = await this.roles.resolveForAssignment(tx, scope, body.roleKeys);
-      assertNoEscalation(principal.permissions, roles);
+      assertNoEscalation(
+        principal.permissions,
+        forAssignment(assignmentActor(principal, false), roles),
+      );
       const count = await this.users.countNonDeleted(tx, scope);
       await this.limits.assertWithinLimit(tx, scope.organizationId, 'max_users', count);
 
@@ -246,6 +262,10 @@ export class UsersService {
         },
         tx,
       );
+      await this.recordArchiveAccess(tx, principal, scope, user.publicId, client.ip, {
+        granted: roles.filter((r) => archiveAccessOf(r).length > 0),
+        revoked: [],
+      });
       return { user, token, reinstated: existing !== null };
     });
 
@@ -430,6 +450,44 @@ export class UsersService {
     return toUserView(await this.require(scope, publicId));
   }
 
+  /**
+   * Step 8.6 D12 (ADR-0089): one extra audit row per assigned or removed role that carries archive
+   * access (`rbac.archive_access_granted` / `rbac.archive_access_revoked`, resource `user`,
+   * metadata the role key, the target user's public id and the archive permissions of the role),
+   * in the assignment's transaction. The Archive → Access audit page lists them.
+   */
+  private async recordArchiveAccess(
+    tx: Prisma.TransactionClient,
+    principal: Principal,
+    scope: TenantScope,
+    userPublicId: string,
+    sourceIp: string | null,
+    changes: { granted: readonly RolePermissionSet[]; revoked: readonly RolePermissionSet[] },
+  ): Promise<void> {
+    const rows = [
+      ...changes.granted.map((role) => ({ action: 'rbac.archive_access_granted', role })),
+      ...changes.revoked.map((role) => ({ action: 'rbac.archive_access_revoked', role })),
+    ];
+    for (const { action, role } of rows) {
+      await this.audit.record(
+        {
+          organizationId: scope.organizationId,
+          actor: this.audit.actorFrom(principal),
+          action,
+          resourceType: 'user',
+          resourceId: userPublicId,
+          sourceIp,
+          metadata: {
+            roleKey: role.key,
+            userId: userPublicId,
+            permissions: archiveAccessOf(role),
+          },
+        },
+        tx,
+      );
+    }
+  }
+
   /** `PUT /users/{id}/roles`: replaces the role set (escalation, platform, last-admin rules). */
   async replaceRoles(
     principal: Principal,
@@ -447,8 +505,14 @@ export class UsersService {
         scope,
         user.roles.map((r) => r.key),
       );
-      assertCanManageUser(principal.permissions, current);
-      assertNoEscalation(principal.permissions, changedRoles(user.roles, next, current));
+      // Step 8.6 D12: archive access is delegated by user managers (audited below): users only,
+      // MFA-authenticated, never to themselves.
+      const assigner = assignmentActor(principal, isSelf(principal, user));
+      assertCanManageUser(principal.permissions, forAssignment(assigner, current));
+      assertNoEscalation(
+        principal.permissions,
+        forAssignment(assigner, changedRoles(user.roles, next, current)),
+      );
       await this.users.replaceRoles(
         tx,
         scope,
@@ -470,6 +534,18 @@ export class UsersService {
           },
         },
         tx,
+      );
+      await this.recordArchiveAccess(
+        tx,
+        principal,
+        scope,
+        user.publicId,
+        client.ip,
+        archiveAccessChanges(
+          user.roles.map((r) => r.key),
+          next,
+          current,
+        ),
       );
       return user;
     });

@@ -21,7 +21,12 @@ const organizationSelect = {
   statusReason: true,
   statusChangedAt: true,
   planId: true,
-  plan: { select: { code: true, name: true } },
+  plan: { select: { code: true, name: true, defaultFeatures: true } },
+  // Step 8.6 D13: the features the service profile is derived from (row or plan default).
+  features: {
+    where: { featureKey: { in: ['inbound_filtering', 'outbound_filtering', 'archiving'] } },
+    select: { featureKey: true, enabled: true },
+  },
   deploymentMode: true,
   dataRegion: true,
   deletionRequestedAt: true,

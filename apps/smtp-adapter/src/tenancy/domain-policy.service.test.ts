@@ -9,7 +9,7 @@ import {
 } from '../../integration/in-session-support/fakes';
 import { DomainPolicyService } from './domain-policy.service';
 
-function harness() {
+function harness(config = testConfig()) {
   const prisma = {
     domain: {
       findUnique: vi.fn(({ where }: { where: { verifiedName: string } }) =>
@@ -42,11 +42,7 @@ function harness() {
   };
   const redis = new FakeRedis();
   const metrics = newMetrics();
-  const service = new DomainPolicyService(
-    prismaService(prisma),
-    jsonCache(redis, metrics),
-    testConfig(),
-  );
+  const service = new DomainPolicyService(prismaService(prisma), jsonCache(redis, metrics), config);
   return { prisma, redis, metrics, service };
 }
 
@@ -80,6 +76,14 @@ describe('DomainPolicyService (D5)', () => {
     >;
     expect(cached.domainId).toBe('11');
     expect(h.redis.ttlMs.get('sa:dom:tenant.test')).toBe(60_000);
+  });
+
+  it('never resolves the journal intake domain or its subdomains (step 8.6 D1)', async () => {
+    const h = harness(testConfig({ JOURNAL_INTAKE_DOMAIN: 'Tenant.Test' }));
+    expect(await h.service.get('tenant.test')).toBeNull();
+    expect(await h.service.get('sub.tenant.test')).toBeNull();
+    expect(h.prisma.domain.findUnique).not.toHaveBeenCalled();
+    expect(h.redis.store.size).toBe(0);
   });
 
   it('serves hits from Redis without touching the database', async () => {

@@ -1,11 +1,11 @@
 import {
   Activity,
-  Archive,
   BarChart3,
   Briefcase,
   Building2,
   CreditCard,
   FileClock,
+  FileSearch,
   Gavel,
   Globe,
   History,
@@ -21,6 +21,7 @@ import {
   Settings,
   Settings2,
   ShieldAlert,
+  ScanSearch,
   ShieldCheck,
   Siren,
   UserCheck,
@@ -39,6 +40,15 @@ import type { OperationId } from '@/lib/api/types';
  */
 export type Gate = readonly OperationId[] | 'authenticated';
 
+/**
+ * The service profile of the acting organization (step 8.6 D13, ADR-0090), derived by the api
+ * from the effective features and returned by `GET /auth/me` (`organization.serviceProfile`).
+ */
+export type ServiceProfile = 'gateway' | 'archive_only';
+
+/** Items that exist only for organizations whose mail flows through the gateway (D13). */
+const GATEWAY_ONLY: readonly ServiceProfile[] = ['gateway'];
+
 export interface NavItem {
   readonly id: string;
   readonly label: string;
@@ -52,6 +62,16 @@ export interface NavItem {
   readonly childGate?: Gate;
   /** A live badge rendered by the shell (step 8.4 D16: active critical incidents, approvals). */
   readonly badge?: 'ato-attention';
+  /**
+   * Service profiles the item exists for (step 8.6 D13; default: every profile). A hidden item's
+   * routes show the "not available for this plan" state.
+   */
+  readonly profiles?: readonly ServiceProfile[];
+  /**
+   * Permissions the user must also hold, all of them (step 8.6: the Archive → Access audit page
+   * reads the audit log with `audit:read` and is part of the archive audience, `archive:search`).
+   */
+  readonly requires?: readonly string[];
 }
 
 export interface NavSection {
@@ -67,6 +87,7 @@ export const NAVIGATION: readonly NavSection[] = [
     items: [
       {
         id: 'dashboard',
+        profiles: GATEWAY_ONLY,
         label: 'Dashboard',
         href: '/dashboard',
         icon: LayoutDashboard,
@@ -74,6 +95,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'reports',
+        profiles: GATEWAY_ONLY,
         label: 'Reports',
         href: '/reports',
         icon: BarChart3,
@@ -87,6 +109,7 @@ export const NAVIGATION: readonly NavSection[] = [
     items: [
       {
         id: 'messages',
+        profiles: GATEWAY_ONLY,
         label: 'Email explorer',
         href: '/messages',
         icon: Mail,
@@ -94,6 +117,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'quarantine',
+        profiles: GATEWAY_ONLY,
         label: 'Quarantine',
         href: '/quarantine',
         icon: ShieldAlert,
@@ -101,6 +125,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'mail-servers',
+        profiles: GATEWAY_ONLY,
         label: 'Mail servers',
         href: '/mail-servers',
         icon: Server,
@@ -120,6 +145,7 @@ export const NAVIGATION: readonly NavSection[] = [
         // Step 8.4 D24: the generic, category-aware incident list (top-level; ATO is its first
         // category, ATP categories join the same page later).
         id: 'incidents',
+        profiles: GATEWAY_ONLY,
         label: 'Incidents',
         href: '/incidents',
         icon: Siren,
@@ -128,6 +154,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'policies',
+        profiles: GATEWAY_ONLY,
         label: 'Policy management',
         href: '/policies',
         icon: ScrollText,
@@ -135,6 +162,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'policy-builder',
+        profiles: GATEWAY_ONLY,
         label: 'Policy builder',
         href: '/policies/builder',
         icon: Workflow,
@@ -142,6 +170,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'threat-intelligence',
+        profiles: GATEWAY_ONLY,
         label: 'Threat intelligence',
         href: '/threat-intelligence',
         icon: Radar,
@@ -149,6 +178,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'url-protection',
+        profiles: GATEWAY_ONLY,
         label: 'URL protection',
         href: '/url-protection',
         icon: Link2,
@@ -156,6 +186,7 @@ export const NAVIGATION: readonly NavSection[] = [
       },
       {
         id: 'attachments',
+        profiles: GATEWAY_ONLY,
         label: 'Attachment analysis',
         href: '/attachments',
         icon: Paperclip,
@@ -210,20 +241,22 @@ export const NAVIGATION: readonly NavSection[] = [
     ],
   },
   {
-    id: 'compliance',
-    label: 'Compliance',
+    // Step 8.6 (D14): the former "Compliance" section is the Archive: storage and use of archived
+    // mail. What is journaled (capture) is configured in Settings → Journaling.
+    id: 'archive',
+    label: 'Archive',
     items: [
       {
         id: 'archive',
-        label: 'Archive',
+        label: 'Search',
         href: '/archive',
-        icon: Archive,
+        icon: ScanSearch,
         gate: ['ArchiveMessagesController_list_v1'],
         childGate: ['ArchiveMessagesController_detail_v1'],
       },
       {
         id: 'retention',
-        label: 'Retention and review',
+        label: 'Retention and lock',
         href: '/archive/retention',
         icon: History,
         gate: ['ArchiveRetentionController_list_v1'],
@@ -241,6 +274,16 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/ediscovery',
         icon: Briefcase,
         gate: ['EdiscoveryCasesController_list_v1'],
+      },
+      {
+        // Step 8.6 (D14): the audit log rows of archive use (archive., ediscovery., legal_hold.,
+        // rbac.archive_access) for the archive audience.
+        id: 'access-audit',
+        label: 'Access audit',
+        href: '/archive/access-audit',
+        icon: FileSearch,
+        gate: ['AuditLogsController_search_v1'],
+        requires: ['archive:search'],
       },
     ],
   },
@@ -321,19 +364,61 @@ export const NAVIGATION: readonly NavSection[] = [
 
 export const NAV_ITEMS: readonly NavItem[] = NAVIGATION.flatMap((section) => section.items);
 
+/** Whether the item exists for the organization's service profile (step 8.6 D13). */
+export function availableForProfile(item: NavItem, profile: ServiceProfile = 'gateway'): boolean {
+  return !item.profiles || item.profiles.includes(profile);
+}
+
+/** Whether the user may see the item: its gate, its extra permissions and the profile. */
+export function itemVisible(
+  item: NavItem,
+  granted: ReadonlySet<string>,
+  profile: ServiceProfile = 'gateway',
+): boolean {
+  return (
+    availableForProfile(item, profile) &&
+    passesGate(item.gate, granted) &&
+    (item.requires ?? []).every((permission) => granted.has(permission))
+  );
+}
+
 /** Sections with only the items the user may see (empty sections dropped). */
-export function visibleNavigation(permissions: readonly string[]): NavSection[] {
+export function visibleNavigation(
+  permissions: readonly string[],
+  profile: ServiceProfile = 'gateway',
+): NavSection[] {
   const granted = new Set(permissions);
   return NAVIGATION.map((section) => ({
     ...section,
-    items: section.items.filter((item) => passesGate(item.gate, granted)),
+    items: section.items.filter((item) => itemVisible(item, granted, profile)),
   })).filter((section) => section.items.length > 0);
 }
 
-/** The first route the user may open (the `/` redirect); `/settings` is always allowed. */
-export function firstPermittedHref(permissions: readonly string[]): string {
+/** Settings → Journaling (step 8.6 D14): the capture half of the former archive settings. */
+export const JOURNALING_SETTINGS_HREF = '/settings?tab=journaling';
+
+/**
+ * The first route the user may open (the `/` redirect); `/settings` is always allowed. An
+ * archive-only organization lands on Archive search, or on Settings → Journaling for users
+ * without archive access (step 8.6 D13).
+ */
+export function firstPermittedHref(
+  permissions: readonly string[],
+  profile: ServiceProfile = 'gateway',
+): string {
   const granted = new Set(permissions);
-  return NAV_ITEMS.find((item) => passesGate(item.gate, granted))?.href ?? '/settings';
+  if (profile === 'archive_only') {
+    const search = NAV_ITEMS.find((item) => item.id === 'archive');
+    if (search && itemVisible(search, granted, profile)) return search.href;
+    if (passesGate(['JournalingController_get_v1'], granted)) return JOURNALING_SETTINGS_HREF;
+  }
+  return NAV_ITEMS.find((item) => itemVisible(item, granted, profile))?.href ?? '/settings';
+}
+
+/** Whether a route belongs to an item the organization's plan does not offer (D13). */
+export function hiddenForProfile(pathname: string, profile: ServiceProfile = 'gateway'): boolean {
+  const item = navItemForPath(pathname);
+  return item !== null && !availableForProfile(item, profile);
 }
 
 /** Gate of the navigation item that owns a pathname (longest matching href). */
@@ -362,4 +447,6 @@ export const PLAN_STEPS: Readonly<Record<string, string>> = {
   '8.3': 'Step 8.3: Deployment manager (docs/plan/execution-plan.md)',
   '8.5':
     'Step 8.5: Microsoft 365 / Google Workspace identity-provider adapters for account takeover (docs/plan/execution-plan.md)',
+  '8.6':
+    'Step 8.6: Journal-only intake and the Journaling / Archive split (docs/plan/execution-plan.md)',
 };

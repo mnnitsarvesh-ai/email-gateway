@@ -20,7 +20,14 @@ export const WINDOW_GRACE_MS = 10_000;
 export const MINUTE_MS = 60_000;
 export const DAY_MS = 86_400_000;
 
-export type RateScope = 'ip' | 'tenant_in' | 'tenant_out' | 'tenant_out_day';
+export type RateScope =
+  | 'ip'
+  | 'tenant_in'
+  | 'tenant_out'
+  | 'tenant_out_day'
+  // Step 8.6 D2.2.6: journal intake messages per source and per organization and minute.
+  | 'jintake_src'
+  | 'jintake_org';
 
 /** UTC minute number (`floor(epochMs / 60000)`). */
 export const minuteWindow = (now: Date): number => Math.floor(now.getTime() / MINUTE_MS);
@@ -38,6 +45,10 @@ export function rateLimitKey(scope: RateScope, subject: string, now: Date): stri
       return `sa:rl:out:${subject}:${minuteWindow(now)}`;
     case 'tenant_out_day':
       return `sa:rl:outd:${subject}:${dayWindow(now)}`;
+    case 'jintake_src':
+      return `sa:rl:jintake_src:${subject}:${minuteWindow(now)}`;
+    case 'jintake_org':
+      return `sa:rl:jintake_org:${subject}:${minuteWindow(now)}`;
   }
 }
 

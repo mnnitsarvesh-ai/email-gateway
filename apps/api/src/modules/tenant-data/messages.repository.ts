@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../auth-contracts/tenant-scope';
+import { GATEWAY_MESSAGE_WHERE } from './gateway-messages';
 import { assertEcho, InconsistentReadError } from '../../http/listing/echo-check';
 import { clampTake } from './page';
 
@@ -69,8 +70,13 @@ export class MessagesRepository {
       select: { id: true, publicId: true, receivedAt: true },
     });
     if (!identity) return null;
+    // Step 8.6 D5: a journal intake message is not a gateway message.
     const message = await this.prisma.emailMessage.findFirst({
-      where: tenantWhere(scope, { id: identity.id, receivedAt: identity.receivedAt }),
+      where: tenantWhere(scope, {
+        id: identity.id,
+        receivedAt: identity.receivedAt,
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
       select: messageSelect,
     });
     return message ? { ...message, publicId: identity.publicId } : null;
@@ -101,6 +107,7 @@ export class MessagesRepository {
     const beyond = order === 'desc' ? 'lt' : 'gt';
     const rows = await this.reader.client.emailMessage.findMany({
       where: tenantWhere(scope, {
+        ...GATEWAY_MESSAGE_WHERE,
         receivedAt: { gte: range.from, lt: range.to },
         ...(after && {
           OR: [

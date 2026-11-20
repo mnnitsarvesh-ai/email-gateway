@@ -201,6 +201,33 @@ export class ArchiveWorld {
   /** Search bodies sent to the "OpenSearch" double (tenant alias and query assertions). */
   searchCalls: Array<{ organizationId: bigint; body: Record<string, unknown> }> = [];
   tenantKeys = new Map<string, SeedTenantKey>();
+  /** Step 8.6: journal intake sources (public id, name, kind) and merged copies of records. */
+  intakeSources: Array<{
+    id: bigint;
+    organizationId: bigint;
+    publicId: string;
+    displayName: string;
+    kind:
+      'microsoft_365_journal' | 'google_workspace_copy' | 'exchange_onprem_journal' | 'smtp_bcc';
+  }> = [];
+  recordSources: Array<{
+    organizationId: bigint;
+    archiveId: bigint;
+    archiveReceivedAt: Date;
+    messageId: bigint;
+    messageReceivedAt: Date;
+    messagePublicId: string;
+    source: 'gateway' | 'journal_intake';
+    emlSha256: string;
+    sizeBytes: number;
+    contentVariant: boolean;
+    recipientsAdded: number;
+    mergedAt: Date;
+  }> = [];
+  /** Step 8.6: organizations whose effective features have `journal_intake`. */
+  intakeEntitled = new Set<bigint>();
+  /** Step 8.6: organizations with the archive-only service profile. */
+  archiveOnly = new Set<bigint>();
   private nextId = 5000n;
   rootKey: { ARCHIVE_ROOT_KEY: string; ARCHIVE_ROOT_KEY_ID?: string | undefined } | null = null;
 
@@ -238,6 +265,10 @@ export class ArchiveWorld {
     this.searchDown = false;
     this.searchCalls = [];
     this.tenantKeys.clear();
+    this.intakeSources = [];
+    this.recordSources = [];
+    this.intakeEntitled.clear();
+    this.archiveOnly.clear();
   }
 
   // ---- fixtures ---------------------------------------------------------------------------------
@@ -289,6 +320,30 @@ export class ArchiveWorld {
     } as unknown as RecordRow;
     this.records.push(record);
     for (const [k, v] of seeded.objects) this.objects.set(k, v);
+    // Step 8.6: merged copies are registry messages of their own with an `archive_record_sources` row.
+    for (const m of seeded.merged) {
+      const copyId = this.id();
+      this.registry.push({
+        id: copyId,
+        publicId: m.messagePublicId,
+        receivedAt: m.receivedAt,
+        organizationId,
+      });
+      this.recordSources.push({
+        organizationId,
+        archiveId: record.id,
+        archiveReceivedAt: seeded.row.receivedAt,
+        messageId: copyId,
+        messageReceivedAt: m.receivedAt,
+        messagePublicId: m.messagePublicId,
+        source: m.source,
+        emlSha256: m.emlSha256,
+        sizeBytes: m.sizeBytes,
+        contentVariant: m.contentVariant,
+        recipientsAdded: 1,
+        mergedAt: new Date(seeded.row.receivedAt.getTime() + 120_000),
+      });
+    }
     this.docs.push({ organizationId, source: searchSourceOf(seeded.row) });
     return { ...seeded, record };
   }
@@ -720,6 +775,28 @@ export class ArchiveWorld {
     };
   }
 
+  /**
+   * `OrganizationFeaturesService` of the archive world: `archiving` unless disabled per
+   * organization; step 8.6 `journal_intake` per `intakeEntitled`, the service profile per
+   * `archiveOnly`.
+   */
+  featuresDouble() {
+    const w = this;
+    const enabled = (organizationId: bigint, key: string): boolean =>
+      (key === 'archiving' && !w.archivingDisabled.has(organizationId)) ||
+      (key === 'journal_intake' && w.intakeEntitled.has(organizationId));
+    return {
+      isEnabled: (organizationId: bigint, key: string) =>
+        Promise.resolve(enabled(organizationId, key)),
+      isEffectivelyEnabled: (organizationId: bigint, key: string) =>
+        Promise.resolve(enabled(organizationId, key)),
+      effective: (organizationId: bigint, keys: readonly string[]) =>
+        Promise.resolve(Object.fromEntries(keys.map((k) => [k, enabled(organizationId, k)]))),
+      serviceProfile: (organizationId: bigint) =>
+        Promise.resolve(w.archiveOnly.has(organizationId) ? 'archive_only' : 'gateway'),
+    };
+  }
+
   recordsDouble(): Partial<Record<keyof ArchiveRecordsRepository, unknown>> {
     const w = this;
     const own = (scope: TenantScope) => scope.organizationId;
@@ -751,6 +828,52 @@ export class ArchiveWorld {
             ) ?? null,
           ),
         ),
+      intakeSourceRef: (scope: TenantScope, sourceId: bigint) => {
+        const src = w.intakeSources.find(
+          (x) => x.organizationId === own(scope) && x.id === sourceId,
+        );
+        return Promise.resolve(
+          src ? { publicId: src.publicId, displayName: src.displayName, kind: src.kind } : null,
+        );
+      },
+      recordSources: (scope: TenantScope, record: { id: bigint; receivedAt: Date }) =>
+        Promise.resolve(
+          copy(
+            w.recordSources
+              .filter(
+                (x) =>
+                  x.organizationId === own(scope) &&
+                  x.archiveId === record.id &&
+                  x.archiveReceivedAt.getTime() === record.receivedAt.getTime(),
+              )
+              .map(({ archiveReceivedAt: _a, ...rest }) => rest),
+          ),
+        ),
+      recordOfMergedCopy: (scope: TenantScope, copyKey: MessageKeyRow) => {
+        const src = w.recordSources.find(
+          (x) =>
+            x.organizationId === own(scope) &&
+            x.messageId === copyKey.id &&
+            x.messageReceivedAt.getTime() === copyKey.receivedAt.getTime(),
+        );
+        if (!src) return Promise.resolve(null);
+        const rec = w.records.find(
+          (r) => r.organizationId === own(scope) && r.id === src.archiveId,
+        );
+        if (!rec) return Promise.resolve(null);
+        const { archiveReceivedAt: _a, ...source } = src;
+        return Promise.resolve(
+          copy({
+            source,
+            record: {
+              id: rec.messageId,
+              publicId: rec.messagePublicId,
+              receivedAt: rec.receivedAt,
+              organizationId: rec.organizationId,
+            },
+          }),
+        );
+      },
       lockOrganizationForHolds: () => Promise.resolve(),
       lockRecord: (_tx: unknown, scope: TenantScope, key: MessageKeyRow) =>
         Promise.resolve(
@@ -1446,10 +1569,7 @@ export function overrideArchive(
         ),
     })
     .overrideProvider(OrganizationFeaturesService)
-    .useValue({
-      isEnabled: (organizationId: bigint, key: string) =>
-        Promise.resolve(key === 'archiving' && !world.archivingDisabled.has(organizationId)),
-    })
+    .useValue(world.featuresDouble())
     .overrideProvider(OrganizationLimitsService)
     .useValue({
       lockOrganization: () => Promise.resolve(),

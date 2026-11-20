@@ -124,7 +124,40 @@ export function AlertSettingsPanel() {
         readOnly={!canEdit}
         onConflict={() => void query.refetch()}
       />
+      <AlwaysOnAlerts />
     </ReportSection>
+  );
+}
+
+/**
+ * Alerts without an organization setting (sent whenever their condition holds, throttled by the
+ * platform). Step 8.6 adds `journal_intake_silent`: a journal intake source went silent or
+ * started failing.
+ */
+export const ALWAYS_ON_ALERTS: readonly { kind: string; label: string; detail: string }[] = [
+  {
+    kind: 'journal_intake_silent',
+    label: 'Journal intake source silent or failing',
+    detail:
+      'When a journal intake source receives no copy for its silence period, or its copies are refused or dropped. Sent to users with journal:manage and the organization contact, at most once a day per source. Names the source and links its setup guide; never shows the intake address.',
+  },
+];
+
+function AlwaysOnAlerts() {
+  return (
+    <div className="mt-4 grid gap-2 border-t pt-4">
+      <h3 className="text-sm font-semibold">Always-on alerts</h3>
+      <ul className="grid gap-2">
+        {ALWAYS_ON_ALERTS.map((alert) => (
+          <li key={alert.kind} className="grid gap-0.5 text-sm">
+            <span className="font-medium">
+              {alert.label} <code className="font-mono text-xs">{alert.kind}</code>
+            </span>
+            <span className="text-xs text-muted-foreground">{alert.detail}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

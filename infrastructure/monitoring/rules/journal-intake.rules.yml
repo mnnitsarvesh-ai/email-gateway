@@ -1,0 +1,90 @@
+# Journal-only intake and cross-source dedupe alerts (step 8.6 D9, R6;
+# docs/plan/steps/27-journal-intake-and-archive-split.md; ADR-0087, ADR-0088). Series: the
+# smtp-adapter's journal_intake_* series (job `smtp-adapter`: intake messages, refusals, unwrapping)
+# and the archive-worker's journal_intake_sources{health} gauge and archive_dedupe_total (job
+# `archive-worker`). Labels are bounded enums only (kind, outcome, stage, code, format, result,
+# health): never a tenant, source, address or token. journal_intake_sources is written by the
+# health-loop leader only (0 on other replicas), so it is aggregated with max().
+# An alert never changes mail flow: intake refusals are answered in-session to the customer's
+# provider or server, proof failures are dropped by design. Every alert links its section of
+# docs/runbooks/journal-intake.md.
+# Validate with `promtool check rules` and `promtool test rules tests/journal-intake.rules.test.yml`.
+groups:
+  - name: journal-intake
+    rules:
+      - alert: JournalIntakeSilentSources
+        expr: max(journal_intake_sources{health="silent"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Journal intake sources have been silent past their silence threshold
+          description: >-
+            {{ $value }} verified journal intake source(s) accepted no message for longer than
+            their silence_alert_minutes. The customers were alerted (journal_intake_silent); a
+            source that journals nothing may have a disabled or changed journal rule, a rotated
+            address not updated on the customer side, or refusals at RCPT.
+          runbook_url: docs/runbooks/journal-intake.md#journalintakesilentsources
+      - alert: JournalIntakeProofDropsHigh
+        expr: sum by (kind) (increase(journal_intake_messages_total{outcome="dropped"}[15m])) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Journal intake messages are being dropped for failed content proof
+          description: >-
+            More than 10 {{ $labels.kind }} intake messages in 15 minutes passed the RCPT checks
+            but failed the content proof (Microsoft 365 tenant header, Google header token) and
+            were accepted and dropped. Either a source's binding changed (tenant, token rotation)
+            or someone with the address is spoofing from the provider's shared ranges.
+          runbook_url: docs/runbooks/journal-intake.md#journalintakeproofdropshigh
+      - alert: JournalIntakeUnwrapFailures
+        expr: sum(increase(journal_intake_unwrap_total{format="journal_report_unparsed"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Journal reports could not be unwrapped and were stored as received
+          description: >-
+            {{ $value }} journal report(s) in the last hour were not recognized as Exchange journal
+            reports and were archived as received (format journal_report_unparsed): compliance is
+            kept, but the original message and its envelope recipients were not extracted.
+          runbook_url: docs/runbooks/journal-intake.md#journalintakeunwrapfailures
+      - alert: JournalIntakeRefusalsSpike
+        expr: sum by (code) (rate(journal_intake_refusals_total{stage="rcpt"}[10m])) * 60 > 30
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Journal intake RCPT refusals are spiking ({{ $labels.code }})
+          description: >-
+            The inbound MX refuses more than 30 journal intake recipients per minute with code
+            {{ $labels.code }} for 15 minutes. unknown_address: address guessing or an old address
+            after rotation; network/tls: a customer server outside its registered networks or
+            without TLS; unavailable: entitlement or archiving switched off; rate/size: limits.
+          runbook_url: docs/runbooks/journal-intake.md#journalintakerefusalsspike
+      - alert: JournalIntakeTempfails
+        # R6: Postfix bounces to the (authenticated) sender after maximal_queue_lifetime of 451s.
+        expr: sum by (kind) (increase(journal_intake_messages_total{outcome="tempfail"}[30m])) > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: The journal LMTP keeps answering 451 for intake messages
+          description: >-
+            More than 10 {{ $labels.kind }} intake deliveries in 30 minutes were tempfailed at the
+            journal LMTP (S3, database, Redis, a missing END-OF-MESSAGE marker or a proof that
+            could not be checked). Postfix retries; after 5 days the report bounces to the
+            customer's own system.
+          runbook_url: docs/runbooks/journal-intake.md#journalintaketempfails
+      - alert: ArchiveDedupeVariantLimit
+        expr: sum(increase(archive_dedupe_total{result="variant_limit"}[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: Merged archive copies hit the content-variant limit
+          description: >-
+            {{ $value }} copies in the last hour matched an archive record (Message-ID and header
+            fingerprint) but the record already holds ARCHIVE_MAX_CONTENT_VARIANTS differing
+            bodies; they were archived as separate records (nothing is lost, storage is not
+            saved). Many hits suggest a body-rewriting relay or a Message-ID reuse.
+          runbook_url: docs/runbooks/journal-intake.md#archivededupevariantlimit

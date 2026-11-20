@@ -134,6 +134,17 @@ The deadline sweeper finalized required engines as `timeout` (`deadline_exceeded
 
 `scan_engine_circuit_state{engine}` per worker: **0 closed** (calls pass; failures counted), **2 open** (calls refused for `SCAN_BREAKER_OPEN_MS`, each attempt recorded as `circuit_open`), **1 half-open** (one probe call at a time, `SCAN_BREAKER_HALF_OPEN_PROBES`; success closes, failure re-opens). Breakers are per worker and in memory: replicas open and close independently and a restart starts closed. Only transport failures count (definite results, `unknown` included, are successes; a missing EML or an S3 outage counts neither way). Transitions: `scan_engine_circuit_transitions_total{to}` and the warn log "scan engine circuit opened".
 
+## Journal intake rounds (step 8.6)
+
+A journal intake message is scanned only when its organization turned intake scanning on (`journal_intake_messages.scan_requested`, set at commit; [design](../plan/steps/27-journal-intake-and-archive-split.md) D4, D8). Its round runs every engine like any round and records the risk score, but the round's completion — by the engines or by the deadline sweeper — applies, in the same transaction, E6/E7 and then **E31** (`scanned → journaled`, `intake_scan_complete`) or **E32** (`scan_failed → journaled`, `intake_scan_failed`) in place of `mail.message.scanned.v1`: nothing reaches the policy engine, ATO or the webhooks (`threat_detected` alerts come from `scanned.v1`). The log line reads `journal intake scan round completed; message journaled, no scanned event`. Engines' own side outputs (sandbox tasks, URL inspection, DLP incidents) behave as for gateway mail. Signature rescans (`attachment_rescan_jobs`) never select intake messages, and `journaled` is final (no rescan edge leaves it).
+
+```sql
+-- Intake messages still in a scan state (normally seconds)
+SELECT status, COUNT(*) FROM email_messages
+WHERE ingest_source = 'journal_intake' AND status IN ('persisted', 'scanning', 'scanned', 'scan_failed')
+  AND received_at >= NOW() - INTERVAL 2 DAY GROUP BY status;
+```
+
 ## Stuck scanning messages
 
 A message in `scanning` longer than the round deadline should not exist: the sweeper finalizes it. If `LifecycleStuckMessages{state="scanning"}` fires:

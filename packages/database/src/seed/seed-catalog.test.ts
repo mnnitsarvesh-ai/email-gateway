@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ARCHIVE_ACCESS_PERMISSIONS,
   DEMO,
   DEMO_POLICY_DSL_VERSION,
   FEATURE_KEYS,
@@ -18,6 +19,7 @@ import {
   SYSTEM_SETTINGS,
   TENANT_PERMISSIONS,
   TENANT_READ_PERMISSIONS,
+  permissionCategoryOf,
   type PermissionKey,
   type SystemRoleKey,
 } from './catalog';
@@ -74,7 +76,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 70 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4 and 8.2, without duplicates', () => {
+  it('contains the 72 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4, 8.2 and 8.6, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -148,14 +150,16 @@ describe('seed catalog', () => {
         'ato:configure',
         'integration:read',
         'integration:manage',
+        'journal:read',
+        'journal:manage',
       ]),
     );
-    expect(keys).toHaveLength(70);
+    expect(keys).toHaveLength(72);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-38)).toEqual([
+    expect(keys.slice(-40)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -194,6 +198,8 @@ describe('seed catalog', () => {
       'ato:configure',
       'integration:read',
       'integration:manage',
+      'journal:read',
+      'journal:manage',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -229,6 +235,7 @@ describe('seed catalog', () => {
         'connector:read',
         'delivery:read',
         'integration:read',
+        'journal:read',
       ]),
     );
   });
@@ -292,6 +299,8 @@ describe('seed catalog', () => {
       compliance_auditor: true,
       read_only_user: false,
       mailbox_user: false,
+      // Step 8.6 (D12): the archive's record views are masked like the explorer's.
+      compliance_officer: true,
     };
     for (const key of SYSTEM_ROLE_KEYS) {
       expect((role(key) as readonly string[]).includes('message:reveal'), key).toBe(matrix[key]);
@@ -311,36 +320,41 @@ describe('seed catalog', () => {
     ).toEqual(['organization_admin', 'security_analyst', 'super_admin']);
   });
 
-  it('grants the step 8.1 archive and eDiscovery permissions exactly as A20 says', () => {
+  it('grants the step 8.1 archive and eDiscovery permissions as A20 says, re-scoped by step 8.6 D12', () => {
     const holders = (permission: string) =>
       SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
         .map((r) => r.key)
         .sort();
     const description = (key: string) => PERMISSIONS.find((p) => p.key === key)?.description;
+    // Step 8.6 (D12): re-scoped descriptions of archive:read, archive:search and archive:manage.
+    expect(description('archive:read')).toBe(
+      'View archive configuration, retention policies, key versions and status (no records)',
+    );
     expect(description('archive:search')).toBe(
-      'Search archived and journaled messages (metadata, masked)',
+      'Search archived messages and view their metadata, journal and security views (masked)',
     );
     expect(description('archive:retrieve')).toBe(
       'View the sanitized preview and download original archived messages (audited)',
     );
     expect(description('archive:manage')).toBe(
-      'Manage archive settings, retention policies, encryption keys, capture issues and ' +
-        'disposal of reviewed records',
+      'Manage retention policies, immutability, encryption keys, access settings and disposal ' +
+        'of reviewed records',
     );
     expect(description('ediscovery:manage')).toBe(
       'Manage eDiscovery cases, custodians, searches, review and exports',
     );
     // Archive settings need archive:manage from step 8.1 on.
     expect(description('settings:manage')).toBe('Change notification and quarantine settings');
+    // Step 8.6 (D12): organization_admin no longer holds archive access; compliance_officer does.
     expect(holders('archive:search')).toEqual(
-      ['compliance_auditor', 'organization_admin', 'security_analyst', 'super_admin'].sort(),
+      ['compliance_auditor', 'compliance_officer', 'security_analyst', 'super_admin'].sort(),
     );
     expect(holders('archive:retrieve')).toEqual(
-      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+      ['compliance_auditor', 'compliance_officer', 'super_admin'].sort(),
     );
-    expect(holders('archive:manage')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('archive:manage')).toEqual(['compliance_officer', 'super_admin']);
     expect(holders('ediscovery:manage')).toEqual(
-      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+      ['compliance_auditor', 'compliance_officer', 'super_admin'].sort(),
     );
     for (const key of [
       'archive:search',
@@ -357,6 +371,7 @@ describe('seed catalog', () => {
     expect(holders('archive:read')).toEqual(
       [
         'compliance_auditor',
+        'compliance_officer',
         'organization_admin',
         'platform_admin',
         'read_only_user',
@@ -365,9 +380,91 @@ describe('seed catalog', () => {
       ].sort(),
     );
     expect(holders('archive:export')).toEqual(
-      ['compliance_auditor', 'organization_admin', 'super_admin'].sort(),
+      ['compliance_auditor', 'compliance_officer', 'super_admin'].sort(),
     );
-    expect(holders('archive:legal_hold')).toEqual(['organization_admin', 'super_admin']);
+    expect(holders('archive:legal_hold')).toEqual(['compliance_officer', 'super_admin'].sort());
+  });
+
+  it('splits Journaling from Archive access as step 8.6 D12 says (ADR-0089)', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const def = (key: string) => PERMISSIONS.find((p) => p.key === key)!;
+    expect(def('journal:read').description).toBe(
+      'View journaling settings, journal intake sources and their health',
+    );
+    expect(def('journal:manage').description).toBe(
+      'Manage journaling capture settings and journal intake sources',
+    );
+    // The migration `journal_intake` writes the same categories (seed is a no-op afterwards).
+    expect(permissionCategoryOf(def('journal:read'))).toBe('journaling');
+    expect(permissionCategoryOf(def('journal:manage'))).toBe('journaling');
+    expect(permissionCategoryOf(def('archive:read'))).toBe('archive');
+    expect([...ARCHIVE_ACCESS_PERMISSIONS]).toEqual([
+      'archive:search',
+      'archive:retrieve',
+      'archive:export',
+      'archive:legal_hold',
+      'archive:manage',
+      'ediscovery:manage',
+    ]);
+    for (const key of ARCHIVE_ACCESS_PERMISSIONS) {
+      expect(role('organization_admin'), key).not.toContain(key);
+      expect(role('compliance_officer'), key).toContain(key);
+      expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
+    }
+    expect(sorted(role('organization_admin'))).toEqual(
+      sorted(TENANT_PERMISSIONS.filter((key) => !ARCHIVE_ACCESS_PERMISSIONS.includes(key))),
+    );
+    expect(holders('journal:read')).toEqual(
+      [
+        'compliance_auditor',
+        'compliance_officer',
+        'domain_admin',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
+    expect(holders('journal:manage')).toEqual(
+      ['domain_admin', 'organization_admin', 'super_admin'].sort(),
+    );
+    expect(TENANT_READ_PERMISSIONS).toContain('journal:read');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('journal:manage');
+    for (const key of ['journal:read', 'journal:manage']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+    }
+    expect(sorted(role('compliance_officer'))).toEqual(
+      sorted([
+        'organization:read',
+        'user:read',
+        'domain:read',
+        'journal:read',
+        'archive:read',
+        ...ARCHIVE_ACCESS_PERMISSIONS,
+        'message:reveal',
+        'audit:read',
+        'report:read',
+      ]),
+    );
+    const officer = SYSTEM_ROLES.find((r) => r.key === 'compliance_officer')!;
+    expect(officer.name).toBe('Compliance Officer');
+    expect(officer.description).toBe(
+      'Searches and views archived mail, runs eDiscovery, manages legal holds, retention and ' +
+        'archive access; reads the access audit',
+    );
+    // The migration writes the same organization_admin description.
+    expect(SYSTEM_ROLES.find((r) => r.key === 'organization_admin')!.description).toBe(
+      'Every tenant permission within the organization except archive access (search, ' +
+        'retrieval, export, legal holds, archive management, eDiscovery: the compliance_officer ' +
+        'role)',
+    );
+    for (const p of PERMISSIONS) expect(p.description.length, p.key).toBeLessThanOrEqual(255);
+    for (const r of SYSTEM_ROLES) expect(r.description.length, r.key).toBeLessThanOrEqual(512);
   });
 
   it('grants the step 8.4 account takeover permissions exactly as §3.3 says', () => {
@@ -414,7 +511,7 @@ describe('seed catalog', () => {
   });
 
   it('keeps ato_detection off in every plan (step 8.4 D21, PO1)', () => {
-    expect(FEATURE_KEYS.at(-1)).toBe('ato_detection');
+    expect(FEATURE_KEYS.at(-2)).toBe('ato_detection');
     expect([...OPERATOR_ENABLED_FEATURE_KEYS]).toEqual(['ato_detection']);
     for (const plan of PLANS) expect(plan.features.ato_detection, plan.code).toBe(false);
     // The full plans still enable every other feature.
@@ -466,7 +563,7 @@ describe('seed catalog', () => {
     expect(role('mailbox_user')).not.toContain('integration:read');
   });
 
-  it('has exactly the 8 system roles of D8 plus mailbox_user (5.3), each referencing existing permissions only', () => {
+  it('has exactly the 8 system roles of D8 plus mailbox_user (5.3) and compliance_officer (8.6), each referencing existing permissions only', () => {
     expect(SYSTEM_ROLES.map((r) => r.key)).toEqual([...SYSTEM_ROLE_KEYS]);
     expect([...SYSTEM_ROLE_KEYS]).toEqual([
       'super_admin',
@@ -478,6 +575,7 @@ describe('seed catalog', () => {
       'compliance_auditor',
       'read_only_user',
       'mailbox_user',
+      'compliance_officer',
     ]);
     expect(SYSTEM_ROLES.map((r) => r.name)).toEqual([
       'Super Admin',
@@ -489,6 +587,7 @@ describe('seed catalog', () => {
       'Compliance Auditor',
       'Read-only User',
       'Mailbox User',
+      'Compliance Officer',
     ]);
     for (const r of SYSTEM_ROLES) {
       expect(new Set(r.permissions).size, r.key).toBe(r.permissions.length);
@@ -522,7 +621,7 @@ describe('seed catalog', () => {
         'threat_intel:read',
         'ato:read',
       ],
-      organization_admin: TENANT_PERMISSIONS,
+      organization_admin: TENANT_PERMISSIONS.filter((k) => !ARCHIVE_ACCESS_PERMISSIONS.includes(k)),
       domain_admin: [
         'organization:read',
         'user:read',
@@ -540,6 +639,8 @@ describe('seed catalog', () => {
         'report:read',
         'integration:read',
         'integration:manage',
+        'journal:read',
+        'journal:manage',
       ],
       security_analyst: [
         'organization:read',
@@ -575,6 +676,7 @@ describe('seed catalog', () => {
         'ato:manage',
         'ato:respond',
         'integration:read',
+        'journal:read',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -605,6 +707,17 @@ describe('seed catalog', () => {
       ],
       read_only_user: read,
       mailbox_user: ['quarantine:self'],
+      compliance_officer: [
+        'organization:read',
+        'user:read',
+        'domain:read',
+        'journal:read',
+        'archive:read',
+        ...ARCHIVE_ACCESS_PERMISSIONS,
+        'message:reveal',
+        'audit:read',
+        'report:read',
+      ],
     };
     expect(Object.keys(expected)).toEqual([...SYSTEM_ROLE_KEYS]);
     for (const [key, permissions] of Object.entries(expected)) {
@@ -682,7 +795,10 @@ describe('seed catalog', () => {
       'domain_admin',
     ]);
     expect(TENANT_READ_PERMISSIONS).not.toContain('domain:routing_manage');
-    expect(holders('delivery:read')).toEqual(SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user'));
+    // mailbox_user (5.3) and compliance_officer (8.6, archive access only) do not read deliveries.
+    expect(holders('delivery:read')).toEqual(
+      SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user' && k !== 'compliance_officer'),
+    );
     expect(TENANT_PERMISSIONS).toContain('domain:routing_manage');
     expect(TENANT_PERMISSIONS).toContain('delivery:read');
     // Step 3.3 (L10.2): the administrative rescan is a tenant write permission.
@@ -826,8 +942,14 @@ describe('seed catalog', () => {
     }
   });
 
-  it('defines the four plans with every limit and feature key', () => {
-    expect(PLANS.map((p) => p.code)).toEqual(['trial', 'standard', 'enterprise', 'dedicated']);
+  it('defines the five plans with every limit and feature key', () => {
+    expect(PLANS.map((p) => p.code)).toEqual([
+      'trial',
+      'standard',
+      'enterprise',
+      'dedicated',
+      'archive_only',
+    ]);
     for (const plan of PLANS) {
       expect(Object.keys(plan.limits).sort(), plan.code).toEqual([...LIMIT_KEYS].sort());
       expect(Object.keys(plan.features).sort(), plan.code).toEqual([...FEATURE_KEYS].sort());
@@ -853,20 +975,80 @@ describe('seed catalog', () => {
       standard: [3_000, 300, 50_000],
       enterprise: [12_000, 1_200, 500_000],
       dedicated: [30_000, 3_000, 2_000_000],
+      // Step 8.6 (D13): no mail filtering, so no SMTP recipients at all.
+      archive_only: [0, 0, 0],
     });
+  });
+
+  it('defines the step 8.6 journal intake feature, limits and the archive_only plan (D13, ADR-0090)', () => {
+    expect(FEATURE_KEYS.at(-1)).toBe('journal_intake');
+    expect(OPERATOR_ENABLED_FEATURE_KEYS).not.toContain('journal_intake');
+    const byCode = Object.fromEntries(PLANS.map((p) => [p.code, p]));
+    expect(
+      Object.fromEntries(
+        PLANS.map((p) => [
+          p.code,
+          [
+            p.features.journal_intake,
+            p.limits.journal_intake_messages_per_minute,
+            p.limits.journal_intake_max_message_bytes,
+          ],
+        ]),
+      ),
+    ).toEqual({
+      trial: [false, 0, 0],
+      standard: [false, 0, 0],
+      enterprise: [true, 6_000, 50 * 1024 * 1024],
+      dedicated: [true, 20_000, 50 * 1024 * 1024],
+      archive_only: [true, 6_000, 50 * 1024 * 1024],
+    });
+    const plan = byCode.archive_only!;
+    expect(plan.name).toBe('Archive only');
+    expect(FEATURE_KEYS.filter((key) => plan.features[key])).toEqual([
+      'archiving',
+      'api_access',
+      'sso',
+      'webhooks',
+      'journal_intake',
+    ]);
+    // serviceProfile = archive_only: neither inbound nor outbound filtering, archiving on.
+    expect(plan.features.inbound_filtering).toBe(false);
+    expect(plan.features.outbound_filtering).toBe(false);
+    expect(plan.limits).toEqual({
+      messages_per_day: 0,
+      max_domains: 100,
+      max_users: 10_000,
+      max_message_size_bytes: 50 * 1024 * 1024,
+      api_requests_per_minute: 1_200,
+      quarantine_retention_days: 0,
+      archive_retention_days: 3_650,
+      inbound_recipients_per_minute: 0,
+      outbound_recipients_per_minute: 0,
+      outbound_recipients_per_domain_per_minute: 0,
+      outbound_recipients_per_day: 0,
+      journal_intake_messages_per_minute: 6_000,
+      journal_intake_max_message_bytes: 50 * 1024 * 1024,
+    });
+    expect(LIMIT_KEYS.slice(-2)).toEqual([
+      'journal_intake_messages_per_minute',
+      'journal_intake_max_message_bytes',
+    ]);
   });
 
   it('defines the step 2.3 per-destination-domain limit as half the per-minute limit (R11)', () => {
     for (const plan of PLANS) {
+      // 0 = no outbound delivery at all (step 8.6 archive_only), so the domain limit is 0 too.
       expect(plan.limits.outbound_recipients_per_domain_per_minute, plan.code).toBe(
-        Math.max(1, Math.floor(plan.limits.outbound_recipients_per_minute / 2)),
+        plan.limits.outbound_recipients_per_minute === 0
+          ? 0
+          : Math.max(1, Math.floor(plan.limits.outbound_recipients_per_minute / 2)),
       );
     }
     expect(
       Object.fromEntries(
         PLANS.map((p) => [p.code, p.limits.outbound_recipients_per_domain_per_minute]),
       ),
-    ).toEqual({ trial: 30, standard: 150, enterprise: 600, dedicated: 1_500 });
+    ).toEqual({ trial: 30, standard: 150, enterprise: 600, dedicated: 1_500, archive_only: 0 });
   });
 
   it('defines the destination provider presets of R2 with valid anchored patterns', () => {

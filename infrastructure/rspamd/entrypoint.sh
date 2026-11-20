@@ -100,6 +100,8 @@ RSPAMD_MILTER_REJECT_SCORE=${RSPAMD_MILTER_REJECT_SCORE:-15}
 RSPAMD_MILTER_DMARC_REJECT=${RSPAMD_MILTER_DMARC_REJECT:-false}
 RSPAMD_AUTHSERV_ID=${RSPAMD_AUTHSERV_ID:-mx.gateway.local}
 RSPAMD_ARC_TRUSTED_SEALERS=${RSPAMD_ARC_TRUSTED_SEALERS:-}
+# Step 8.6 (ADR-0087): the platform's journal intake domain; empty = no intake settings rule.
+RSPAMD_JOURNAL_INTAKE_DOMAIN=${RSPAMD_JOURNAL_INTAKE_DOMAIN:-}
 CONTROLLER_PASSWORD=$(read_secret RSPAMD_CONTROLLER_PASSWORD)
 CONTROLLER_ENABLE_PASSWORD=$(read_secret RSPAMD_CONTROLLER_ENABLE_PASSWORD)
 
@@ -119,6 +121,13 @@ for _sealer in $(printf '%s' "$RSPAMD_ARC_TRUSTED_SEALERS" | tr ',' ' '); do
   ARC_TRUSTED_SEALERS="${ARC_TRUSTED_SEALERS}$(printf '%s' "$_sealer" | tr 'A-Z' 'a-z')
 "
 done
+JOURNAL_INTAKE_DOMAIN=$(printf '%s' "$RSPAMD_JOURNAL_INTAKE_DOMAIN" | tr 'A-Z' 'a-z')
+JOURNAL_INTAKE_DOMAIN=${JOURNAL_INTAKE_DOMAIN%.}
+if [ -n "$JOURNAL_INTAKE_DOMAIN" ]; then
+  printf '%s' "$JOURNAL_INTAKE_DOMAIN" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' \
+    || die "RSPAMD_JOURNAL_INTAKE_DOMAIN must be a lower-case domain name with at least two labels"
+  [ "${#JOURNAL_INTAKE_DOMAIN}" -le 253 ] || die "RSPAMD_JOURNAL_INTAKE_DOMAIN is too long"
+fi
 case "$RSPAMD_RBL_PROFILE" in
   test | production) ;;
   *) die "RSPAMD_RBL_PROFILE must be one of: test production" ;;
@@ -146,6 +155,33 @@ cp "$SRC"/local.d/* "$LOCAL"/
 cp "$SRC"/override.d/* "$OVERRIDE"/
 
 umask 077
+
+# ---------------------------------------------------------------- settings.conf (journal intake)
+# Step 8.6 D2.3 (ADR-0087 amending ADR-0027 decision 1): a journal copy of spam must be archived,
+# and an SMTP-time reject would make Microsoft 365 send the report to its alternate journaling
+# mailbox. Recipients in the intake domain select `journal_intake`, which applies NO action
+# (symbols are still computed). Safe only because the smtp-adapter policy keeps intake
+# transactions intake-only (452 on mixing), so no tenant recipient ever shares the setting.
+if [ -n "$JOURNAL_INTAKE_DOMAIN" ]; then
+  cat >>"$LOCAL/settings.conf" <<EOF
+
+# Rendered by entrypoint.sh from RSPAMD_JOURNAL_INTAKE_DOMAIN (step 8.6 D2.3).
+journal_intake {
+  id = "journal_intake";
+  priority = high;
+  rcpt = "@$JOURNAL_INTAKE_DOMAIN";
+  apply {
+    actions {
+      reject = null;
+      "add header" = null;
+      "rewrite subject" = null;
+      greylist = null;
+      "soft reject" = null;
+    }
+  }
+}
+EOF
+fi
 
 # ---------------------------------------------------------------- options.inc
 {

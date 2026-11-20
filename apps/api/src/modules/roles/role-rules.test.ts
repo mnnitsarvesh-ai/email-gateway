@@ -18,6 +18,9 @@ import {
   missingPermissions,
   ROLE_KEY_PATTERN,
   violatesLastAdministrator,
+  archiveAccessChanges,
+  archiveAccessOf,
+  forAssignment,
 } from './role-rules';
 
 const role = (key: string) => {
@@ -141,5 +144,71 @@ describe('assertCanManageUser', () => {
         role('ok', ['user:manage']),
       ]),
     ).toThrow(ForbiddenException);
+  });
+});
+
+describe('archive access (step 8.6 D12, ADR-0089)', () => {
+  const co = {
+    key: 'compliance_officer',
+    permissions: ['archive:read', 'archive:search', 'audit:read', 'ediscovery:manage'],
+  };
+  const ro = { key: 'read_only_user', permissions: ['archive:read', 'journal:read'] };
+
+  it('archiveAccessOf lists the archive access permissions of a role', () => {
+    expect(archiveAccessOf(co)).toEqual(['archive:search', 'ediscovery:manage']);
+    expect(archiveAccessOf(ro)).toEqual([]);
+  });
+
+  const assigner = (
+    permissions: string[],
+    over: Partial<{ kind: 'user' | 'api_key'; mfaAuthenticated: boolean; self: boolean }> = {},
+  ) => ({
+    permissions: new Set(permissions),
+    kind: 'user' as const,
+    mfaAuthenticated: true,
+    self: false,
+    ...over,
+  });
+
+  it('forAssignment drops archive access only for user managers', () => {
+    expect(forAssignment(assigner(['user:manage']), [co])).toEqual([
+      { key: 'compliance_officer', permissions: ['archive:read', 'audit:read'] },
+    ]);
+    expect(forAssignment(assigner(['user:read']), [co])).toEqual([co]);
+  });
+
+  it('forAssignment needs no delegation when the actor holds the archive access itself', () => {
+    const holder = ['user:manage', 'archive:search', 'ediscovery:manage'];
+    for (const over of [{ kind: 'api_key' as const, mfaAuthenticated: false }, { self: true }]) {
+      expect(forAssignment(assigner(holder, over), [co])).toEqual([co]);
+    }
+    expect(forAssignment(assigner(['user:manage'], { self: true }), [ro])).toEqual([ro]);
+  });
+
+  it('forAssignment refuses the delegation to API keys, to oneself and without MFA (403)', () => {
+    for (const [over, reason] of [
+      [{ kind: 'api_key', mfaAuthenticated: false }, /not by an API key/],
+      [{ self: true }, /cannot grant yourself archive access/],
+      [{ mfaAuthenticated: false }, /multi-factor/],
+    ] as const) {
+      const run = () => forAssignment(assigner(['user:manage'], over), [ro, co]);
+      expect(run).toThrow(ForbiddenException);
+      expect(run).toThrow(reason);
+    }
+  });
+
+  it('archiveAccessChanges finds the granted and revoked archive roles', () => {
+    expect(archiveAccessChanges(['read_only_user'], [ro, co], [ro])).toEqual({
+      granted: [co],
+      revoked: [],
+    });
+    expect(archiveAccessChanges(['read_only_user', 'compliance_officer'], [ro], [ro, co])).toEqual({
+      granted: [],
+      revoked: [co],
+    });
+    expect(archiveAccessChanges(['compliance_officer'], [co], [co])).toEqual({
+      granted: [],
+      revoked: [],
+    });
   });
 });

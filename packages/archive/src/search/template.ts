@@ -1,3 +1,4 @@
+import { ARCHIVE_INDEX_MAPPING_REVISION } from '../versions';
 import { indexPattern } from './names';
 
 /**
@@ -52,6 +53,8 @@ export const ARCHIVE_INDEX_MAPPING = Object.freeze({
     legal_hold: { type: 'boolean' },
     lock_mode: keyword,
     indexed_at: { type: 'date' },
+    /** Step 8.6 (mapping revision 2): `gateway`, `journal_intake` (the record's source flags). */
+    ingest_sources: keyword,
   },
 } as const);
 
@@ -94,6 +97,27 @@ export function buildIndexTemplate(options: IndexTemplateOptions): Record<string
       },
       mappings: ARCHIVE_INDEX_MAPPING,
     },
-    _meta: { owner: 'archive-worker', version, design: 'step 8.1 §4.3' },
+    _meta: {
+      owner: 'archive-worker',
+      version,
+      mappingRevision: ARCHIVE_INDEX_MAPPING_REVISION,
+      design: 'step 8.1 §4.3, step 8.6 D7',
+    },
+  };
+}
+
+/**
+ * Body of `PUT <index>/_mapping` that upgrades an existing index of the same version to the
+ * current mapping revision (step 8.6 adds `ingest_sources`). Adding a field is an additive mapping
+ * change OpenSearch accepts on a live index, so no reindex is needed; documents indexed before it
+ * simply lack the field (the `source` filter treats a missing field as `gateway`). Re-run it for
+ * every `<prefix>-v<version>-*` index before indexing documents with the field (the template
+ * covers indices created afterwards). The 8.1 rebuild tooling (`cli/reindex`) remains the
+ * fallback.
+ */
+export function buildIndexMappingUpdate(): Record<string, unknown> {
+  return {
+    properties: { ingest_sources: ARCHIVE_INDEX_MAPPING.properties.ingest_sources },
+    _meta: { mappingRevision: ARCHIVE_INDEX_MAPPING_REVISION },
   };
 }

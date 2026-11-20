@@ -88,7 +88,11 @@ let b: Tenant;
 
 async function tenant(): Promise<Tenant> {
   const org = await fx.createOrganization({ planCode: 'enterprise' });
-  const user = await fx.createUser(org, { roles: ['organization_admin'], mfa: true });
+  // Step 8.6 (ADR-0089): an organization admin as migrated (archive access through compliance_officer).
+  const user = await fx.createUser(org, {
+    roles: ['organization_admin', 'compliance_officer'],
+    mfa: true,
+  });
   const http = archiveHttp(ctx, bearer((await loginWithMfa(ctx, fx, user)).accessToken));
   const policy = await ctx.prisma.archiveRetentionPolicy.create({
     data: { organizationId: org.id, name: 'P', retentionDays: 365, priority: 1 },

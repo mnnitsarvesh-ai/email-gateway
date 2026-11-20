@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { ArrowLeftRightIcon, MenuIcon, PanelLeftCloseIcon, PanelLeftOpenIcon } from 'lucide-react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { PlanUnavailableView } from '@/components/plan-unavailable-view';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
@@ -12,7 +13,7 @@ import { DESKTOP_QUERY, MOBILE_QUERY, useMediaQuery } from '@/hooks/use-media-qu
 import { SESSION_QUERY_KEY, useMe, useSession } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { isBoolean, readPreference, writePreference } from '@/lib/local-preference';
-import { gateForPath, navItemForPath } from '@/lib/navigation';
+import { gateForPath, hiddenForProfile, navItemForPath } from '@/lib/navigation';
 import { scheduleProactiveRefresh } from '@/lib/session/refresh';
 import { cn } from '@/lib/utils';
 import { DevFixturesBadge } from './dev-fixtures-badge';
@@ -95,6 +96,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
   };
 
   const permissions = meData?.permissions ?? [];
+  const profile = meData?.organization.serviceProfile ?? 'gateway';
   const navItem = navItemForPath(pathname);
   const routeGate = gateForPath(pathname);
   const override = session.data?.override ?? null;
@@ -104,6 +106,8 @@ function ShellFrame({ children }: { children: ReactNode }) {
     if (me.isLoading || session.isLoading || mustEnroll)
       return <LoadingState label="Loading your workspace" rows={5} />;
     if (me.error) return <ErrorState error={me.error} onRetry={() => void me.refetch()} />;
+    // Step 8.6 (D13): gateway pages of an archive-only organization.
+    if (hiddenForProfile(pathname, profile)) return <PlanUnavailableView page={navItem?.label} />;
     return routeGate ? <RouteGate gate={routeGate}>{children}</RouteGate> : children;
   })();
 
@@ -119,7 +123,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
           aria-label="Sidebar"
         >
           <Brand collapsed={collapsed} />
-          <SidebarNav permissions={permissions} collapsed={collapsed} />
+          <SidebarNav permissions={permissions} profile={profile} collapsed={collapsed} />
           <div className="border-t border-sidebar-border p-2">
             <Button
               variant="ghost"
@@ -156,6 +160,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
             <Brand collapsed={false} />
             <SidebarNav
               permissions={permissions}
+              profile={profile}
               collapsed={false}
               onNavigate={() => setDrawerOpen(false)}
             />

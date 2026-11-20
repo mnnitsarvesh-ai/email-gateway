@@ -58,7 +58,22 @@ const MANAGE = 'archive:manage';
 const HOLD = 'archive:legal_hold';
 const EDISC = 'ediscovery:manage';
 const REVEAL = 'message:reveal';
-const ALL = [READ, SEARCH, RETRIEVE, EXPORT, MANAGE, HOLD, EDISC, REVEAL, 'dlp:read'];
+// Step 8.6 (ADR-0089): the Journaling area.
+const JREAD = 'journal:read';
+const JMANAGE = 'journal:manage';
+const ALL = [
+  READ,
+  SEARCH,
+  RETRIEVE,
+  EXPORT,
+  MANAGE,
+  HOLD,
+  EDISC,
+  REVEAL,
+  'dlp:read',
+  JREAD,
+  JMANAGE,
+];
 const OTHER_ORG = 2n;
 const BASE = '/api/v1/archive';
 const DAY = 86_400_000;
@@ -218,12 +233,14 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
   }
 
   const SPECS: Spec[] = [
-    { id: '#1', method: 'get', path: () => `${BASE}/settings`, all: [READ], ok: 200 },
+    { id: '#1', method: 'get', path: () => `${BASE}/settings`, any: [READ, JREAD], ok: 200 },
     {
+      // Step 8.6 D11: any of journal:manage / archive:manage at the route, then per changed
+      // path; the example changes paths of both areas, so it needs both.
       id: '#2',
       method: 'put',
       path: () => `${BASE}/settings`,
-      all: [MANAGE],
+      all: [JMANAGE, MANAGE],
       mfa: true,
       keyed: true,
       body: () => ARCHIVE_EXAMPLES.settingsUpdate,
@@ -274,39 +291,52 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
       body: () => ARCHIVE_EXAMPLES.rotate,
       ok: 201,
     },
-    { id: '#10', method: 'get', path: () => `${BASE}/status`, all: [READ], ok: 200 },
-    { id: '#11', method: 'get', path: () => `${BASE}/capture-issues`, all: [MANAGE], ok: 200 },
+    { id: '#10', method: 'get', path: () => `${BASE}/status`, any: [READ, JREAD], ok: 200 },
+    {
+      id: '#11',
+      method: 'get',
+      path: () => `${BASE}/capture-issues`,
+      any: [JMANAGE, MANAGE],
+      ok: 200,
+    },
     {
       id: '#12',
       method: 'post',
       path: (c) => `${BASE}/capture-issues/${c.failed}/retry`,
-      all: [MANAGE],
+      any: [JMANAGE, MANAGE],
       keyed: true,
       ok: 200,
     },
     { id: '#13', method: 'get', path: () => `${BASE}/disposals`, all: [READ], ok: 200 },
     { id: '#14', method: 'get', path: () => `${BASE}/export-signing-keys`, all: [READ], ok: 200 },
     { id: '#15', method: 'get', path: () => `${BASE}/messages?${RANGE}`, all: [SEARCH], ok: 200 },
-    { id: '#16', method: 'get', path: (c) => `${BASE}/messages/${c.record}`, all: [READ], ok: 200 },
+    // Step 8.6 D12 (ADR-0089): record routes need archive:search (was archive:read).
+    {
+      id: '#16',
+      method: 'get',
+      path: (c) => `${BASE}/messages/${c.record}`,
+      all: [SEARCH],
+      ok: 200,
+    },
     {
       id: '#17',
       method: 'get',
       path: (c) => `${BASE}/messages/${c.record}/journal`,
-      all: [READ],
+      all: [SEARCH],
       ok: 200,
     },
     {
       id: '#18',
       method: 'get',
       path: (c) => `${BASE}/messages/${c.record}/security`,
-      all: [READ],
+      all: [SEARCH],
       ok: 200,
     },
     {
       id: '#19',
       method: 'post',
       path: (c) => `${BASE}/messages/${c.record}/reveal`,
-      all: [READ, REVEAL],
+      all: [SEARCH, REVEAL],
       body: () => ARCHIVE_EXAMPLES.reveal,
       ok: 200,
     },
@@ -735,7 +765,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
     });
 
     it('PUT applies the CAS, bumps the generation, signals the lock pass and audits changed paths only', async () => {
-      const auth = await asUser([MANAGE]);
+      const auth = await asUser([MANAGE, JMANAGE]);
       const conflict = await api
         .http()
         .put(`${BASE}/settings`)
@@ -765,7 +795,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
     });
 
     it('PUT refuses enabling without entitlement or default, scope ids of another tenant, downgrades and missing Object Lock', async () => {
-      const auth = await asUser([MANAGE]);
+      const auth = await asUser([MANAGE, JMANAGE]);
       const put = (body: object) =>
         api
           .http()
@@ -904,7 +934,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
 
   describe('keys (#8, #9; A9)', () => {
     it('rotation creates the next active version and retires the previous one (no key material)', async () => {
-      const auth = await asUser([MANAGE, READ]);
+      const auth = await asUser([MANAGE, READ, SEARCH]);
       const res = await api
         .http()
         .post(`${BASE}/keys/rotate`)
@@ -1044,7 +1074,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
           await api
             .http()
             .get(`${BASE}/messages/${ctx.record}`)
-            .set(await asUser([READ]))
+            .set(await asUser([SEARCH]))
         ).status,
       ).toBe(200);
     });
@@ -1056,7 +1086,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
       const plain = await api
         .http()
         .get(`${BASE}/messages/${ctx.record}`)
-        .set(await asUser([READ]));
+        .set(await asUser([SEARCH]));
       expect(plain.body).toMatchObject({
         subject: null,
         subjectMasked: true,
@@ -1070,13 +1100,13 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
       const holder = await api
         .http()
         .get(`${BASE}/messages/${ctx.record}`)
-        .set(await asUser([READ, HOLD]));
+        .set(await asUser([SEARCH, HOLD]));
       expect(holder.body.holds).toEqual([expect.objectContaining({ name: 'Bob hold' })]);
       expect(audit.entries.filter((e) => e.action === 'archive.message_viewed')).toHaveLength(2);
     });
 
     it('journal decrypts and masks; security maps the frozen round; reveal is audited before values', async () => {
-      const auth = await asUser([READ, REVEAL]);
+      const auth = await asUser([SEARCH, REVEAL]);
       const journal = await api.http().get(`${BASE}/messages/${ctx.record}/journal`).set(auth);
       expect(journal.status).toBe(200);
       expect(journal.body.headers).toEqual(
@@ -1264,7 +1294,7 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
       const journal = await api
         .http()
         .get(`${BASE}/messages/${ctx.review}/journal`)
-        .set(await asUser([READ]));
+        .set(await asUser([SEARCH]));
       expect(journal.status).toBe(410);
     });
   });

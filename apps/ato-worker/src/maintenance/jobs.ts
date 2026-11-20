@@ -110,7 +110,8 @@ export class AtoMaintenance {
 
   /**
    * Completeness of the lossy `ato.mail` feed: per ATO-enabled organization, walks
-   * `email_messages` (outbound/internal) from its cursor (`ato-mail-catchup:<org>`) up to
+   * `email_messages` (outbound/internal, gateway only: a journal intake copy is never an ATO
+   * signal, step 8.6 D4) from its cursor (`ato-mail-catchup:<org>`) up to
    * `now − ATO_MAIL_CATCHUP_LAG_SECONDS`, takes each message's latest completed scan round and
    * processes the keys the ledger does not have through the live handler.
    */
@@ -139,6 +140,7 @@ export class AtoMaintenance {
           AND received_at <= ${end}
           AND (received_at > ${start} OR (received_at = ${start} AND id > ${startId}))
           AND direction IN ('outbound', 'internal')
+          AND ingest_source = 'gateway'
         ORDER BY received_at, id
         LIMIT ${config.mailCatchupBatch}`;
       for (const row of rows) {

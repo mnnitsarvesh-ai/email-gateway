@@ -81,6 +81,13 @@ flowchart LR
     archive_disposals[(archive_disposals P)]
     archive_encryption_keys
     ediscovery_cases[ediscovery_cases, custodians, searches, hits, exports]
+    archive_record_sources[(archive_record_sources P)]
+    archive_dedupe_keys
+  end
+  subgraph intake[Journal intake]
+    journal_intake_sources
+    journal_intake_counters
+    journal_intake_messages[(journal_intake_messages P)]
   end
   subgraph integrations[Provider integrations]
     provider_connections
@@ -145,6 +152,13 @@ flowchart LR
   email_messages -.-> email_archives
   email_messages -.-> archive_capture_intents
   email_archives -.-> archive_disposals
+  email_archives -.-> archive_record_sources
+  email_archives -.-> archive_dedupe_keys
+  organizations --> journal_intake_sources
+  provider_connections --> journal_intake_sources
+  journal_intake_sources --> journal_intake_counters
+  email_messages -.-> journal_intake_messages
+  journal_intake_sources -.-> journal_intake_messages
   organizations --> archive_encryption_keys
   organizations --> ediscovery_cases
   email_messages -.-> message_outbox
@@ -427,7 +441,8 @@ erDiagram
     bigint id PK "registry id"
     datetime received_at PK "PARTITIONED month"
     bigint organization_id
-    enum status "lifecycle state, 15 values (ADR-0025)"
+    enum status "lifecycle state, 16 values (ADR-0025; journaled since 8.6)"
+    enum ingest_source "gateway, journal_intake (8.6)"
     int version "+1 per applied transition"
     smallint lifecycle_round "+1 on rescan and release (step 3.3)"
     varchar status_reason "reason code of the last transition"
@@ -1179,6 +1194,10 @@ erDiagram
   email_archives |o..o{ archive_download_grants : "message_id + received_at"
   users ||--o{ archive_download_grants : "user_id CASCADE"
   organizations ||--o{ archive_download_grants : "RESTRICT"
+  email_archives ||..o{ archive_record_sources : "archive_id + archive_received_at (8.6)"
+  email_messages ||..o{ archive_record_sources : "merged copy: message_id + message_received_at"
+  email_archives ||..o{ archive_dedupe_keys : "archive_id + archive_received_at (8.6)"
+  archive_capture_intents |o..o| email_archives : "merged: archive_id + archive_received_at (8.6)"
   archive_settings {
     bigint id PK
     bigint organization_id FK,UK
@@ -1199,10 +1218,12 @@ erDiagram
   }
   archive_capture_intents {
     bigint id PK
-    datetime received_at PK "PARTITIONED month, 2 months"
+    datetime received_at PK "PARTITIONED month, 4 months"
     bigint message_id "UQ with received_at"
     enum status
     datetime next_check_at
+    datetime archive_received_at "8.6: NULL = received_at"
+    bool merged "8.6"
   }
   email_archives {
     bigint id PK
@@ -1215,6 +1236,26 @@ erDiagram
     varchar wrapped_dek "NULL = crypto-shredded"
     datetime retain_until
     bool legal_hold "informational"
+    bool source_gateway "8.6"
+    bool source_journal_intake "8.6"
+    bigint intake_source_id "8.6, no FK"
+    smallint merged_count "8.6"
+  }
+  archive_record_sources {
+    bigint id PK
+    datetime archive_received_at PK "PARTITIONED month, never dropped (8.6)"
+    bigint archive_id
+    bigint message_id "UQ with message_received_at, archive_received_at"
+    enum source "gateway, journal_intake"
+    bool content_variant
+  }
+  archive_dedupe_keys {
+    bigint id PK
+    bigint organization_id "no FK"
+    char message_id_hash "index with org, header_fingerprint"
+    char header_fingerprint "archive-fingerprint/1"
+    char body_sha256
+    bigint archive_id
   }
   archive_encryption_keys {
     bigint id PK
@@ -1281,6 +1322,53 @@ erDiagram
     char jti UK
     bigint user_id FK
     enum kind "message, export"
+  }
+```
+
+## Journal intake
+
+Step 8.6 ([design §3](../plan/steps/27-journal-intake-and-archive-split.md#3-data-model-one-forward-migration-utc-timestamp_journal_intake-wp1), ADR-0087). Intake messages are ordinary registry messages (`email_messages.ingest_source = journal_intake`); `journal_intake_messages` holds their envelope and proof. Solid lines are foreign keys; dotted lines are logical references. Only hashes of the intake credentials are stored.
+
+```mermaid
+erDiagram
+  organizations ||--o{ journal_intake_sources : "RESTRICT"
+  provider_connections |o--o{ journal_intake_sources : "provider kinds, RESTRICT"
+  journal_intake_sources ||--o{ journal_intake_counters : "CASCADE"
+  journal_intake_sources ||..o{ journal_intake_messages : "source_id, no FK"
+  email_messages ||..o| journal_intake_messages : "message_id + received_at"
+  journal_intake_sources {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UQ with display_name"
+    enum kind "microsoft_365_journal, google_workspace_copy, exchange_onprem_journal, smtp_bcc"
+    enum status "pending_verification, active, paused, disabled"
+    bigint provider_connection_id FK
+    char address_hash UK "SHA-256 of the local part"
+    char previous_address_hash UK "rotation overlap"
+    char header_token_hash "Google only"
+    enum health_status
+    int row_version
+  }
+  journal_intake_counters {
+    bigint id PK
+    bigint source_id FK "UQ with day"
+    bigint organization_id "no FK"
+    date day
+  }
+  journal_intake_messages {
+    bigint message_id PK
+    datetime received_at PK "PARTITIONED month, 6 months"
+    bigint organization_id
+    bigint source_id
+    enum format "journal_report, copy, journal_report_unparsed"
+    json envelope "journal-envelope/1"
+    json proof "journal-intake-proof/1"
+  }
+  email_messages {
+    bigint id PK
+    datetime received_at PK "PARTITIONED"
+    enum ingest_source "gateway, journal_intake"
+    enum status "... journaled"
   }
 ```
 

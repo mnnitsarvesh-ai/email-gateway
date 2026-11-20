@@ -12,6 +12,7 @@ import {
   okJson,
   renderWithProviders,
   server,
+  TEST_ORG,
 } from '@/test';
 import { AppShell } from './app-shell';
 import { PlatformHealthCard } from './platform-health-card';
@@ -45,6 +46,50 @@ describe('AppShell (design P11)', () => {
     expect(screen.getByRole('main')).toHaveAttribute('id', 'main');
     expect(screen.queryByText('DEV FIXTURES')).not.toBeInTheDocument();
     await expectNoAxeViolations(container);
+  });
+
+  it('hides gateway pages from an archive-only organization and explains hidden routes (step 8.6)', async () => {
+    const me = makeMe({
+      role: 'organization_admin',
+      overrides: { organization: { ...TEST_ORG, serviceProfile: 'archive_only' } },
+    });
+    const { container } = renderWithProviders(<AppShell>{page}</AppShell>, {
+      me,
+      route: '/messages',
+    });
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    for (const name of [
+      'Dashboard',
+      'Reports',
+      'Email explorer',
+      'Quarantine',
+      'Mail servers',
+      'Policy builder',
+    ])
+      expect(within(nav).queryByRole('link', { name })).not.toBeInTheDocument();
+    expect(within(nav).queryByText('Security')).not.toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Retention and lock' })).toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Settings' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Not available for this plan' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('page content')).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('shows the Archive section of a compliance officer with the access audit (step 8.6)', () => {
+    renderWithProviders(<AppShell>{page}</AppShell>, {
+      role: 'compliance_officer',
+      route: '/archive/access-audit',
+    });
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(nav).getByText('Archive')).toBeInTheDocument();
+    expect(within(nav).getByRole('link', { name: 'Access audit' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(within(nav).getByRole('link', { name: 'Search' })).toHaveAttribute('href', '/archive');
+    expect(within(nav).queryByText('Compliance')).not.toBeInTheDocument();
   });
 
   it('guards a route the role may not open with the 403 view', () => {

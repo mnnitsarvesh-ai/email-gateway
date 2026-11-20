@@ -266,3 +266,32 @@ describe('inconsistent writer reads', () => {
     expect(store.reschedule).not.toHaveBeenCalled();
   });
 });
+
+describe('journal intake guard (step 8.6 D4)', () => {
+  beforeEach(() => {
+    recordDeliverySignal.mockReset();
+  });
+
+  it('refuses to reinject a journal intake message: row failed, metric, no SMTP, no signal', async () => {
+    const { reinjector, store, prisma, metrics } = build({
+      context: vi.fn().mockResolvedValue({
+        ingestSource: 'journal_intake',
+        envelopeFrom: 'sender@ext.test',
+        clientIp: null,
+        clientHelo: null,
+        deliveries: active,
+      }),
+    });
+    const inc = vi.spyOn(metrics.intakeRefusals, 'inc');
+    await expect(reinjector.process(claimed(1))).resolves.toBe('failed');
+    expect(inc).toHaveBeenCalledWith({ stage: 'reinjection' });
+    expect(store.markFailed).toHaveBeenCalledWith(
+      expect.anything(),
+      'intake_not_deliverable',
+      'journal intake messages are never delivered',
+    );
+    expect(store.approvalTime).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(recordDeliverySignal).not.toHaveBeenCalled();
+  });
+});

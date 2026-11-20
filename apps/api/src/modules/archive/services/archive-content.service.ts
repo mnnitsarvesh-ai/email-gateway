@@ -225,6 +225,33 @@ export class ArchiveContentService {
     return this.pipe(opened, decrypt, 'eml');
   }
 
+  /**
+   * Step 8.6 D7: a stored content variant (the EML of a merged copy whose body differed) as a
+   * decrypting stream: encrypted under the record's DEK with the merged copy's public id as the
+   * subject; its plaintext SHA-256 must equal `archive_record_sources.eml_sha256`.
+   */
+  async openVariantEml(
+    scope: TenantScope,
+    record: RecordRow,
+    variant: { messagePublicId: string; emlSha256: string },
+  ): Promise<Readable> {
+    const { dek, objects } = await this.recordKey(scope, record);
+    const copy = (objects.merged ?? []).find((m) => m.messageId === variant.messagePublicId);
+    if (copy === undefined || copy.eml === null) {
+      dek.fill(0);
+      throw archiveContentUnavailable();
+    }
+    const opened = await this.openObject(scope, 'archive', copy.eml.key, copy.eml.versionId);
+    const decrypt = createArchiveDecryptStream({
+      dek,
+      kind: 'eml',
+      organizationId: scope.organizationId,
+      subjectId: variant.messagePublicId,
+      expectedSha256: variant.emlSha256,
+    });
+    return this.pipe(opened, decrypt, 'eml');
+  }
+
   /** An export package (ZIP) as a decrypting stream verified against `package_sha256`. */
   async openExport(scope: TenantScope, row: ExportContentRow): Promise<Readable> {
     if (

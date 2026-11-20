@@ -332,6 +332,7 @@ describe('facts, journal and scope (A4, A5)', () => {
       receivedAt: new Date('2026-11-16T10:00:00Z'),
       organizationId: ORG,
       publicId: '0190a5d0-0000-7000-8000-0000000000aa',
+      ingestSource: 'gateway',
       direction: 'outbound',
       status: 'delivered',
       statusReason: null,

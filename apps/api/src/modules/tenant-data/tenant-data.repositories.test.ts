@@ -116,7 +116,13 @@ describe('tenant-scoped repositories (D9)', () => {
     const found = await repo.findByPublicId(SCOPE, PUBLIC_ID);
     expect(found).toMatchObject({ id: 77n, publicId: PUBLIC_ID });
     expectEveryQueryScoped(calls);
-    expect(calls[1]!.args.where).toEqual({ id: 77n, receivedAt, organizationId: 42n });
+    // Step 8.6 D5: gateway messages only.
+    expect(calls[1]!.args.where).toEqual({
+      id: 77n,
+      receivedAt,
+      organizationId: 42n,
+      ingestSource: 'gateway',
+    });
   });
 
   it('messages: an identity of another organization is never followed', async () => {

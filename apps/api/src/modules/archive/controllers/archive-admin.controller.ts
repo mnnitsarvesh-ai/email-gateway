@@ -17,6 +17,7 @@ import {
   CurrentPrincipal,
   CurrentScope,
   CursorList,
+  RequireAnyPermission,
   RequireMfa,
   RequirePermissions,
   UserOnly,
@@ -100,16 +101,19 @@ export class ArchiveAdminController {
   ) {}
 
   @Get('settings')
-  @RequirePermissions(P.read)
+  @RequireAnyPermission(P.read, P.journalRead)
+  @ApiTags('journaling')
   @ApiOperation({
     summary: 'Get the archive settings',
     description:
       'The effective archive settings of your organization (`archive-settings/1` with the ' +
       'defaults applied: every direction journaled, rejected/quarantined/failed mail not ' +
-      'included, scope `all`, policy ARCHIVE honoured, preview on, original download off), ' +
+      'included, scope `all`, policy ARCHIVE honoured, preview on, original download off, ' +
+      'journal intake scanning off), ' +
       'whether archiving is enabled and entitled (plan feature `archiving`), the immutability ' +
       'mode, whether S3 Object Lock is available, the default retention policy and the ' +
-      '`rowVersion` to send with PUT (0 when no settings exist yet). From the read replica.',
+      '`rowVersion` to send with PUT (0 when no settings exist yet). From the read replica. ' +
+      'Step 8.6: `archive:read` or `journal:read`.',
   })
   @ApiArchiveResponse(200, ArchiveSettingsViewSchema, X.settings, 'The archive settings')
   @ApiArchiveForbidden()
@@ -119,7 +123,8 @@ export class ArchiveAdminController {
   }
 
   @Put('settings')
-  @RequirePermissions(P.manage)
+  @RequireAnyPermission(P.journalManage, P.manage)
+  @ApiTags('journaling')
   @UserOnly()
   @RequireMfa()
   @HttpCode(HttpStatus.OK)
@@ -139,7 +144,12 @@ export class ArchiveAdminController {
       'archive_object_lock_unavailable`); a stronger mode is applied to existing records by ' +
       'the archive-worker. Each change increments `generation`; the archive-worker applies it ' +
       'within its settings cache TTL. Audited `archive.settings_updated` (changed paths, never ' +
-      'values). Requires the Idempotency-Key header; rate class `sensitive`.' +
+      'values). Step 8.6: requires `journal:manage` or `archive:manage` and authorizes each ' +
+      'changed path: `enabled`, `settings.directions|include|scope|policyArchive|intake` need ' +
+      '`journal:manage`; `immutability`, `defaultRetentionPolicyId`, `settings.access` need ' +
+      '`archive:manage` (`403 archive_settings_forbidden_path` with `paths`; an omitted section ' +
+      'of the replacing `settings` document that changes the effective value counts as a ' +
+      'change). Requires the Idempotency-Key header; rate class `sensitive`.' +
       MFA_RULE,
   })
   @ApiBody({
@@ -149,8 +159,10 @@ export class ArchiveAdminController {
   @ApiArchiveResponse(200, ArchiveSettingsViewSchema, X.settings, 'The updated settings', true)
   @ApiKeyedErrors()
   @ApiArchiveForbidden(
-    [C.notEnabled],
-    '`archiving_not_enabled` when enabling without the plan feature',
+    [C.notEnabled, C.settingsForbiddenPath],
+    '`archiving_not_enabled` when enabling without the plan feature, ' +
+      '`archive_settings_forbidden_path` (`paths`: `{ path, permission }` of each changed path ' +
+      'the caller may not change)',
   )
   @ApiCodedError(404, 'The default retention policy is unknown', [C.retentionPolicyNotFound])
   @ApiArchiveConflicts(
@@ -245,14 +257,15 @@ export class ArchiveAdminController {
   }
 
   @Get('status')
-  @RequirePermissions(P.read)
+  @RequireAnyPermission(P.read, P.journalRead)
   @ApiOperation({
     summary: 'Get the archive status',
     description:
       'Counts of your organization: capture intents (pending, open, failed, lost, oldest ' +
       'pending), records by status, the search index queue and its lag, disposals in progress ' +
       'and failed, key versions, S3 Object Lock availability and whether archive search is ' +
-      'configured and reachable. From the read replica.',
+      'configured and reachable. From the read replica. Step 8.6: `archive:read` or ' +
+      '`journal:read`.',
   })
   @ApiArchiveResponse(200, ArchiveStatusSchema, X.status, 'The archive status')
   @ApiArchiveForbidden()
@@ -278,7 +291,8 @@ export class ArchiveAdminController {
   }
 
   @Get('capture-issues')
-  @RequirePermissions(P.manage)
+  @RequireAnyPermission(P.journalManage, P.manage)
+  @ApiTags('journaling')
   @CursorList('v1')
   @ApiOperation({
     summary: 'List capture issues',
@@ -288,7 +302,8 @@ export class ArchiveAdminController {
       'message never reached a capturable state in time and was not archived) or is still ' +
       '`pending` after 6 hours (a message waiting in quarantine is expected to wait and is not ' +
       'listed), newest first: message id, received time, status, a code (never text), ' +
-      'attempts, sources. v1 list (`archive_capture_issues`).',
+      'attempts, sources. v1 list (`archive_capture_issues`). Step 8.6: `journal:manage` or ' +
+      '`archive:manage`.',
   })
   @ApiListQuery(CaptureIssueListQuerySchema, {
     ...PAGE_PARAMETERS,
@@ -310,7 +325,8 @@ export class ArchiveAdminController {
   }
 
   @Post('capture-issues/:messageId/retry')
-  @RequirePermissions(P.manage)
+  @RequireAnyPermission(P.journalManage, P.manage)
+  @ApiTags('journaling')
   @HttpCode(HttpStatus.OK)
   @ArchiveIdempotency(ARCHIVE_OPERATIONS.captureRetry)
   @ApiOperation({
@@ -318,8 +334,9 @@ export class ArchiveAdminController {
     description:
       'Moves a `failed` capture intent back to `pending`, due now (the archive-worker retries ' +
       'it). A `lost` capture cannot be retried (`409 archive_capture_retry_not_allowed`). Needs ' +
-      'the plan feature `archiving`. Audited `archive.capture_retried`. Requires the ' +
-      'Idempotency-Key header; rate class `sensitive`.',
+      'the plan feature `archiving`. Audited `archive.capture_retried`. Step 8.6: ' +
+      '`journal:manage` or `archive:manage`. Requires the Idempotency-Key header; rate class ' +
+      '`sensitive`.',
   })
   @ApiMessageIdParam()
   @ApiArchiveResponse(200, CaptureRetrySchema, X.captureRetry, 'Queued for capture', true)

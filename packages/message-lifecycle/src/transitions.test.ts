@@ -7,7 +7,7 @@ import {
   STATE_RANK,
   type MessageState,
 } from './states';
-import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
+import { findEdge, INTAKE_ONLY_STATES, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
 
 /** §9 item 2: invariants of the transition table. */
 
@@ -18,7 +18,9 @@ import { findEdge, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
  * (docs/plan/steps/16-policy-engine.md P14, ADR-0044); step 5.3 (docs/plan/steps/17-quarantine.md
  * Q5, ADR-0046 decision 4) adds `policy_partial` to E10, the role `quarantine` with
  * `quarantine_expired` to E26, and the edges E28 and E29; step 8.1
- * (docs/plan/steps/23-journaling-archiving.md A25, ADR-0064) retires E25 (`→ archived`).
+ * (docs/plan/steps/23-journaling-archiving.md A25, ADR-0064) retires E25 (`→ archived`); step 8.6
+ * (docs/plan/steps/27-journal-intake-and-archive-split.md D4, ADR-0087) adds E30-E32 into the
+ * final state `journaled` of journal intake messages.
  */
 const RETIRED_EDGE_IDS = ['E4', 'E25', 'E27'];
 /**
@@ -56,6 +58,9 @@ E24 delivery_pending,delivery_retry rejected delivery,recovery delivery_failed -
 E26 persisted,scanning,scanned,scan_failed,policy_evaluated,approved,quarantined,held_for_review,delivery_pending,delivery_retry expired sweeper,quarantine deadline_exceeded,quarantine_expired - 3.3
 E28 delivered,rejected,expired approved quarantine quarantine_partial_release yes 5.3
 E29 rejected quarantined quarantine manual_quarantine - 5.3
+E30 persisted journaled scanner intake_unscanned,intake_parse_failed - 8.6
+E31 scanned journaled scanner intake_scan_complete - 8.6
+E32 scan_failed journaled scanner intake_scan_failed - 8.6
 `;
 /** Role/reason pairings (`reasonRoles`) of the table. */
 const REASON_ROLES: Record<string, Record<string, string[]>> = {
@@ -66,7 +71,7 @@ const REASON_ROLES: Record<string, Record<string, string[]>> = {
 };
 
 describe('TRANSITIONS', () => {
-  it('is the L3 table verbatim (E1–E29) without the retired E4, E25 and E27', () => {
+  it('is the L3 table verbatim (E1–E32) without the retired E4, E25 and E27', () => {
     const expected = L3.trim()
       .split('\n')
       .map((line) => {
@@ -85,7 +90,7 @@ describe('TRANSITIONS', () => {
     expect(TRANSITIONS.map((e) => ({ ...e, from: [...e.from] }))).toEqual(expected);
   });
 
-  it('uses exactly the fifteen states but the reserved archived, and only known roles; every role but the history-only ones is used', () => {
+  it('uses exactly the sixteen states but the reserved archived, and only known roles; every role but the history-only ones is used', () => {
     const states = new Set<MessageState>();
     const roles = new Set<string>();
     for (const edge of TRANSITIONS) {
@@ -113,7 +118,7 @@ describe('TRANSITIONS', () => {
       }
     }
     // Ids are E1, E2, … in order; a retired id (E4, E25, E27) is never reused.
-    const ids = Array.from({ length: 29 }, (_, i) => `E${i + 1}`).filter(
+    const ids = Array.from({ length: 32 }, (_, i) => `E${i + 1}`).filter(
       (id) => !RETIRED_EDGE_IDS.includes(id),
     );
     expect(TRANSITIONS.map((e) => e.id)).toEqual(ids);
@@ -212,14 +217,14 @@ describe('TRANSITIONS', () => {
     }
     expect(TRANSITIONS.find((e) => e.id === 'E29')!.newRound).toBeUndefined();
     // Appended: the step 5.2 codes keep their positions.
-    expect(LIFECYCLE_REASON_CODES.slice(-4)).toEqual([
+    expect(LIFECYCLE_REASON_CODES.slice(-8, -4)).toEqual([
       'policy_partial',
       'quarantine_partial_release',
       'manual_quarantine',
       'quarantine_expired',
     ]);
     expect(LIFECYCLE_REASON_CODES.indexOf('lifecycle_backfill')).toBe(
-      LIFECYCLE_REASON_CODES.length - 5,
+      LIFECYCLE_REASON_CODES.length - 9,
     );
   });
 
@@ -279,6 +284,35 @@ describe('TRANSITIONS', () => {
     for (const state of [...FINAL_STATES, 'received' as const]) {
       expect(EXPIRABLE_STATES).not.toContain(state);
     }
-    expect(FINAL_STATES).toEqual(['delivered', 'rejected', 'archived', 'expired']);
+    expect(FINAL_STATES).toEqual(['delivered', 'rejected', 'archived', 'expired', 'journaled']);
+  });
+
+  it('adds the step 8.6 intake edges E30-E32 into the final journaled state (D4, ADR-0087)', () => {
+    const into = TRANSITIONS.filter((e) => e.to === 'journaled');
+    expect(into.map((e) => [e.id, [...e.from], e.roles, e.reasons, e.producedBy])).toEqual([
+      ['E30', ['persisted'], ['scanner'], ['intake_unscanned', 'intake_parse_failed'], '8.6'],
+      ['E31', ['scanned'], ['scanner'], ['intake_scan_complete'], '8.6'],
+      ['E32', ['scan_failed'], ['scanner'], ['intake_scan_failed'], '8.6'],
+    ]);
+    for (const edge of into) expect(edge.newRound, edge.id).toBeUndefined();
+    // Final: no edge leaves it (no rescan E19, partial release E28, manual quarantine E29), it is
+    // never expirable and it ranks with the other final outcomes.
+    expect(TRANSITIONS.filter((e) => e.from.includes('journaled'))).toEqual([]);
+    expect(FINAL_STATES).toContain('journaled');
+    expect(EXPIRABLE_STATES).not.toContain('journaled');
+    for (const id of ['E19', 'E26', 'E28', 'E29']) {
+      expect(TRANSITIONS.find((e) => e.id === id)!.from, id).not.toContain('journaled');
+    }
+    expect(STATE_RANK.journaled).toBeGreaterThan(STATE_RANK.scanned);
+    expect(STATE_RANK.journaled).toBeGreaterThan(STATE_RANK.scan_failed);
+    // Appended after the step 5.3 codes.
+    expect(LIFECYCLE_REASON_CODES.slice(-4)).toEqual([
+      'intake_unscanned',
+      'intake_parse_failed',
+      'intake_scan_complete',
+      'intake_scan_failed',
+    ]);
+    expect(INTAKE_ONLY_STATES).toEqual(['journaled']);
+    expect(MESSAGE_STATES.at(-1)).toBe('journaled');
   });
 });

@@ -6,10 +6,12 @@ import {
 } from '@email-gateway/common';
 import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/database';
 import { EventTypes } from '@email-gateway/event-contracts';
+import { type TransitionActor, transitionMessage } from '@email-gateway/message-lifecycle';
 import type { MimeParseResult } from '@email-gateway/mime-parser';
 import type {
   FinalizeInput,
   FinalizeResult,
+  IntakeGateResult,
   MarkParsingResult,
   MessageRecord,
   MimeStore,
@@ -26,6 +28,30 @@ export class AlreadyFinalized extends Error {
 }
 
 const json = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
+
+/** The actor of E30 (step 8.6 D4): the email-worker as `scanner`, like E3/E6/E7. */
+export const INTAKE_PARSE_ACTOR: TransitionActor = {
+  role: 'scanner',
+  service: SOURCE_SERVICE,
+  type: 'system',
+};
+
+/**
+ * What the parse commit writes for a message (step 8.6 D4): `gateway` → the 3.1 behaviour (a
+ * `parsed.v1` or `parse_failed.v1` outbox row); a journal intake message whose scan was requested
+ * → `parsed.v1` on success and E30 `intake_parse_failed` (no outbox row) on failure; a journal
+ * intake message without a requested scan → E30 `intake_unscanned` / `intake_parse_failed` and
+ * never an outbox row. Pure.
+ */
+export function intakeGate(
+  ingestSource: 'gateway' | 'journal_intake' | undefined,
+  scanRequested: boolean,
+  parseFailed: boolean,
+): { kind: 'outbox' } | { kind: 'journal'; reason: 'intake_unscanned' | 'intake_parse_failed' } {
+  if (ingestSource !== 'journal_intake') return { kind: 'outbox' };
+  if (parseFailed) return { kind: 'journal', reason: 'intake_parse_failed' };
+  return scanRequested ? { kind: 'outbox' } : { kind: 'journal', reason: 'intake_unscanned' };
+}
 
 /**
  * MySQL side of the MIME ingestion stage, on the **writer** only (ADR-0014). Every statement is
@@ -71,6 +97,7 @@ export class MimeRepository implements MimeStore {
         emlObjectKey: true,
         emlSha256: true,
         sizeBytes: true,
+        ingestSource: true,
       },
     });
   }
@@ -152,31 +179,60 @@ export class MimeRepository implements MimeStore {
       const result = await processOnce(this.txPrisma, input.consumer, input.event.eventId, (tx) =>
         this.applyFinal(tx, input, outboxEventId),
       );
-      return result.status === 'duplicate'
-        ? { outcome: 'duplicate' }
-        : { outcome: 'handled', outboxEventId };
+      if (result.status === 'duplicate') return { outcome: 'duplicate' };
+      const intake = result.result;
+      return {
+        outcome: 'handled',
+        ...(intake === null || intake === 'scan_requested' ? { outboxEventId } : {}),
+        ...(intake !== null ? { intake } : {}),
+      };
     } catch (err) {
       if (err instanceof AlreadyFinalized) return { outcome: 'duplicate' };
       throw err;
     }
   }
 
+  /**
+   * `journal_intake_messages.scan_requested` of an intake message (same partition key, step 8.6
+   * D4). A missing row (never written by the intake LMTP, which commits both together) counts as
+   * not requested: the fail-safe never sends an intake message toward the policy engine.
+   */
+  private async scanRequested(
+    tx: Prisma.TransactionClient,
+    message: FinalizeInput['message'],
+  ): Promise<boolean> {
+    const row = await tx.journalIntakeMessage.findUnique({
+      where: { messageId_receivedAt: { messageId: message.id, receivedAt: message.receivedAt } },
+      select: { organizationId: true, scanRequested: true },
+    });
+    if (row === null || row.organizationId !== message.organizationId) return false;
+    return row.scanRequested;
+  }
+
   private async applyFinal(
     tx: Prisma.TransactionClient,
     input: FinalizeInput,
     outboxEventId: string,
-  ): Promise<void> {
+  ): Promise<IntakeGateResult | null> {
     const { message, outcome } = input;
     const scope = {
       messageId: message.id,
       receivedAt: message.receivedAt,
       organizationId: message.organizationId,
     };
+    const intake = message.ingestSource === 'journal_intake';
+    const gate = intakeGate(
+      message.ingestSource,
+      intake ? await this.scanRequested(tx, message) : false,
+      outcome.status === 'parse_failed',
+    );
     // Validated before anything is written: a contract violation rolls everything back.
     const payload =
-      outcome.status === 'parse_failed'
-        ? buildParseFailedPayload(input)
-        : buildParsedPayload(input);
+      gate.kind !== 'outbox'
+        ? null
+        : outcome.status === 'parse_failed'
+          ? buildParseFailedPayload(input)
+          : buildParsedPayload(input);
     const result = outcome.result;
     const stats = outcome.stats;
 
@@ -260,6 +316,28 @@ export class MimeRepository implements MimeStore {
       select: { id: true },
     });
 
+    if (gate.kind === 'journal') {
+      // 5'. Step 8.6 D4: a journal intake message ends in `journaled` (E30) instead of an outbox
+      // event; nothing reaches the policy engine (never `parse_failed.v1` and its E5 fail-safe).
+      const transition = await transitionMessage(tx, {
+        message: {
+          id: message.id,
+          receivedAt: message.receivedAt,
+          organizationId: message.organizationId,
+        },
+        to: 'journaled',
+        reason: gate.reason,
+        actor: INTAKE_PARSE_ACTOR,
+        transitionKey: `intake-parse:${message.id.toString()}`,
+        causationEventId: input.event.eventId,
+        correlationId: input.event.correlationId,
+        expectedFrom: ['persisted'],
+      });
+      return transition.result === 'applied' || transition.result === 'duplicate'
+        ? 'journaled'
+        : 'transition_skipped';
+    }
+
     // 5. The transactional outbox event (M14).
     await tx.messageOutbox.create({
       data: {
@@ -276,6 +354,7 @@ export class MimeRepository implements MimeStore {
       },
       select: { id: true },
     });
+    return intake ? 'scan_requested' : null;
   }
 }
 

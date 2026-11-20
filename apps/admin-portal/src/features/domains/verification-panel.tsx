@@ -10,9 +10,15 @@ import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
 import { queryKeyFor, useApiMutation, useApiQuery } from '@/lib/api/hooks';
 import { Can } from '@/lib/auth/can';
+import { useArchiveOnly } from '@/lib/auth/me';
 import { humanize } from '@/lib/format';
 import { MutationError } from './kit';
-import { DomainStatusBadge, RecordStatusBadge, type DomainStatusView } from './model';
+import {
+  ARCHIVE_ONLY_LABEL,
+  DomainStatusBadge,
+  RecordStatusBadge,
+  type DomainStatusView,
+} from './model';
 
 /** Backoff of the status poll while verification is pending: 5 s, 10 s, 20 s, 40 s, then 60 s. */
 export function pollDelay(updates: number): number {
@@ -21,12 +27,28 @@ export function pollDelay(updates: number): number {
 
 type Check = DomainStatusView['checks'][keyof DomainStatusView['checks']];
 
-function CheckRow({ name, check, extra }: { name: string; check: Check; extra?: ReactNode }) {
+function CheckRow({
+  name,
+  check,
+  extra,
+  notRequired = false,
+}: {
+  name: string;
+  check: Check;
+  extra?: ReactNode;
+  /** Step 8.6: archive-only organizations need no MX, SPF or DKIM record. */
+  notRequired?: boolean;
+}) {
   return (
     <li className="grid gap-1 rounded-md border p-3 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-medium">{name}</span>
-        <RecordStatusBadge status={check.status} />
+        <span className="flex flex-wrap items-center gap-2">
+          {notRequired ? (
+            <span className="text-xs text-muted-foreground">{ARCHIVE_ONLY_LABEL}</span>
+          ) : null}
+          <RecordStatusBadge status={check.status} />
+        </span>
       </div>
       <span className="text-xs text-muted-foreground">
         Last checked <DateTime value={check.lastCheckedAt} emptyLabel="never" />
@@ -52,6 +74,7 @@ function CheckRow({ name, check, extra }: { name: string; check: Check; extra?: 
  */
 export function VerificationPanel({ domainId }: { domainId: string }) {
   const queryClient = useQueryClient();
+  const archiveOnly = useArchiveOnly();
   const status = useApiQuery(
     'DomainDnsController_status_v1',
     { path: { id: domainId } },
@@ -128,6 +151,7 @@ export function VerificationPanel({ domainId }: { domainId: string }) {
         <CheckRow name="Ownership (TXT)" check={view.checks.ownership} />
         <CheckRow
           name="MX"
+          notRequired={archiveOnly}
           check={view.checks.mx}
           extra={
             view.checks.mx.observed.length > 0 ? (
@@ -145,6 +169,7 @@ export function VerificationPanel({ domainId }: { domainId: string }) {
         />
         <CheckRow
           name="SPF"
+          notRequired={archiveOnly}
           check={view.checks.spf}
           extra={
             view.checks.spf.lookupCount !== null && view.checks.spf.lookupCount !== undefined ? (
@@ -156,6 +181,7 @@ export function VerificationPanel({ domainId }: { domainId: string }) {
         />
         <CheckRow
           name="DKIM"
+          notRequired={archiveOnly}
           check={view.checks.dkim}
           extra={
             view.checks.dkim.selectors.length > 0 ? (
@@ -182,13 +208,15 @@ export function VerificationPanel({ domainId }: { domainId: string }) {
         />
       </ul>
       <p className="text-xs text-muted-foreground">
-        {view.readyForActivation
-          ? 'Ownership is proven: the domain can be activated.'
-          : view.mailFlowReady
-            ? 'Mail flow is ready: the domain is active and its MX points to the gateway.'
-            : view.status === 'active'
-              ? 'The domain is active; mail flows once its MX record points to the gateway.'
-              : 'Activation needs proven ownership only; switch the MX record after activating.'}
+        {archiveOnly
+          ? 'Archive-only plan: ownership (TXT) is the only record needed; mail does not flow through the gateway, so MX, SPF and DKIM are not required.'
+          : view.readyForActivation
+            ? 'Ownership is proven: the domain can be activated.'
+            : view.mailFlowReady
+              ? 'Mail flow is ready: the domain is active and its MX points to the gateway.'
+              : view.status === 'active'
+                ? 'The domain is active; mail flows once its MX record points to the gateway.'
+                : 'Activation needs proven ownership only; switch the MX record after activating.'}
       </p>
     </div>
   );

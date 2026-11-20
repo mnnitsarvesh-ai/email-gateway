@@ -40,6 +40,7 @@ export const SETTINGS: ArchiveSettings = {
     scope: { mode: 'all', domainIds: [], departmentIds: [], userIds: [], addresses: [] },
     policyArchive: { enabled: true },
     access: { previewEnabled: true, downloadEnabled: true },
+    intake: { scanEnabled: false },
   },
   generation: 2,
   journalEnabledAt: null,
@@ -90,6 +91,7 @@ export function message(overrides: Partial<ArchiveMessage> = {}): ArchiveMessage
     direction: 'inbound',
     category: 'delivered',
     sources: ['journal'],
+    ingestSources: ['gateway'],
     status: 'active',
     envelopeFrom: 'sender@partner.example.test',
     headerFrom: 'sender@partner.example.test',
@@ -115,6 +117,8 @@ export function detail(overrides: Partial<ArchiveDetail> = {}): ArchiveDetail {
   const base = message();
   return {
     ...base,
+    intake: null,
+    mergedCopies: [],
     internetMessageId: '<EXAMPLE-1@mail.example.test>',
     parties: {
       envelopeFrom: base.envelopeFrom,

@@ -10,6 +10,7 @@ import {
   ConnectorResolver,
   type ConnectorView,
 } from '../connectors/connector-resolver.service';
+import { JournalIntakePolicy } from '../journal-intake/journal-intake-policy.service';
 import { DkimReadinessService } from '../outbound/dkim-readiness.service';
 import { ProviderRelayPolicy } from '../provider-relay/provider-relay-policy.service';
 import { SuppressionService } from '../outbound/suppression.service';
@@ -111,6 +112,12 @@ function minLimit(...limits: (number | null)[]): number | null {
  * after the sender checks and before suppression and rate limits (D14; inbound, reinjection and
  * bounce paths are never affected); at END-OF-MESSAGE a passed submission is recorded for ATO
  * detection after the answer (D4, never awaited by the reply).
+ *
+ * Step 8.6 D2.2 (ADR-0087): in `inbound` at RCPT a recipient in JOURNAL_INTAKE_DOMAIN is decided
+ * by the journal intake branch only (never resolved as a tenant domain); a tenant recipient
+ * records the transaction kind before its DUNNO, so intake and tenant recipients never share a
+ * transaction (`452 4.5.3`, both orders); at END-OF-MESSAGE an intake transaction writes its
+ * marker for the journal LMTP. Absent module (intake off) = step 8.5 behaviour.
  */
 @Injectable()
 export class PolicyDecisionService {
@@ -135,6 +142,8 @@ export class PolicyDecisionService {
     private readonly telemetry: AtoTelemetryRecorder,
     // Step 8.2 D7/D8/D10 (provider relay); absent = step 2.2 behaviour.
     @Optional() private readonly providerRelay?: ProviderRelayPolicy,
+    // Step 8.6 D2.2 (journal intake); absent = intake off.
+    @Optional() private readonly journalIntake?: JournalIntakePolicy,
   ) {
     this.logger = logger.child({ component: 'policy-decision' });
     this.decisions = metrics.counter(
@@ -206,6 +215,10 @@ export class PolicyDecisionService {
     const state = request.protocol_state;
     const now = new Date();
     if (state === 'RCPT') {
+      // Step 8.6 D2.2: the intake domain is decided by the intake branch alone.
+      if (context === 'inbound' && this.journalIntake?.isIntakeRecipient(request.recipient)) {
+        return this.journalIntake.checkRecipient(request, now);
+      }
       // The bounce-notice address is reserved for postfix-outbound's own postmaster copies
       // (D13): no listener may accept mail for it, or a client could reach the bounce handler
       // through reinjection with a forged notice (review finding, §12.7).
@@ -280,6 +293,9 @@ export class PolicyDecisionService {
       if (sizeOf(request) > limit) return TOO_BIG_FOR_RECIPIENT;
       await this.recordSizeLimit(request, limit);
     }
+    // Step 8.6 D2.2.5: no tenant recipient in a transaction that carries an intake recipient.
+    const mixed = await this.journalIntake?.claimTenant(request);
+    if (mixed) return mixed;
     this.logger.debug(
       { context: 'inbound', organizationId: String(orgId), recipientDomain: domain.name },
       'recipient accepted by policy',
@@ -486,13 +502,21 @@ export class PolicyDecisionService {
     const instance = request.instance ?? '';
     if (!INSTANCE.test(instance)) throw new PolicyMisconfiguredError('missing instance attribute');
     const limit = await this.sizes.limit(instance);
-    if (limit !== null && sizeOf(request) > limit) return TOO_BIG;
+    if (limit !== null && sizeOf(request) > limit) {
+      if (context === 'inbound') this.journalIntake?.recordEndOfMessageTooBig(request, new Date());
+      return TOO_BIG;
+    }
     // Step 8.2 D8.1: the provider relay marker before DUNNO (a Redis error tempfails).
     if (context === 'relay' && this.providerRelay) {
       const answer = await this.providerRelay.endOfMessage(
         request,
         await this.resolveConnector(request, context),
       );
+      if (answer !== null) return answer;
+    }
+    // Step 8.6: the marker of an intake transaction before DUNNO (a Redis error tempfails).
+    if (context === 'inbound' && this.journalIntake) {
+      const answer = await this.journalIntake.endOfMessage(request);
       if (answer !== null) return answer;
     }
     return DUNNO;

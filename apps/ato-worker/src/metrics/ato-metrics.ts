@@ -19,6 +19,8 @@ export const ATO_EVENT_RESULTS = [
   'skipped_org',
   'duplicate',
   'unattributed',
+  // Step 8.6 D4: a journal intake message is never an ATO signal (defence in depth).
+  'skipped_source',
   'error',
 ] as const;
 export type AtoEventResult = (typeof ATO_EVENT_RESULTS)[number];
@@ -62,7 +64,7 @@ export class AtoMetrics {
   constructor(metrics: MetricsService) {
     this.events = metrics.counter(
       'ato_events_total',
-      'ATO source events by source (portal_login, account_change, smtp_auth, smtp_submission, outbound_message, provider) and result (processed, skipped_feature, skipped_direction, skipped_org, duplicate, unattributed, error)',
+      'ATO source events by source (portal_login, account_change, smtp_auth, smtp_submission, outbound_message, provider) and result (processed, skipped_feature, skipped_direction, skipped_org, duplicate, unattributed, skipped_source, error)',
       ['source', 'result'],
     );
     this.detectionDuration = metrics.histogram(

@@ -243,3 +243,30 @@ describe('archive-worker config (§4.8)', () => {
     }
   });
 });
+
+describe('journal intake and dedupe keys (step 8.6 §4.4)', () => {
+  it('applies the defaults', () => {
+    expect(loadWorkerConfig(base)).toMatchObject({
+      JOURNAL_INTAKE_HEALTH_INTERVAL_MS: 60_000,
+      JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS: 24,
+      ARCHIVE_DEDUPE_WINDOW_HOURS: 72,
+      ARCHIVE_MAX_CONTENT_VARIANTS: 4,
+      ARCHIVE_MAX_MERGED_COPIES: 8,
+    });
+  });
+
+  it('bounds the keys and keeps variants ≤ merged copies (names keys, never values)', () => {
+    expect(issues({ ...base, ARCHIVE_MAX_MERGED_COPIES: '9' })).toContain(
+      'ARCHIVE_MAX_MERGED_COPIES',
+    );
+    expect(issues({ ...base, JOURNAL_INTAKE_HEALTH_INTERVAL_MS: '10' })).toContain(
+      'JOURNAL_INTAKE_HEALTH_INTERVAL_MS',
+    );
+    expect(
+      issues({ ...base, ARCHIVE_MAX_CONTENT_VARIANTS: '6', ARCHIVE_MAX_MERGED_COPIES: '4' }),
+    ).toContain('ARCHIVE_MAX_CONTENT_VARIANTS');
+    expect(
+      loadWorkerConfig({ ...base, ARCHIVE_DEDUPE_WINDOW_HOURS: '1' }).ARCHIVE_DEDUPE_WINDOW_HOURS,
+    ).toBe(1);
+  });
+});

@@ -23,6 +23,8 @@ export class MimeMetrics {
   readonly attachments: Counter;
   readonly attachmentFlags: Counter<'flag'>;
   readonly retries: Counter<'class'>;
+  /** Step 8.6 D4: the parse commit's gate for journal intake messages. */
+  readonly intake: Counter<'result'>;
 
   constructor(metrics: MetricsService) {
     this.messages = metrics.counter(
@@ -60,6 +62,11 @@ export class MimeMetrics {
       'mime_retries_total',
       'Parse attempts given back after an infrastructure failure, by failing dependency',
       ['class'],
+    );
+    this.intake = metrics.counter(
+      'mime_intake_messages_total',
+      'Journal intake messages finalized by the MIME stage, by gate result (journaled: E30 and no outbox event; scan_requested: parsed.v1 for the scan stage; transition_skipped: no outbox event, E30 not applied)',
+      ['result'],
     );
   }
 

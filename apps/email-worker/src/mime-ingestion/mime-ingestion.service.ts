@@ -193,6 +193,7 @@ export class MimeIngestionService {
       const seconds =
         downloadStarted === null ? null : (performance.now() - downloadStarted) / 1000;
       metrics.finalized(outcome, seconds);
+      if (finalized.intake !== undefined) metrics.intake.inc({ result: finalized.intake });
       const log = {
         ...ids,
         status: outcome.status,
@@ -203,6 +204,7 @@ export class MimeIngestionService {
         durationMs: completedAt.getTime() - startedAt.getTime(),
         attempts,
         ...(outcome.failureReason ? { failureReason: outcome.failureReason } : {}),
+        ...(finalized.intake !== undefined ? { intake: finalized.intake } : {}),
       };
       if (outcome.status === 'parse_failed') this.logger.warn(log, 'message parse failed');
       else this.logger.info(log, 'message parsed');

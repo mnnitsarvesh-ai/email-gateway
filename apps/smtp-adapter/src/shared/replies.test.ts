@@ -89,6 +89,13 @@ describe('policy actions (D4, D11)', () => {
     expect(replies.ATO_SEND_RESTRICTED_DEFER).toBe(
       'DEFER_IF_PERMIT 4.7.1 Sending temporarily restricted by security policy, try again later',
     );
+    // Step 8.6 D2.2 (contracts §34).
+    expect(replies.INTAKE_UNAVAILABLE).toBe('450 4.7.1 Journal intake temporarily unavailable');
+    expect(replies.INTAKE_SENDER_NOT_AUTHORIZED).toBe(
+      'REJECT 5.7.1 Journal intake sender not authorized',
+    );
+    expect(replies.INTAKE_ONE_DESTINATION).toBe('452 4.5.3 Error: too many recipients');
+    expect(replyLine(replies.LMTP_INTAKE_DROPPED)).toBe('250 2.0.0 Ok: dropped');
   });
 
   it('never answers OK, and every action is a single line Postfix accepts', () => {
@@ -99,9 +106,12 @@ describe('policy actions (D4, D11)', () => {
           !name.startsWith('SOCKETMAP_') && name !== 'TRANSPORT_DESTINATION_NOT_CONFIGURED',
       )
       .map(([, v]) => v as string);
-    expect(actions.length).toBe(14);
+    expect(actions.length).toBe(17);
     for (const action of actions) {
-      expect(action).toMatch(/^(DUNNO|REJECT 5\.\d\.\d+ \S.*|DEFER_IF_PERMIT 4\.\d\.\d+ \S.*)$/);
+      // Step 8.6: numeric 4xx actions where the code matters (450, 452 of contracts §34).
+      expect(action).toMatch(
+        /^(DUNNO|REJECT 5\.\d\.\d+ \S.*|DEFER_IF_PERMIT 4\.\d\.\d+ \S.*|45[02] 4\.\d\.\d+ \S.*)$/,
+      );
       expect(action).not.toMatch(/[\r\n]/);
       expect(action.startsWith('OK')).toBe(false);
     }

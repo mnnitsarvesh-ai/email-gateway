@@ -34,7 +34,7 @@ import {
   UserStatusBadge,
   type User,
 } from './model';
-import { RolePicker } from './role-picker';
+import { ArchiveAccessConfirmDialog, RolePicker, useArchiveRolesAdded } from './role-picker';
 
 const URL_SHAPE = {
   q: z.string().max(320).optional().catch(undefined),
@@ -64,12 +64,23 @@ function InviteForm({ onDone }: { onDone: (userId: string) => void }) {
   const form = useZodForm(inviteSchema, {
     defaultValues: { email: '', displayName: '', roleKeys: [] },
   });
-  const submit = form.handleSubmit(async (values) => {
+  const archiveRolesAdded = useArchiveRolesAdded();
+  const [confirmArchive, setConfirmArchive] = useState<{
+    roles: string[];
+    values: z.output<typeof inviteSchema>;
+  } | null>(null);
+  const send = async (values: z.output<typeof inviteSchema>) => {
     setMessages([]);
     const outcome = await invite.submit({ body: values });
     if (outcome.ok) return onDone(outcome.data.id);
     const lines = applyApiErrors(form, outcome.error);
     setMessages(outcome.error.status === 403 ? [...lines, NO_ESCALATION_HINT] : lines);
+  };
+  const submit = form.handleSubmit(async (values) => {
+    // Step 8.6: assigning archive access is confirmed first (audited by the api).
+    const archive = archiveRolesAdded([], values.roleKeys);
+    if (archive.length > 0) return setConfirmArchive({ roles: archive, values });
+    await send(values);
   });
   return (
     <Form {...form}>
@@ -129,6 +140,15 @@ function InviteForm({ onDone }: { onDone: (userId: string) => void }) {
         >
           {invite.isPending ? 'Sending …' : 'Send invitation'}
         </Button>
+        <ArchiveAccessConfirmDialog
+          roles={confirmArchive?.roles ?? null}
+          onCancel={() => setConfirmArchive(null)}
+          onConfirm={async () => {
+            const pending = confirmArchive;
+            setConfirmArchive(null);
+            if (pending) await send(pending.values);
+          }}
+        />
       </form>
     </Form>
   );

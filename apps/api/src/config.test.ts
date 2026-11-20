@@ -1694,3 +1694,44 @@ describe('loadApiConfig: Microsoft 365 and Google Workspace connections (step 8.
     );
   });
 });
+
+describe('loadApiConfig: journal intake (step 8.6 §4.4)', () => {
+  it('reads the intake domain and defaults the limits', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      JOURNAL_INTAKE_DOMAIN: 'journal.gateway.test',
+      JOURNAL_INTAKE_MAX_MESSAGE_BYTES: 52_428_800,
+      JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS: 7,
+      JOURNAL_INTAKE_MAX_SOURCES_PER_ORG: 20,
+    });
+  });
+
+  it('turns intake off with an empty domain (no secret needed)', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      JOURNAL_INTAKE_DOMAIN: '',
+      JOURNAL_INTAKE_ADDRESS_SECRET: '',
+    });
+    expect(cfg.JOURNAL_INTAKE_DOMAIN).toBeUndefined();
+    expect(cfg.JOURNAL_INTAKE_ADDRESS_SECRET).toBeUndefined();
+  });
+
+  it('requires the address secret with the domain and never echoes it', () => {
+    expect(rejection({ ...valid, JOURNAL_INTAKE_ADDRESS_SECRET: undefined })).toContain(
+      'JOURNAL_INTAKE_ADDRESS_SECRET',
+    );
+    const short = 'cd'.repeat(16);
+    const message = rejection({ ...valid, JOURNAL_INTAKE_ADDRESS_SECRET: short });
+    expect(message).toContain('JOURNAL_INTAKE_ADDRESS_SECRET');
+    expect(message).not.toContain(short);
+  });
+
+  it.each([
+    ['JOURNAL_INTAKE_DOMAIN', 'localhost'],
+    ['JOURNAL_INTAKE_MAX_MESSAGE_BYTES', '10'],
+    ['JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS', '91'],
+    ['JOURNAL_INTAKE_MAX_SOURCES_PER_ORG', '0'],
+  ])('refuses %s=%s naming the key', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});

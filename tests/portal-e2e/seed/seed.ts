@@ -59,6 +59,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const ALPHA = { slug: 'e2e-portal-alpha', name: 'E2E Portal Alpha' } as const;
 export const BETA = { slug: 'e2e-portal-beta', name: 'E2E Portal Beta' } as const;
+/** Step 8.6: an organization on the archive-only plan (ADR-0090). */
+export const GAMMA = { slug: 'e2e-portal-gamma', name: 'E2E Portal Gamma Archive' } as const;
+export const GAMMA_PLAN = 'archive_only';
 export const ALPHA_DOMAIN = 'alpha.e2e-portal.test';
 export const ALPHA_DELETED_DOMAIN = 'old.alpha.e2e-portal.test';
 export const BETA_DOMAIN = 'beta.e2e-portal.test';
@@ -67,7 +70,7 @@ export const ALPHA_AUDIT_ROWS = 70;
 /** Alpha's tenant request budget (the enterprise plan value; standard is 300). */
 export const ALPHA_API_REQUESTS_PER_MINUTE = 1_200;
 /** Users of the role table below that belong to alpha (every role key starting with `alpha`). */
-export const ALPHA_ROLE_USERS = 10;
+export const ALPHA_ROLE_USERS = 12;
 
 function generatePassword(): string {
   return `E2e-${randomBytes(12).toString('base64url')}-7a`;
@@ -116,11 +119,16 @@ interface Org {
  */
 export const E2E_PLAN = 'enterprise';
 
-async function createOrganization(p: PrismaClient, slug: string, name: string): Promise<Org> {
-  const planDef = PLANS.find((plan) => plan.code === E2E_PLAN);
-  if (!planDef) throw new Error(`${E2E_PLAN} plan missing`);
+async function createOrganization(
+  p: PrismaClient,
+  slug: string,
+  name: string,
+  planCode: string = E2E_PLAN,
+): Promise<Org> {
+  const planDef = PLANS.find((plan) => plan.code === planCode);
+  if (!planDef) throw new Error(`${planCode} plan missing`);
   const plan = await p.organizationPlan.findUniqueOrThrow({
-    where: { code: E2E_PLAN },
+    where: { code: planCode },
     select: { id: true },
   });
   const org = await p.organization.create({
@@ -536,6 +544,7 @@ export async function seed(): Promise<SeedSummary> {
 
     const alpha = await createOrganization(p, ALPHA.slug, ALPHA.name);
     const beta = await createOrganization(p, BETA.slug, BETA.name);
+    const gamma = await createOrganization(p, GAMMA.slug, GAMMA.name, GAMMA_PLAN);
     // The suite drives alpha's whole traffic through ten users within minutes (step 7.2 adds 14
     // details sections per role): the tenant budget of the standard plan (300 requests per
     // minute for the whole organization) would answer `429` to later specs. Alpha gets the
@@ -557,7 +566,7 @@ export async function seed(): Promise<SeedSummary> {
     });
     const spec: Record<
       UserKey,
-      { email: string; roles: string[]; org: 'alpha' | 'beta' | 'platform'; name: string }
+      { email: string; roles: string[]; org: 'alpha' | 'beta' | 'gamma' | 'platform'; name: string }
     > = {
       alphaAdmin: {
         email: `admin@${ALPHA_DOMAIN}`,
@@ -607,9 +616,11 @@ export async function seed(): Promise<SeedSummary> {
         org: 'alpha',
         name: 'Alpha MFA Admin',
       },
+      // Step 8.6: an admin that existed before the split keeps archive access through the
+      // migrated compliance_officer assignment (ADR-0089); alphaAdmin is a new admin without it.
       alphaApprover: {
         email: `approver@${ALPHA_DOMAIN}`,
-        roles: ['organization_admin'],
+        roles: ['organization_admin', 'compliance_officer'],
         org: 'alpha',
         name: 'Alpha Approver',
       },
@@ -620,11 +631,29 @@ export async function seed(): Promise<SeedSummary> {
         org: 'alpha',
         name: 'Alpha MFA Auditor',
       },
+      alphaCompliance: {
+        email: `compliance@${ALPHA_DOMAIN}`,
+        roles: ['compliance_officer'],
+        org: 'alpha',
+        name: 'Alpha Compliance Officer',
+      },
+      alphaAccessAdmin: {
+        email: `access-admin@${ALPHA_DOMAIN}`,
+        roles: ['organization_admin'],
+        org: 'alpha',
+        name: 'Alpha Access Admin',
+      },
       betaAdmin: {
         email: `admin@${BETA_DOMAIN}`,
-        roles: ['organization_admin'],
+        roles: ['organization_admin', 'compliance_officer'],
         org: 'beta',
         name: 'Beta Admin',
+      },
+      gammaAdmin: {
+        email: 'admin@gamma.e2e-portal.test',
+        roles: ['organization_admin', 'compliance_officer'],
+        org: 'gamma',
+        name: 'Gamma Archive Admin',
       },
       platformAdmin: {
         email: 'platform-admin@e2e-portal.test',
@@ -633,7 +662,7 @@ export async function seed(): Promise<SeedSummary> {
         name: 'E2E Platform Admin',
       },
     };
-    const orgOf = { alpha, beta, platform } as const;
+    const orgOf = { alpha, beta, gamma, platform } as const;
     const users = {} as Record<UserKey, E2eUser>;
     const userIds = new Map<string, bigint>();
     for (const [key, s] of Object.entries(spec) as Array<[UserKey, (typeof spec)[UserKey]]>) {
@@ -662,6 +691,25 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(auditorSecret, auditorId) },
     });
     users.alphaAuditorMfa.totpSecret = auditorSecret;
+    // Step 8.6: the compliance officer signs in with MFA (archive previews and downloads).
+    const complianceSecret = base32Encode(randomBytes(20));
+    const complianceId = userIds.get(spec.alphaCompliance.email)!;
+    await p.user.update({
+      where: { id: complianceId },
+      data: {
+        mfaEnabled: true,
+        mfaSecretCiphertext: sealMfaSecret(complianceSecret, complianceId),
+      },
+    });
+    users.alphaCompliance.totpSecret = complianceSecret;
+    // Step 8.6 review fix: an organization admin (no archive access) with MFA delegates it.
+    const accessSecret = base32Encode(randomBytes(20));
+    const accessId = userIds.get(spec.alphaAccessAdmin.email)!;
+    await p.user.update({
+      where: { id: accessId },
+      data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(accessSecret, accessId) },
+    });
+    users.alphaAccessAdmin.totpSecret = accessSecret;
 
     const memberHash = await hashPassword(generatePassword());
     const memberIds: string[] = [];
@@ -953,7 +1001,6 @@ export async function seed(): Promise<SeedSummary> {
       );
       try {
         archive = await prepareArchive(p, {
-          alphaAdmin: alphaApi,
           alphaApprover: approverApi,
           betaOrg: beta.id,
         });
@@ -1015,6 +1062,7 @@ export async function seed(): Promise<SeedSummary> {
       orgs: {
         alpha: { id: alpha.publicId, name: alpha.name, slug: alpha.slug },
         beta: { id: beta.publicId, name: beta.name, slug: beta.slug },
+        gamma: { id: gamma.publicId, name: gamma.name, slug: gamma.slug },
       },
       alpha: {
         domainId: alphaDomain.publicId,

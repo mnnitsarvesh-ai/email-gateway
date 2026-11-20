@@ -763,11 +763,15 @@ describe('route security (e2e, dependencies stubbed)', () => {
     const R = 'archive:read';
     const M = 'archive:manage';
     const E = 'ediscovery:manage';
+    // Step 8.6 D11/D12 (ADR-0089): the Journaling area and the record-route re-scope.
+    const JR = 'journal:read';
+    const JM = 'journal:manage';
+    const S = 'archive:search';
     const expected: Record<string, [string[], Flags?]> = {
-      'get /api/v1/archive/settings': [[R]],
+      'get /api/v1/archive/settings': [[R, JR], { any: true }],
       'put /api/v1/archive/settings': [
-        [M],
-        { mfa: true, user: true, cls: 'sensitive', key: 'archive.settings_update' },
+        [JM, M],
+        { any: true, mfa: true, user: true, cls: 'sensitive', key: 'archive.settings_update' },
       ],
       'get /api/v1/archive/retention-policies': [[R], { cursor: true }],
       'post /api/v1/archive/retention-policies': [
@@ -788,20 +792,20 @@ describe('route security (e2e, dependencies stubbed)', () => {
         [M],
         { mfa: true, user: true, cls: 'sensitive', key: 'archive.key_rotate' },
       ],
-      'get /api/v1/archive/status': [[R]],
-      'get /api/v1/archive/capture-issues': [[M], { cursor: true }],
+      'get /api/v1/archive/status': [[R, JR], { any: true }],
+      'get /api/v1/archive/capture-issues': [[JM, M], { any: true, cursor: true }],
       'post /api/v1/archive/capture-issues/:messageId/retry': [
-        [M],
-        { cls: 'sensitive', key: 'archive.capture_retry' },
+        [JM, M],
+        { any: true, cls: 'sensitive', key: 'archive.capture_retry' },
       ],
       'get /api/v1/archive/disposals': [[R], { cursor: true }],
       'get /api/v1/archive/export-signing-keys': [[R]],
       'get /api/v1/archive/messages': [['archive:search'], { cls: 'expensive', cursor: true }],
-      'get /api/v1/archive/messages/:messageId': [[R]],
-      'get /api/v1/archive/messages/:messageId/journal': [[R]],
-      'get /api/v1/archive/messages/:messageId/security': [[R]],
+      'get /api/v1/archive/messages/:messageId': [[S]],
+      'get /api/v1/archive/messages/:messageId/journal': [[S]],
+      'get /api/v1/archive/messages/:messageId/security': [[S]],
       'post /api/v1/archive/messages/:messageId/reveal': [
-        [R, 'message:reveal'],
+        [S, 'message:reveal'],
         { rate: 'reveal' },
       ],
       'get /api/v1/archive/messages/:messageId/preview': [
@@ -882,6 +886,51 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route.idempotency, key).toBeNull();
       // Grants and the reveal carry no key (secret-bearing / values never stored).
       expect(route.returnsSecret, key).toBe(false);
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
+  it('the step 8.6 journaling routes: exact permissions, MFA, users, classes, keys, secrets and cursors (D11)', () => {
+    type Flags = { any?: boolean; mfa?: boolean; cls?: string; secret?: boolean; cursor?: boolean };
+    const JR = 'journal:read';
+    const JM = 'journal:manage';
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/journaling/settings': [[JR, 'archive:read'], { any: true }],
+      'put /api/v1/journaling/settings': [[JM], { mfa: true, cls: 'sensitive' }],
+      'get /api/v1/journaling/status': [[JR]],
+      'get /api/v1/journaling/intake-sources': [[JR], { cursor: true }],
+      'post /api/v1/journaling/intake-sources': [
+        [JM],
+        { mfa: true, cls: 'sensitive', secret: true },
+      ],
+      'get /api/v1/journaling/intake-sources/:sourceId': [[JR]],
+      'patch /api/v1/journaling/intake-sources/:sourceId': [[JM], { mfa: true, cls: 'sensitive' }],
+      'delete /api/v1/journaling/intake-sources/:sourceId': [[JM], { mfa: true, cls: 'sensitive' }],
+      'post /api/v1/journaling/intake-sources/:sourceId/rotate-address': [
+        [JM],
+        { mfa: true, cls: 'sensitive', secret: true },
+      ],
+      'get /api/v1/journaling/intake-sources/:sourceId/wizard': [[JR]],
+      'get /api/v1/journaling/intake-sources/:sourceId/setup-guide': [[JR]],
+      'post /api/v1/journaling/intake-sources/:sourceId/attestations': [
+        [JM],
+        { mfa: true, cls: 'sensitive' },
+      ],
+    };
+    const journaling = routes.filter((r) => /^\/api\/v1\/journaling(\/|$)/.test(r.path));
+    expect(journaling.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: flags?.any ? 'any' : 'all', permissions });
+      expect(route.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route.userOnly, key).toBe(flags?.mfa ?? false);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      expect(route.idempotency, key).toBeNull();
+      expect(route.returnsSecret, key).toBe(flags?.secret ?? false);
+      expect(route.secretRedactedReplay, key).toBe(flags?.secret ?? false);
       expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
     }
   });
@@ -1185,6 +1234,9 @@ describe('route security (e2e, dependencies stubbed)', () => {
         // Step 8.2: the consent URL and the probe address (ADR-0057 redacted replay).
         'post /api/v1/provider-connections/:id/grants',
         'post /api/v1/provider-connections/:id/validations',
+        // Step 8.6: the intake address shown once on creation and rotation.
+        'post /api/v1/journaling/intake-sources',
+        'post /api/v1/journaling/intake-sources/:sourceId/rotate-address',
       ].sort(),
     );
     expect(routes.filter((r) => r.secretRedactedReplay && !r.returnsSecret)).toEqual([]);

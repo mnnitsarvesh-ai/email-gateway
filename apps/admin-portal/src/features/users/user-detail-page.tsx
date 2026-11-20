@@ -35,7 +35,7 @@ import { useCan, useMe } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { DetailList, FormDialog, QueryView, Section, isUuid } from '@/features/domains/kit';
 import { NO_ESCALATION_HINT, ROLE_KEY, UserStatusBadge } from './model';
-import { RolePicker } from './role-picker';
+import { ArchiveAccessConfirmDialog, RolePicker, useArchiveRolesAdded } from './role-picker';
 
 type UserDetail = SuccessBody<'UsersController_get_v1'>;
 
@@ -164,6 +164,8 @@ function RolesEditor({ user }: { user: UserDetail }) {
   const current = user.roles.map((r) => r.key);
   const [value, setValue] = useState<string[]>(current);
   const [error, setError] = useState<string | undefined>();
+  const [confirmArchive, setConfirmArchive] = useState<string[] | null>(null);
+  const archiveRolesAdded = useArchiveRolesAdded();
   const save = useApiMutation('UsersController_replaceRoles_v1', {
     invalidates: ['UsersController_get_v1', 'UsersController_list_v1'],
     successMessage: 'Roles saved.',
@@ -195,14 +197,30 @@ function RolesEditor({ user }: { user: UserDetail }) {
             const parsed = rolesSchema.safeParse({ roleKeys: value });
             if (!parsed.success) return setError(parsed.error.issues[0]?.message);
             setError(undefined);
+            const archive = archiveRolesAdded(current, parsed.data.roleKeys);
+            if (archive.length > 0) return setConfirmArchive(archive);
             void save.submit({ path: { id: user.id }, body: parsed.data });
           }}
         >
-          <RolePicker legend="Assigned roles" value={value} onChange={setValue} error={error} />
+          <RolePicker
+            legend="Assigned roles"
+            value={value}
+            onChange={setValue}
+            error={error}
+            targetUserId={user.id}
+          />
           {escalationAware(save.error)}
           <Button type="submit" className="justify-self-start" disabled={!dirty || save.isPending}>
             {save.isPending ? 'Saving …' : 'Save roles'}
           </Button>
+          <ArchiveAccessConfirmDialog
+            roles={confirmArchive}
+            onCancel={() => setConfirmArchive(null)}
+            onConfirm={async () => {
+              setConfirmArchive(null);
+              await save.submit({ path: { id: user.id }, body: { roleKeys: value } });
+            }}
+          />
         </form>
       ) : null}
     </Section>

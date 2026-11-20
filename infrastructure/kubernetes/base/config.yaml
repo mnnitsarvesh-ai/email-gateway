@@ -357,3 +357,31 @@ data:
   PROVIDER_GOOGLE_ATO_TELEMETRY_SA_CLIENT_ID: ''
   PROVIDER_GOOGLE_ATO_RESPONSE_SA_CLIENT_ID: ''
   PROVIDER_GOOGLE_ATO_RESPONSE_EXTENDED_SA_CLIENT_ID: ''
+  # Journal-only intake and archive dedupe (step 8.6 §4.4, docs/plan/steps/27-journal-intake-and-
+  # archive-split.md; docs/deployment/smtp-gateway.md "Journal intake"). The platform-owned
+  # intake domain (MX to the inbound gateway hosts; the inbound Postfix ASG and its Rspamd get
+  # the same value as POSTFIX_JOURNAL_INTAKE_DOMAIN / RSPAMD_JOURNAL_INTAKE_DOMAIN). Empty = intake
+  # off (the api answers 503 journal_intake_unavailable, the smtp-adapter starts no journal LMTP).
+  # Set per overlay. JOURNAL_INTAKE_ADDRESS_SECRET is NOT here: its own Secret
+  # email-gateway-journal-intake-address-secret, mounted by the api only (the smtp-adapter
+  # compares SHA-256 hashes only).
+  JOURNAL_INTAKE_DOMAIN: ''
+  JOURNAL_INTAKE_ENABLED: 'true'
+  # api, smtp-adapter: platform ceiling of one intake message (min'ed with the source and plan).
+  JOURNAL_INTAKE_MAX_MESSAGE_BYTES: '52428800'
+  # smtp-adapter (journal LMTP :10053 and the intake branch of the RCPT policy).
+  LMTP_JOURNAL_PORT: '10053'
+  JOURNAL_INTAKE_ENVELOPE_MAX_BYTES: '1048576'
+  JOURNAL_INTAKE_MAX_RECIPIENTS: '10000'
+  JOURNAL_INTAKE_SOURCE_CACHE_SECONDS: '30'
+  JOURNAL_INTAKE_RATE_PER_SOURCE_PER_MINUTE: '6000'
+  JOURNAL_INTAKE_COUNTER_FLUSH_SECONDS: '30'
+  # api (address rotation overlap, sources per organization).
+  JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS: '7'
+  JOURNAL_INTAKE_MAX_SOURCES_PER_ORG: '20'
+  # archive-worker (capture role: intake health loop and silence alerts; cross-source dedupe).
+  JOURNAL_INTAKE_HEALTH_INTERVAL_MS: '60000'
+  JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS: '24'
+  ARCHIVE_DEDUPE_WINDOW_HOURS: '72'
+  ARCHIVE_MAX_CONTENT_VARIANTS: '4'
+  ARCHIVE_MAX_MERGED_COPIES: '8'

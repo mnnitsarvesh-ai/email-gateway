@@ -15,6 +15,8 @@ import { LoginAuditService } from './login-audit.service';
 import { LoginThrottleService } from './login-throttle.service';
 import { MfaService, type SecondFactor } from './mfa.service';
 import { type ClientContext, SessionService, type TokenResponse } from './session.service';
+import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
+import type { ServiceProfile } from '../../../tenancy/service-profile';
 
 export interface LoginInput {
   email: string;
@@ -33,7 +35,14 @@ export type LoginResult = TokenResponse | MfaChallengeResponse;
 
 export interface MeResponse {
   user: { id: string; email: string; displayName: string; status: string };
-  organization: { id: string; slug: string; name: string; kind: 'customer' | 'platform' };
+  organization: {
+    id: string;
+    slug: string;
+    name: string;
+    kind: 'customer' | 'platform';
+    /** Step 8.6 D13 (ADR-0090). */
+    serviceProfile: ServiceProfile;
+  };
   roles: string[];
   permissions: string[];
   mfaEnabled: boolean;
@@ -62,6 +71,7 @@ export class AuthenticationService {
     private readonly loginAudit: LoginAuditService,
     private readonly sessions: SessionService,
     private readonly mfa: MfaService,
+    private readonly features: OrganizationFeaturesService,
   ) {}
 
   async login(input: LoginInput, context: ClientContext): Promise<LoginResult> {
@@ -232,7 +242,11 @@ export class AuthenticationService {
   async me(principal: UserPrincipal): Promise<MeResponse> {
     const user = await this.users.findById(principal.userId);
     if (!user) throw new NotFoundException('User not found');
-    const roles = await this.users.roleKeys(user.id);
+    const [roles, serviceProfile] = await Promise.all([
+      this.users.roleKeys(user.id),
+      // Step 8.6 D13 (ADR-0090): derived from the effective features, never stored.
+      this.features.serviceProfile(principal.organizationId),
+    ]);
     return {
       user: {
         id: user.publicId,
@@ -245,6 +259,7 @@ export class AuthenticationService {
         slug: user.organization.slug,
         name: user.organization.name,
         kind: user.organization.kind,
+        serviceProfile,
       },
       roles,
       permissions: [...principal.permissions].sort(),

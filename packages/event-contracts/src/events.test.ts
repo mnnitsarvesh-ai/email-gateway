@@ -85,6 +85,21 @@ describe('parseEvent', () => {
     expect(event.payload.direction).toBe('inbound');
   });
 
+  it('accepts the optional ingestSource of message.received (step 8.6, absent = gateway)', () => {
+    expect(parseEvent(envelope(receivedPayload()), messageReceivedV1).payload.ingestSource).toBe(
+      undefined,
+    );
+    for (const ingestSource of ['gateway', 'journal_intake'] as const) {
+      const event = parseEvent(envelope(receivedPayload({ ingestSource })), messageReceivedV1);
+      expect(event.payload.ingestSource).toBe(ingestSource);
+    }
+    expect(() =>
+      parseEvent(envelope(receivedPayload({ ingestSource: 'import' })), messageReceivedV1),
+    ).toThrow();
+    // The schema stays non-strict: older consumers ignore keys added later.
+    expect(messageReceivedV1.safeParse({ ...receivedPayload(), futureKey: 1 }).success).toBe(true);
+  });
+
   it('accepts a valid message.scanned event', () => {
     const event = parseEvent(
       envelope(scannedPayload(), { eventType: EventTypes.MessageScanned }),
@@ -638,7 +653,7 @@ describe('domain.routing.changed.v1', () => {
 });
 
 describe('lifecycle states and actor roles (step 3.3 L2, L3)', () => {
-  it('lists the fifteen states in rank/enum order and the ten actor roles', () => {
+  it('lists the sixteen states in rank/enum order (journaled appended by step 8.6) and the ten actor roles', () => {
     expect(MESSAGE_STATES).toEqual([
       'received',
       'persisted',
@@ -655,6 +670,7 @@ describe('lifecycle states and actor roles (step 3.3 L2, L3)', () => {
       'delivered',
       'archived',
       'expired',
+      'journaled',
     ]);
     expect(ACTOR_ROLES).toEqual([
       'ingestion',

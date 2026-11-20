@@ -356,6 +356,66 @@ describe('UserDetailPage', () => {
     ).toBeInTheDocument();
   });
 
+  it('confirms before assigning a role that grants archived-mail access (step 8.6)', async () => {
+    const calls: unknown[] = [];
+    mockDetail({
+      RolesController_list_v1: () =>
+        okJson({
+          data: [
+            ...ROLES.data,
+            role('compliance_officer', ['archive:read', 'archive:search', 'ediscovery:manage']),
+          ],
+        }),
+      UsersController_replaceRoles_v1: ({ body }) => (calls.push(body), okJson(user(1))),
+    });
+    const mfaAdmin = makeMe({
+      overrides: { session: { id: makeMe().session.id, mfaAuthenticated: true } },
+    });
+    const { user: u } = renderWithProviders(<UserDetailPage userId={USER_ID} />, { me: mfaAdmin });
+    // User managers may delegate archive access although they do not hold it (api rule, 8.6),
+    // from an MFA session.
+    const box = await screen.findByRole('checkbox', { name: /compliance officer/ });
+    expect(box).toBeEnabled();
+    expect(screen.getByText(/grants access to archived mail/)).toBeInTheDocument();
+    await u.click(box);
+    await u.click(screen.getByRole('button', { name: 'Save roles' }));
+    const dialog = await screen.findByRole('alertdialog', {
+      name: 'Grant access to archived mail?',
+    });
+    expect(within(dialog).getByText('compliance officer')).toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+    await u.click(within(dialog).getByRole('button', { name: 'Grant archive access' }));
+    await waitFor(() =>
+      expect(calls).toEqual([{ roleKeys: ['read_only_user', 'compliance_officer'] }]),
+    );
+  });
+
+  it('archive roles stay disabled without an MFA session and on the own account (step 8.6)', async () => {
+    const roles = () =>
+      okJson({
+        data: [
+          ...ROLES.data,
+          role('compliance_officer', ['archive:read', 'archive:search', 'ediscovery:manage']),
+        ],
+      });
+    mockDetail({ RolesController_list_v1: roles });
+    const first = renderWithProviders(<UserDetailPage userId={USER_ID} />);
+    expect(await screen.findByRole('checkbox', { name: /compliance officer/ })).toBeDisabled();
+    expect(screen.getByText(/only from a session signed in with multi-factor/)).toBeInTheDocument();
+    first.unmount();
+
+    const self = makeMe({
+      overrides: { session: { id: makeMe().session.id, mfaAuthenticated: true } },
+    });
+    mockDetail({
+      RolesController_list_v1: roles,
+      UsersController_get_v1: () => okJson(user(1, { id: self.user.id })),
+    });
+    renderWithProviders(<UserDetailPage userId={self.user.id} />, { me: self });
+    expect(await screen.findByRole('checkbox', { name: /compliance officer/ })).toBeDisabled();
+    expect(screen.getByText(/cannot give yourself access to archived mail/)).toBeInTheDocument();
+  });
+
   it('disables, resends the invitation, resets MFA (mfa_required explained) and revokes sessions', async () => {
     const calls: Record<string, unknown> = {};
     mockDetail({

@@ -21,7 +21,14 @@ export const USER_KEYS = [
   'alphaMfaAdmin',
   'alphaApprover',
   'alphaAuditorMfa',
+  // Step 8.6: a compliance officer (archive access only, MFA) and the admin of the archive-only
+  // organization gamma.
+  'alphaCompliance',
+  // Step 8.6 review fix: an organization admin without archive access who signs in with MFA (the
+  // delegation of archive access needs an MFA session).
+  'alphaAccessAdmin',
   'betaAdmin',
+  'gammaAdmin',
   'platformAdmin',
 ] as const;
 export type UserKey = (typeof USER_KEYS)[number];
@@ -30,7 +37,7 @@ export interface E2eUser {
   email: string;
   password: string;
   roles: string[];
-  organization: 'alpha' | 'beta' | 'platform';
+  organization: 'alpha' | 'beta' | 'gamma' | 'platform';
   /** Base32 TOTP secret once MFA is enabled (seeded, or enrolled through the UI). */
   totpSecret?: string;
   /** Last TOTP step sent to the api (each step is accepted once). */
@@ -66,7 +73,7 @@ export interface E2eState {
   runId: string;
   seededAt: string;
   users: Record<UserKey, E2eUser>;
-  orgs: Record<'alpha' | 'beta', { id: string; name: string; slug: string }>;
+  orgs: Record<'alpha' | 'beta' | 'gamma', { id: string; name: string; slug: string }>;
   alpha: {
     domainId: string;
     domainName: string;

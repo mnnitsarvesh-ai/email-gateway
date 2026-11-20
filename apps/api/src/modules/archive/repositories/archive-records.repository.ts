@@ -5,6 +5,8 @@ import {
   type ArchiveDisposalReason,
   type ArchiveDisposalState,
   type ArchiveIntentStatus,
+  type JournalIntakeSourceKind,
+  type MessageIngestSource,
   Prisma,
 } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
@@ -66,6 +68,11 @@ export const recordSelect = {
   outcomeRefreshedAt: true,
   archivedAt: true,
   deletedAt: true,
+  // Step 8.6 D6/D7: copy sources, the intake source and merged copies.
+  sourceGateway: true,
+  sourceJournalIntake: true,
+  intakeSourceId: true,
+  mergedCount: true,
 } satisfies Prisma.EmailArchiveSelect;
 
 /** An `email_archives` row as the api reads it (the wrapped DEK only reaches the writer paths). */
@@ -133,6 +140,24 @@ const OPEN_DISPOSAL_STATES: ArchiveDisposalState[] = [
   'objects_deleted',
   'index_deleted',
 ];
+
+/** Step 8.6: merged copies of one record (`ARCHIVE_MAX_MERGED_COPIES` ≤ 8; bounded read). */
+const MAX_RECORD_SOURCES = 16;
+
+/** Step 8.6: one merged copy of a record (`archive_record_sources`). */
+export interface RecordSourceRow {
+  organizationId: bigint;
+  archiveId: bigint;
+  messageId: bigint;
+  messageReceivedAt: Date;
+  messagePublicId: string;
+  source: MessageIngestSource;
+  emlSha256: string;
+  sizeBytes: number;
+  contentVariant: boolean;
+  recipientsAdded: number;
+  mergedAt: Date;
+}
 
 /** Most active holds an organization can have (ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG upper bound). */
 const MAX_HOLDS = 1_000;
@@ -263,6 +288,107 @@ export class ArchiveRecordsRepository {
       retentionDays: row.retentionDays,
       onExpiry: row.onExpiry,
       live: row.deletedAt === null,
+    };
+  }
+
+  /** Step 8.6: the journal intake source of a record (public id, name, kind), any client. */
+  async intakeSourceRef(
+    scope: TenantScope,
+    sourceId: bigint,
+  ): Promise<{ publicId: string; displayName: string; kind: JournalIntakeSourceKind } | null> {
+    const row = await this.db.journalIntakeSource.findFirst({
+      where: tenantWhere(scope, { id: sourceId }),
+      select: { organizationId: true, publicId: true, displayName: true, kind: true },
+    });
+    if (row === null) return null;
+    assertEcho('archive.record.intake_source', [row], { organizationId: scope.organizationId });
+    return { publicId: row.publicId, displayName: row.displayName, kind: row.kind };
+  }
+
+  /**
+   * Step 8.6 D7: the copies merged into a record (`archive_record_sources`, ≤ 8 by the capture
+   * rule; partition key `archive_received_at` = the record's `received_at`), oldest first.
+   */
+  async recordSources(
+    scope: TenantScope,
+    record: Pick<RecordRow, 'id' | 'receivedAt'>,
+    on: 'replica' | 'writer' | Tx = 'replica',
+  ): Promise<RecordSourceRow[]> {
+    const client = on === 'replica' ? this.db : on === 'writer' ? this.writer : on;
+    const rows = await client.archiveRecordSource.findMany({
+      where: tenantWhere(scope, {
+        archiveId: record.id,
+        archiveReceivedAt: record.receivedAt,
+      }),
+      select: {
+        organizationId: true,
+        archiveId: true,
+        messageId: true,
+        messageReceivedAt: true,
+        messagePublicId: true,
+        source: true,
+        emlSha256: true,
+        sizeBytes: true,
+        contentVariant: true,
+        recipientsAdded: true,
+        mergedAt: true,
+      },
+      orderBy: [{ mergedAt: 'asc' }, { id: 'asc' }],
+      take: MAX_RECORD_SOURCES,
+    });
+    assertEcho('archive.record.sources', rows, {
+      organizationId: scope.organizationId,
+      archiveId: record.id,
+    });
+    return rows;
+  }
+
+  /**
+   * Step 8.6: the record a merged copy belongs to, by the copy's registry key (writer or tx):
+   * the `archive_record_sources` row and the record's key, or null.
+   */
+  async recordOfMergedCopy(
+    scope: TenantScope,
+    copy: MessageKeyRow,
+    on: 'writer' | Tx = 'writer',
+  ): Promise<{ source: RecordSourceRow; record: MessageKeyRow } | null> {
+    const client = on === 'writer' ? this.writer : on;
+    const source = await client.archiveRecordSource.findFirst({
+      where: tenantWhere(scope, { messageId: copy.id, messageReceivedAt: copy.receivedAt }),
+      select: {
+        organizationId: true,
+        archiveId: true,
+        archiveReceivedAt: true,
+        messageId: true,
+        messageReceivedAt: true,
+        messagePublicId: true,
+        source: true,
+        emlSha256: true,
+        sizeBytes: true,
+        contentVariant: true,
+        recipientsAdded: true,
+        mergedAt: true,
+      },
+    });
+    if (source === null) return null;
+    assertEcho('archive.record.merged_copy', [source], {
+      organizationId: scope.organizationId,
+      messageId: copy.id,
+    });
+    const record = await client.emailArchive.findFirst({
+      where: tenantWhere(scope, { id: source.archiveId, receivedAt: source.archiveReceivedAt }),
+      select: { organizationId: true, messageId: true, receivedAt: true, messagePublicId: true },
+    });
+    if (record === null) return null;
+    assertEcho('archive.record.merged_parent', [record], { organizationId: scope.organizationId });
+    return {
+      source,
+      record: {
+        id: record.messageId,
+        publicId: record.messagePublicId,
+        receivedAt: record.receivedAt,
+        organizationId: record.organizationId,
+      },
     };
   }
 

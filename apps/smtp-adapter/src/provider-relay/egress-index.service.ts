@@ -9,6 +9,10 @@ import {
   RELAY_PROVIDERS,
 } from '@email-gateway/mail-routing';
 import { ADAPTER_CONFIG, ADAPTER_LOGGER } from '../config';
+import {
+  type JournalIntakeConfig,
+  journalIntakeDomain,
+} from '../journal-intake/journal-intake.config';
 import type { ProviderRelayConfig } from './provider-relay.config';
 import { ProviderRelayMetrics } from './provider-relay.metrics';
 
@@ -22,7 +26,8 @@ export class EgressIndexUnavailableError extends Error {
 export type EgressIndexConfig = Pick<
   ProviderRelayConfig,
   'PROVIDER_EGRESS_CACHE_SECONDS' | 'PROVIDER_EGRESS_EXTRA_RANGES' | 'PROVIDER_RELAY_ENABLED'
->;
+> &
+  Partial<Pick<JournalIntakeConfig, 'JOURNAL_INTAKE_ENABLED' | 'JOURNAL_INTAKE_DOMAIN'>>;
 
 /**
  * The provider egress ranges in memory (step 8.2 D7.2): the ranges of the `active`
@@ -31,6 +36,9 @@ export type EgressIndexConfig = Pick<
  * the config). A failed load keeps the last loaded index (logged, counted); an empty set means no
  * provider relay for that provider. Before the first successful load `current()` throws, so the
  * relay tempfails instead of refusing provider mail permanently.
+ *
+ * Step 8.6 D2.2.3: journal intake uses the same index (provider kinds must come from the egress
+ * set; on-premises sources must not), so it is also loaded while intake is on with the relay off.
  */
 @Injectable()
 export class EgressIndexService implements OnModuleInit, OnModuleDestroy {
@@ -48,8 +56,19 @@ export class EgressIndexService implements OnModuleInit, OnModuleDestroy {
     this.logger = logger.child({ component: 'provider-egress' });
   }
 
+  /** The relay or journal intake needs the ranges. */
+  get needed(): boolean {
+    return (
+      this.config.PROVIDER_RELAY_ENABLED ||
+      journalIntakeDomain({
+        JOURNAL_INTAKE_ENABLED: this.config.JOURNAL_INTAKE_ENABLED ?? false,
+        JOURNAL_INTAKE_DOMAIN: this.config.JOURNAL_INTAKE_DOMAIN,
+      }) !== null
+    );
+  }
+
   async onModuleInit(): Promise<void> {
-    if (!this.config.PROVIDER_RELAY_ENABLED) return;
+    if (!this.needed) return;
     await this.refresh();
     this.timer = setInterval(() => {
       void this.refresh();

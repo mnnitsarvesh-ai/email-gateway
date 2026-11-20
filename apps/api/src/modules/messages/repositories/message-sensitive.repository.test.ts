@@ -86,9 +86,14 @@ describe('MessageRevealRepository (step 7.2 §2 E6)', () => {
     ...over,
   });
 
+  const gatewayRows = () =>
+    vi.fn(() => Promise.resolve([{ id: 5n, receivedAt: at, organizationId: 7n }]));
+
   it('finds the scope’s registry rows of the ids and refuses rows of other ids or tenants', async () => {
     const findMany = vi.fn(() => Promise.resolve([identity('p-5')]));
-    const repo = new MessageRevealRepository(client({ messageIdentity: { findMany } }));
+    const repo = new MessageRevealRepository(
+      client({ messageIdentity: { findMany }, emailMessage: { findMany: gatewayRows() } }),
+    );
     expect(await repo.refs(scope, ['p-5', 'p-6', 'p-5'])).toEqual([identity('p-5')]);
     expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { publicId: { in: ['p-5', 'p-6'] }, organizationId: 7n } }),
@@ -98,6 +103,20 @@ describe('MessageRevealRepository (step 7.2 §2 E6)', () => {
     await expect(repo.refs(scope, ['p-5'])).rejects.toBeInstanceOf(InconsistentReadError);
     findMany.mockResolvedValueOnce([identity('p-5', { organizationId: 8n })]);
     await expect(repo.refs(scope, ['p-5'])).rejects.toBeInstanceOf(InconsistentReadError);
+  });
+
+  it('drops journal intake messages (step 8.6 D5: not gateway messages)', async () => {
+    const identities = vi.fn(() => Promise.resolve([identity('p-5'), identity('p-6', { id: 6n })]));
+    const gateway = gatewayRows();
+    const repo = new MessageRevealRepository(
+      client({ messageIdentity: { findMany: identities }, emailMessage: { findMany: gateway } }),
+    );
+    expect(await repo.refs(scope, ['p-5', 'p-6'])).toEqual([identity('p-5')]);
+    expect(gateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ ingestSource: 'gateway', organizationId: 7n }),
+      }),
+    );
   });
 
   it('reads the subjects by (id, received_at) and checks the exact pairs', async () => {

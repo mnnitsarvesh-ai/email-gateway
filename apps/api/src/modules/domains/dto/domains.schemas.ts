@@ -42,7 +42,13 @@ const DomainNameInputSchema = z
 
 export const CreateDomainSchema = z.strictObject({
   name: DomainNameInputSchema,
-  inboundEnabled: z.boolean().default(true),
+  inboundEnabled: z
+    .boolean()
+    .optional()
+    .describe(
+      'Default true. Step 8.6: archive-only organizations create domains with inbound mail flow ' +
+        'off; `true` is refused there (`403 mail_filtering_not_enabled`)',
+    ),
   dkim: z
     .strictObject({
       ed25519: z.boolean().default(false).describe('Also create an Ed25519 key (RFC 8463)'),

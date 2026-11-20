@@ -21,6 +21,9 @@ export const PLATFORM_EMAIL_SUFFIX = '@e2e-portal.test';
 /** Partitioned tables and their partition column (docs/database/partitioning.md). */
 const PARTITION_COLUMN: Record<string, string> = {
   archive_capture_intents: 'received_at',
+  // Step 8.6: journal intake messages and merged copies.
+  archive_record_sources: 'archive_received_at',
+  journal_intake_messages: 'received_at',
   archive_disposals: 'requested_at',
   attachment_scan_results: 'received_at',
   bec_scan_results: 'received_at',
@@ -87,6 +90,10 @@ const ORDER = [
   'message_outbox',
   // Step 8.1: archive and eDiscovery rows (seed/archive.ts ARCHIVE_TABLES order).
   ...ARCHIVE_TABLES,
+  // Step 8.6: journal intake (sources reference provider_connections RESTRICT; counters CASCADE).
+  'journal_intake_counters',
+  'journal_intake_messages',
+  'journal_intake_sources',
   'message_risk_scores',
   'email_auth_results',
   'scan_engine_results',

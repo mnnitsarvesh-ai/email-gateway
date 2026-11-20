@@ -6,7 +6,15 @@ import { ADAPTER_LOGGER } from '../config';
 
 /** Label values of `smtp_cache_errors_total{cache}` (bounded). */
 export type CacheName =
-  'domain' | 'recipient' | 'limits' | 'connector' | 'route' | 'tls_policy' | 'instance';
+  | 'domain'
+  | 'recipient'
+  | 'limits'
+  | 'connector'
+  | 'route'
+  | 'tls_policy'
+  | 'instance'
+  // Step 8.6 D2.2: journal intake sources by address hash.
+  | 'journal_intake';
 
 export interface CacheSpec<T> {
   cache: CacheName;

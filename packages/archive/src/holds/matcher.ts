@@ -24,7 +24,8 @@ import type { MessageDirection } from '../vocabulary';
 export interface LegalHoldFacts {
   receivedAt: Date;
   direction?: MessageDirection | null;
-  recipientDirections?: readonly MessageDirection[];
+  /** Recipient directions; NULL entries (unknown, step 8.6 D3) are ignored. */
+  recipientDirections?: readonly (MessageDirection | null)[];
   /** Envelope sender and header From. */
   senderAddresses: readonly string[];
   /** Envelope recipients (BCC included). */
@@ -93,7 +94,7 @@ export function legalHoldMatches(
   if (c.directions !== undefined) {
     const have = [
       ...(facts.direction ? [facts.direction] : []),
-      ...(facts.recipientDirections ?? []),
+      ...(facts.recipientDirections ?? []).filter((d): d is MessageDirection => d !== null),
     ];
     // Unknown directions cannot exclude the message (fail-safe).
     if (have.length > 0 && !c.directions.some((d) => have.includes(d))) return false;

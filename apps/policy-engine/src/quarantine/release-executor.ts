@@ -58,6 +58,7 @@ import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 import { type QuarantineInconsistencySink, quarantineWrongRead } from './errors';
 import { chunks, writeMessageEvent, writeQuarantineNotification } from './outbox';
 import type { LatestScanRound, ReleaseFactsReader } from './release-facts';
+import { gatewayMessageState } from './gateway-states';
 import type { QuarantineSettingsRepository } from './settings.repository';
 import type { MessageKey, QuarantineStoreWriter } from './store-writer';
 
@@ -277,7 +278,7 @@ export class ReleaseExecutor {
     }
 
     // 3. The message state (Q5, Q13.5).
-    const lifecycle = releaseLifecycleFor(snapshot.state);
+    const lifecycle = releaseLifecycleFor(gatewayMessageState(snapshot.state));
     if (lifecycle.kind === 'blocked') {
       await this.block(tx, event, {
         entries,
@@ -318,7 +319,7 @@ export class ReleaseExecutor {
         },
         mode: p.mode,
         approvedReasons,
-        messageState: snapshot.state,
+        messageState: gatewayMessageState(snapshot.state),
         scan:
           scan === null ? null : { scanId: scan.scanId.toString(), completedAt: scan.completedAt },
         result,

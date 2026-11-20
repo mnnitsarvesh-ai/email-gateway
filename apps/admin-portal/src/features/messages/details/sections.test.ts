@@ -46,6 +46,8 @@ describe('details sections (§1.4)', () => {
       compliance_auditor: all,
       read_only_user: noDlpAudit,
       mailbox_user: [],
+      // Step 8.6: the archive role holds no message:read (it never opens gateway messages).
+      compliance_officer: ['audit'],
     });
   });
 

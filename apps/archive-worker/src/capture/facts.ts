@@ -1,6 +1,10 @@
 import {
+  type ArchiveJournalIntake,
+  archiveJournalIntakeSchema,
   type ArchiveParties,
   canonicalJson,
+  type IngestSource,
+  type IntakeRecipientField,
   type MessageDirection,
   type MessageStatus,
   type RecipientStatus,
@@ -60,13 +64,20 @@ export interface MessageRow {
   finalVerdict: DbMessageVerdict | null;
   finalAction: DbMessageAction | null;
   riskScore: number | null;
+  /** `email_messages.ingest_source` (step 8.6 D3). */
+  ingestSource: IngestSource;
 }
 
 export interface RecipientRow {
   id: bigint;
   seq: number;
   address: string;
-  direction: MessageDirection;
+  /**
+   * The recipient's direction; for a gateway message a NULL column falls back to the message's
+   * (8.1). A journal intake recipient keeps NULL (unknown: an external recipient of an external
+   * sender, step 8.6 D3).
+   */
+  direction: MessageDirection | null;
   status: RecipientStatus;
   finalAction: string | null;
 }
@@ -82,6 +93,18 @@ export interface RoundRef {
 export interface MessageFacts {
   message: MessageRow;
   recipients: RecipientRow[];
+}
+
+/**
+ * The intake facts of a journal intake message (step 8.6 D6): the `archive-journal/1` `intake`
+ * block from `journal_intake_messages` and its source, and the source's internal id
+ * (`email_archives.intake_source_id`). Null when the message is not an intake message.
+ */
+export interface IntakeFacts {
+  sourceInternalId: bigint;
+  block: ArchiveJournalIntake;
+  /** Lower-cased address → the journal envelope field (parties `field`). */
+  fields: Map<string, IntakeRecipientField>;
 }
 
 const MAX_RECIPIENTS = 65_535;
@@ -126,6 +149,7 @@ export class FactsReader {
           finalVerdict: true,
           finalAction: true,
           riskScore: true,
+          ingestSource: true,
         },
       }),
       db.messageIdentity.findUnique({
@@ -170,11 +194,59 @@ export class FactsReader {
         id: r.id,
         seq: r.rcptSeq,
         address: r.address,
-        direction: r.direction ?? row.direction,
+        direction:
+          row.ingestSource === 'journal_intake' ? r.direction : (r.direction ?? row.direction),
         status: r.status,
         finalAction: r.finalAction,
       })),
     };
+  }
+
+  /**
+   * The intake facts of a journal intake message (step 8.6 D6) on the writer, echo-checked:
+   * `journal_intake_messages` (same partition key) and its source's public id and kind. A
+   * message without a row (never expected: the intake LMTP commits both together) or whose
+   * stored documents do not validate gets no intake block (the record is still captured).
+   */
+  async intake(db: Db, m: MessageRow): Promise<IntakeFacts | null> {
+    if (m.ingestSource !== 'journal_intake') return null;
+    const row = await db.journalIntakeMessage.findUnique({
+      where: { messageId_receivedAt: { messageId: m.id, receivedAt: m.receivedAt } },
+      select: {
+        organizationId: true,
+        sourceId: true,
+        kind: true,
+        format: true,
+        envelope: true,
+        proof: true,
+      },
+    });
+    if (row === null) return null;
+    if (row.organizationId !== m.organizationId) throw new InconsistentReadError('intake_echo');
+    const source = await db.journalIntakeSource.findUnique({
+      where: { id: row.sourceId },
+      select: { organizationId: true, publicId: true },
+    });
+    if (source === null) return null;
+    if (source.organizationId !== m.organizationId) {
+      throw new InconsistentReadError('intake_source_echo');
+    }
+    const envelope = asObject(row.envelope);
+    const parsed = archiveJournalIntakeSchema.safeParse({
+      sourceId: source.publicId,
+      kind: row.kind,
+      format: row.format,
+      envelope,
+      envelopeMismatch: envelope?.envelopeMismatch === true,
+      proof: asObject(row.proof),
+    });
+    if (!parsed.success) return null;
+    const fields = new Map<string, IntakeRecipientField>();
+    for (const r of parsed.data.envelope.recipients) {
+      const key = r.address.trim().toLowerCase();
+      if (!fields.has(key)) fields.set(key, r.field);
+    }
+    return { sourceInternalId: row.sourceId, block: parsed.data, fields };
   }
 
   /** The journal inputs: parse row, header allow-list, attachments, deliveries at this instant. */
@@ -426,19 +498,33 @@ export function decimalsToStrings<T extends object>(row: T): Record<string, unkn
   return out;
 }
 
-/** `archive-parties/1` of a message (A5 step 6; addresses as stored). */
-export function partiesOf(facts: MessageFacts): ArchiveParties {
+const asObject = (value: unknown): Record<string, unknown> | null => {
+  const v: unknown = typeof value === 'string' ? JSON.parse(value) : value;
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null;
+};
+
+/**
+ * `archive-parties/1` of a message (A5 step 6; addresses as stored). A journal intake recipient
+ * carries its journal envelope `field` (step 8.6 D6: to, cc, bcc, …).
+ */
+export function partiesOf(facts: MessageFacts, intake: IntakeFacts | null = null): ArchiveParties {
   return {
     v: 1,
     from: facts.message.envelopeFrom.slice(0, 320),
     headerFrom: facts.message.headerFrom?.slice(0, 320) ?? null,
-    recipients: facts.recipients.map((r) => ({
-      seq: r.seq,
-      address: r.address.slice(0, 320),
-      direction: r.direction,
-      status: r.status,
-      finalAction: r.finalAction,
-    })),
+    recipients: facts.recipients.map((r) => {
+      const field = intake?.fields.get(r.address.trim().toLowerCase());
+      return {
+        seq: r.seq,
+        address: r.address.slice(0, 320),
+        direction: r.direction,
+        status: r.status,
+        finalAction: r.finalAction,
+        ...(field !== undefined ? { field } : {}),
+      };
+    }),
   };
 }
 
@@ -473,7 +559,12 @@ export function isMalicious(
   );
 }
 
-/** Every direction of the message: its own and its recipients' (retention and holds). */
+/** Every direction of the message: its own and its recipients' known ones (retention, holds). */
 export function directionsOf(facts: MessageFacts): MessageDirection[] {
-  return [...new Set([facts.message.direction, ...facts.recipients.map((r) => r.direction)])];
+  return [
+    ...new Set([
+      facts.message.direction,
+      ...facts.recipients.map((r) => r.direction).filter((d): d is MessageDirection => d !== null),
+    ]),
+  ];
 }

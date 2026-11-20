@@ -1,6 +1,7 @@
 import type { ResolvedArchiveSettings } from '../documents/settings';
 import type {
   ArchiveCategory,
+  IngestSource,
   MessageDirection,
   MessageStatus,
   RecipientStatus,
@@ -32,12 +33,19 @@ import { nextOutcomeCheckAt, nextWaitCheckAt } from './schedule';
  * longer than the intent max age and then released is still journaled (review finding of 8.1).
  *
  * The reserved state `archived` (no producer since E25 was retired, A25) is treated as non-final.
+ *
+ * Step 8.6 (D6, ADR-0087): a journal intake message (`ingestSource = 'journal_intake'`) is
+ * captured only in its final state `journaled`, with category `delivered` (the provider delivered
+ * or sent it); in every other state (`persisted`, `scanning`, `scanned`, `scan_failed`, …) it
+ * waits. Policy sources never exist for intake messages. Gateway messages (no `ingestSource`, or
+ * `gateway`) are decided exactly as before.
  */
 
 export const FINAL_MESSAGE_STATUSES: readonly MessageStatus[] = [
   'delivered',
   'rejected',
   'expired',
+  'journaled',
 ];
 export const CAPTURE_SKIP_REASONS = [
   'not_entitled',
@@ -74,7 +82,10 @@ export interface CaptureMessageFacts {
   /** `email_messages.status_changed_at` (refresh schedule of final states). */
   statusChangedAt?: Date | null;
   direction: MessageDirection;
-  recipients: ReadonlyArray<{ status: RecipientStatus; direction: MessageDirection }>;
+  /** Recipient directions; NULL = unknown (an external recipient of an external intake sender, D3). */
+  recipients: ReadonlyArray<{ status: RecipientStatus; direction: MessageDirection | null }>;
+  /** `email_messages.ingest_source` (step 8.6); undefined = `gateway`. */
+  ingestSource?: IngestSource;
   /**
    * Whether the original EML object exists (HEAD of `eml_object_key`); undefined = not checked
    * (assumed present; the capture itself detects a missing object).
@@ -125,8 +136,13 @@ export function isFinalMessageStatus(status: MessageStatus): boolean {
  * (non-final, before a delivery). `quarantined` is returned for quarantined and held messages.
  */
 export function categoryOf(
-  message: Pick<CaptureMessageFacts, 'status' | 'statusReason' | 'recipients'>,
+  message: Pick<CaptureMessageFacts, 'status' | 'statusReason' | 'recipients' | 'ingestSource'>,
 ): ArchiveCategory | null {
+  if (message.ingestSource === 'journal_intake') {
+    // D6: only the final state counts; recipients are `journaled`, never `delivered`.
+    return message.status === 'journaled' ? 'delivered' : null;
+  }
+  if (message.status === 'journaled') return 'delivered';
   if (message.status === 'delivered' || message.recipients.some((r) => r.status === 'delivered')) {
     return 'delivered';
   }

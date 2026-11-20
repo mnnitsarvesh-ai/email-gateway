@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService } from '@email-gateway/common';
 import type { Prisma, PrismaClient } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 import { InconsistentDlpReadError } from '../dlp.errors';
 import {
   DLP_ID_KINDS,
@@ -176,11 +177,38 @@ export class DlpResultsRepository {
     });
   }
 
-  /** Public ids of the organization's messages (`message_identities`). */
-  async messagePublicIds(scope: TenantScope, ids: bigint[]): Promise<Map<string, string>> {
-    if (ids.length === 0) return new Map();
+  /**
+   * Public ids of the organization's **gateway** messages (`message_identities`) among the
+   * results' `(message_id, received_at)` keys. Step 8.6 D5: a journal intake message
+   * (`ingest_source = 'journal_intake'`) is archive-only mail; its results are left out of the
+   * gateway incident list (the caller drops rows without a public id).
+   */
+  async messagePublicIds(
+    scope: TenantScope,
+    keys: ReadonlyArray<{ messageId: bigint; receivedAt: Date }>,
+  ): Promise<Map<string, string>> {
+    if (keys.length === 0) return new Map();
+    const ids = [...new Set(keys.map((k) => k.messageId))];
+    const times = keys.map((k) => k.receivedAt.getTime());
+    const gateway = await this.db.emailMessage.findMany({
+      where: tenantWhere(scope, {
+        id: { in: ids },
+        receivedAt: { gte: new Date(Math.min(...times)), lte: new Date(Math.max(...times)) },
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true, receivedAt: true },
+    });
+    const wanted = new Set(keys.map((k) => `${k.messageId.toString()}:${k.receivedAt.getTime()}`));
+    const gatewayIds = [
+      ...new Set(
+        gateway
+          .filter((m) => wanted.has(`${m.id.toString()}:${m.receivedAt.getTime()}`))
+          .map((m) => m.id),
+      ),
+    ];
+    if (gatewayIds.length === 0) return new Map();
     const rows = await this.db.messageIdentity.findMany({
-      where: tenantWhere(scope, { id: { in: [...new Set(ids)] } }),
+      where: tenantWhere(scope, { id: { in: gatewayIds } }),
       select: { id: true, publicId: true },
     });
     return new Map(rows.map((r) => [r.id.toString(), r.publicId]));
@@ -192,7 +220,7 @@ export class DlpResultsRepository {
 
   // ---------------------------------------------------------------------------------- evidence
 
-  /** The organization's message by public id on the writer (echo-checked). */
+  /** The organization's gateway message by public id on the writer (echo-checked; D5). */
   async findMessage(
     tx: Client,
     scope: TenantScope,
@@ -206,6 +234,16 @@ export class DlpResultsRepository {
     if (row.organizationId !== scope.organizationId || row.publicId !== publicId) {
       throw new InconsistentDlpReadError('message');
     }
+    // Step 8.6 D5: a journal intake message is not a gateway message (404 on the evidence door).
+    const gateway = await tx.emailMessage.findFirst({
+      where: tenantWhere(scope, {
+        id: row.id,
+        receivedAt: row.receivedAt,
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true },
+    });
+    if (gateway === null) return null;
     return { id: row.id, publicId: row.publicId, receivedAt: row.receivedAt };
   }
 

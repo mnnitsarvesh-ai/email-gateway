@@ -118,6 +118,12 @@ export const MeResponseSchema = z.object({
     slug: z.string(),
     name: z.string(),
     kind: z.enum(['customer', 'platform']),
+    serviceProfile: z
+      .enum(['gateway', 'archive_only'])
+      .describe(
+        'Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but ' +
+          'neither inbound nor outbound filtering (the portal hides gateway-only pages)',
+      ),
   }),
   roles: z.array(z.string()),
   permissions: z.array(z.string()),

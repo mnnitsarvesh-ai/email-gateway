@@ -11,8 +11,9 @@ export default function ConsoleIndexPage() {
   const router = useRouter();
   const me = useMe();
   const permissions = me.data?.permissions;
+  const profile = me.data?.organization.serviceProfile;
   useEffect(() => {
-    if (permissions) router.replace(firstPermittedHref(permissions));
-  }, [permissions, router]);
+    if (permissions) router.replace(firstPermittedHref(permissions, profile));
+  }, [permissions, profile, router]);
   return <LoadingState label="Opening your start page" rows={4} />;
 }

@@ -45,6 +45,7 @@ describe('dev fixture layer (design P9)', () => {
         'policies',
         'dlp-bec',
         'archive',
+        'journaling',
         'ato',
         'incidents',
         'provider-connections',

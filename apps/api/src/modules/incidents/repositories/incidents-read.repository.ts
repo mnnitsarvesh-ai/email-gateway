@@ -13,6 +13,7 @@ import {
 } from '@email-gateway/security-incidents';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import { assertEcho } from '../../../http/listing/echo-check';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 
 export type Db = Prisma.TransactionClient;
 
@@ -276,8 +277,14 @@ export class IncidentsReadRepository {
     const times = links.map((l) => l.refTime.getTime());
     const window = { gte: new Date(Math.min(...times)), lte: new Date(Math.max(...times)) };
     const [messages, identities, risks, recipients, domains] = await Promise.all([
+      // Step 8.6 D5: journal intake messages are never linked as gateway messages.
       client.emailMessage.findMany({
-        where: { organizationId: org, id: { in: ids }, receivedAt: window },
+        where: {
+          organizationId: org,
+          id: { in: ids },
+          receivedAt: window,
+          ...GATEWAY_MESSAGE_WHERE,
+        },
         select: {
           id: true,
           receivedAt: true,

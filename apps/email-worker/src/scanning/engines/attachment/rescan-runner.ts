@@ -294,6 +294,7 @@ export class RescanJobRunner {
       FROM email_messages m
       WHERE m.received_at >= ${job.windowStart} AND m.received_at <= ${job.windowEnd}
         AND m.status IN (${Prisma.join(states)})
+        AND m.ingest_source = 'gateway'
         ${organization}
         ${cursor}
         AND EXISTS (

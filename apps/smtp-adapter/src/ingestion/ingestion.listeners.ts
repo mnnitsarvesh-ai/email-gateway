@@ -3,13 +3,13 @@ import { createLogger } from '@email-gateway/logger';
 import { LmtpListener } from '../lmtp/lmtp-listener';
 import { LmtpListenerService, type ManagedLmtpListener } from '../lmtp/lmtp-listener.service';
 import { parseNetworkList } from '../shared/internal-networks';
-import type { IngestDirection } from './ingestion-keys';
+import type { GatewayDirection } from './ingestion-keys';
 import { INGESTION_OPTIONS, type IngestionModuleOptions } from './ingestion.options';
 import { IngestionService } from './ingestion.service';
 
 function createIngestionListener(
   name: string,
-  direction: IngestDirection,
+  direction: GatewayDirection,
   options: IngestionModuleOptions,
   ingestion: IngestionService,
 ): ManagedLmtpListener {

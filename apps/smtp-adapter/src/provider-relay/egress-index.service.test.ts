@@ -20,7 +20,10 @@ const ip = (text: string) => ({
   bytes: Uint8Array.from(text.split('.').map(Number)),
 });
 
-function harness(extra: Record<string, string[]> = {}) {
+function harness(
+  extra: Record<string, string[]> = {},
+  flags: { relay?: boolean; intakeDomain?: string } = {},
+) {
   const metrics = newMetrics();
   const findMany = vi.fn(() =>
     Promise.resolve<unknown[]>([
@@ -34,7 +37,9 @@ function harness(extra: Record<string, string[]> = {}) {
     {
       PROVIDER_EGRESS_CACHE_SECONDS: 60,
       PROVIDER_EGRESS_EXTRA_RANGES: extra,
-      PROVIDER_RELAY_ENABLED: true,
+      PROVIDER_RELAY_ENABLED: flags.relay ?? true,
+      JOURNAL_INTAKE_ENABLED: true,
+      JOURNAL_INTAKE_DOMAIN: flags.intakeDomain,
     },
     silentLogger(),
   );
@@ -95,6 +100,18 @@ describe('EgressIndexService (D7.2)', () => {
     findMany.mockResolvedValueOnce([]);
     await service.refresh();
     expect(service.current().providersFor(ip('40.92.0.1'))).toEqual([]);
+  });
+
+  it('loads for journal intake with the relay off, and not at all without either (step 8.6)', async () => {
+    const intake = harness({}, { relay: false, intakeDomain: 'journal.gateway.test' });
+    expect(intake.service.needed).toBe(true);
+    await intake.service.onModuleInit();
+    intake.service.onModuleDestroy();
+    expect(intake.service.loaded).toBe(true);
+    const neither = harness({}, { relay: false });
+    expect(neither.service.needed).toBe(false);
+    await neither.service.onModuleInit();
+    expect(neither.findMany).not.toHaveBeenCalled();
   });
 
   it('shares one load between concurrent refreshes', async () => {

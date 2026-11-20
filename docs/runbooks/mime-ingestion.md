@@ -6,6 +6,19 @@ Parsing never affects mail acceptance, and until step 3.3 it does not change `em
 
 Since step 3.2 the worker consumes `mail.message.received.v1` from the RabbitMQ quorum queue `email.received` (published by the event-relay; ledger consumer `email-worker.mime-parser`, prefetch `MIME_CONCURRENCY`). The 3.1 outbox feed, its cursors (`outbox:email-worker.mime-parser…`) and the `MIME_OUTBOX_*` keys are gone; broker-side operations (relay lag, dead letters, replay, reconciliation) are in the [RabbitMQ messaging runbook](rabbitmq-messaging.md).
 
+## Journal intake messages (step 8.6)
+
+A journal intake message (`email_messages.ingest_source = 'journal_intake'`, committed by the smtp-adapter's intake LMTP, [journal-intake.md](journal-intake.md)) is parsed exactly like any message, but its parse commit is gated ([design](../plan/steps/27-journal-intake-and-archive-split.md) D4, ADR-0087), reading `journal_intake_messages.scan_requested` of the same partition key (a missing row counts as not requested):
+
+| Scan requested | Parse outcome                          | Lifecycle in the same transaction                | Outbox event                                                                    |
+| -------------- | -------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------- |
+| no             | parsed / with defects / limit exceeded | E30 `persisted → journaled` (`intake_unscanned`) | none (only `state_changed.v1`)                                                  |
+| no             | `parse_failed`                         | E30 (`intake_parse_failed`)                      | none                                                                            |
+| yes            | parsed / with defects / limit exceeded | — (the scan stage runs; E31/E32 end it)          | `parsed.v1`                                                                     |
+| yes            | `parse_failed`                         | E30 (`intake_parse_failed`)                      | none — never `parse_failed.v1` (the policy engine's E5 fail-safe never sees it) |
+
+`mime_intake_messages_total{result}` counts the gate (`journaled`, `scan_requested`, `transition_skipped`: E30 was not applied because the message had left `persisted`; the log line `message parsed` carries `intake`). An intake message stuck in `persisted` is never expired by the event-relay (it must end `journaled` for the archive capture); re-drive its received event as below. Gateway messages are unchanged.
+
 ## Detection
 
 - Metrics on the email-worker's `GET /metrics`:

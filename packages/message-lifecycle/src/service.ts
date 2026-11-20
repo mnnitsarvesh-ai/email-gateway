@@ -21,7 +21,11 @@ import { toStateChangedPayload } from './events';
 import { transitionKeyHash } from './keys';
 import { noopLifecycleMetrics, type LifecycleMetrics } from './metrics';
 import { isActorRole, isMessageState, type ActorRole, type MessageState } from './states';
-import { isLifecycleReasonCode, type LifecycleReasonCode } from './transitions';
+import {
+  isLifecycleReasonCode,
+  type LifecycleReasonCode,
+  type MessageIngestSourceValue,
+} from './transitions';
 
 /**
  * The transition service (step 3.3 L5): the only writer of `email_messages.status`,
@@ -134,6 +138,8 @@ interface LifecycleRow {
   status_reason: string | null;
   direction: MessageDirection;
   eml_object_key: string;
+  /** Step 8.6: `gateway` | `journal_intake` (asserted for edges into `journaled`). */
+  ingest_source: string;
 }
 
 function validateRequest(request: TransitionRequest): string {
@@ -230,15 +236,29 @@ export async function lockLifecycle(
   tx: Prisma.TransactionClient,
   message: MessageRef,
 ): Promise<LifecycleSnapshot | null> {
+  const locked = await lockLifecycleRow(tx, message);
+  return locked === null ? null : locked.snapshot;
+}
+
+const toIngestSource = (value: string): MessageIngestSourceValue => {
+  if (value === 'gateway' || value === 'journal_intake') return value;
+  throw new LifecycleContractError('email_messages.ingest_source', 'unknown stored ingest source');
+};
+
+/** `lockLifecycle` plus the row's ingest source (step 8.6), for the transition decision. */
+async function lockLifecycleRow(
+  tx: Prisma.TransactionClient,
+  message: MessageRef,
+): Promise<{ snapshot: LifecycleSnapshot; ingestSource: MessageIngestSourceValue } | null> {
   const rows = await tx.$queryRaw<LifecycleRow[]>`
     SELECT id, received_at, organization_id, status, version, lifecycle_round, status_changed_at,
-           status_reason, direction, eml_object_key
+           status_reason, direction, eml_object_key, ingest_source
     FROM email_messages
     WHERE id = ${message.id} AND received_at = ${message.receivedAt}
     FOR UPDATE`;
   const row = rows[0];
   if (!row || BigInt(row.organization_id) !== message.organizationId) return null;
-  return toSnapshot(row);
+  return { snapshot: toSnapshot(row), ingestSource: toIngestSource(row.ingest_source) };
 }
 
 /**
@@ -246,7 +266,8 @@ export async function lockLifecycle(
  *
  * 1. lock the message row (`not_found` for no row or another organization: nothing written);
  * 2. the transition key: a history row with its SHA-256 → `duplicate/transition_key`;
- * 3. `decideTransition` (L4): not `apply` → a stale/invalid outcome writes one email_events
+ * 3. `decideTransition` (L4; with the row's `ingest_source`, step 8.6: only a journal intake
+ *    message may enter `journaled`): not `apply` → a stale/invalid outcome writes one email_events
  *    `lifecycle.ignored` row unless `recordIgnored === false`, invalid is logged at warn;
  * 4. compare-and-set `UPDATE … WHERE version = ?` (no row → LifecycleVersionConflictError);
  * 5. the history row (every column; a P2002 on the transition key propagates, the retry answers
@@ -267,8 +288,9 @@ export async function transitionMessage(
   const { message } = request;
 
   // 1.
-  const snapshot = await lockLifecycle(tx, message);
-  if (!snapshot) return { result: 'not_found' };
+  const locked = await lockLifecycleRow(tx, message);
+  if (!locked) return { result: 'not_found' };
+  const { snapshot, ingestSource } = locked;
 
   // 2.
   const known = await tx.$queryRaw<{ id: bigint }[]>`
@@ -283,7 +305,7 @@ export async function transitionMessage(
 
   // 3.
   const decision = decideTransition(
-    { state: snapshot.state, version: snapshot.version, round: snapshot.round },
+    { state: snapshot.state, version: snapshot.version, round: snapshot.round, ingestSource },
     request,
   );
   const ids = {

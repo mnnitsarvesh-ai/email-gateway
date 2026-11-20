@@ -1,0 +1,445 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`generateJournalIntakeGuide (journal-intake-guide/1) > exchange_onprem_journal: example guide and Markdown (snapshot) 1`] = `
+"# Journal intake setup guide: Example On-premises Exchange journaling
+
+Generated 2026-11-20T00:00:00.000Z (\`journal-intake-guide/1\`).
+Source type: On-premises Exchange journaling.
+
+> This guide contains the values of your own journal intake source. The gateway never changes your mail system: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. The intake address and token are masked: a user with journaling management rights can reveal them in the console.
+
+## Contents
+
+1. [Overview and what the gateway will never do](#overview)
+2. [Your intake address](#intake-address)
+3. [Exchange Server journaling](#onprem-journaling)
+4. [Verify and monitor](#verify)
+
+<a id="overview"></a>
+
+## 1. Overview and what the gateway will never do
+
+This guide sets up the journal intake source "Example On-premises Exchange journaling" (On-premises Exchange journaling). Your mail system sends a copy of every message to the intake address below; the gateway archives the copy (encrypted, retained and searchable under your archive settings). Your MX records and mail flow do not change.
+
+The gateway only receives copies. It never delivers, forwards, quarantines or bounces a journaled message, and it never changes your configuration. Copies that fail the sender checks are discarded and shown in the source health; they are never returned to the sender.
+
+<a id="intake-address"></a>
+
+## 2. Your intake address
+
+The intake address identifies this source. Treat it like a password: anyone who knows it and sends from your authorized systems can add copies to your archive. You can rotate it in the console at any time; the previous address keeps working for a short overlap.
+
+<a id="intake-address-values"></a>
+
+### 2.1 Values for this source
+
+The address is masked in this guide. A user with journaling management rights can reveal it in the console before applying the steps below.
+
+| Item | Value |
+| --- | --- |
+| Intake address | \`journal-••••xamp@journal.gateway.example.net\` |
+| Source | \`Example On-premises Exchange journaling\` |
+| TLS required | \`yes\` |
+
+<a id="onprem-journaling"></a>
+
+## 3. Exchange Server journaling
+
+Run these commands in the Exchange Management Shell of your organization. Premium journaling (journal rules) needs Exchange Enterprise client access licenses; standard journaling configures the journal recipient per mailbox database instead.
+
+<a id="onprem-journal-recipient"></a>
+
+### 3.1 Create the journal recipient
+
+Create a mail contact for the intake address, so journal rules and mailbox databases can name it as their journal recipient.
+
+\`\`\`powershell
+New-MailContact -Name 'Email security gateway journal' -ExternalEmailAddress 'journal-••••xamp@journal.gateway.example.net'
+\`\`\`
+
+> **Attestation \`journal.onprem.journal_recipient_created\`** (your statement, not a gateway check): The journal recipient for the intake address exists and a journal rule or mailbox database journaling uses it.
+> Status: not confirmed yet
+
+<a id="onprem-journal-rule"></a>
+
+### 3.2 Create the journal rule (or database journaling)
+
+Create a journal rule for all messages, set the mailbox for undeliverable journal reports, or, for standard journaling, set the journal recipient on each mailbox database.
+
+\`\`\`powershell
+New-JournalRule -Name 'Email security gateway journal' -JournalEmailAddress 'Email security gateway journal' -Scope Global -Enabled $true
+\`\`\`
+
+\`\`\`powershell
+Set-TransportConfig -JournalingReportNdrTo 'journal-ndr@example.com'
+\`\`\`
+
+\`\`\`powershell
+Get-MailboxDatabase | Set-MailboxDatabase -JournalRecipient 'Email security gateway journal'
+\`\`\`
+
+<a id="onprem-send-connector"></a>
+
+### 3.3 Send journal reports to the gateway over TLS
+
+Create a Send connector for the intake domain that delivers to the gateway hosts and requires TLS with a certificate valid for the intake domain.
+
+\`\`\`powershell
+New-SendConnector -Name 'Email security gateway journal' -Usage Custom -AddressSpaces 'SMTP:journal.gateway.example.net;1' -DNSRoutingEnabled $false -SmartHosts 'mx1.gateway.example.net','mx2.gateway.example.net' -RequireTLS $true -TlsAuthLevel DomainValidation -TlsDomain 'journal.gateway.example.net'
+\`\`\`
+
+> **Attestation \`journal.onprem.send_connector_tls\`** (your statement, not a gateway check): A Send connector delivers mail for the intake domain to the gateway hosts and requires TLS.
+> Status: not confirmed yet
+
+<a id="source-networks"></a>
+
+### 3.4 Registered sending networks
+
+The gateway accepts copies for this source only from these networks, and only over TLS. Mail from any other address is refused in the SMTP session (550 5.7.1). Update the networks in the console before your servers change addresses.
+
+| Item | Value |
+| --- | --- |
+| Network 1 | \`198.51.100.0/24\` |
+| Network 2 | \`2001:db8:10::/48\` |
+
+<a id="verify"></a>
+
+## 4. Verify and monitor
+
+<a id="verify-first-message"></a>
+
+### 4.1 Send a test message
+
+Send a message that your configuration copies. The source becomes verified with the first accepted copy; the message then appears in archive search with the source "journal intake".
+
+<a id="monitor-health"></a>
+
+### 4.2 Watch the source health
+
+The console shows accepted and refused copies per day. When no copy arrives for the configured silence period, or copies are refused or discarded, the source turns silent or failing and your alert recipients are notified.
+
+<a id="rotate-address"></a>
+
+### 4.3 Rotate the address
+
+Rotating creates a new address; the previous values stay valid for a short overlap. Update the steps above with the new values within the overlap.
+"
+`;
+
+exports[`generateJournalIntakeGuide (journal-intake-guide/1) > google_workspace_copy: example guide and Markdown (snapshot) 1`] = `
+"# Journal intake setup guide: Example Google Workspace copies
+
+Generated 2026-11-20T00:00:00.000Z (\`journal-intake-guide/1\`).
+Source type: Google Workspace copies.
+
+> This guide contains the values of your own journal intake source. The gateway never changes your mail system: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. The intake address and token are masked: a user with journaling management rights can reveal them in the console.
+
+## Contents
+
+1. [Overview and what the gateway will never do](#overview)
+2. [Your intake address](#intake-address)
+3. [Google Workspace routing rule](#google-routing)
+4. [Verify and monitor](#verify)
+
+<a id="overview"></a>
+
+## 1. Overview and what the gateway will never do
+
+This guide sets up the journal intake source "Example Google Workspace copies" (Google Workspace copies). Your mail system sends a copy of every message to the intake address below; the gateway archives the copy (encrypted, retained and searchable under your archive settings). Your MX records and mail flow do not change.
+
+The gateway only receives copies. It never delivers, forwards, quarantines or bounces a journaled message, and it never changes your configuration. Copies that fail the sender checks are discarded and shown in the source health; they are never returned to the sender.
+
+<a id="intake-address"></a>
+
+## 2. Your intake address
+
+The intake address identifies this source. Treat it like a password: anyone who knows it and sends from your authorized systems can add copies to your archive. You can rotate it in the console at any time; the previous address keeps working for a short overlap.
+
+<a id="intake-address-values"></a>
+
+### 2.1 Values for this source
+
+The address is masked in this guide. A user with journaling management rights can reveal it in the console before applying the steps below.
+
+| Item | Value |
+| --- | --- |
+| Intake address | \`journal-••••xamp@journal.gateway.example.net\` |
+| X-EG-Journal-Token header value | \`••••enex\` |
+| Source | \`Example Google Workspace copies\` |
+| Provider connection | \`Example Google Workspace\` |
+| TLS required | \`yes\` |
+
+<a id="google-routing"></a>
+
+## 3. Google Workspace routing rule
+
+In the Google Admin console, open Apps, Google Workspace, Gmail, Routing, and add a routing setting at the top-level organizational unit.
+
+<a id="google-route"></a>
+
+### 3.1 Add the "Also deliver to" route
+
+Name the setting "Email security gateway journal". Under "Email messages to affect" select Inbound, Outbound, Internal - sending and Internal - receiving. Under "Also deliver to", add the intake address as an additional recipient.
+
+| Item | Value |
+| --- | --- |
+| Also deliver to | \`journal-••••xamp@journal.gateway.example.net\` |
+
+> **Attestation \`journal.google.route_created\`** (your statement, not a gateway check): The routing setting "Email security gateway journal" also delivers inbound, outbound and internal mail to the intake address.
+> Status: not confirmed yet
+
+<a id="google-headers"></a>
+
+### 3.2 Add the journal headers
+
+In the same setting, under "Headers", select "Add X-Gm-Original-To header" and "Add custom headers", and add the custom header below. Copies without a matching header are discarded.
+
+| Item | Value |
+| --- | --- |
+| Custom header name | \`X-EG-Journal-Token\` |
+| Custom header value | \`••••enex\` |
+
+> **Warning:** Google copies carry the recipient Gmail routed the message to (X-Gm-Original-To), not the full envelope of the original message: a blind-copied recipient is known only from the copy routed for that recipient.
+
+> **Attestation \`journal.google.headers_added\`** (your statement, not a gateway check): The routing setting adds the X-Gm-Original-To header and the X-EG-Journal-Token header with the current token.
+> Status: not confirmed yet
+
+<a id="verify"></a>
+
+## 4. Verify and monitor
+
+<a id="verify-first-message"></a>
+
+### 4.1 Send a test message
+
+Send a message that your configuration copies. The source becomes verified with the first accepted copy; the message then appears in archive search with the source "journal intake".
+
+<a id="monitor-health"></a>
+
+### 4.2 Watch the source health
+
+The console shows accepted and refused copies per day. When no copy arrives for the configured silence period, or copies are refused or discarded, the source turns silent or failing and your alert recipients are notified.
+
+<a id="rotate-address"></a>
+
+### 4.3 Rotate the address
+
+Rotating creates a new address and header token; the previous values stay valid for a short overlap. Update the steps above with the new values within the overlap.
+"
+`;
+
+exports[`generateJournalIntakeGuide (journal-intake-guide/1) > microsoft_365_journal: example guide and Markdown (snapshot) 1`] = `
+"# Journal intake setup guide: Example Microsoft 365 journaling
+
+Generated 2026-11-20T00:00:00.000Z (\`journal-intake-guide/1\`).
+Source type: Microsoft 365 journaling.
+
+> This guide contains the values of your own journal intake source. The gateway never changes your mail system: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. The intake address and token are masked: a user with journaling management rights can reveal them in the console.
+
+## Contents
+
+1. [Overview and what the gateway will never do](#overview)
+2. [Your intake address](#intake-address)
+3. [Microsoft 365 journal rule](#m365-journaling)
+4. [Verify and monitor](#verify)
+
+<a id="overview"></a>
+
+## 1. Overview and what the gateway will never do
+
+This guide sets up the journal intake source "Example Microsoft 365 journaling" (Microsoft 365 journaling). Your mail system sends a copy of every message to the intake address below; the gateway archives the copy (encrypted, retained and searchable under your archive settings). Your MX records and mail flow do not change.
+
+The gateway only receives copies. It never delivers, forwards, quarantines or bounces a journaled message, and it never changes your configuration. Copies that fail the sender checks are discarded and shown in the source health; they are never returned to the sender.
+
+<a id="intake-address"></a>
+
+## 2. Your intake address
+
+The intake address identifies this source. Treat it like a password: anyone who knows it and sends from your authorized systems can add copies to your archive. You can rotate it in the console at any time; the previous address keeps working for a short overlap.
+
+<a id="intake-address-values"></a>
+
+### 2.1 Values for this source
+
+The address is masked in this guide. A user with journaling management rights can reveal it in the console before applying the steps below.
+
+| Item | Value |
+| --- | --- |
+| Intake address | \`journal-••••xamp@journal.gateway.example.net\` |
+| Source | \`Example Microsoft 365 journaling\` |
+| Provider connection | \`Example Microsoft 365 (11111111-2222-3333-4444-555555555555)\` |
+| TLS required | \`yes\` |
+
+<a id="m365-journaling"></a>
+
+## 3. Microsoft 365 journal rule
+
+Journal rules are managed in the Microsoft Purview portal (Data lifecycle management, Exchange (legacy), Journal rules) or with Exchange Online PowerShell (Connect-ExchangeOnline).
+
+<a id="m365-ndr-mailbox"></a>
+
+### 3.1 Set the mailbox for undeliverable journal reports
+
+Exchange Online requires an alternate mailbox that receives journal reports which cannot be delivered (for example while the intake address is paused). Use a dedicated mailbox in your tenant that is itself not journaled, and review it regularly.
+
+\`\`\`powershell
+Set-TransportConfig -JournalingReportNdrTo 'journal-ndr@example.com'
+\`\`\`
+
+> **Attestation \`journal.m365.ndr_mailbox_set\`** (your statement, not a gateway check): A mailbox for undeliverable journal reports is set and reviewed.
+> Status: not confirmed yet
+
+<a id="m365-journal-rule"></a>
+
+### 3.2 Create the journal rule
+
+In Purview, create a journal rule named "Email security gateway journal" that sends journal reports to the intake address, for messages sent or received from everyone, and the message types you want to archive (all messages, internal only or external only).
+
+| Item | Value |
+| --- | --- |
+| Send journal reports to | \`journal-••••xamp@journal.gateway.example.net\` |
+
+\`\`\`powershell
+New-JournalRule -Name 'Email security gateway journal' -JournalEmailAddress 'journal-••••xamp@journal.gateway.example.net' -Scope Global -Enabled $true
+\`\`\`
+
+> **Warning:** Journal rules journal only the mail of mailboxes in your tenant. Exchange Online does not journal to an Exchange Online mailbox; the intake address is external to your tenant, which is what Exchange Online requires. A new rule can take up to an hour to apply.
+
+> **Attestation \`journal.m365.rule_created\`** (your statement, not a gateway check): The journal rule "Email security gateway journal" sends journal reports to the intake address.
+> Status: not confirmed yet
+
+<a id="m365-dkim"></a>
+
+### 3.3 Optional: sign with DKIM
+
+The gateway accepts journal reports only from Microsoft 365 servers and checks that each report carries your bound tenant id. DKIM signatures of your domains are recorded as additional evidence when present; enabling DKIM signing in Microsoft Defender is recommended but not required.
+
+| Item | Value |
+| --- | --- |
+| example.com | \`DKIM signing recommended\` |
+
+<a id="verify"></a>
+
+## 4. Verify and monitor
+
+<a id="verify-first-message"></a>
+
+### 4.1 Send a test message
+
+Send a message that your configuration copies. The source becomes verified with the first accepted copy; the message then appears in archive search with the source "journal intake".
+
+<a id="monitor-health"></a>
+
+### 4.2 Watch the source health
+
+The console shows accepted and refused copies per day. When no copy arrives for the configured silence period, or copies are refused or discarded, the source turns silent or failing and your alert recipients are notified.
+
+<a id="rotate-address"></a>
+
+### 4.3 Rotate the address
+
+Rotating creates a new address; the previous values stay valid for a short overlap. Update the steps above with the new values within the overlap.
+"
+`;
+
+exports[`generateJournalIntakeGuide (journal-intake-guide/1) > smtp_bcc: example guide and Markdown (snapshot) 1`] = `
+"# Journal intake setup guide: Example Generic SMTP BCC copies
+
+Generated 2026-11-20T00:00:00.000Z (\`journal-intake-guide/1\`).
+Source type: Generic SMTP BCC copies.
+
+> This guide contains the values of your own journal intake source. The gateway never changes your mail system: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. The intake address and token are masked: a user with journaling management rights can reveal them in the console.
+
+## Contents
+
+1. [Overview and what the gateway will never do](#overview)
+2. [Your intake address](#intake-address)
+3. [BCC copies from your mail server](#smtp-bcc)
+4. [Verify and monitor](#verify)
+
+<a id="overview"></a>
+
+## 1. Overview and what the gateway will never do
+
+This guide sets up the journal intake source "Example Generic SMTP BCC copies" (Generic SMTP BCC copies). Your mail system sends a copy of every message to the intake address below; the gateway archives the copy (encrypted, retained and searchable under your archive settings). Your MX records and mail flow do not change.
+
+The gateway only receives copies. It never delivers, forwards, quarantines or bounces a journaled message, and it never changes your configuration. Copies that fail the sender checks are discarded and shown in the source health; they are never returned to the sender.
+
+<a id="intake-address"></a>
+
+## 2. Your intake address
+
+The intake address identifies this source. Treat it like a password: anyone who knows it and sends from your authorized systems can add copies to your archive. You can rotate it in the console at any time; the previous address keeps working for a short overlap.
+
+<a id="intake-address-values"></a>
+
+### 2.1 Values for this source
+
+The address is masked in this guide. A user with journaling management rights can reveal it in the console before applying the steps below.
+
+| Item | Value |
+| --- | --- |
+| Intake address | \`journal-••••xamp@journal.gateway.example.net\` |
+| Source | \`Example Generic SMTP BCC copies\` |
+| TLS required | \`yes\` |
+
+<a id="smtp-bcc"></a>
+
+## 3. BCC copies from your mail server
+
+Configure your mail server to send a blind copy of every message to the intake address. The Postfix settings below are an example; other servers have equivalent options.
+
+<a id="smtp-bcc-config"></a>
+
+### 3.1 Send a copy of every message
+
+Use always\\_bcc for all mail, or sender\\_bcc\\_maps / recipient\\_bcc\\_maps to copy a subset. Require TLS for the intake domain.
+
+\`\`\`text
+# /etc/postfix/main.cf
+always_bcc = journal-••••xamp@journal.gateway.example.net
+smtp_tls_policy_maps = hash:/etc/postfix/tls_policy
+
+# /etc/postfix/tls_policy (then: postmap /etc/postfix/tls_policy)
+journal.gateway.example.net encrypt
+\`\`\`
+
+> **Warning:** BCC copies carry only the recipients named in the To and Cc headers: blind-copied recipients of the original message are not known to the archive.
+
+> **Attestation \`journal.smtp.bcc_configured\`** (your statement, not a gateway check): The mail server sends a BCC copy of the mail to archive to the intake address over TLS.
+> Status: not confirmed yet
+
+<a id="source-networks"></a>
+
+### 3.2 Registered sending networks
+
+The gateway accepts copies for this source only from these networks, and only over TLS. Mail from any other address is refused in the SMTP session (550 5.7.1). Update the networks in the console before your servers change addresses.
+
+| Item | Value |
+| --- | --- |
+| Network 1 | \`198.51.100.0/24\` |
+| Network 2 | \`2001:db8:10::/48\` |
+
+<a id="verify"></a>
+
+## 4. Verify and monitor
+
+<a id="verify-first-message"></a>
+
+### 4.1 Send a test message
+
+Send a message that your configuration copies. The source becomes verified with the first accepted copy; the message then appears in archive search with the source "journal intake".
+
+<a id="monitor-health"></a>
+
+### 4.2 Watch the source health
+
+The console shows accepted and refused copies per day. When no copy arrives for the configured silence period, or copies are refused or discarded, the source turns silent or failing and your alert recipients are notified.
+
+<a id="rotate-address"></a>
+
+### 4.3 Rotate the address
+
+Rotating creates a new address; the previous values stay valid for a short overlap. Update the steps above with the new values within the overlap.
+"
+`;

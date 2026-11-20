@@ -24,6 +24,8 @@ export { DEV_MOCK_MARKER } from '../types';
  *   `<role key>@example.com`      signs in with that system role (e.g. read_only_user@example.com)
  *   `mfa.<role key>@example.com`  the same user with MFA enabled: any 6-digit code works
  *   `enroll.<role key>@example.com` organization requires MFA and the user has not enrolled
+ *   `archive.<role key>@example.com` the same user (with MFA) in the archive-only organization
+ *                                   "Delta Archive (example)" (step 8.6, ADR-0090)
  * Platform roles (`super_admin`, `platform_admin`) belong to the platform organization.
  */
 
@@ -36,6 +38,8 @@ interface FixtureUser {
   role: SystemRoleKey;
   mfaEnabled: boolean;
   mfaEnrollmentRequired: boolean;
+  /** Member of the archive-only organization (step 8.6 dev hint `archive.`). */
+  archiveOnly?: boolean;
 }
 
 interface FixtureSession {
@@ -63,7 +67,11 @@ function organization(
     status: 'active',
     statusReason: null,
     statusChangedAt: null,
-    plan: { code: plan, name: plan[0]?.toUpperCase() + plan.slice(1) },
+    plan: {
+      code: plan,
+      name: plan === 'archive_only' ? 'Archive only' : plan[0]?.toUpperCase() + plan.slice(1),
+    },
+    serviceProfile: plan === 'archive_only' ? 'archive_only' : 'gateway',
     dataRegion: 'eu-west-1',
     deploymentMode: 'saas',
     deployments: [],
@@ -83,6 +91,8 @@ export const CUSTOMER_ORGS: Organization[] = [
   organization('alpha', 'Alpha Industries (example)', 'customer', 'business'),
   organization('bravo', 'Bravo Logistics (example)', 'customer', 'starter'),
   organization('charlie', 'Charlie Health (example)', 'customer', 'enterprise'),
+  // Step 8.6: an archive-only customer (journal intake; no gateway pages).
+  organization('delta', 'Delta Archive (example)', 'customer', 'archive_only'),
   ...Array.from({ length: 27 }, (_, i) =>
     organization(
       `tenant-${String(i + 1).padStart(2, '0')}`,
@@ -121,13 +131,15 @@ function token(prefix: string): string {
 }
 
 function parseHint(email: string): FixtureUser | null {
-  const match = /^(?:(mfa|enroll)\.)?([a-z_]+)@example\.com$/.exec(email.trim().toLowerCase());
+  const match = /^(?:(mfa|enroll|archive)\.)?([a-z_]+)@example\.com$/.exec(
+    email.trim().toLowerCase(),
+  );
   if (!match) return null;
   const role = match[2] as SystemRoleKey;
   if (!SYSTEM_ROLE_KEYS.includes(role)) return null;
   const mode = match[1];
   const userId = stableUuid(`user:${email.toLowerCase()}`);
-  const mfaEnabled = enrolled.get(userId) ?? mode === 'mfa';
+  const mfaEnabled = enrolled.get(userId) ?? (mode === 'mfa' || mode === 'archive');
   return {
     id: userId,
     email: email.toLowerCase(),
@@ -138,11 +150,14 @@ function parseHint(email: string): FixtureUser | null {
     role,
     mfaEnabled,
     mfaEnrollmentRequired: mode === 'enroll' && !mfaEnabled,
+    archiveOnly: mode === 'archive',
   };
 }
 
 function homeOrg(user: FixtureUser): Organization {
-  return PLATFORM_ROLE_KEYS.includes(user.role) ? PLATFORM_ORG : (CUSTOMER_ORGS[0] as Organization);
+  if (PLATFORM_ROLE_KEYS.includes(user.role)) return PLATFORM_ORG;
+  if (user.archiveOnly) return CUSTOMER_ORGS.find((o) => o.slug === 'delta') as Organization;
+  return CUSTOMER_ORGS[0] as Organization;
 }
 
 function issueTokens(user: FixtureUser, mfaAuthenticated: boolean, sessionId?: string) {
@@ -282,7 +297,13 @@ export const fixtures: FixtureHandlers = {
           displayName: session.user.displayName,
           status: 'active',
         },
-        organization: { id: target.id, slug: target.slug, name: target.name, kind: target.kind },
+        organization: {
+          id: target.id,
+          slug: target.slug,
+          name: target.name,
+          kind: target.kind,
+          serviceProfile: target.serviceProfile,
+        },
         roles: [session.user.role],
         permissions: ROLE_PERMISSIONS[session.user.role].filter((p) => !p.startsWith('platform:')),
         mfaEnabled: true,
@@ -297,7 +318,13 @@ export const fixtures: FixtureHandlers = {
       const org = homeOrg(user);
       return ok('AuthController_me_v1', {
         user: { id: user.id, email: user.email, displayName: user.displayName, status: 'active' },
-        organization: { id: org.id, slug: org.slug, name: org.name, kind: org.kind },
+        organization: {
+          id: org.id,
+          slug: org.slug,
+          name: org.name,
+          kind: org.kind,
+          serviceProfile: org.serviceProfile,
+        },
         roles: [user.role],
         permissions: [...ROLE_PERMISSIONS[user.role]],
         mfaEnabled: user.mfaEnabled,

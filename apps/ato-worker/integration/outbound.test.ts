@@ -394,4 +394,50 @@ describe('connector attribution (D4) and fast paths', () => {
     });
     expect(cursor?.positionId).toBe(seeded[5]!.id);
   });
+
+  it('journal intake copies are never ATO signals (step 8.6 D4): live skipped, catch-up excluded', async () => {
+    const org = await fx.organization('intake');
+    await configure(h, org.id);
+    const sender = `jr@${org.domain}`;
+    const seeded = await fx.messages(org.id, [
+      {
+        sender,
+        receivedAt: ago(20 * MIN),
+        recipients: ['x@partner.example'],
+        domainId: org.domainId,
+      },
+      {
+        sender,
+        receivedAt: ago(20 * MIN - 1000),
+        recipients: ['y@partner.example'],
+        domainId: org.domainId,
+      },
+    ]);
+    for (const m of seeded) {
+      await fx.prisma.emailMessage.update({
+        where: { id_receivedAt: { id: m.id, receivedAt: m.receivedAt } },
+        data: { ingestSource: 'journal_intake' },
+      });
+    }
+    const before = await h.metric('ato_events_total', {
+      source: 'outbound_message',
+      result: 'skipped_source',
+    });
+    await deliverMail(h, fx.scanned(seeded[0]!));
+    expect(
+      await h.metric('ato_events_total', { source: 'outbound_message', result: 'skipped_source' }),
+    ).toBe(before + 1);
+    await fx.prisma.organizationFeature.updateMany({
+      where: { organizationId: org.id, featureKey: 'ato_detection' },
+      data: { updatedAt: ago(60 * MIN) },
+    });
+    h.comps.orgs.invalidate(org.id);
+    const processed = await h.metric('ato_mail_catchup_processed_total');
+    await h.comps.maintenance.mailCatchup();
+    expect(await h.metric('ato_mail_catchup_processed_total')).toBe(processed);
+    for (const m of seeded) {
+      expect(await h.comps.db.processed(LEDGERS.mail, atoMailKey(m.id, m.scanId))).toBe(false);
+    }
+    expect(await fx.prisma.atoAccount.count({ where: { organizationId: org.id } })).toBe(0);
+  });
 });

@@ -10,7 +10,7 @@ import {
   RETIRED_ROLE_KEYS,
   SYSTEM_ROLES,
   SYSTEM_SETTINGS,
-  permissionCategory,
+  permissionCategoryOf,
 } from './catalog';
 import { seedProviderEgress } from './provider-egress';
 
@@ -69,7 +69,8 @@ export interface CatalogSummary {
 }
 
 /**
- * The catalog: permissions, the 9 system roles (D8 + mailbox_user, 5.3) and the migration of retired role keys,
+ * The catalog: permissions, the 10 system roles (D8 + mailbox_user, 5.3, + compliance_officer,
+ * 8.6) and the migration of retired role keys,
  * plans, system settings and the platform organization (D10). Safe in every environment; one
  * transaction.
  */
@@ -80,7 +81,7 @@ export async function seedCatalog(
   const environment = options.environment ?? process.env.APP_ENV ?? 'local';
   return prisma.$transaction(async (tx) => {
     for (const p of PERMISSIONS) {
-      const data = { description: p.description, category: permissionCategory(p.key) };
+      const data = { description: p.description, category: permissionCategoryOf(p) };
       await tx.permission.upsert({
         where: { key: p.key },
         create: { key: p.key, ...data },

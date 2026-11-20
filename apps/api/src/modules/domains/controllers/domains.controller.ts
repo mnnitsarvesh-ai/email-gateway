@@ -55,6 +55,7 @@ import {
   ListDomainsQuerySchema,
 } from '../dto/domains.schemas';
 import { DomainsService } from '../services/domains.service';
+import { MAIL_FILTERING_NOT_ENABLED } from '../domains.errors';
 
 /** Domains of the caller's organization (§4). The tenant always comes from the credential. */
 @ApiTags('domains')
@@ -75,15 +76,25 @@ export class DomainsController {
       'on request) and the DNS records to publish. `409` when the organization already has the ' +
       'name or another organization owns it. The first check runs about a minute later. At ' +
       'most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain ' +
-      '(`PROVIDER_PROBE_DOMAIN`, step 8.2) and names under it are `422 domain_reserved`.',
+      '(`PROVIDER_PROBE_DOMAIN`, step 8.2), the journal intake domain (`JOURNAL_INTAKE_DOMAIN`, ' +
+      'step 8.6) and names under them are `422 domain_reserved`. Step 8.6: an archive-only ' +
+      'organization (`serviceProfile: archive_only`) gets the domain with inbound mail flow off; ' +
+      '`inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`).',
   })
   @ApiBody({ schema: zodToOpenApi(CreateDomainSchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(CreatedDomainSchema) })
-  @ApiErrors(400, 401, 403, 409, 429, 503)
+  @ApiErrors(400, 401, 409, 429, 503)
   @ApiCodedError(
     422,
-    '`domain_reserved`: the platform probe domain or a name under it (step 8.2)',
+    '`domain_reserved`: the platform probe domain (step 8.2), the journal intake domain (step ' +
+      '8.6) or a name under them',
     [PROVIDER_ERROR_CODES.domainReserved],
+  )
+  @ApiCodedError(
+    403,
+    'Missing permission (`forbidden`), or `inboundEnabled: true` for an archive-only ' +
+      'organization (`mail_filtering_not_enabled`, step 8.6)',
+    ['forbidden', MAIL_FILTERING_NOT_ENABLED],
   )
   create(
     @CurrentPrincipal() principal: Principal,

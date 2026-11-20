@@ -210,6 +210,7 @@ export const USAGE_COUNTS: UsageCounts = {
     ['outbound', 12],
   ]),
   messagesToday: 4,
+  journalIntakeToday: 2,
   quarantineActive: 3,
   apiKeysActive: 1,
   sessionsActive: 2,

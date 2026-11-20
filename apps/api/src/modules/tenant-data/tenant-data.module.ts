@@ -6,6 +6,7 @@ import { AtoProviderTenantDataRepository } from './ato-provider-tenant-data.repo
 import { BecTenantDataRepository } from './bec-tenant-data.repository';
 import { DlpTenantDataRepository } from './dlp-tenant-data.repository';
 import { DomainsRepository } from './domains.repository';
+import { JournalIntakeTenantDataRepository } from './journal-intake-tenant-data.repository';
 import { MessagesRepository } from './messages.repository';
 import { PoliciesRepository } from './policies.repository';
 import { PolicyTenantDataRepository } from './policy-tenant-data.repository';
@@ -28,7 +29,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * 8.2: ProviderTenantDataRepository its Microsoft 365 / Google Workspace connection rows (purge
  * order of §3.3) and their tenant data export (never credential material); step 8.5:
  * AtoProviderTenantDataRepository its ATO identity-provider rows (mailbox items, stream rows,
- * account identities, integrations) and their export (never a token or an address).
+ * account identities, integrations) and their export (never a token or an address); step 8.6:
+ * JournalIntakeTenantDataRepository its journal intake counters, intake messages and sources
+ * (before the provider connections, which the sources reference).
  */
 @Module({
   providers: [
@@ -46,6 +49,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ArchiveTenantDataRepository,
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
+    JournalIntakeTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -60,6 +64,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ArchiveTenantDataRepository,
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
+    JournalIntakeTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

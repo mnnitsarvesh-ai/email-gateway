@@ -14,7 +14,11 @@ export interface JournalMessageFacts {
   envelopeFrom: string | null;
   /** Address of the header From (display name removed), when parsed. */
   headerFrom: string | null;
-  recipients: ReadonlyArray<{ address: string; direction: MessageDirection }>;
+  /**
+   * Recipient directions. NULL (step 8.6 D3: an external recipient of a journal intake message
+   * whose sender is external too) is not org-side and enables no direction.
+   */
+  recipients: ReadonlyArray<{ address: string; direction: MessageDirection | null }>;
 }
 
 /** The scope of `archive-settings/1` with every id resolved to addresses or domain names. */
@@ -89,7 +93,7 @@ export function directionEligible(
   message: Pick<JournalMessageFacts, 'direction' | 'recipients'>,
 ): boolean {
   if (settings.directions[message.direction]) return true;
-  return message.recipients.some((r) => settings.directions[r.direction]);
+  return message.recipients.some((r) => r.direction !== null && settings.directions[r.direction]);
 }
 
 /** A matcher of one resolved scope (sets built once per settings generation). */

@@ -147,6 +147,18 @@ export const configSchema = baseConfigSchema
     ARCHIVE_GOVERNANCE_BYPASS_ORPHANS: flag.default(true),
     ARCHIVE_REPLICA_TARGETS: replicaTargets.default([]),
 
+    // Journal intake and cross-source dedupe (step 8.6 D7, D9, §4.4).
+    /** Intake health job interval (capture role, leader lock `eg:archive-intake-health`). */
+    JOURNAL_INTAKE_HEALTH_INTERVAL_MS: int(1_000, 3_600_000).default(60_000),
+    /** At most one `journal_intake_silent` alert per source within this many hours. */
+    JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS: int(1, 720).default(24),
+    /** Merge window of cross-source dedupe; dedupe rows older than it are pruned. */
+    ARCHIVE_DEDUPE_WINDOW_HOURS: int(1, 720).default(72),
+    /** Content variants (differing bodies) a record keeps; beyond it a copy is a record of its own. */
+    ARCHIVE_MAX_CONTENT_VARIANTS: int(0, 8).default(4),
+    /** Merged copies a record holds (`objects.merged`, ≤ 8); beyond it a copy is its own record. */
+    ARCHIVE_MAX_MERGED_COPIES: int(0, 8).default(8),
+
     // eDiscovery (A18).
     ARCHIVE_EXPORT_SIGNING_KEY: z.string().min(1).max(4_096).optional(),
     ARCHIVE_EXPORT_SIGNING_KEY_ID: z
@@ -178,6 +190,9 @@ export const configSchema = baseConfigSchema
     }
     if (cfg.ARCHIVE_CAPTURE_RETRY_BASE_MS > cfg.ARCHIVE_CAPTURE_RETRY_MAX_MS) {
       issue('ARCHIVE_CAPTURE_RETRY_BASE_MS', 'must not exceed ARCHIVE_CAPTURE_RETRY_MAX_MS');
+    }
+    if (cfg.ARCHIVE_MAX_CONTENT_VARIANTS > cfg.ARCHIVE_MAX_MERGED_COPIES) {
+      issue('ARCHIVE_MAX_CONTENT_VARIANTS', 'must not exceed ARCHIVE_MAX_MERGED_COPIES');
     }
     if (cfg.ARCHIVE_REPLICA_TARGETS.some((t) => t.bucket === cfg.S3_BUCKET_ARCHIVE)) {
       issue('ARCHIVE_REPLICA_TARGETS', 'must not list the archive bucket itself');

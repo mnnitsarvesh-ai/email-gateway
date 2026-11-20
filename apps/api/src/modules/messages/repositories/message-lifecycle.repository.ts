@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { ActorType, Prisma, QuarantineStatus } from '@email-gateway/database';
 import type { MessageRef } from '@email-gateway/message-lifecycle';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 
 type Tx = Prisma.TransactionClient;
 
@@ -52,11 +53,26 @@ const OPEN_ENTRY_STATES: readonly QuarantineStatus[] = ['held', 'pending_approva
 @Injectable()
 export class MessageLifecycleRepository {
   /** Registry lookup by public id, matched on the organization. */
-  findIdentity(tx: Tx, scope: TenantScope, publicId: string): Promise<MessageIdentityRow | null> {
-    return tx.messageIdentity.findFirst({
+  async findIdentity(
+    tx: Tx,
+    scope: TenantScope,
+    publicId: string,
+  ): Promise<MessageIdentityRow | null> {
+    const identity = await tx.messageIdentity.findFirst({
       where: tenantWhere(scope, { publicId }),
       select: { id: true, publicId: true, receivedAt: true },
     });
+    if (identity === null) return null;
+    // Step 8.6 D5/I1: a journal intake message is never rescanned or released (404).
+    const gateway = await tx.emailMessage.findFirst({
+      where: tenantWhere(scope, {
+        id: identity.id,
+        receivedAt: identity.receivedAt,
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true },
+    });
+    return gateway === null ? null : identity;
   }
 
   /** True when the message history already holds this transition key (hex SHA-256). */

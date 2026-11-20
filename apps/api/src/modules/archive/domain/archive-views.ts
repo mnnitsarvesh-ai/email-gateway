@@ -2,6 +2,7 @@ import {
   ARCHIVE_CATEGORIES,
   ARCHIVE_RECORD_STATUSES,
   type ArchiveParties,
+  INGEST_SOURCES,
   archivePartiesSchema,
   archiveScanRoundsSchema,
   MESSAGE_ACTIONS,
@@ -98,6 +99,14 @@ export function sourcesOf(record: Pick<RecordRow, 'capturedByJournal' | 'capture
   ];
 }
 
+/** Step 8.6: the copy sources of a record (`gateway`, `journal_intake`). */
+export function ingestSourcesOf(record: Pick<RecordRow, 'sourceGateway' | 'sourceJournalIntake'>) {
+  return [
+    ...(record.sourceGateway ? (['gateway'] as const) : []),
+    ...(record.sourceJournalIntake ? (['journal_intake'] as const) : []),
+  ];
+}
+
 /** The facts a legal hold matcher tests, from the record (writer or replica). */
 export function holdFactsOf(record: RecordRow) {
   const parties = partiesOf(record);
@@ -125,6 +134,7 @@ export function messageViewOfRecord(record: RecordRow): ArchiveMessageView {
     direction: record.direction,
     category: record.category,
     sources: sourcesOf(record),
+    ingestSources: ingestSourcesOf(record),
     status: record.status,
     envelopeFrom: record.envelopeFrom,
     headerFrom: normalizeAddress(record.headerFrom),
@@ -157,6 +167,11 @@ export function messageViewOfSource(source: ArchiveSearchSource): ArchiveMessage
   const sources = list(source.sources).filter(
     (s): s is 'journal' | 'policy' => s === 'journal' || s === 'policy',
   );
+  // Step 8.6: documents indexed before mapping revision 2 have no `ingest_sources` (gateway).
+  const ingest =
+    source.ingest_sources === undefined
+      ? (['gateway'] as const)
+      : INGEST_SOURCES.filter((s) => list(source.ingest_sources).includes(s));
   return {
     messageId,
     receivedAt: new Date(receivedAt).toISOString(),
@@ -164,6 +179,7 @@ export function messageViewOfSource(source: ArchiveSearchSource): ArchiveMessage
     direction,
     category,
     sources,
+    ingestSources: [...ingest],
     status,
     envelopeFrom: source.envelope_from ?? '',
     headerFrom: source.header_from ?? null,

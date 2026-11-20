@@ -1,8 +1,8 @@
 import {
+  archivePrefixOf,
   assertKeyOfOrganization,
   type DisposalObjects,
   type DisposalReplicaStatus,
-  disposalObjectsOf,
   disposalReplicaStatusOf,
   readDisposalObjects,
   readDisposalReplicaStatus,
@@ -23,6 +23,7 @@ import type { ArchiveMetrics } from '../metrics/archive-metrics';
 import { big, type Db, orgFilter } from '../shared/db';
 import { errorCode, errorFields } from '../shared/errors';
 import type { ArchiveStorage } from '../storage/archive-storage';
+import { disposalObjectsWithMerged, recordVersionsWithMerged } from '../storage/record-versions';
 
 // One builder for every disposal writer (worker expiry, api manual dispose and purge).
 export type { DisposalObjects, DisposalReplicaStatus };
@@ -50,7 +51,8 @@ export async function decideDisposal(
     now: Date;
   },
 ): Promise<void> {
-  const objects = disposalObjectsOf(record);
+  // Step 8.6 D7: the merged copies' journal objects and variants are disposed with the record.
+  const objects = disposalObjectsWithMerged(record);
   const replica = disposalReplicaStatusOf(input.replicaTargets.map((t) => t.bucket));
   await tx.archiveDisposal.create({
     data: {
@@ -315,7 +317,19 @@ export class DisposalPipeline {
         });
       }
     };
-    for (const v of d.objects.versions) {
+    // Step 8.6 D7: the merged copies of the record (a disposal decided before 8.6 or by the api's
+    // shared builder may not list their versions): their recorded versions and their prefixes.
+    const merged = await this.mergedOf(d);
+    for (const v of merged.versions) {
+      if (v.versionId !== null) recorded.add(`${v.key}\0${v.versionId}`);
+    }
+    const versions = [
+      ...d.objects.versions,
+      ...merged.versions.filter(
+        (v) => !d.objects.versions.some((x) => x.key === v.key && x.versionId === v.versionId),
+      ),
+    ];
+    for (const v of versions) {
       if (v.versionId === null) continue;
       await remove(
         storage.buckets.archive,
@@ -324,10 +338,9 @@ export class DisposalPipeline {
         false,
       );
     }
-    const buckets = [storage.buckets.archive, ...this.options.replicaTargets.map((t) => t.bucket)];
-    for (const bucket of buckets) {
-      for await (const v of storage.listVersions(bucket, prefix)) {
-        if (!v.key.startsWith(prefix)) continue;
+    const sweep = async (bucket: string, sweepPrefix: string): Promise<void> => {
+      for await (const v of storage.listVersions(bucket, sweepPrefix)) {
+        if (!v.key.startsWith(sweepPrefix)) continue;
         if (
           bucket === storage.buckets.archive &&
           recorded.has(`${v.key}\0${v.versionId}`) &&
@@ -343,6 +356,10 @@ export class DisposalPipeline {
         }
         await remove(bucket, v.key, v.versionId, !recorded.has(`${v.key}\0${v.versionId}`));
       }
+    };
+    const buckets = [storage.buckets.archive, ...this.options.replicaTargets.map((t) => t.bucket)];
+    for (const bucket of buckets) {
+      for (const p of [prefix, ...merged.prefixes]) await sweep(bucket, p);
     }
     // De-duplicate (a recorded locked version is seen twice).
     const seen = new Set<string>();
@@ -352,6 +369,54 @@ export class DisposalPipeline {
       seen.add(k);
       return true;
     });
+  }
+
+  /**
+   * The merged copies of a disposal's record (step 8.6 D7): every version its `objects.merged`
+   * names (the row still exists, `disposing`, until step 4) and the prefix of every merged message
+   * (`archive_record_sources`) that has no record of its own (a separate record's prefix is never
+   * swept here).
+   */
+  private async mergedOf(
+    d: ClaimedDisposal,
+  ): Promise<{ versions: Array<{ key: string; versionId: string | null }>; prefixes: string[] }> {
+    const record = await this.prisma.emailArchive.findUnique({
+      where: { id_receivedAt: { id: d.archiveRecordId, receivedAt: d.messageReceivedAt } },
+      select: { organizationId: true, objects: true },
+    });
+    const versions =
+      record !== null && record.organizationId === d.organizationId
+        ? recordVersionsWithMerged(record)
+        : [];
+    const sources = await this.prisma.archiveRecordSource.findMany({
+      where: {
+        organizationId: d.organizationId,
+        archiveId: d.archiveRecordId,
+        archiveReceivedAt: d.messageReceivedAt,
+      },
+      select: { organizationId: true, messagePublicId: true, messageReceivedAt: true },
+      take: 64,
+    });
+    const prefixes: string[] = [];
+    for (const src of sources) {
+      if (src.organizationId !== d.organizationId) continue;
+      const own = await this.prisma.emailArchive.count({
+        where: {
+          organizationId: d.organizationId,
+          messagePublicId: src.messagePublicId,
+          receivedAt: src.messageReceivedAt,
+        },
+      });
+      if (own > 0) continue;
+      prefixes.push(
+        archivePrefixOf({
+          organizationId: d.organizationId,
+          receivedAt: src.messageReceivedAt,
+          messagePublicId: src.messagePublicId,
+        }),
+      );
+    }
+    return { versions, prefixes };
   }
 
   /** Step 3: the document is gone (not visible through the alias) and no index op is queued. */
@@ -376,6 +441,31 @@ export class DisposalPipeline {
         DELETE FROM email_archives
         WHERE id = ${d.archiveRecordId} AND received_at = ${d.messageReceivedAt}
           AND organization_id = ${d.organizationId} AND status = 'disposing'`;
+      // Step 8.6 D7: the record's merged-copy rows and dedupe rows go with it; the registry rows
+      // of merged messages follow the purge contract like the record's own.
+      const merged = await tx.archiveRecordSource.findMany({
+        where: {
+          organizationId: d.organizationId,
+          archiveId: d.archiveRecordId,
+          archiveReceivedAt: d.messageReceivedAt,
+        },
+        select: { messageId: true, messageReceivedAt: true },
+      });
+      await tx.$executeRaw`
+        DELETE FROM archive_record_sources
+        WHERE organization_id = ${d.organizationId} AND archive_id = ${d.archiveRecordId}
+          AND archive_received_at = ${d.messageReceivedAt}`;
+      await tx.$executeRaw`
+        DELETE FROM archive_dedupe_keys
+        WHERE organization_id = ${d.organizationId} AND archive_id = ${d.archiveRecordId}
+          AND archive_received_at = ${d.messageReceivedAt}`;
+      for (const copy of merged) {
+        await deleteRegistryRowIfUnreferenced(tx, {
+          messageId: copy.messageId,
+          messageReceivedAt: copy.messageReceivedAt,
+          organizationId: d.organizationId,
+        });
+      }
       await deleteRegistryRowIfUnreferenced(tx, d);
       const done = await tx.$executeRaw`
         UPDATE archive_disposals SET state = 'completed', completed_at = ${now},
@@ -422,7 +512,8 @@ export class DisposalPipeline {
  * The registry purge contract (step 1.1, `packages/database/src/partitioning/executor.ts`):
  * whoever deletes the last reference to a message below the purge watermark deletes its
  * `message_identities` row in the same transaction — when no `email_messages` row, no
- * `quarantine_messages` row and no live `email_archives` row references it.
+ * `quarantine_messages` row and no live `email_archives` row references it (step 8.6: nor an
+ * `archive_record_sources` row of a merged copy).
  */
 export async function deleteRegistryRowIfUnreferenced(
   tx: Db,
@@ -439,7 +530,9 @@ export async function deleteRegistryRowIfUnreferenced(
         WHERE m.id = ${d.messageId} AND m.received_at = ${d.messageReceivedAt})
       AND NOT EXISTS (SELECT 1 FROM quarantine_messages q WHERE q.message_id = ${d.messageId})
       AND NOT EXISTS (SELECT 1 FROM email_archives a
-        WHERE a.message_id = ${d.messageId} AND a.deleted_at IS NULL)`;
+        WHERE a.message_id = ${d.messageId} AND a.deleted_at IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM archive_record_sources s
+        WHERE s.message_id = ${d.messageId})`;
   return deleted === 1;
 }
 

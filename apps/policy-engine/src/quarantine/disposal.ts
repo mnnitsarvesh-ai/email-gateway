@@ -18,6 +18,7 @@ import {
 } from '@email-gateway/quarantine';
 import { type QuarantineInconsistencySink, quarantineWrongRead } from './errors';
 import type { MessageKey } from './store-writer';
+import { gatewayRecipientState } from './gateway-states';
 
 /**
  * Object disposal of quarantined mail (step 5.3 Q17, Q19 step 3): the writer facts
@@ -356,7 +357,7 @@ export class DisposalFactsReader {
         state: e.status,
         emlObjectKey: e.emlObjectKey,
       })),
-      recipientStatuses: recipients.map((r) => r.status),
+      recipientStatuses: recipients.map((r) => gatewayRecipientState(r.status)),
     };
   }
 }

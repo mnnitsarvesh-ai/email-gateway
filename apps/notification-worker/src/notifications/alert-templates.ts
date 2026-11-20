@@ -13,7 +13,10 @@ import { type RenderedNotice, safeText } from './templates';
  * tenant's own domain name, the failing record purposes and `/domains/<id>`; webhook disabled →
  * the subscription name (sanitized, ≤ 80), its failure counters and `/webhooks/<id>`;
  * integration unhealthy (step 8.2 D12) → the provider, the connection name (sanitized, ≤ 80), the
- * transition, the failing check titles and `/integrations/providers/<id>?tab=health`.
+ * transition, the failing check titles and `/integrations/providers/<id>?tab=health`; journal
+ * intake silent (step 8.6 D9) → the source display name (sanitized, ≤ 80) and kind, whether it
+ * is silent (medium) or failing (high), its health now, the last accepted time and
+ * `/settings/journaling/intake/<id>` (never the intake address or header token).
  *
  * **Never** a subject, a body, a sender or recipient address, a URL found in mail, a file name,
  * an endpoint URL or a secret. Free text from the database (organization and subscription names)
@@ -88,21 +91,57 @@ export interface IntegrationAlertFacts extends AlertCommonFacts {
   };
 }
 
-export type AlertFacts =
-  ThreatAlertFacts | DnsAlertFacts | WebhookDisabledAlertFacts | IntegrationAlertFacts;
+export interface JournalIntakeAlertFacts extends AlertCommonFacts {
+  kind: 'journal_intake_silent';
+  intake: {
+    sourcePublicId: string;
+    name: string;
+    /** `journal_intake_sources.kind`. */
+    sourceKind: string;
+    /** `journal_intake_sources.health_status` when the alert is sent. */
+    healthNow: string;
+    lastAcceptedAt: string | null;
+    /** `silence_alert_minutes` (null: silence alerts off for the source). */
+    silenceAlertMinutes: number | null;
+  };
+}
 
-const KIND_TITLE: Readonly<Record<AlertKind, string>> = {
+export type AlertFacts =
+  | ThreatAlertFacts
+  | DnsAlertFacts
+  | WebhookDisabledAlertFacts
+  | IntegrationAlertFacts
+  | JournalIntakeAlertFacts;
+
+/**
+ * Alert kinds this worker renders: the `@email-gateway/webhooks` kinds plus the step 8.6
+ * `journal_intake_silent` (requested by the archive-worker's intake health loop; the event
+ * contract carries it, the shared webhooks vocabulary does not yet).
+ */
+export type SecurityAlertKind = AlertKind | 'journal_intake_silent';
+
+const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
   threat_detected: 'Threat detected',
   domain_dns_failed: 'Domain DNS check failed',
   webhook_disabled: 'Webhook endpoint disabled',
   integration_unhealthy: 'Microsoft 365 / Google Workspace connection unhealthy',
+  journal_intake_silent: 'Journal intake source silent or failing',
 };
 
-const KIND_SUBJECT: Readonly<Record<AlertKind, string>> = {
+const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
   threat_detected: 'threat detected',
   domain_dns_failed: 'domain DNS check failed',
   webhook_disabled: 'webhook endpoint disabled',
   integration_unhealthy: 'mail platform connection unhealthy',
+  journal_intake_silent: 'journal intake source needs attention',
+};
+
+/** Display names of the journal intake source kinds (step 8.6 D1). */
+export const INTAKE_SOURCE_KIND_NAMES: Readonly<Record<string, string>> = {
+  microsoft_365_journal: 'Microsoft 365 journaling',
+  google_workspace_copy: 'Google Workspace copy',
+  exchange_onprem_journal: 'On-premises Exchange journaling',
+  smtp_bcc: 'SMTP BCC copy',
 };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -217,6 +256,25 @@ function body(facts: AlertFacts): string[] {
         '',
         'Mail flow is not changed automatically: review the checks and the setup guide.',
         ...(id ? [`Details: ${facts.portalUrl}/integrations/providers/${id}?tab=health`] : []),
+      ];
+    }
+    case 'journal_intake_silent': {
+      const i = facts.intake;
+      const id = publicId(i.sourcePublicId);
+      const failing = facts.severity === 'high';
+      return [
+        `Journal intake source: ${displayName(i.name, 80) || '(name not shown)'} (${id || 'unknown'})`,
+        `Source kind: ${INTAKE_SOURCE_KIND_NAMES[i.sourceKind] ?? 'unknown'}`,
+        failing
+          ? 'Problem: failing. Journal mail from this source is being refused or dropped, or its provider connection is unusable; journal copies may be lost.'
+          : `Problem: silent. No journal message has been accepted from this source for longer than its silence threshold${
+              i.silenceAlertMinutes === null ? '' : ` (${String(i.silenceAlertMinutes)} minutes)`
+            }.`,
+        `Health now: ${code(i.healthNow)}`,
+        `Last accepted message: ${instant(i.lastAcceptedAt)}`,
+        '',
+        'Check the journal rule or routing at the provider and the source health and setup guide.',
+        ...(id ? [`Details: ${facts.portalUrl}/settings/journaling/intake/${id}`] : []),
       ];
     }
   }

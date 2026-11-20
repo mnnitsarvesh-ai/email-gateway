@@ -4,6 +4,8 @@
 
 Amended by [ADR-0078](0078-provider-relay-tenant-attribution.md) (step 8.2): decision 5 gains the post-queue case `provider_proof_failed`; step 2.2 D10 is enforced.
 
+Amended by [ADR-0087](0087-journal-intake-path.md) (step 8.6): a fourth LMTP listener (`:10053`, journal intake) and the intake transport (`transport_maps` routes the platform journal intake domain to it); intake transactions are intake-only (`452 4.5.3` on mixing) and the intake LMTP answers only `250` or `451`.
+
 **Context.** Step 2.2 turns the local MX into a production-oriented gateway: tenant domains resolved dynamically, recipient validation, rate limits, durable ingestion, authenticated outbound submission (SASL, source IP, client certificates), per-domain DKIM, bounce processing and loop prevention. ADR-0006 fixed Postfix at the edge and LMTP ingestion but left open how Postfix gets tenant data, how submission is authenticated, how the outbound path is laid out and what the ingestion idempotency key is. The security boundaries say the edge (Postfix) holds no data-store credentials.
 
 **Decision.**

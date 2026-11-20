@@ -2,7 +2,14 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import type { TenantScope } from '../../../auth-contracts/tenant-scope';
 import { categoriesOf, collectRefs, findingsOf, policyOf } from '../domain/dlp-result';
 import type { DlpIncidentListQuery, DlpIncidentPage, DlpIncidentView } from '../dto/dlp.schemas';
-import { DlpResultsRepository, type DlpResultRow } from '../repositories/dlp-results.repository';
+import {
+  DlpResultsRepository,
+  type DlpResultRow,
+  type IncidentPage,
+} from '../repositories/dlp-results.repository';
+
+/** Reads that refill a page whose rows were journal intake results (step 8.6 D5). */
+const INCIDENT_FILL_ROUNDS = 5;
 
 const CURSOR = /^i(0|[1-9][0-9]{0,15}):([1-9][0-9]{0,19})$/;
 
@@ -42,32 +49,45 @@ export class DlpIncidentsService {
     if (from !== undefined && to !== undefined && from.getTime() >= to.getTime()) {
       throw new BadRequestException(['to: must be after from']);
     }
-    const rows = await this.repository.listIncidents(scope, {
-      take: query.limit + 1,
-      ...(query.cursor !== undefined && { before: decodeIncidentCursor(query.cursor) }),
+    const filter: Omit<IncidentPage, 'take' | 'before'> = {
       ...(query.action !== undefined && { action: query.action }),
       ...(query.direction !== undefined && { direction: query.direction }),
       ...(from !== undefined && { from }),
       ...(to !== undefined && { to }),
-    });
-    const page = rows.slice(0, query.limit);
-    const [messages, ids] = await Promise.all([
-      this.repository.messagePublicIds(
-        scope,
-        page.map((row) => row.messageId),
-      ),
-      this.repository.publicIds(scope, collectRefs(page)),
-    ]);
-    const data = page.flatMap((row): DlpIncidentView[] => {
-      const messageId = messages.get(row.messageId.toString());
-      if (messageId === undefined) return [];
-      return [this.viewOf(row, messageId, ids)];
-    });
-    const last = page.at(-1);
-    return {
-      data,
-      nextCursor: rows.length > query.limit && last ? encodeIncidentCursor(last) : null,
     };
+    // Step 8.6 D5: results of journal intake messages are not gateway incidents. They are
+    // dropped after the read (the result rows carry no ingest source), so a page is refilled
+    // from the following rows, at most INCIDENT_FILL_ROUNDS reads; a page that is still short
+    // ends with the cursor of the last row read.
+    const kept: Array<{ row: DlpResultRow; messageId: string }> = [];
+    let before = query.cursor === undefined ? undefined : decodeIncidentCursor(query.cursor);
+    let exhausted = false;
+    let lastRead: DlpResultRow | undefined;
+    for (let round = 0; round < INCIDENT_FILL_ROUNDS && kept.length <= query.limit; round += 1) {
+      const rows = await this.repository.listIncidents(scope, {
+        take: query.limit + 1,
+        ...(before !== undefined && { before }),
+        ...filter,
+      });
+      const messages = await this.repository.messagePublicIds(scope, rows);
+      for (const row of rows) {
+        const messageId = messages.get(row.messageId.toString());
+        if (messageId !== undefined) kept.push({ row, messageId });
+      }
+      lastRead = rows.at(-1) ?? lastRead;
+      if (rows.length <= query.limit) {
+        exhausted = true;
+        break;
+      }
+      before = { receivedAt: lastRead!.receivedAt, id: lastRead!.id };
+    }
+    const page = kept.slice(0, query.limit);
+    const ids = await this.repository.publicIds(scope, collectRefs(page.map((p) => p.row)));
+    const data = page.map((p) => this.viewOf(p.row, p.messageId, ids));
+    let nextCursor: string | null = null;
+    if (kept.length > query.limit) nextCursor = encodeIncidentCursor(page.at(-1)!.row);
+    else if (!exhausted && lastRead !== undefined) nextCursor = encodeIncidentCursor(lastRead);
+    return { data, nextCursor };
   }
 
   private viewOf(

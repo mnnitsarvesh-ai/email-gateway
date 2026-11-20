@@ -32,6 +32,18 @@ spec:
           image: email-gateway/smtp-adapter:latest
           ports:
             - { name: http, containerPort: 3010 }
+            # Postfix extension listeners (step 2.2 §4; fixed ports of the Postfix configurations).
+            # The Postfix hosts (EC2 ASGs) reach them through the environment's internal load
+            # balancer in front of this Service (docs/deployment/smtp-gateway.md).
+            - { name: policy, containerPort: 10040 }
+            - { name: socketmap, containerPort: 10041 }
+            - { name: sasl, containerPort: 10042 }
+            - { name: lmtp-inbound, containerPort: 10050 }
+            - { name: lmtp-outbound, containerPort: 10051 }
+            - { name: lmtp-bounces, containerPort: 10052 }
+            # Step 8.6 D2.4: the journal intake LMTP (inbound Postfix transport_maps of the intake
+            # domain). Listens only while JOURNAL_INTAKE_DOMAIN is set (ConfigMap).
+            - { name: lmtp-journal, containerPort: 10053 }
           envFrom:
             - configMapRef: { name: email-gateway-config }
           env:
@@ -96,6 +108,14 @@ spec:
   selector: { app.kubernetes.io/name: smtp-adapter }
   ports:
     - { name: http, port: 80, targetPort: http }
+    - { name: policy, port: 10040, targetPort: policy }
+    - { name: socketmap, port: 10041, targetPort: socketmap }
+    - { name: sasl, port: 10042, targetPort: sasl }
+    - { name: lmtp-inbound, port: 10050, targetPort: lmtp-inbound }
+    - { name: lmtp-outbound, port: 10051, targetPort: lmtp-outbound }
+    - { name: lmtp-bounces, port: 10052, targetPort: lmtp-bounces }
+    # Step 8.6: journal intake LMTP.
+    - { name: lmtp-journal, port: 10053, targetPort: lmtp-journal }
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -119,3 +139,42 @@ spec:
   minAvailable: 1
   selector:
     matchLabels: { app.kubernetes.io/name: smtp-adapter }
+---
+# Ingress of the smtp-adapter (step 8.6 WP3; docs/deployment/smtp-gateway.md "Security groups",
+# which this mirrors inside the cluster): the Postfix extension listeners only from the Postfix
+# ASG subnets, the HTTP port (health, /metrics) only from Prometheus (the kubelet's probes are not
+# subject to policies). Inbound MX (10.0.96.0/22): policy, socketmap, inbound LMTP and the journal
+# intake LMTP (10053, step 8.6 D2.4). Outbound relay (10.0.100.0/22): policy, socketmap, SASL,
+# outbound LMTP and bounce notices. Placeholder private CIDRs: every overlay replaces them with the
+# environment's subnets. Egress stays unrestricted here (as before step 8.6).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: smtp-adapter
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: smtp-adapter }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3010 }]
+    # Inbound MX (postfix): RCPT/END-OF-MESSAGE policy, relay_domain socketmap, LMTP 10050 and the
+    # journal intake LMTP 10053.
+    - from: [{ ipBlock: { cidr: 10.0.96.0/22 } }]
+      ports:
+        - { protocol: TCP, port: 10040 }
+        - { protocol: TCP, port: 10041 }
+        - { protocol: TCP, port: 10050 }
+        - { protocol: TCP, port: 10053 }
+    # Outbound relay (postfix-outbound): policy, socketmap, SASL, outbound LMTP, bounce notices.
+    - from: [{ ipBlock: { cidr: 10.0.100.0/22 } }]
+      ports:
+        - { protocol: TCP, port: 10040 }
+        - { protocol: TCP, port: 10041 }
+        - { protocol: TCP, port: 10042 }
+        - { protocol: TCP, port: 10051 }
+        - { protocol: TCP, port: 10052 }

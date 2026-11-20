@@ -141,6 +141,12 @@ export type CompletionResult =
       /** applied → `scanned.v1` written; stale/invalid/not_found → superseded, no event. */
       transition: 'applied' | 'duplicate' | 'stale' | 'invalid' | 'not_found';
       scannedEventId: string | null;
+      /**
+       * Journal intake messages only (step 8.6 D4): `journaled` = E31/E32 applied in the round's
+       * transaction in place of `scanned.v1`; `transition_skipped` = no event, the E31/E32 edge
+       * was not applied.
+       */
+      intake?: 'journaled' | 'transition_skipped';
     };
 
 export interface FinalizeInput {

@@ -24,6 +24,8 @@ describe('rate limit windows and keys (D6)', () => {
     expect(rateLimitKey('tenant_in', '7', now)).toBe(`sa:rl:in:7:${minute}`);
     expect(rateLimitKey('tenant_out', '7', now)).toBe(`sa:rl:out:7:${minute}`);
     expect(rateLimitKey('tenant_out_day', '7', now)).toBe('sa:rl:outd:7:20261102');
+    expect(rateLimitKey('jintake_src', '42', now)).toBe(`sa:rl:jintake_src:42:${minute}`);
+    expect(rateLimitKey('jintake_org', '7', now)).toBe(`sa:rl:jintake_org:7:${minute}`);
   });
 });
 

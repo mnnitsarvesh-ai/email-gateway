@@ -10,6 +10,7 @@ import {
 } from './states';
 import {
   findEdge,
+  INTAKE_ONLY_STATES,
   LIFECYCLE_REASON_CODES,
   TRANSITIONS,
   type LifecycleReasonCode,
@@ -17,7 +18,15 @@ import {
 } from './transitions';
 
 const FROM: readonly (MessageState | null)[] = [null, ...MESSAGE_STATES];
-const current = (state: MessageState | null, version = 3, round = 0) => ({ state, version, round });
+const current = (
+  state: MessageState | null,
+  version = 3,
+  round = 0,
+  ingestSource: 'gateway' | 'journal_intake' = 'gateway',
+) => ({ state, version, round, ingestSource });
+/** A journal intake message for edges into an intake-only state (step 8.6), else a gateway one. */
+const currentFor = (state: MessageState | null, to: MessageState) =>
+  current(state, 3, 0, INTAKE_ONLY_STATES.includes(to) ? 'journal_intake' : 'gateway');
 
 /** The classification of a pair without an edge (L4 step 5), stated independently of decide. */
 function expectedWithoutEdge(from: MessageState | null, to: MessageState): Decision {
@@ -46,7 +55,7 @@ describe('decideTransition: exhaustive (from ∪ creation) × to × role (§9 it
         const edge = findEdge(from, to);
         for (const role of ACTOR_ROLES) {
           const reason: LifecycleReasonCode = (edge && reasonFor(edge, role)) ?? 'delivery_planned';
-          const decision = decideTransition(current(from), { to, reason, actor: { role } });
+          const decision = decideTransition(currentFor(from, to), { to, reason, actor: { role } });
           checked += 1;
           if (edge && (from !== to || edge.newRound)) {
             if (edge.roles.includes(role)) {
@@ -70,7 +79,7 @@ describe('decideTransition: exhaustive (from ∪ creation) × to × role (§9 it
         }
       }
     }
-    expect(checked).toBe(16 * 15 * ACTOR_ROLES.length);
+    expect(checked).toBe(17 * 16 * ACTOR_ROLES.length);
     // Every (edge source, role) pair applies exactly once.
     const expected = TRANSITIONS.reduce((n, e) => n + e.from.length * e.roles.length, 0);
     expect(applied).toBe(expected);
@@ -81,7 +90,7 @@ describe('decideTransition: exhaustive (from ∪ creation) × to × role (§9 it
       for (const from of edge.from) {
         for (const role of edge.roles) {
           for (const reason of LIFECYCLE_REASON_CODES) {
-            const decision = decideTransition(current(from), {
+            const decision = decideTransition(currentFor(from, edge.to), {
               to: edge.to,
               reason,
               actor: { role },
@@ -113,6 +122,87 @@ describe('decideTransition: exhaustive (from ∪ creation) × to × role (§9 it
         }
       }
     }
+  });
+});
+
+describe('decideTransition: the journaled state is for journal intake messages only (step 8.6 D4)', () => {
+  const intakeEdges = TRANSITIONS.filter((edge) => INTAKE_ONLY_STATES.includes(edge.to));
+
+  it('applies E30-E32 to a journal intake message', () => {
+    expect(intakeEdges.map((e) => e.id)).toEqual(['E30', 'E31', 'E32']);
+    for (const edge of intakeEdges) {
+      for (const reason of edge.reasons) {
+        const d = decideTransition(current(edge.from[0]!, 3, 0, 'journal_intake'), {
+          to: 'journaled',
+          reason,
+          actor: { role: 'scanner' },
+        });
+        expect(d, `${edge.id} ${reason}`).toEqual({ result: 'apply', edge, nextRound: 0 });
+      }
+    }
+  });
+
+  it('refuses every edge into journaled for a gateway message (also when the ingest source is absent)', () => {
+    for (const edge of intakeEdges) {
+      for (const reason of edge.reasons) {
+        for (const state of [
+          current(edge.from[0]!, 3, 0, 'gateway'),
+          { state: edge.from[0]!, version: 3, round: 0 },
+        ]) {
+          expect(
+            decideTransition(state, { to: 'journaled', reason, actor: { role: 'scanner' } }),
+            `${edge.id} ${reason}`,
+          ).toEqual({ result: 'invalid', why: 'ingest_source_not_allowed' });
+        }
+      }
+    }
+  });
+
+  it('checks the edge, role and reason first; a journaled message is final for everything', () => {
+    const intake = (state: MessageState) => current(state, 3, 0, 'journal_intake');
+    // No edge from policy_evaluated (an intake message never gets there): a missing edge.
+    expect(
+      decideTransition(intake('policy_evaluated'), {
+        to: 'journaled',
+        reason: 'intake_unscanned',
+        actor: { role: 'scanner' },
+      }),
+    ).toEqual({ result: 'invalid', why: 'edge_not_allowed' });
+    expect(
+      decideTransition(intake('persisted'), {
+        to: 'journaled',
+        reason: 'intake_unscanned',
+        actor: { role: 'policy' },
+      }),
+    ).toEqual({ result: 'invalid', why: 'actor_not_allowed' });
+    expect(
+      decideTransition(intake('scanned'), {
+        to: 'journaled',
+        reason: 'intake_unscanned',
+        actor: { role: 'scanner' },
+      }),
+    ).toEqual({ result: 'invalid', why: 'reason_not_allowed' });
+    // Rescan, partial release, manual quarantine and expiry never leave `journaled`.
+    for (const [to, reason, role] of [
+      ['scanning', 'admin_rescan', 'operator'],
+      ['scanning', 'signature_rescan', 'scanner'],
+      ['approved', 'quarantine_partial_release', 'quarantine'],
+      ['quarantined', 'manual_quarantine', 'quarantine'],
+      ['expired', 'deadline_exceeded', 'sweeper'],
+      ['policy_evaluated', 'policy_decided', 'policy'],
+    ] as const) {
+      expect(
+        decideTransition(intake('journaled'), { to, reason, actor: { role } }),
+        `${to} ${reason}`,
+      ).toEqual({ result: 'stale', why: 'final_state' });
+    }
+    expect(
+      decideTransition(intake('journaled'), {
+        to: 'journaled',
+        reason: 'intake_scan_complete',
+        actor: { role: 'scanner' },
+      }),
+    ).toEqual({ result: 'duplicate', why: 'same_state' });
   });
 });
 

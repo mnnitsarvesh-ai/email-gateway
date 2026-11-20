@@ -389,18 +389,19 @@ export function archiveSettingsDocument(addresses: string[]) {
 }
 
 /**
- * Alpha: retention policy (api, alpha admin) and disabled settings with the custodian scope (api,
- * MFA approver). Beta: the same rows on the writer, enabled, plus one captured-to-be message.
+ * Alpha: retention policy and disabled settings with the custodian scope (api, MFA approver: an
+ * organization admin with the migrated compliance_officer grant since step 8.6, because retention
+ * needs `archive:manage`, which new organization admins no longer hold). Beta: the same rows on
+ * the writer, enabled, plus one captured-to-be message.
  */
 export async function prepareArchive(
   p: PrismaClient,
   input: {
-    alphaAdmin: ApiSession;
     alphaApprover: ApiSession;
     betaOrg: bigint;
   },
 ): Promise<{ alphaPolicyId: string; betaMessages: InsertedArchiveMessage[] }> {
-  const policy = await input.alphaAdmin.call<{ id: string }>(
+  const policy = await input.alphaApprover.call<{ id: string }>(
     'POST',
     '/archive/retention-policies',
     { name: ARCHIVE_POLICY_NAME, retentionDays: 2555, onExpiry: 'delete', priority: 1000 },
@@ -493,6 +494,9 @@ export const ARCHIVE_TABLES = [
   'archive_index_queue',
   'archive_index_checks',
   'archive_disposals',
+  // Step 8.6: cross-source dedupe rows and merged copies (deleted with their records).
+  'archive_record_sources',
+  'archive_dedupe_keys',
   'email_archives',
   'archive_capture_intents',
   'archive_settings',

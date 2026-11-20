@@ -4,7 +4,7 @@ import { ArchiveIcon, CableIcon, KeyRoundIcon, UserCheckIcon } from 'lucide-reac
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
-import { useCan } from '@/lib/auth/me';
+import { useCan, useMe } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { Section } from '@/features/domains/kit';
 import { ProvidersSection } from './providers/providers-section';
@@ -12,8 +12,9 @@ import { WebhooksSection } from './webhooks-section';
 
 /**
  * `/integrations`: webhooks (full list), the Microsoft 365 and Google Workspace connections
- * (step 8.2 §6), API keys and SMTP connectors (link cards), the archive link card (step 8.1) and
- * the account takeover identity providers link card (step 8.5).
+ * (step 8.2 §6), API keys and SMTP connectors (link cards), the journaling and archive link card
+ * (step 8.1, split in step 8.6) and the account takeover identity providers link card (step 8.5).
+ * Archive-only organizations (step 8.6 D13) do not see the SMTP connectors card.
  */
 export function IntegrationsPage() {
   return (
@@ -33,9 +34,11 @@ export function IntegrationsPage() {
 function Integrations() {
   const canWebhooks = useCan('WebhooksController_list_v1');
   const canKeys = useCan('ApiKeysController_list_v1');
-  const canConnectors = useCan('SmtpConnectorsController_list_v1');
+  const me = useMe();
+  const archiveOnly = me.data?.organization.serviceProfile === 'archive_only';
+  const canConnectors = useCan('SmtpConnectorsController_list_v1') && !archiveOnly;
   const canProviders = useCan('ProviderConnectionsController_list_v1');
-  const canArchiveSettings = useCan('ArchiveAdminController_get_v1');
+  const canJournaling = useCan('JournalingController_get_v1');
   const canArchiveSearch = useCan('ArchiveMessagesController_list_v1');
   const canAtoProviders = useCan('AtoProvidersController_list_v1');
   return (
@@ -86,17 +89,17 @@ function Integrations() {
             </Button>
           </Section>
         ) : null}
-        {canArchiveSettings || canArchiveSearch ? (
+        {canJournaling || canArchiveSearch ? (
           <Section
-            title="Archive and journaling"
-            description="Journal inbound, outbound and internal mail into the encrypted compliance archive (step 8.1)."
+            title="Journaling and archive"
+            description="Journaling captures mail from the gateway or from journal intake (Microsoft 365, Google Workspace, on-premises Exchange or SMTP); the archive keeps it encrypted and immutable for search, holds and eDiscovery."
           >
             <div className="flex flex-wrap gap-2">
-              {canArchiveSettings ? (
+              {canJournaling ? (
                 <Button asChild variant="outline" className="justify-self-start">
-                  <Link href="/settings?tab=archive">
+                  <Link href="/settings?tab=journaling">
                     <ArchiveIcon aria-hidden />
-                    Archive settings
+                    Journaling settings
                   </Link>
                 </Button>
               ) : null}

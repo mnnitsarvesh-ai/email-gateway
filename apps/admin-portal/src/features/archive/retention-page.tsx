@@ -49,30 +49,41 @@ import {
   type RetentionPolicy,
 } from './model';
 import { archiveSearchQuery, DEFAULT_ARCHIVE_STATE } from './search-state';
+import { ArchiveAccessPanel, ArchiveImmutabilityPanel } from './settings-panel';
 
 export const RETENTION_TABS: readonly TabDefinition[] = [
   { id: 'policies', label: 'Retention policies', ops: ['ArchiveRetentionController_list_v1'] },
+  // Step 8.6 (D14): moved here from the former Settings → Archive tab.
+  { id: 'immutability', label: 'Immutability and keys', ops: ['ArchiveAdminController_get_v1'] },
+  { id: 'access', label: 'Access settings', ops: ['ArchiveAdminController_get_v1'] },
   { id: 'review', label: 'Review queue', ops: ['ArchiveMessagesController_list_v1'] },
   { id: 'disposals', label: 'Disposal log', ops: ['ArchiveAdminController_disposals_v1'] },
   { id: 'capture', label: 'Capture issues', ops: ['ArchiveAdminController_captureIssues_v1'] },
 ];
 
-/** Retention and review (`/archive/retention`, step 8.1 A11, A13, A14, A28). */
+/**
+ * Retention and lock (`/archive/retention`, step 8.1 A11, A13, A14, A28; step 8.6 D14 adds the
+ * immutability, keys and access tabs of the Archive layer).
+ */
 export function RetentionPage() {
   return (
     <RouteGate gate={['ArchiveRetentionController_list_v1']}>
       <div className="grid min-w-0 gap-4">
         <PageHeader
-          title="Retention and review"
-          breadcrumbs={[{ label: 'Archive', href: '/archive' }, { label: 'Retention and review' }]}
-          description="How long archived mail is kept, records waiting for a disposal decision, the disposal log and messages the archive could not capture."
+          title="Retention and lock"
+          breadcrumbs={[{ label: 'Archive', href: '/archive' }, { label: 'Retention and lock' }]}
+          description="How long archived mail is kept and how it is locked and encrypted, who may preview or download it, records waiting for a disposal decision, the disposal log and messages the archive could not capture."
         />
         <GatedTabs
           tabs={RETENTION_TABS}
-          label="Retention and review"
+          label="Retention and lock"
           keepParams={[]}
           render={(tab) => {
             switch (tab) {
+              case 'immutability':
+                return <ArchiveImmutabilityPanel />;
+              case 'access':
+                return <ArchiveAccessPanel />;
               case 'review':
                 return <ReviewQueue />;
               case 'disposals':
@@ -232,11 +243,11 @@ function PoliciesTab() {
       <Notice>
         <span>
           The first matching policy by priority (lowest first) sets a record’s retention when it is
-          captured; records no policy matches use the default policy of the{' '}
+          captured; records no policy matches use the default policy (
           <Link href={archiveSettingsHref} className="underline underline-offset-2">
-            archive settings
+            Immutability and keys
           </Link>
-          . Retention never shrinks for records already captured: a longer policy protects them, a
+          ) . Retention never shrinks for records already captured: a longer policy protects them, a
           shorter one applies to new captures only. Your plan limits the longest retention
           (archive_retention_days).
         </span>

@@ -91,7 +91,11 @@ beforeAll(async () => {
   fx = createFixtures(ctx);
 
   orgA = await fx.createOrganization();
-  adminA = await fx.createUser(orgA, { roles: ['organization_admin'], mfa: true });
+  // Step 8.6 (ADR-0089): an organization admin as migrated (archive access through compliance_officer).
+  adminA = await fx.createUser(orgA, {
+    roles: ['organization_admin', 'compliance_officer'],
+    mfa: true,
+  });
   memberA = await fx.createUser(orgA, { roles: ['read_only_user'] });
   tokenA = (await loginWithMfa(ctx, fx, adminA)).accessToken;
 

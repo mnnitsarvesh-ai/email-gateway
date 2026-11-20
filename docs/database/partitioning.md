@@ -23,53 +23,57 @@ Thirty-nine high-volume tables are range-partitioned by time ([ADR-0014](../arch
 
 The registry is `packages/database/src/partitioning/registry.ts`. "Retention N months" means: drop `pYYYYMM` when its **upper bound** ≤ the first day of (current UTC month − N months), so 6 months keeps the current month plus 6 full months. For days: drop when the upper bound ≤ today (00:00 UTC) − N days.
 
-| Table                          | Partition column    | Granularity | Drop after | Tier        | Guard                                   |
-| ------------------------------ | ------------------- | ----------- | ---------- | ----------- | --------------------------------------- |
-| `email_messages`               | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_recipients`             | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_attachments`            | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_scans`                  | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_deliveries`             | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_headers`                | `received_at`       | month       | 3 months   | detail      |                                         |
-| `email_events`                 | `received_at`       | month       | 3 months   | detail      |                                         |
-| `email_message_status_history` | `received_at`       | month       | 3 months   | detail      |                                         |
-| `scan_engine_results`          | `received_at`       | month       | 3 months   | detail      |                                         |
-| `policy_execution_logs`        | `received_at`       | month       | 6 months   | core        |                                         |
-| `delivery_attempts`            | `received_at`       | month       | 3 months   | detail      |                                         |
-| `delivery_reinjections`        | `received_at`       | month       | 6 months   | core        |                                         |
-| `delivery_status_events`       | `received_at`       | month       | 3 months   | detail      |                                         |
-| `email_message_parses`         | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_auth_results`           | `received_at`       | month       | 6 months   | core        |                                         |
-| `attachment_scan_results`      | `received_at`       | month       | 6 months   | core        |                                         |
-| `sandbox_submissions`          | `received_at`       | month       | 6 months   | core        |                                         |
-| `message_urls`                 | `received_at`       | month       | 6 months   | core        |                                         |
-| `url_scan_results`             | `received_at`       | month       | 6 months   | core        |                                         |
-| `url_rewrites`                 | `received_at`       | month       | 6 months   | core        |                                         |
-| `url_dynamic_inspections`      | `received_at`       | month       | 6 months   | core        |                                         |
-| `url_click_events`             | `clicked_at`        | month       | 6 months   | core        |                                         |
-| `bec_scan_results`             | `received_at`       | month       | 6 months   | core        |                                         |
-| `dlp_scan_results`             | `received_at`       | month       | 6 months   | core        |                                         |
-| `dlp_evidence`                 | `received_at`       | month       | 7 months   | core        | every row crypto-shredded at ≤ 180 days |
-| `message_risk_scores`          | `received_at`       | month       | 6 months   | core        |                                         |
-| `email_archives`               | `received_at`       | month       | never      | compliance  | `drop: false` (row-level disposal, 8.1) |
-| `archive_capture_intents`      | `received_at`       | month       | 4 months   | operational |                                         |
-| `archive_disposals`            | `requested_at`      | month       | never      | compliance  | `drop: false` (disposal log, 8.1)       |
-| `bounce_events`                | `occurred_at`       | month       | 6 months   | core        |                                         |
-| `audit_logs`                   | `created_at`        | month       | never      | compliance  | `drop: false` (export is an ops action) |
-| `webhook_deliveries`           | `event_occurred_at` | month       | 2 months   | operational |                                         |
-| `webhook_events`               | `occurred_at`       | month       | 2 months   | operational |                                         |
-| `webhook_delivery_attempts`    | `attempted_at`      | month       | 2 months   | operational |                                         |
-| `ato_auth_events`              | `occurred_at`       | month       | 3 months   | detail      |                                         |
-| `ato_account_activity_daily`   | `day_start`         | month       | 6 months   | core        |                                         |
-| `ato_risk_signals`             | `detected_at`       | month       | 13 months  | core        |                                         |
-| `ato_risk_scores`              | `computed_at`       | month       | 13 months  | core        |                                         |
-| `message_outbox`               | `created_at`        | **day**     | 7 days     | operational | no unpublished rows                     |
+| Table                          | Partition column      | Granularity | Drop after | Tier        | Guard                                   |
+| ------------------------------ | --------------------- | ----------- | ---------- | ----------- | --------------------------------------- |
+| `email_messages`               | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_recipients`             | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_attachments`            | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_scans`                  | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_deliveries`             | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_headers`                | `received_at`         | month       | 3 months   | detail      |                                         |
+| `email_events`                 | `received_at`         | month       | 3 months   | detail      |                                         |
+| `email_message_status_history` | `received_at`         | month       | 3 months   | detail      |                                         |
+| `scan_engine_results`          | `received_at`         | month       | 3 months   | detail      |                                         |
+| `policy_execution_logs`        | `received_at`         | month       | 6 months   | core        |                                         |
+| `delivery_attempts`            | `received_at`         | month       | 3 months   | detail      |                                         |
+| `delivery_reinjections`        | `received_at`         | month       | 6 months   | core        |                                         |
+| `delivery_status_events`       | `received_at`         | month       | 3 months   | detail      |                                         |
+| `email_message_parses`         | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_auth_results`           | `received_at`         | month       | 6 months   | core        |                                         |
+| `attachment_scan_results`      | `received_at`         | month       | 6 months   | core        |                                         |
+| `sandbox_submissions`          | `received_at`         | month       | 6 months   | core        |                                         |
+| `message_urls`                 | `received_at`         | month       | 6 months   | core        |                                         |
+| `url_scan_results`             | `received_at`         | month       | 6 months   | core        |                                         |
+| `url_rewrites`                 | `received_at`         | month       | 6 months   | core        |                                         |
+| `url_dynamic_inspections`      | `received_at`         | month       | 6 months   | core        |                                         |
+| `url_click_events`             | `clicked_at`          | month       | 6 months   | core        |                                         |
+| `bec_scan_results`             | `received_at`         | month       | 6 months   | core        |                                         |
+| `dlp_scan_results`             | `received_at`         | month       | 6 months   | core        |                                         |
+| `dlp_evidence`                 | `received_at`         | month       | 7 months   | core        | every row crypto-shredded at ≤ 180 days |
+| `message_risk_scores`          | `received_at`         | month       | 6 months   | core        |                                         |
+| `email_archives`               | `received_at`         | month       | never      | compliance  | `drop: false` (row-level disposal, 8.1) |
+| `archive_capture_intents`      | `received_at`         | month       | 4 months   | operational |                                         |
+| `archive_disposals`            | `requested_at`        | month       | never      | compliance  | `drop: false` (disposal log, 8.1)       |
+| `journal_intake_messages`      | `received_at`         | month       | 6 months   | core        |                                         |
+| `archive_record_sources`       | `archive_received_at` | month       | never      | compliance  | `drop: false` (merged copies, 8.6)      |
+| `bounce_events`                | `occurred_at`         | month       | 6 months   | core        |                                         |
+| `audit_logs`                   | `created_at`          | month       | never      | compliance  | `drop: false` (export is an ops action) |
+| `webhook_deliveries`           | `event_occurred_at`   | month       | 2 months   | operational |                                         |
+| `webhook_events`               | `occurred_at`         | month       | 2 months   | operational |                                         |
+| `webhook_delivery_attempts`    | `attempted_at`        | month       | 2 months   | operational |                                         |
+| `ato_auth_events`              | `occurred_at`         | month       | 3 months   | detail      |                                         |
+| `ato_account_activity_daily`   | `day_start`           | month       | 6 months   | core        |                                         |
+| `ato_risk_signals`             | `detected_at`         | month       | 13 months  | core        |                                         |
+| `ato_risk_scores`              | `computed_at`         | month       | 13 months  | core        |                                         |
+| `message_outbox`               | `created_at`          | **day**     | 7 days     | operational | no unpublished rows                     |
 
 Step 6.2: `webhook_events` is partitioned by the **source event's** `occurred_at` (the deterministic public id and partition key are identical on every redelivery, so the unique key `(event_id, occurred_at)` makes projection idempotent), `webhook_delivery_attempts` by the attempt instant; both live as long as the deliveries that reference them (2 months, operational). A delivery's history shows its event as `null` once the event's partition has dropped. `webhook_replays`, `notification_settings`, `notification_user_preferences` and `notification_alert_windows` are not partitioned (control-plane rows with foreign keys, purged by row by the webhook-worker maintenance, W13).
 
 Step 8.1: `email_archives` stays partitioned by the message's `received_at` and is never dropped: archive retention and legal holds are per record, so the archive-worker's lifecycle role disposes of records one by one (crypto-shred, objects, index, row; [A13, A14](../plan/steps/23-journaling-archiving.md#a14-disposal-pipeline-and-cross-store-consistency-adr-0067)) and its old partitions simply empty out (an empty partition costs nothing; dropping one by hand is an ops decision). `archive_capture_intents` copies the message's `received_at` (one intent per message, unique `(message_id, received_at)`); an intent is resolved within `ARCHIVE_INTENT_MAX_AGE_DAYS` (≤ 30) of its message, or — a message waiting in quarantine — within `QUARANTINE_WAIT_MAX_DAYS` (100, above the longest quarantine hold plus review), so the 4-month operational retention only drops resolved rows (2 months before the closing-round fix of step 8.1, which would have dropped the intent of a message held longer than ~2 months). `archive_disposals` is partitioned by the disposal request instant and never dropped: it is the per-record compliance trail of every deletion of archived mail (it outlives the records it describes). The nine other archive and eDiscovery tables are not partitioned (configuration, keys, the transient index queue, per-day checks, grants and the case tables: foreign keys to `organizations`, `users` and each other; bounded per tenant; deleted by the organization purge, A24).
 
 Step 8.4 ([§3.2](../plan/steps/24-account-takeover-core.md#32-migration-account_takeover), D22): `ato_auth_events` (enriched authentication events; `login_audit_logs` stays the 365-day system of record) is partitioned by `occurred_at`, its unique key `(organization_id, dedupe_key, occurred_at)` makes producers idempotent (successful SMTP AUTHs are aggregated per connector, IP and hour with `occurred_at` = the hour start, so a retried event lands on the same key); `ato_account_activity_daily` by the UTC `day_start` (unique `(organization_id, account_id, day_start)`); `ato_risk_signals` and `ato_risk_scores` by the detection or computation instant, kept 13 months so incidents of the last year keep their evidence. None has a foreign key in either direction: incidents reference signals and authentication events through `security_incident_links (ref_id, ref_time)`, which carries the partition key so a lookup prunes.
+
+Step 8.6 ([§3.2](../plan/steps/27-journal-intake-and-archive-split.md#32-new-tables), ADR-0087, ADR-0088): `journal_intake_messages` (journal envelope and proof of an intake message, primary key `(message_id, received_at)`) follows `email_messages` (6 months, core): the archive keeps what it needs in its own encrypted journal object, so the drop never loses an archived fact. `archive_record_sources` (copies merged into another message's archive record) is partitioned by the **record's** `received_at` (`archive_received_at`), so a record and its merged copies live in the same month; it is compliance data, never dropped, and deleted row by row with the record's disposal. Its unique key `(message_id, message_received_at, archive_received_at)` ends with the partition column; the registry purge keeps the merged messages' `message_identities` rows while such a row exists. 41 tables in the registry. Not partitioned: `journal_intake_sources` (configuration with foreign keys), `journal_intake_counters` (daily rows per source, pruned after 400 days by the archive-worker) and `archive_dedupe_keys` (transient, pruned after `ARCHIVE_DEDUPE_WINDOW_HOURS`).
 
 Not partitioned, deliberately: `scan_engine_settings` (step 4.1: one row per organization and engine, needs foreign keys), the six BEC tenant tables of step 4.4 (`bec_executive_profiles`, `bec_vendor_profiles`, `bec_trusted_senders`, `bec_feedback`, `bec_suppression_rules`, `bec_contact_history`: control-plane or aggregate rows with foreign keys to `organizations` and `users`, bounded per tenant, purged by row), the six DLP tenant tables of step 4.5 (`dlp_policies`, `dlp_policy_rules`, `dlp_exceptions`, `dlp_custom_patterns`, `dlp_keyword_dictionaries`, `dlp_compliance_settings`: tenant configuration with foreign keys to `organizations`, `users` and each other, bounded per tenant, deleted with the organization), the two sandbox tables of step 4.6 (`sandbox_analyses`, `sandbox_artifacts`: platform-level, content-addressed and deduplicated across tenants, so low volume; the artifacts reference their analysis with a foreign key; both are deleted row by row by the email-worker's sandbox sweeper at `expires_at`, ≤ 180 days; the partitioned count stays thirty, and step 4.6 only added columns and an index to the partitioned `sandbox_submissions`), the two risk profile tables of step 5.1 (`risk_scoring_profiles`, `risk_scoring_profile_versions`: tenant configuration, one pointer row and a bounded number of versions (`RISK_PROFILE_MAX_VERSIONS`) per organization, with foreign keys to `organizations`, `users` and each other, deleted with the organization), `message_identities` (the uniqueness anchor), `message_idempotency` (its key must not contain time, or a late redelivery would pass), `message_consumer_progress` (same key, step 3.2), `api_idempotency_keys` (the api's Idempotency-Key store, step 3.3; its key must not contain time either), `quarantine_messages` (about 5% of volume, needs foreign keys, purged by `expires_at`) and the rest of the step 5.3 quarantine store (`quarantine_actions`, `quarantine_release_logs`, `quarantine_approval_requests`, `quarantine_download_grants`, `quarantine_settings`, `quarantine_user_preferences`, `quarantine_object_purges`, `quarantine_digest_runs`, `quarantine_digests`: foreign keys to the entry, `organizations` and `users`; purged by row by the quarantine sweeper, [retention.md](retention.md#planned-feature-owned-purges)) and every control-plane table. Step 8.4: `security_incidents` and its events and links, and the twelve unpartitioned `ato_*` tables (settings, accounts, baselines, overrides, trusted contexts, incident details, response actions and their logs, SMTP restrictions, provider integrations, identities): low volume, foreign keys and row-level purges by the ato-worker maintenance role.
 

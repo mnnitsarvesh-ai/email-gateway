@@ -13,6 +13,7 @@ import {
   UntrustedText,
   VerdictBadge,
 } from '@/components/domain';
+import { ToneBadge } from '@/components/domain/tone-badge';
 import { FormErrorSummary } from '@/components/form';
 import { ErrorState } from '@/components/states/error-state';
 import { Button } from '@/components/ui/button';
@@ -24,11 +25,13 @@ import { EnumBadge } from '@/features/messages/controls';
 import type { RevealedArchiveValues } from './hooks';
 import {
   CATEGORY_TONE,
+  INGEST_SOURCE_LABEL,
   LOCK_TONE,
   RECORD_STATUS_TONE,
   archiveMessageHref,
   explainArchiveError,
   isRetryable,
+  type ArchiveIngestSource,
   type ArchiveMessage,
 } from './model';
 
@@ -154,6 +157,13 @@ export function archiveColumns(
       cell: ({ row }) => <EnumBadge value={row.original.category} tones={CATEGORY_TONE} />,
     },
     {
+      // Step 8.6: gateway, journal intake, or both (merged copies of one message).
+      id: 'ingestSources',
+      header: 'Copies from',
+      meta: { label: 'Copies from' },
+      cell: ({ row }) => <IngestSourcesBadges sources={row.original.ingestSources} />,
+    },
+    {
       id: 'verdict',
       header: 'Verdict',
       meta: { label: 'Verdict' },
@@ -244,8 +254,27 @@ export function ArchiveCard({
         <DirectionBadge direction={row.direction} />
         <EnumBadge value={row.category} tones={CATEGORY_TONE} />
         <EnumBadge value={row.status} tones={RECORD_STATUS_TONE} />
+        <IngestSourcesBadges sources={row.ingestSources} />
       </span>
     </div>
+  );
+}
+
+/** Where a record's copies came from (step 8.6): words, never colour alone. */
+export function IngestSourcesBadges({
+  sources,
+}: {
+  sources: readonly ArchiveIngestSource[] | undefined;
+}) {
+  const list = sources && sources.length > 0 ? sources : (['gateway'] as const);
+  return (
+    <span className="flex flex-wrap items-center gap-1">
+      {list.map((source) => (
+        <ToneBadge key={source} tone={source === 'gateway' ? 'neutral' : 'info'}>
+          {INGEST_SOURCE_LABEL[source]}
+        </ToneBadge>
+      ))}
+    </span>
   );
 }
 

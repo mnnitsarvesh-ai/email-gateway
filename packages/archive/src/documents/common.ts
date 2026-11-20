@@ -3,6 +3,10 @@ import { DECIMAL_ID_PATTERN, UUID_PATTERN } from '../ids';
 import {
   ARCHIVE_CATEGORIES,
   ARCHIVE_SOURCES,
+  INGEST_SOURCES,
+  INTAKE_FORMATS,
+  INTAKE_RECIPIENT_FIELDS,
+  INTAKE_SOURCE_KINDS,
   MESSAGE_ACTIONS,
   MESSAGE_DIRECTIONS,
   MESSAGE_STATUSES,
@@ -38,6 +42,11 @@ export const messageStatusSchema = z.enum(MESSAGE_STATUSES);
 export const recipientStatusSchema = z.enum(RECIPIENT_STATUSES);
 export const verdictSchema = z.enum(MESSAGE_VERDICTS);
 export const actionSchema = z.enum(MESSAGE_ACTIONS);
+/** Step 8.6: `email_messages.ingest_source`, intake kinds, formats and recipient fields. */
+export const ingestSourceSchema = z.enum(INGEST_SOURCES);
+export const intakeSourceKindSchema = z.enum(INTAKE_SOURCE_KINDS);
+export const intakeFormatSchema = z.enum(INTAKE_FORMATS);
+export const intakeRecipientFieldSchema = z.enum(INTAKE_RECIPIENT_FIELDS);
 
 /** A non-empty list without duplicates, at most `max` entries. */
 export function setOf<T extends z.ZodType>(item: T, max: number) {

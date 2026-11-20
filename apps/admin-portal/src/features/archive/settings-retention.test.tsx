@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { ApiError } from '@/lib/api/errors';
 import {
   apiErrorJson,
   expectNoAxeViolations,
@@ -8,9 +9,17 @@ import {
   noContentResponse,
   okJson,
   renderWithProviders,
+  MIGRATED_ADMIN_PERMISSIONS,
 } from '@/test';
 import { RetentionPage } from './retention-page';
-import { ArchiveSettingsPanel, draftOf, settingsBody } from './settings-panel';
+import {
+  ArchiveAccessPanel,
+  ArchiveImmutabilityPanel,
+  draftErrors,
+  draftOf,
+  forbiddenPaths,
+  settingsBody,
+} from './settings-panel';
 import { policyBody, policyDraftOf } from './retention-page';
 import { DOMAIN_ID, POLICY, POLICY_2, POLICY_ID, SETTINGS, STATUS } from './test-data';
 
@@ -48,7 +57,7 @@ function mockSettings(settings = SETTINGS, extra: Parameters<typeof mockApi>[0] 
   });
 }
 
-describe('Settings → Archive and retention (A22, A28)', () => {
+describe('Archive → Retention and lock: immutability, keys and access (A22, A28; step 8.6)', () => {
   it('builds a contract-valid full PUT body from the settings', () => {
     const body = settingsBody(
       { ...draftOf(SETTINGS), enabled: true, scopeMode: 'include', domainIds: [DOMAIN_ID] },
@@ -62,11 +71,29 @@ describe('Settings → Archive and retention (A22, A28)', () => {
       userIds: [],
       addresses: [],
     });
+    expect(body.settings?.intake).toEqual({ scanEnabled: false });
+  });
+
+  it('checks drafts, maps refusals to fields and names forbidden paths', () => {
+    expect(
+      draftErrors({ ...draftOf(SETTINGS), enabled: true, defaultRetentionPolicyId: null }),
+    ).toHaveProperty('defaultRetentionPolicyId');
+    expect(draftErrors({ ...draftOf(SETTINGS), scopeMode: 'include' })).toHaveProperty('scope');
+    expect(
+      forbiddenPaths(
+        new ApiError({
+          status: 403,
+          code: 'archive_settings_forbidden_path',
+          message: 'no',
+          details: { paths: [{ path: 'settings.scope', permission: 'journal:manage' }] },
+        }),
+      ),
+    ).toEqual(['settings.scope (journal:manage)']);
   });
 
   it('shows status, availability and key versions; read-only for a compliance auditor', async () => {
     mockSettings();
-    const { container } = renderWithProviders(<ArchiveSettingsPanel />, {
+    const { container } = renderWithProviders(<ArchiveImmutabilityPanel />, {
       role: 'compliance_auditor',
     });
     expect(
@@ -76,7 +103,11 @@ describe('Settings → Archive and retention (A22, A28)', () => {
       await screen.findByText('12 active · 1 in review · 0 being disposed'),
     ).toBeInTheDocument();
     expect(screen.getByText(/needs the archive:manage permission/)).toBeInTheDocument();
-    expect(screen.queryByRole('form', { name: 'Archive settings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Settings → Journaling' })).toHaveAttribute(
+      'href',
+      '/settings?tab=journaling',
+    );
+    expect(screen.queryByRole('form', { name: 'Immutability settings' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Rotate key' })).not.toBeInTheDocument();
     expect(await screen.findByText('root-EXAMPLE-1')).toBeInTheDocument();
     await expectNoAxeViolations(container);
@@ -84,7 +115,7 @@ describe('Settings → Archive and retention (A22, A28)', () => {
 
   it('warns when the plan has no archiving entitlement', async () => {
     mockSettings({ ...SETTINGS, entitled: false, objectLockAvailable: false });
-    renderWithProviders(<ArchiveSettingsPanel />, { role: 'organization_admin' });
+    renderWithProviders(<ArchiveImmutabilityPanel />, { role: 'compliance_officer' });
     expect(
       await screen.findByText(/Archiving is not part of your organization’s plan/),
     ).toBeInTheDocument();
@@ -94,20 +125,20 @@ describe('Settings → Archive and retention (A22, A28)', () => {
     expect(screen.getByRole('radio', { name: 'Compliance' })).toBeDisabled();
   });
 
-  it('enables archiving with a CAS body and asks for typed confirmation before compliance immutability', async () => {
+  it('asks for typed confirmation before compliance immutability and keeps the journaling paths', async () => {
     const bodies: unknown[] = [];
     mockSettings(SETTINGS, {
       ArchiveAdminController_update_v1: ({ body, request }) => {
         bodies.push(body);
         expect(request.headers.get('idempotency-key')).toBeTruthy();
-        return okJson({ ...SETTINGS, enabled: true, immutability: 'compliance', rowVersion: 4 });
+        return okJson({ ...SETTINGS, immutability: 'compliance', rowVersion: 4 });
       },
     });
-    const { user } = renderWithProviders(<ArchiveSettingsPanel />, { role: 'organization_admin' });
-    const form = await screen.findByRole('form', { name: 'Archive settings' });
-    await user.click(
-      within(form).getByRole('switch', { name: 'Archive mail of this organization' }),
-    );
+    const { user } = renderWithProviders(<ArchiveImmutabilityPanel />, {
+      role: 'compliance_officer',
+    });
+    const form = await screen.findByRole('form', { name: 'Immutability settings' });
+    expect(within(form).queryByRole('switch', { name: /Journal mail/ })).not.toBeInTheDocument();
     await user.click(within(form).getByRole('radio', { name: 'Compliance' }));
     await user.click(within(form).getByRole('button', { name: 'Save archive settings' }));
     const dialog = await screen.findByRole('alertdialog');
@@ -120,16 +151,19 @@ describe('Settings → Archive and retention (A22, A28)', () => {
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toMatchObject({
       expectedRowVersion: 3,
-      enabled: true,
+      enabled: SETTINGS.enabled,
       immutability: 'compliance',
+      settings: { directions: SETTINGS.settings.directions, scope: SETTINGS.settings.scope },
     });
     expectRequestMatchesContract('ArchiveAdminController_update_v1', bodies[0]);
   });
 
-  it('offers reload or overwrite on a 409 archive_settings_conflict (currentRowVersion)', async () => {
+  it('saves the access settings and offers reload or overwrite on a 409 (currentRowVersion)', async () => {
     const versions: number[] = [];
+    const bodies: unknown[] = [];
     mockSettings(SETTINGS, {
       ArchiveAdminController_update_v1: ({ body }) => {
+        bodies.push(body);
         const version = (body as { expectedRowVersion: number }).expectedRowVersion;
         versions.push(version);
         return version === 3
@@ -141,58 +175,54 @@ describe('Settings → Archive and retention (A22, A28)', () => {
               rowVersion: 8,
               settings: {
                 ...SETTINGS.settings,
-                include: { ...SETTINGS.settings.include, failed: true },
+                access: { ...SETTINGS.settings.access, downloadEnabled: false },
               },
             });
       },
     });
-    const { user } = renderWithProviders(<ArchiveSettingsPanel />, { role: 'organization_admin' });
-    const form = await screen.findByRole('form', { name: 'Archive settings' });
-    await user.click(within(form).getByRole('checkbox', { name: 'Failed' }));
+    const { user, container } = renderWithProviders(<ArchiveAccessPanel />, {
+      role: 'compliance_officer',
+    });
+    const form = await screen.findByRole('form', { name: 'Access settings' });
+    await expectNoAxeViolations(container);
+    await user.click(
+      within(form).getByRole('switch', { name: 'Allow downloading archived originals' }),
+    );
     await user.click(within(form).getByRole('button', { name: 'Save archive settings' }));
     const dialog = await screen.findByRole('alertdialog');
     expect(within(dialog).getByText(/Someone else saved the archive settings/)).toBeInTheDocument();
-    expect(
-      within(dialog).getByRole('button', { name: 'Reload the current version' }),
-    ).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Overwrite with my edit' }));
     await waitFor(() => expect(versions).toEqual([3, 7]));
+    expect(bodies[1]).toMatchObject({
+      settings: { access: { downloadEnabled: false, previewEnabled: true } },
+    });
   });
 
-  it('maps 422 refusals to their fields and checks the draft before sending', async () => {
-    let calls = 0;
-    mockSettings(
-      { ...SETTINGS, defaultRetentionPolicyId: null },
-      {
-        ArchiveAdminController_update_v1: () => {
-          calls += 1;
-          return apiErrorJson(422, 'archive_scope_reference_invalid', 'bad reference', {
-            extra: { path: 'settings.scope.domainIds[0]' },
-          });
-        },
-      },
-    );
-    const { user } = renderWithProviders(<ArchiveSettingsPanel />, { role: 'organization_admin' });
-    const form = await screen.findByRole('form', { name: 'Archive settings' });
+  it('names the paths of a 403 archive_settings_forbidden_path refusal', async () => {
+    mockSettings(SETTINGS, {
+      ArchiveAdminController_update_v1: () =>
+        apiErrorJson(403, 'archive_settings_forbidden_path', 'no', {
+          extra: { paths: [{ path: 'settings.access', permission: 'archive:manage' }] },
+        }),
+    });
+    const { user } = renderWithProviders(<ArchiveAccessPanel />, { role: 'compliance_officer' });
+    const form = await screen.findByRole('form', { name: 'Access settings' });
     await user.click(
-      within(form).getByRole('switch', { name: 'Archive mail of this organization' }),
+      within(form).getByRole('switch', {
+        name: 'Allow the sanitized preview of archived messages',
+      }),
     );
     await user.click(within(form).getByRole('button', { name: 'Save archive settings' }));
     expect(
-      within(form).getAllByText(/Choose a default retention policy before enabling archiving/)
-        .length,
-    ).toBeGreaterThan(0);
-    expect(calls).toBe(0);
-    await user.click(
-      within(form).getByRole('switch', { name: 'Archive mail of this organization' }),
-    );
-    await user.click(within(form).getByRole('radio', { name: 'Only the chosen parties' }));
-    await user.click(await within(form).findByRole('checkbox', { name: 'corp.example.test' }));
-    await user.click(within(form).getByRole('button', { name: 'Save archive settings' }));
-    await waitFor(() => expect(calls).toBe(1));
-    expect(
-      await within(form).findAllByText(/no longer exists in your organization/),
-    ).not.toHaveLength(0);
+      await within(form).findByText(/You may not change: settings.access \(archive:manage\)/),
+    ).toBeInTheDocument();
+  });
+
+  it('is read-only for an organization admin without archive access (step 8.6)', async () => {
+    mockSettings();
+    renderWithProviders(<ArchiveAccessPanel />, { role: 'organization_admin' });
+    expect(await screen.findByText(/needs the archive:manage permission/)).toBeInTheDocument();
+    expect(screen.queryByRole('form', { name: 'Access settings' })).not.toBeInTheDocument();
   });
 
   it('rotates the key with a reason', async () => {
@@ -203,7 +233,9 @@ describe('Settings → Archive and retention (A22, A28)', () => {
         return okJson({ key: { ...KEYS.data[0]!, version: 2 }, previousVersion: 1 }, 201);
       },
     });
-    const { user } = renderWithProviders(<ArchiveSettingsPanel />, { role: 'organization_admin' });
+    const { user } = renderWithProviders(<ArchiveImmutabilityPanel />, {
+      role: 'compliance_officer',
+    });
     await user.click(await screen.findByRole('button', { name: 'Rotate key' }));
     const dialog = await screen.findByRole('alertdialog');
     await user.type(within(dialog).getByLabelText('Reason (required)'), 'EXAMPLE yearly rotation');
@@ -245,6 +277,7 @@ describe('/archive/retention (A11, A13, A14, A28)', () => {
     });
     const { user, container } = renderWithProviders(<RetentionPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive/retention',
     });
     expect(await screen.findByText('Default seven years')).toBeInTheDocument();
@@ -302,6 +335,7 @@ describe('/archive/retention (A11, A13, A14, A28)', () => {
     });
     const { user } = renderWithProviders(<RetentionPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive/retention?tab=capture',
     });
     expect(await screen.findByText('S3ServiceException')).toBeInTheDocument();
@@ -326,6 +360,7 @@ describe('/archive/retention (A11, A13, A14, A28)', () => {
     });
     const { user } = renderWithProviders(<RetentionPage />, {
       role: 'organization_admin',
+      permissions: MIGRATED_ADMIN_PERMISSIONS,
       route: '/archive/retention',
     });
     await screen.findByText('Default seven years');

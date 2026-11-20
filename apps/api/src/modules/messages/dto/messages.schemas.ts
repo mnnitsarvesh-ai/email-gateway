@@ -81,6 +81,8 @@ export const RecipientStatusSchema = z.enum([
   'deferred',
   'failed',
   'bounced',
+  // Step 8.6 D3: recipients of a journal intake message (never served by the gateway views).
+  'journaled',
 ]);
 
 export const LifecycleViewSchema = z.object({

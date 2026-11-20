@@ -43,6 +43,8 @@ import {
   isUniqueViolation,
 } from '../repositories/domains.repository';
 import { domainReserved } from '../../provider-connections/provider-connections.errors';
+import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
+import { mailFilteringNotEnabled } from '../domains.errors';
 import { VerificationsRepository } from '../repositories/verifications.repository';
 import { DomainConfigurationService } from './domain-configuration.service';
 import { DomainEventsService } from './domain-events.service';
@@ -55,6 +57,7 @@ export type DomainsConfig = Pick<
   | 'GATEWAY_SPF_INCLUDE'
   | 'DOMAIN_VERIFICATION_LABEL'
   | 'PROVIDER_PROBE_DOMAIN'
+  | 'JOURNAL_INTAKE_DOMAIN'
 >;
 
 /** The `max_domains` organization limit (step 1.3 D12). */
@@ -87,6 +90,8 @@ export class DomainsService {
   private readonly probeDomain: string;
   /** Names longer than this would give record hosts over 253 characters (D2, D6). */
   private readonly maxNameLength: number;
+  /** Step 8.6 D1: the platform's journal intake domain (null: intake off). */
+  private readonly intakeDomain: string | null;
 
   constructor(
     @Inject(API_CONFIG) private readonly config: DomainsConfig,
@@ -100,6 +105,7 @@ export class DomainsService {
     private readonly ownership: DomainOwnershipRepository,
     private readonly configuration: DomainConfigurationService,
     private readonly events: DomainEventsService,
+    private readonly features: OrganizationFeaturesService,
   ) {
     this.allowTestNames = config.APP_ENV === 'local' || config.APP_ENV === 'ci';
     this.reservedNames = [
@@ -109,6 +115,7 @@ export class DomainsService {
     ].map((name) => name.toLowerCase().replace(/\.$/, ''));
     this.maxNameLength = maxDomainNameLength(config.DOMAIN_VERIFICATION_LABEL);
     this.probeDomain = config.PROVIDER_PROBE_DOMAIN.toLowerCase().replace(/\.$/, '');
+    this.intakeDomain = config.JOURNAL_INTAKE_DOMAIN?.toLowerCase().replace(/\.$/, '') ?? null;
   }
 
   /** Normalized ASCII name, or `400` with the D2 error code in the message. */
@@ -125,6 +132,10 @@ export class DomainsService {
     // Step 8.2 §4.4 (ADR-0079): the probe domain and names under it are intercepted by the
     // provider relay; a tenant may never own (add, hence verify) one: `422 domain_reserved`.
     if (isDomainAtOrUnder(ascii, this.probeDomain)) throw domainReserved();
+    // Step 8.6 D1: the journal intake domain (intake addresses live under it) likewise.
+    if (this.intakeDomain !== null && isDomainAtOrUnder(ascii, this.intakeDomain)) {
+      throw domainReserved();
+    }
     const reserved = this.reservedNames.find((suffix) => isDomainAtOrUnder(ascii, suffix));
     if (reserved !== undefined) {
       throw new BadRequestException([`name: Domain name is reserved (${reserved}) (reserved)`]);
@@ -152,6 +163,12 @@ export class DomainsService {
     client: ClientContext,
   ): Promise<CreatedDomain> {
     const name = this.normalizeName(input.name);
+    // Step 8.6 D13 (ADR-0090): an archive-only organization has no mail filtering; its domains
+    // are created with inbound mail flow off, and turning it on is refused.
+    const archiveOnly =
+      (await this.features.serviceProfile(scope.organizationId)) === 'archive_only';
+    if (archiveOnly && input.inboundEnabled === true) throw mailFilteringNotEnabled();
+    const inboundEnabled = archiveOnly ? false : (input.inboundEnabled ?? true);
     await this.transactions.run((tx) => this.assertCanAdd(tx, scope, name));
     const pairs = await Promise.all([
       generateDkimKeyPair('rsa_2048'),
@@ -165,7 +182,7 @@ export class DomainsService {
         await this.assertCanAdd(tx, scope, name);
         const domain = await this.domains.create(tx, scope, {
           name,
-          inboundEnabled: input.inboundEnabled,
+          inboundEnabled,
           nextCheckAt: new Date(now.getTime() + FIRST_CHECK_DELAY_SECONDS * 1000),
           now,
         });

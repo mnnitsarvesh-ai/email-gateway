@@ -96,9 +96,11 @@ export class JournalSweep {
         envelope_from: string;
         header_from: string | null;
         created_at: Date;
+        ingest_source: string;
       }>
     >`
-      SELECT id, received_at, organization_id, direction, envelope_from, header_from, created_at
+      SELECT id, received_at, organization_id, direction, envelope_from, header_from, created_at,
+        ingest_source
       FROM email_messages
       WHERE id > ${position} AND received_at >= ${since}
       ORDER BY id LIMIT ${this.options.batchSize}`;
@@ -173,11 +175,20 @@ export class JournalSweep {
     };
   }
 
-  /** Recipient addresses and directions of the candidate messages (one query per batch). */
+  /**
+   * Recipient addresses and directions of the candidate messages (one query per batch). A gateway
+   * recipient without a direction takes the message's (8.1); a journal intake recipient keeps
+   * NULL (unknown, step 8.6 D3), which eligibility ignores.
+   */
   private async recipients(
-    rows: ReadonlyArray<{ id: bigint | number; received_at: Date; direction: MessageDirection }>,
-  ): Promise<Map<string, Array<{ address: string; direction: MessageDirection }>>> {
-    const out = new Map<string, Array<{ address: string; direction: MessageDirection }>>();
+    rows: ReadonlyArray<{
+      id: bigint | number;
+      received_at: Date;
+      direction: MessageDirection;
+      ingest_source?: string;
+    }>,
+  ): Promise<Map<string, Array<{ address: string; direction: MessageDirection | null }>>> {
+    const out = new Map<string, Array<{ address: string; direction: MessageDirection | null }>>();
     if (rows.length === 0) return out;
     const ids = rows.map((r) => big(r.id));
     const times = rows.map((r) => r.received_at.getTime());
@@ -193,7 +204,11 @@ export class JournalSweep {
       const msg = byId.get(r.messageId.toString());
       if (msg === undefined || msg.received_at.getTime() !== r.receivedAt.getTime()) continue;
       const list = out.get(r.messageId.toString()) ?? [];
-      list.push({ address: r.address, direction: r.direction ?? msg.direction });
+      list.push({
+        address: r.address,
+        direction:
+          msg.ingest_source === 'journal_intake' ? r.direction : (r.direction ?? msg.direction),
+      });
       out.set(r.messageId.toString(), list);
     }
     return out;

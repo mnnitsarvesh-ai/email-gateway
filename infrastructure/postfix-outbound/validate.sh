@@ -55,3 +55,15 @@ require_readable() {
   esac
   [ -r "$2" ] || die "$1 does not point at a readable file"
 }
+
+# require_mail_domain NAME VALUE: a lower-case DNS domain with at least two labels (no IP
+# literal, no trailing dot), e.g. the journal intake domain (step 8.6 D2.1).
+require_mail_domain() {
+  printf '%s' "$2" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' \
+    || die "$1 must be a lower-case domain name with at least two labels"
+  [ "${#2}" -le 253 ] || die "$1 is too long"
+  case "$2" in
+    *[!0-9.]*) ;;
+    *) die "$1 must not be an IP address" ;;
+  esac
+}

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService } from '@email-gateway/common';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 import { assertEcho, InconsistentReadError } from '../../../http/listing/echo-check';
 import type { MessageRef } from './message-data.repository';
 
@@ -39,7 +40,18 @@ export class MessageRevealRepository {
       organizationId: scope.organizationId,
       publicId: ids,
     });
-    return rows;
+    if (rows.length === 0) return rows;
+    // Step 8.6 D5: journal intake messages are not gateway messages (treated as not found).
+    const gateway = await this.db.emailMessage.findMany({
+      where: tenantWhere(scope, {
+        OR: rows.map((r) => ({ id: r.id, receivedAt: r.receivedAt })),
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true, receivedAt: true, organizationId: true },
+    });
+    assertEcho('messages.reveal.gateway', gateway, { organizationId: scope.organizationId });
+    const keep = new Set(gateway.map((g) => `${g.id}:${g.receivedAt.getTime()}`));
+    return rows.filter((r) => keep.has(`${r.id}:${r.receivedAt.getTime()}`));
   }
 
   /** The stored subjects of these messages (absent when the message row is gone). */

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 import { Prisma as PrismaRuntime } from '@email-gateway/database';
 import { InconsistentBecReadError } from '../bec.errors';
 import { lockOrganizationRow } from './bec-profiles.repository';
@@ -168,6 +169,17 @@ export class BecFeedbackRepository {
     if (row.organizationId !== scope.organizationId || row.publicId !== publicId) {
       throw new InconsistentBecReadError('message');
     }
+    // Step 8.6 D5: a journal intake message is not a gateway message (404 message_not_found);
+    // its sender never becomes a BEC suppression.
+    const gateway = await tx.emailMessage.findFirst({
+      where: tenantWhere(scope, {
+        id: row.id,
+        receivedAt: row.receivedAt,
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true },
+    });
+    if (gateway === null) return null;
     return { id: row.id, publicId: row.publicId, receivedAt: row.receivedAt };
   }
 

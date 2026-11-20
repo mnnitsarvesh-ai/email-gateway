@@ -411,7 +411,8 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       expect(domains.create).toHaveBeenCalledWith(
         expect.objectContaining({ kind: 'user', userPublicId: ids.user }),
         expect.objectContaining({ organizationId: 2n }),
-        { name: 'Acme.test.', inboundEnabled: true },
+        // Step 8.6: `inboundEnabled` defaults in the service (false for archive-only).
+        { name: 'Acme.test.' },
         expect.objectContaining({ ip: expect.any(String) }),
       );
     });

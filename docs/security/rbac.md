@@ -77,9 +77,9 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `delivery:suppression_manage`  | Add and remove recipient suppressions (step 6.1)                                                                                         |
 | `webhook:read`                 | View webhook subscriptions, event catalogue and delivery history (step 6.2)                                                              |
 | `message:reveal`               | Reveal masked message metadata (subjects, recipient addresses, To/Cc/Subject header values) through the audited reveal action (step 7.2) |
-| `archive:search`               | Search archived and journaled messages (metadata, masked) (step 8.1)                                                                     |
+| `archive:search`               | Search archived messages and view their metadata, journal and security views (masked) (step 8.1; re-scoped in 8.6)                       |
 | `archive:retrieve`             | View the sanitized preview and download original archived messages (audited) (step 8.1)                                                  |
-| `archive:manage`               | Manage archive settings, retention policies, encryption keys, capture issues and disposal of reviewed records (step 8.1)                 |
+| `archive:manage`               | Manage retention policies, immutability, encryption keys, access settings and disposal of reviewed records (step 8.1; re-scoped in 8.6)  |
 | `ediscovery:manage`            | Manage eDiscovery cases, custodians, searches, review and exports (step 8.1)                                                             |
 | `ato:read`                     | View account takeover dashboards, accounts, signals and incidents (step 8.4)                                                             |
 | `ato:manage`                   | Triage account takeover incidents, notes, overrides and trusted contexts (step 8.4)                                                      |
@@ -87,102 +87,109 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `ato:configure`                | Configure account takeover detection, scoring, notifications and automation (step 8.4)                                                   |
 | `integration:read`             | View Microsoft 365 and Google Workspace connections, health, validations and setup guides; never credentials (step 8.2)                  |
 | `integration:manage`           | Connect, consent, upload credentials, validate and change Microsoft 365 and Google Workspace connections (step 8.2)                      |
+| `journal:read`                 | View journaling settings, journal intake sources and their health (step 8.6; in the read set; category `journaling`)                     |
+| `journal:manage`               | Manage journaling capture settings and journal intake sources (step 8.6; category `journaling`)                                          |
 
-The catalog has **70** permissions (68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
+Step 8.6 (ADR-0089) also re-scoped `archive:read` to "View archive configuration, retention policies, key versions and status (no records)" (it is in the read set) and exports `ARCHIVE_ACCESS_PERMISSIONS` = `archive:search`, `archive:retrieve`, `archive:export`, `archive:legal_hold`, `archive:manage`, `ediscovery:manage` (the permissions that open archived mail or govern it).
+
+The catalog has **72** permissions (70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
 ## Default roles
 
-System roles are shared by all organizations (`roles.organization_id IS NULL`, `is_system = true`) and are read-only through the API (`PUT`/`DELETE` → `409`). The seed creates exactly these nine (`SYSTEM_ROLE_KEYS`; `mailbox_user` added by step 5.3) and migrates retired step-1.1 keys to them.
+System roles are shared by all organizations (`roles.organization_id IS NULL`, `is_system = true`) and are read-only through the API (`PUT`/`DELETE` → `409`). The seed creates exactly these ten (`SYSTEM_ROLE_KEYS`; `mailbox_user` added by step 5.3, `compliance_officer` by step 8.6) and migrates retired step-1.1 keys to them.
 
-| Abbr. | Key                   | Name                | Purpose                                                                                                                               |
-| ----- | --------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| PA    | `platform_admin`      | Platform Admin      | Platform operator: manages customer organizations and operations, reads tenant data, may start an audited override; no content access |
-| OA    | `organization_admin`  | Organization Admin  | Every tenant permission within the organization                                                                                       |
-| DA    | `domain_admin`        | Domain Admin        | Adds, verifies and configures the organization's domains                                                                              |
-| SAn   | `security_analyst`    | Security Analyst    | Investigates messages, edits draft policies and handles quarantine                                                                    |
-| QR    | `quarantine_reviewer` | Quarantine Reviewer | Reviews, releases, approves, rejects and deletes quarantined messages; no content access                                              |
-| CA    | `compliance_auditor`  | Compliance Auditor  | Read-only access plus the audit log and archive export                                                                                |
-| RO    | `read_only_user`      | Read-only User      | Read-only access to the organization                                                                                                  |
-| MU    | `mailbox_user`        | Mailbox User        | End user (step 5.3): sees, previews and requests the release of quarantined mail addressed to their own verified address only         |
+| Abbr. | Key                   | Name                | Purpose                                                                                                                                                                |
+| ----- | --------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PA    | `platform_admin`      | Platform Admin      | Platform operator: manages customer organizations and operations, reads tenant data, may start an audited override; no content access                                  |
+| OA    | `organization_admin`  | Organization Admin  | Every tenant permission within the organization except archive access (`ARCHIVE_ACCESS_PERMISSIONS`, step 8.6); manages journaling and may assign `compliance_officer` |
+| DA    | `domain_admin`        | Domain Admin        | Adds, verifies and configures the organization's domains                                                                                                               |
+| SAn   | `security_analyst`    | Security Analyst    | Investigates messages, edits draft policies and handles quarantine                                                                                                     |
+| QR    | `quarantine_reviewer` | Quarantine Reviewer | Reviews, releases, approves, rejects and deletes quarantined messages; no content access                                                                               |
+| CA    | `compliance_auditor`  | Compliance Auditor  | Read-only access plus the audit log and archive export                                                                                                                 |
+| RO    | `read_only_user`      | Read-only User      | Read-only access to the organization                                                                                                                                   |
+| MU    | `mailbox_user`        | Mailbox User        | End user (step 5.3): sees, previews and requests the release of quarantined mail addressed to their own verified address only                                          |
+| CO    | `compliance_officer`  | Compliance Officer  | Step 8.6: searches and views archived mail, runs eDiscovery, manages legal holds, retention and archive access; reads the access audit                                 |
 
 ### Permission matrix
 
 Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regenerate this table.
 
-| Permission                     | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  | MU  |
-| ------------------------------ | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
-| `organization:read`            |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
-| `organization:manage`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `user:read`                    |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |
-| `user:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `role:read`                    |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |
-| `role:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `apikey:read`                  |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |
-| `apikey:manage`                |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `session:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `domain:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
-| `domain:manage`                |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
-| `policy:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
-| `policy:manage`                |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `policy:publish`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `message:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
-| `message:read_content`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `message:rescan`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `quarantine:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
-| `quarantine:release`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
-| `quarantine:delete`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
-| `quarantine:request_release`   |  ✓  |     |  ✓  |     |     |  ✓  |     |     |     |
-| `report:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
-| `audit:read`                   |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `archive:read`                 |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |
-| `archive:export`               |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
-| `archive:legal_hold`           |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `webhook:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `settings:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `platform:organizations`       |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `platform:operations`          |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `platform:tenant_override`     |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `domain:dkim_rotate`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
-| `connector:read`               |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |
-| `connector:manage`             |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
-| `domain:routing_manage`        |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
-| `delivery:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |
-| `platform:dead_letter_replay`  |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `scan:settings_manage`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |     |
-| `bec:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `dlp:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `dlp:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `dlp:evidence_read`            |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `dlp:compliance_manage`        |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `quarantine:preview`           |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `quarantine:approve`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
-| `quarantine:reject`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |
-| `quarantine:manage`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `quarantine:download`          |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `quarantine:self`              |  ✓  |     |  ✓  |     |     |     |     |     |  ✓  |
-| `threat_intel:read`            |  ✓  |  ✓  |  ✓  |     |  ✓  |     |     |     |     |
-| `billing:read`                 |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
-| `delivery:suppression_manage`  |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
-| `webhook:read`                 |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `message:reveal`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `archive:search`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `archive:retrieve`             |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
-| `archive:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `ediscovery:manage`            |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |
-| `ato:read`                     |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |
-| `ato:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `ato:respond`                  |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |
-| `ato:configure`                |  ✓  |     |  ✓  |     |     |     |     |     |     |
-| `integration:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |
-| `integration:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |
+| Permission                     | SA  | PA  | OA  | DA  | SAn | QR  | CA  | RO  | MU  | CO  |
+| ------------------------------ | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| `organization:read`            |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |
+| `organization:manage`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `user:read`                    |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |  ✓  |
+| `user:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `role:read`                    |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |     |
+| `role:manage`                  |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `apikey:read`                  |  ✓  |  ✓  |  ✓  |     |     |     |  ✓  |  ✓  |     |     |
+| `apikey:manage`                |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `session:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `domain:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |  ✓  |
+| `domain:manage`                |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `policy:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |     |
+| `policy:manage`                |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `policy:publish`               |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `message:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |     |
+| `message:read_content`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `message:rescan`               |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `quarantine:read`              |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |     |
+| `quarantine:release`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `quarantine:delete`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `quarantine:request_release`   |  ✓  |     |  ✓  |     |     |  ✓  |     |     |     |     |
+| `report:read`                  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |
+| `audit:read`                   |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |  ✓  |
+| `archive:read`                 |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |  ✓  |
+| `archive:export`               |  ✓  |     |     |     |     |     |  ✓  |     |     |  ✓  |
+| `archive:legal_hold`           |  ✓  |     |     |     |     |     |     |     |     |  ✓  |
+| `webhook:manage`               |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `settings:manage`              |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `platform:organizations`       |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `platform:operations`          |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `platform:tenant_override`     |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `domain:dkim_rotate`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `connector:read`               |  ✓  |  ✓  |  ✓  |  ✓  |     |     |  ✓  |  ✓  |     |     |
+| `connector:manage`             |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `domain:routing_manage`        |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `delivery:read`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |     |
+| `platform:dead_letter_replay`  |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `scan:settings_manage`         |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `platform:scan_training`       |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `platform:threat_intel_manage` |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `platform:scan_rescan`         |  ✓  |  ✓  |     |     |     |     |     |     |     |     |
+| `bec:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `bec:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `bec:feedback`                 |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `bec:feedback_export`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `dlp:read`                     |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `dlp:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `dlp:evidence_read`            |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `dlp:compliance_manage`        |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `quarantine:preview`           |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `quarantine:approve`           |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `quarantine:reject`            |  ✓  |     |  ✓  |     |  ✓  |  ✓  |     |     |     |     |
+| `quarantine:manage`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `quarantine:download`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `quarantine:self`              |  ✓  |     |  ✓  |     |     |     |     |     |  ✓  |     |
+| `threat_intel:read`            |  ✓  |  ✓  |  ✓  |     |  ✓  |     |     |     |     |     |
+| `billing:read`                 |  ✓  |     |  ✓  |     |     |     |  ✓  |     |     |     |
+| `delivery:suppression_manage`  |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `webhook:read`                 |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `message:reveal`               |  ✓  |     |  ✓  |     |  ✓  |     |  ✓  |     |     |  ✓  |
+| `archive:search`               |  ✓  |     |     |     |  ✓  |     |  ✓  |     |     |  ✓  |
+| `archive:retrieve`             |  ✓  |     |     |     |     |     |  ✓  |     |     |  ✓  |
+| `archive:manage`               |  ✓  |     |     |     |     |     |     |     |     |  ✓  |
+| `ediscovery:manage`            |  ✓  |     |     |     |     |     |  ✓  |     |     |  ✓  |
+| `ato:read`                     |  ✓  |  ✓  |  ✓  |     |  ✓  |     |  ✓  |     |     |     |
+| `ato:manage`                   |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `ato:respond`                  |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `ato:configure`                |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `integration:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |     |
+| `integration:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `journal:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |  ✓  |
+| `journal:manage`               |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -449,36 +456,73 @@ Who sees what, by system role (the tenant roles directly, the platform roles und
 - **API keys** see exactly the same masks; a key reveals only when its scope holds `message:reveal` (granted only by a creator holding it).
 - **Not reused:** `message:read_content` keeps its meaning (body and attachment content from object storage) and gates no reveal.
 
+## Journaling and the Journaling / Archive split (step 8.6)
+
+Design [27-journal-intake-and-archive-split.md](../plan/steps/27-journal-intake-and-archive-split.md) D11, D12, §3.3; [ADR-0089](../architecture/adr/0089-journaling-archive-permission-split.md). The former archive area is split: **Journaling** (capture — what is journaled, journal intake sources) with `journal:read` / `journal:manage`, and **Archive** (storage and use — retention, immutability, keys, access settings, search, records, holds, eDiscovery) with the archive permissions. Organization admins (IT/mail administrators) manage journaling but do **not** read the archive by default (product-owner decision 2); archive access is held by the new `compliance_officer` role and assigned explicitly, audited.
+
+| Role                         | Before 8.6 (archive)                                                                  | After 8.6                                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| super_admin                  | all                                                                                   | all (content routes still refuse override sessions, A20)                                                                                                     |
+| platform_admin               | `archive:read` (read set)                                                             | `archive:read`, `journal:read` (read set); no record detail any more                                                                                         |
+| organization_admin           | every tenant permission                                                               | every tenant permission **except** `ARCHIVE_ACCESS_PERMISSIONS`; gains `journal:*`; may assign `compliance_officer` (`user:manage`, audited)                 |
+| domain_admin                 | —                                                                                     | + `journal:read`, `journal:manage`                                                                                                                           |
+| security_analyst             | `archive:read`, `archive:search`                                                      | unchanged + `journal:read`                                                                                                                                   |
+| compliance_auditor           | read set, `archive:export`, `archive:search`, `archive:retrieve`, `ediscovery:manage` | unchanged + `journal:read` (read set)                                                                                                                        |
+| read_only_user               | `archive:read` (read set)                                                             | `archive:read`, `journal:read`; no record detail any more                                                                                                    |
+| **compliance_officer** (new) | —                                                                                     | `organization:read`, `user:read`, `domain:read`, `journal:read`, `archive:read`, `ARCHIVE_ACCESS_PERMISSIONS`, `message:reveal`, `audit:read`, `report:read` |
+
+| Route                                                                                          | Requirement                                                                                   | Users / MFA | API keys |
+| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ----------- | -------- |
+| `GET /journaling/settings`                                                                     | `journal:read` or `archive:read`                                                              | —           | yes      |
+| `PUT /journaling/settings`                                                                     | `journal:manage`                                                                              | users, MFA  | no       |
+| `GET /journaling/status`, `GET /journaling/intake-sources[/{id}]`, `…/wizard`, `…/setup-guide` | `journal:read` (`?reveal=true` and the clear address in the guide: `journal:manage`, audited) | —           | yes      |
+| `POST /journaling/intake-sources`, `PATCH/DELETE …/{id}`, `…/rotate-address`, `…/attestations` | `journal:manage`                                                                              | users, MFA  | no       |
+| `GET /archive/settings`, `GET /archive/status`                                                 | `archive:read` or `journal:read`                                                              | —           | yes      |
+| `PUT /archive/settings`                                                                        | `journal:manage` or `archive:manage`, then **per changed path** (below)                       | users, MFA  | no       |
+| `GET /archive/capture-issues`, `POST …/{messageId}/retry`                                      | `journal:manage` or `archive:manage`                                                          | —           | yes      |
+| `GET /archive/messages/{id}`, `…/journal`, `…/security`                                        | `archive:search` (was `archive:read`)                                                         | —           | yes      |
+| `POST /archive/messages/{id}/reveal`                                                           | `archive:search` + `message:reveal` (was `archive:read` + `message:reveal`)                   | —           | yes      |
+
+**Per-path settings authorization.** `PUT /archive/settings` compares each path with the stored effective value: `enabled`, `settings.directions`, `settings.include`, `settings.scope`, `settings.policyArchive`, `settings.intake` need `journal:manage`; `immutability`, `defaultRetentionPolicyId`, `settings.access` need `archive:manage`. A change the caller may not make answers `403 archive_settings_forbidden_path` with `paths: [{ path, permission }]` before anything is written. `PUT /journaling/settings` accepts only the journaling sections and keeps the stored `access` section, so a journaling manager can never weaken immutability or open downloads, and an archive manager can never stop capture.
+
+**Record-detail re-scope (the only access removed).** Archived record detail, journal, frozen security results and reveal need `archive:search`. `read_only_user`, `platform_admin` and custom roles holding `archive:read` without `archive:search` lose archived-record detail (they never had search); `archive:read` is configuration and status only. This is recorded in the migration and the release notes.
+
+**Assigning archive access (delegation, audited).** Archive access is delegated by user managers: for **role assignment** (`POST /users/invitations`, `PUT /users/{id}/roles`) the escalation guards ignore `ARCHIVE_ACCESS_PERMISSIONS` when the caller holds `user:manage`, so an organization admin can assign and remove `compliance_officer` (or a custom role with archive access) without holding archive access. The delegation is narrow (step 8.6 review fix): only a **user** principal in an **MFA-authenticated** session may use it, and **never on its own account**; an API key with `user:manage`, a session without MFA, or a self-assignment that would need it is `403` (`Archive access can be granted or removed only by a user, not by an API key`, `Granting or removing archive access requires a multi-factor authenticated session`, `You cannot grant yourself archive access; another administrator must assign it`). A caller that already holds the archive permissions it grants does not need the delegation (the ordinary escalation guard applies). Every assignment or removal of a role that carries any of them writes an extra audit row in the same transaction: `rbac.archive_access_granted` or `rbac.archive_access_revoked` (resource `user` + the target's public id; metadata `roleKey`, `userId`, the role's archive `permissions`; the actor as usual). Creating or editing roles and every other user-management action keep the strict guards. The Archive → Access audit page lists these rows with the `archive.*`, `ediscovery.*` and `legal_hold.*` rows.
+
+**Grant-preserving migration** (`20261120053633_journal_intake`, §3.3). Idempotent, never deleting an assignment: the permissions and their re-scoped descriptions, the `compliance_officer` role and its grants, then — **audit first** — one `rbac.archive_access_migrated` row (actor `system`, actor id `migration:journal_intake`, metadata `{ roleKey: 'compliance_officer', reason: 'step_8_6_archive_access_split', fromRole: 'organization_admin' }`) per existing `organization_admin` assignment in a customer organization whose user had no `compliance_officer` yet, then that assignment, then the role-permission changes (archive access removed from `organization_admin`; `journal:*` to organization and domain admins; `journal:read` to the security analyst and the read-set roles). Every existing organization admin's effective permissions are a superset of before; new organizations after 8.6 start without archive access for admins. Verification: `node dist/migrations/cli.js effective-permissions export|compare` (docs/database/README.md "Step 8.6 migration").
+
+**API keys** accept `journal:read` and `journal:manage` as scopes; the MFA routes stay user-only.
+
 ## Archive and eDiscovery (step 8.1)
 
-Design [23-journaling-archiving.md](../plan/steps/23-journaling-archiving.md) A20, §4.4. Permissions: `archive:read` (settings, status, keys, retention, disposal log, detail, journal, frozen security results), `archive:search` (metadata search; case searches with `ediscovery:manage`), `archive:retrieve` (sanitized preview, original download grants), `archive:export` (export requests and their grants, with `ediscovery:manage`), `archive:manage` (settings, retention policies, key rotation, capture issues, disposal of reviewed records), `archive:legal_hold` (holds: list, detail, release; creation with `ediscovery:manage`), `ediscovery:manage` (cases, custodians, searches, hits, review, exports). None is part of `TENANT_READ_PERMISSIONS`.
+Design [23-journaling-archiving.md](../plan/steps/23-journaling-archiving.md) A20, §4.4. **Step 8.6 changes are above** (record routes on `archive:search`, per-path settings, capture issues shared with `journal:manage`, organization admins without archive access). Permissions: `archive:read` (settings, status, keys, retention, disposal log; before 8.6 also detail, journal and frozen security results), `archive:search` (metadata search; case searches with `ediscovery:manage`), `archive:retrieve` (sanitized preview, original download grants), `archive:export` (export requests and their grants, with `ediscovery:manage`), `archive:manage` (settings, retention policies, key rotation, capture issues, disposal of reviewed records), `archive:legal_hold` (holds: list, detail, release; creation with `ediscovery:manage`), `ediscovery:manage` (cases, custodians, searches, hits, review, exports). None is part of `TENANT_READ_PERMISSIONS`.
 
-| Route                                                                                                           | Requirement                                                                                                                               | Users / MFA             | API keys |
-| --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | -------- |
-| `GET /archive/settings`, `/status`, `/keys`, `/disposals`, `/export-signing-keys`, `/retention-policies[/{id}]` | `archive:read`                                                                                                                            | —                       | yes      |
-| `PUT /archive/settings`, `POST /archive/keys/rotate`                                                            | `archive:manage`                                                                                                                          | users, MFA              | no       |
-| `POST/PUT/DELETE /archive/retention-policies…`                                                                  | `archive:manage`                                                                                                                          | —                       | yes      |
-| `GET /archive/capture-issues`, `POST …/{messageId}/retry`                                                       | `archive:manage`                                                                                                                          | —                       | yes      |
-| `GET /archive/messages`                                                                                         | `archive:search` (+ `message:reveal` for `recipient`, `subject`, `custodian`; + `archive:legal_hold` or `ediscovery:manage` for `holdId`) | —                       | yes      |
-| `GET /archive/messages/{id}`, `…/journal`, `…/security`                                                         | `archive:read`                                                                                                                            | —                       | yes      |
-| `POST /archive/messages/{id}/reveal`                                                                            | `archive:read` + `message:reveal`                                                                                                         | —                       | yes      |
-| `GET /archive/messages/{id}/preview`                                                                            | `archive:retrieve`                                                                                                                        | users, MFA, no override | no       |
-| `POST /archive/messages/{id}/download-grants`                                                                   | `archive:retrieve` (+ password/TOTP re-entry)                                                                                             | users, MFA, no override | no       |
-| `GET /archive/downloads/{token}`                                                                                | `archive:retrieve` (message) or `archive:export` + `ediscovery:manage` (export); the grant's user                                         | users, no override      | no       |
-| `POST /archive/messages/{id}/dispose`                                                                           | `archive:manage`                                                                                                                          | users, MFA              | no       |
-| `GET /legal-holds[/{id}]`                                                                                       | `archive:legal_hold` or `ediscovery:manage`                                                                                               | —                       | yes      |
-| `POST /legal-holds/{id}/release`                                                                                | `archive:legal_hold`                                                                                                                      | users, MFA              | no       |
-| `POST /ediscovery/cases/{id}/holds`                                                                             | `archive:legal_hold` + `ediscovery:manage`                                                                                                | users, MFA              | no       |
-| `GET/POST /ediscovery/cases`, `GET/PATCH /ediscovery/cases/{id}`                                                | `ediscovery:manage`                                                                                                                       | —                       | yes      |
-| `POST /ediscovery/cases/{id}/close`                                                                             | `ediscovery:manage`                                                                                                                       | users, MFA              | no       |
-| `POST /ediscovery/cases/{id}/searches`                                                                          | `ediscovery:manage` + `archive:search`                                                                                                    | —                       | yes      |
-| `GET …/searches[/{id}]`, `…/hits`                                                                               | `ediscovery:manage`                                                                                                                       | —                       | yes      |
-| `POST …/searches/{id}/review`                                                                                   | `ediscovery:manage`                                                                                                                       | users                   | no       |
-| `POST /ediscovery/cases/{id}/exports`                                                                           | `ediscovery:manage` + `archive:export`                                                                                                    | —                       | yes      |
-| `GET …/exports[/{id}]`                                                                                          | `ediscovery:manage`                                                                                                                       | —                       | yes      |
-| `POST …/exports/{id}/download-grants`                                                                           | `ediscovery:manage` + `archive:export` (+ re-entry)                                                                                       | users, MFA, no override | no       |
+| Route                                                                                                                                    | Requirement                                                                                                                               | Users / MFA             | API keys |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | -------- |
+| `GET /archive/settings`, `/status` (8.6: or `journal:read`), `/keys`, `/disposals`, `/export-signing-keys`, `/retention-policies[/{id}]` | `archive:read`                                                                                                                            | —                       | yes      |
+| `PUT /archive/settings` (8.6: `journal:manage` or `archive:manage`, per path), `POST /archive/keys/rotate`                               | `archive:manage`                                                                                                                          | users, MFA              | no       |
+| `POST/PUT/DELETE /archive/retention-policies…`                                                                                           | `archive:manage`                                                                                                                          | —                       | yes      |
+| `GET /archive/capture-issues`, `POST …/{messageId}/retry`                                                                                | `archive:manage` (8.6: or `journal:manage`)                                                                                               | —                       | yes      |
+| `GET /archive/messages`                                                                                                                  | `archive:search` (+ `message:reveal` for `recipient`, `subject`, `custodian`; + `archive:legal_hold` or `ediscovery:manage` for `holdId`) | —                       | yes      |
+| `GET /archive/messages/{id}`, `…/journal`, `…/security`                                                                                  | `archive:search` (8.6; `archive:read` before)                                                                                             | —                       | yes      |
+| `POST /archive/messages/{id}/reveal`                                                                                                     | `archive:search` + `message:reveal` (8.6; `archive:read` before)                                                                          | —                       | yes      |
+| `GET /archive/messages/{id}/preview`                                                                                                     | `archive:retrieve`                                                                                                                        | users, MFA, no override | no       |
+| `POST /archive/messages/{id}/download-grants`                                                                                            | `archive:retrieve` (+ password/TOTP re-entry)                                                                                             | users, MFA, no override | no       |
+| `GET /archive/downloads/{token}`                                                                                                         | `archive:retrieve` (message) or `archive:export` + `ediscovery:manage` (export); the grant's user                                         | users, no override      | no       |
+| `POST /archive/messages/{id}/dispose`                                                                                                    | `archive:manage`                                                                                                                          | users, MFA              | no       |
+| `GET /legal-holds[/{id}]`                                                                                                                | `archive:legal_hold` or `ediscovery:manage`                                                                                               | —                       | yes      |
+| `POST /legal-holds/{id}/release`                                                                                                         | `archive:legal_hold`                                                                                                                      | users, MFA              | no       |
+| `POST /ediscovery/cases/{id}/holds`                                                                                                      | `archive:legal_hold` + `ediscovery:manage`                                                                                                | users, MFA              | no       |
+| `GET/POST /ediscovery/cases`, `GET/PATCH /ediscovery/cases/{id}`                                                                         | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST /ediscovery/cases/{id}/close`                                                                                                      | `ediscovery:manage`                                                                                                                       | users, MFA              | no       |
+| `POST /ediscovery/cases/{id}/searches`                                                                                                   | `ediscovery:manage` + `archive:search`                                                                                                    | —                       | yes      |
+| `GET …/searches[/{id}]`, `…/hits`                                                                                                        | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST …/searches/{id}/review`                                                                                                            | `ediscovery:manage`                                                                                                                       | users                   | no       |
+| `POST /ediscovery/cases/{id}/exports`                                                                                                    | `ediscovery:manage` + `archive:export`                                                                                                    | —                       | yes      |
+| `GET …/exports[/{id}]`                                                                                                                   | `ediscovery:manage`                                                                                                                       | —                       | yes      |
+| `POST …/exports/{id}/download-grants`                                                                                                    | `ediscovery:manage` + `archive:export` (+ re-entry)                                                                                       | users, MFA, no override | no       |
 
-**Role matrix excerpt** (seed catalog): super_admin all; organization_admin all seven archive keys plus `ediscovery:manage` and `message:reveal`; compliance_auditor `archive:read`, `archive:search`, `archive:retrieve`, `archive:export`, `ediscovery:manage` and `message:reveal` (runs a case to export and downloads it, cannot place or release holds, cannot change settings); security_analyst `archive:read`, `archive:search` (and `message:reveal`, so the reveal-gated filters); read_only_user and platform_admin `archive:read` only (metadata); quarantine_reviewer, domain_admin and mailbox_user none.
+**Role matrix excerpt** (seed catalog, after step 8.6): super_admin all; compliance_officer every archive key, `ediscovery:manage` and `message:reveal`; organization_admin `archive:read` only (plus `message:reveal`; archive access through an explicit `compliance_officer` assignment); compliance_auditor `archive:read`, `archive:search`, `archive:retrieve`, `archive:export`, `ediscovery:manage` and `message:reveal` (runs a case to export and downloads it, cannot place or release holds, cannot change settings); security_analyst `archive:read`, `archive:search` (and `message:reveal`, so the reveal-gated filters); read_only_user and platform_admin `archive:read` only (configuration and status; no record detail since 8.6); quarantine_reviewer, domain_admin and mailbox_user none.
 
 **Platform overrides.** Archived content is customer-only (product-owner decision 5): the preview, download grants and downloads refuse an override session with `403 archive_override_forbidden`, whatever its permissions. Metadata routes under an override work with the override's intersected permissions (platform_admin: the read set only) and every audit row carries `metadata.override`.
 
@@ -563,7 +607,7 @@ Organizations with `role:manage` can define their own roles (`POST /roles`, `PUT
 
 1. Every key must name a system role or a custom role of the organization (`400` otherwise).
 2. Platform roles only in the platform organization (`400`).
-3. **Escalation guard (`403`):** the caller must hold every permission of every role it **adds or removes**. Removing a role the caller could not grant is escalation too: a user manager cannot demote an organization admin. Super admins hold every permission. API keys are judged by their effective scopes.
+3. **Escalation guard (`403`):** the caller must hold every permission of every role it **adds or removes**. Removing a role the caller could not grant is escalation too: a user manager cannot demote an organization admin. Super admins hold every permission. API keys are judged by their effective scopes. **Step 8.6:** archive access (`ARCHIVE_ACCESS_PERMISSIONS`) is delegable by `user:manage` holders in role assignments (and in the target-side guard of a role change), so an organization admin can assign `compliance_officer` — only as a user in an MFA session, never by an API key and never to itself (`403`); each such grant or removal is audited `rbac.archive_access_granted|revoked` ([Journaling and the Journaling / Archive split](#journaling-and-the-journaling--archive-split-step-86)).
 4. **Last administrator (`409`):** see below.
 
 Role changes take effect on the user's next request (the principal cache is invalidated after commit); the user keeps their sessions.

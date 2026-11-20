@@ -395,6 +395,7 @@ afterAll(async () => {
   await prisma.notificationSettings.deleteMany({ where });
   await prisma.notificationUserPreference.deleteMany({ where });
   await prisma.webhookSubscription.deleteMany({ where });
+  await prisma.journalIntakeSource.deleteMany({ where });
   await prisma.quarantineMessage.deleteMany({ where });
   await prisma.domainDnsRecord.deleteMany({ where });
   await prisma.domain.deleteMany({ where });
@@ -587,6 +588,55 @@ describe('security alerts (step 6.2 N3, N4)', () => {
     await new Promise((r) => setTimeout(r, 1_000));
     expect(sink.messages).toHaveLength(before + 1);
     expect(await ledger(foreign.eventId)).toBe(0);
+  });
+});
+
+describe('journal_intake_silent (step 8.6 D9)', () => {
+  it('journal:manage holders and the contact; source name, kind and intake link, never the address', async () => {
+    const source = await prisma.journalIntakeSource.create({
+      data: {
+        organizationId: orgA.id,
+        kind: 'microsoft_365_journal',
+        displayName: `Contoso journal ${suffix}`,
+        status: 'active',
+        addressHash: randomBytes(32).toString('hex'),
+        healthStatus: 'silent',
+        silenceAlertMinutes: 240,
+        verifiedAt: new Date(Date.now() - 86_400_000),
+        lastAcceptedAt: new Date(Date.now() - 6 * 3_600_000),
+      },
+    });
+    const before = sink.messages.length;
+    const e = alertEnvelope(orgA.id, {
+      kind: 'journal_intake_silent',
+      severity: 'medium',
+      refs: { intakeSourceId: source.publicId },
+    });
+    await publish(e);
+    await eventually(() => sink.messages.length === before + 1, 20_000, 'intake alert sent');
+    const mail = sink.messages.at(-1)!;
+    expect(mail.recipients.sort()).toEqual(
+      [usersA.admin!.email, usersA.domainAdmin!.email, usersA.adminNoPolicyAlerts!.email, contactA]
+        .map((x) => x.toLowerCase())
+        .sort(),
+    );
+    const body = bodyOf(mail.data);
+    expect(body).toContain(`Journal intake source: Contoso journal ${suffix} (${source.publicId})`);
+    expect(body).toContain('Source kind: Microsoft 365 journaling');
+    expect(body).toContain('Problem: silent.');
+    expect(body).toContain(`https://portal.test/settings/journaling/intake/${source.publicId}`);
+    assertNoForbiddenContent(mail.data);
+    await eventually(() => handled(e.eventId), 20_000, 'intake alert ledgered');
+    // Organization B's envelope naming A's source is dead-lettered (never mailed).
+    const foreign = alertEnvelope(orgB.id, {
+      kind: 'journal_intake_silent',
+      severity: 'high',
+      refs: { intakeSourceId: source.publicId },
+    });
+    const count = sink.messages.length;
+    await publish(foreign);
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(sink.messages.length).toBe(count);
   });
 });
 

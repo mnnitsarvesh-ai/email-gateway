@@ -7,7 +7,8 @@
  * Microsoft 365 and Google Workspace connections); since step 7.2 the explorer, the
  * details and the scan rounds page carry no "arrives in 7.2" state any more, and since step 7.3
  * the policy pages carry no "arrives in 7.3" state (the builder, the management flows and the
- * DLP/BEC editors replaced them).
+ * DLP/BEC editors replaced them). Step 8.6 split the archive area: Settings → Journaling (capture,
+ * organization admins) and the Archive section (storage and use, archive roles only).
  */
 import { signIn } from '../support/auth';
 import { expect, test } from '../support/fixtures';
@@ -127,7 +128,7 @@ test('organization admin: directory and administration pages', async ({ page }) 
     {
       path: '/integrations',
       heading: 'Integrations',
-      markers: ['Alpha SIEM (e2e)', 'Archive and journaling', 'Microsoft 365 and Google Workspace'],
+      markers: ['Alpha SIEM (e2e)', 'Journaling and archive', 'Microsoft 365 and Google Workspace'],
       absent: ['Arrives in step 8.1', 'Arrives in step 8.2'],
     },
     { path: '/integrations/api-keys', heading: /api keys|integrations/i },
@@ -148,25 +149,49 @@ test('organization admin: directory and administration pages', async ({ page }) 
       markers: ['Multi-factor authentication'],
     },
     { path: '/settings?tab=scanning', heading: 'Settings' },
-    // Step 8.1: the archive tab is real (no "arrives in 8.1" state left).
+    // Step 8.6: the capture half of the former archive tab (the old link redirects here).
     {
-      path: '/settings?tab=archive',
+      path: '/settings?tab=journaling',
       heading: 'Settings',
-      markers: ['Encryption key versions', /Immutable storage/],
+      markers: ['Journaling and the archive', 'Journal intake sources'],
       absent: ['Arrives in step 8.1'],
     },
-    // Step 8.1: Compliance pages.
+    // Archive configuration stays readable to organization admins (archive:read), not records.
+    {
+      path: '/archive/retention',
+      heading: 'Retention and lock',
+      markers: [s.archive.policyName],
+    },
+    {
+      path: '/archive/retention?tab=immutability',
+      heading: 'Retention and lock',
+      markers: ['Encryption key versions', /Immutable storage/],
+    },
+    { path: '/archive/retention?tab=access', heading: 'Retention and lock' },
+    { path: '/archive/retention?tab=capture', heading: 'Retention and lock' },
+  ];
+  for (const check of checks) await checkPage(page, check);
+});
+
+test('compliance officer: the Archive section (search, retention and lock, holds, eDiscovery, access audit)', async ({
+  page,
+}) => {
+  const s = readState();
+  await signIn(page, 'alphaCompliance', { next: '/archive?range=7d' });
+  const checks: PageCheck[] = [
     { path: '/archive?range=7d', heading: 'Archive', absent: ['Arrives in step 8.1'] },
     {
       path: '/archive/retention',
-      heading: 'Retention and review',
+      heading: 'Retention and lock',
       markers: [s.archive.policyName],
     },
-    { path: '/archive/retention?tab=review', heading: 'Retention and review' },
-    { path: '/archive/retention?tab=disposals', heading: 'Retention and review' },
-    { path: '/archive/retention?tab=capture', heading: 'Retention and review' },
+    { path: '/archive/retention?tab=immutability', heading: 'Retention and lock' },
+    { path: '/archive/retention?tab=access', heading: 'Retention and lock' },
+    { path: '/archive/retention?tab=review', heading: 'Retention and lock' },
+    { path: '/archive/retention?tab=disposals', heading: 'Retention and lock' },
     { path: '/legal-holds', heading: 'Legal holds' },
     { path: '/ediscovery', heading: 'eDiscovery' },
+    { path: '/archive/access-audit?range=7d', heading: 'Access audit' },
   ];
   for (const check of checks) await checkPage(page, check);
 });

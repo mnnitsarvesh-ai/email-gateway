@@ -112,7 +112,10 @@ export class UsersController {
     description:
       'Creates the user (or re-invites a deleted one) with the given roles and emails an ' +
       'invitation link. Enforces the `max_users` limit, the escalation rule and platform-role ' +
-      'restrictions. Refused under a platform override (`403`): the access would outlive it.',
+      'restrictions. Refused under a platform override (`403`): the access would outlive it. ' +
+      'A holder of `user:manage` without archive access may still assign a role that grants it ' +
+      '(`compliance_officer`, step 8.6) only as an MFA-authenticated user, never with an API key ' +
+      '(`403`); the grant is audited (`rbac.archive_access_granted`).',
   })
   @ApiBody({ schema: zodToOpenApi(InviteUserRequestSchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(UserResponseSchema) })
@@ -216,7 +219,10 @@ export class UsersController {
     description:
       'The caller must hold every permission of the target’s current roles and of each added ' +
       'role; platform roles only in the platform organization; the last active administrator ' +
-      'keeps `user:manage`; refused under a platform override (`403`).',
+      'keeps `user:manage`; refused under a platform override (`403`). A holder of ' +
+      '`user:manage` without archive access may grant or remove a role that carries it ' +
+      '(`compliance_officer`, step 8.6) only as an MFA-authenticated user, never with an API key ' +
+      'and never on their own account (`403`); audited as `rbac.archive_access_granted|revoked`.',
   })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiBody({ schema: zodToOpenApi(UserRolesRequestSchema, { io: 'input' }) })

@@ -1,5 +1,10 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { SYSTEM_ROLE_KEYS, TENANT_PERMISSIONS } from '@email-gateway/database';
+import {
+  ARCHIVE_ACCESS_PERMISSIONS,
+  SYSTEM_ROLE_KEYS,
+  TENANT_PERMISSIONS,
+} from '@email-gateway/database';
+import { CodedForbiddenException } from '../../http/coded-exception';
 
 /**
  * Pure authorization rules of the role model (D8). Services call them; they never touch the
@@ -109,4 +114,83 @@ export function assertTenantPermissions(permissions: readonly string[]): void {
  */
 export function violatesLastAdministrator(before: number, after: number): boolean {
   return before > 0 && after === 0;
+}
+
+/** Step 8.6 D12 (ADR-0089): the permissions that open archived mail. */
+const ARCHIVE_ACCESS: ReadonlySet<string> = new Set(ARCHIVE_ACCESS_PERMISSIONS);
+
+/** The archive access permissions of a role, sorted (empty: the role grants no archive access). */
+export function archiveAccessOf(role: RolePermissionSet): string[] {
+  return role.permissions.filter((p) => ARCHIVE_ACCESS.has(p)).sort();
+}
+
+/**
+ * Who assigns roles, as far as archive delegation is concerned (step 8.6 D12, review fix).
+ * `kind` is the principal kind, `mfaAuthenticated` whether the user session passed MFA (always
+ * false for an API key), `self` whether the user whose roles change is the actor itself.
+ */
+export interface AssignmentActor {
+  permissions: ReadonlySet<string>;
+  kind: 'user' | 'api_key';
+  mfaAuthenticated: boolean;
+  self: boolean;
+}
+
+/**
+ * Step 8.6 D12 (ADR-0089): archive access is delegated by user managers. An organization
+ * administrator holds `user:manage` but no archive access by default, yet must be able to assign
+ * (and remove) `compliance_officer`; so for role ASSIGNMENT the no-escalation rules ignore the
+ * archive access permissions the actor lacks when the actor holds `user:manage`. The delegation
+ * is narrow (review fix): only a **user** (never an API key), only in an **MFA-authenticated**
+ * session, and never on the actor's **own** account (an administrator cannot grant itself the
+ * archive; another administrator must). When a change needs the delegation and the actor does
+ * not qualify, `403` says why. Every grant and removal is audited
+ * (`rbac.archive_access_granted|revoked`). Creating or editing a role, and every other
+ * user-management action, keep the strict rule.
+ */
+export function forAssignment(
+  actor: AssignmentActor,
+  roles: readonly RolePermissionSet[],
+): RolePermissionSet[] {
+  if (!actor.permissions.has(USER_MANAGE_PERMISSION)) return [...roles];
+  const delegated = roles.some((r) =>
+    r.permissions.some((p) => ARCHIVE_ACCESS.has(p) && !actor.permissions.has(p)),
+  );
+  if (!delegated) return [...roles];
+  if (actor.kind !== 'user') {
+    throw new CodedForbiddenException(
+      'user_required',
+      'Archive access can be granted or removed only by a user, not by an API key',
+    );
+  }
+  if (actor.self) {
+    throw new CodedForbiddenException(
+      'forbidden',
+      'You cannot grant yourself archive access; another administrator must assign it',
+    );
+  }
+  if (!actor.mfaAuthenticated) {
+    throw new CodedForbiddenException(
+      'mfa_required',
+      'Granting or removing archive access requires a multi-factor authenticated session',
+    );
+  }
+  return roles.map((r) => ({
+    key: r.key,
+    permissions: r.permissions.filter((p) => !ARCHIVE_ACCESS.has(p)),
+  }));
+}
+
+/** The roles of an assignment change that grant or remove archive access (audit rows). */
+export function archiveAccessChanges(
+  currentKeys: readonly string[],
+  next: readonly RolePermissionSet[],
+  current: readonly RolePermissionSet[],
+): { granted: RolePermissionSet[]; revoked: RolePermissionSet[] } {
+  const before = new Set(currentKeys);
+  const after = new Set(next.map((r) => r.key));
+  return {
+    granted: next.filter((r) => !before.has(r.key) && archiveAccessOf(r).length > 0),
+    revoked: current.filter((r) => !after.has(r.key) && archiveAccessOf(r).length > 0),
+  };
 }

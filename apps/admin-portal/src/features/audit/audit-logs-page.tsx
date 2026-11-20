@@ -113,7 +113,7 @@ function ActorCell({ actor }: { actor: AuditRow['actor'] }) {
   );
 }
 
-const auditColumns = (onOpen: (row: AuditRow) => void): DataTableColumn<AuditRow>[] => [
+export const auditColumns = (onOpen: (row: AuditRow) => void): DataTableColumn<AuditRow>[] => [
   {
     id: 'createdAt',
     header: 'Time',

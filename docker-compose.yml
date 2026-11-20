@@ -632,6 +632,9 @@ services:
       # Trusted ARC sealers (S7 R6): only these may make a DMARC failure a reason only. Empty = none.
       RSPAMD_ARC_TRUSTED_SEALERS: ${RSPAMD_ARC_TRUSTED_SEALERS:-}
       RSPAMD_MAX_MESSAGE_BYTES: ${RSPAMD_MAX_MESSAGE_BYTES:-52428800}
+      # Step 8.6 D2.3: recipients in the journal intake domain select the settings rule
+      # `journal_intake` (no SMTP-time action; symbols still computed). Empty = no rule.
+      RSPAMD_JOURNAL_INTAKE_DOMAIN: ${JOURNAL_INTAKE_DOMAIN:-}
     tmpfs:
       - /etc/rspamd/local.d:uid=11333,gid=11333,mode=0750
       - /etc/rspamd/override.d:uid=11333,gid=11333,mode=0750
@@ -708,6 +711,9 @@ services:
       POSTFIX_POSTSCREEN_DNSBL_SITES: ${POSTFIX_POSTSCREEN_DNSBL_SITES:-}
       POSTFIX_TLS_CERT_PATH: ${POSTFIX_TLS_CERT_PATH:-/etc/ssl/certs/ssl-cert-snakeoil.pem}
       POSTFIX_TLS_KEY_PATH: ${POSTFIX_TLS_KEY_PATH:-/etc/ssl/private/ssl-cert-snakeoil.key}
+      # Step 8.6 D2.1: the journal intake domain becomes a relay domain routed to the journal
+      # LMTP (smtp-adapter :10053). Empty = intake off (step 2.2 rendering).
+      POSTFIX_JOURNAL_INTAKE_DOMAIN: ${JOURNAL_INTAKE_DOMAIN:-}
     # SMTP_ADAPTER_HOST=host.docker.internal reaches an adapter running on the host (D20).
     extra_hosts: ['host.docker.internal:host-gateway']
     # Step 2.3 §6: also on `mailtest` with a fixed address (dns-sink gw-mx.sink.test), so the
@@ -1107,9 +1113,11 @@ services:
     # The stack tests speak raw LMTP to smtp-adapter from here (§9 suite 7); like the Postfix
     # containers, reach an adapter that runs on the host (SMTP_ADAPTER_HOST=host.docker.internal).
     extra_hosts: ['host.docker.internal:host-gateway']
+    # Step 8.6: fixed .73 so a stack test can register it as the network of an on-premises /
+    # generic SMTP journal intake source (outside the provider-sender egress addresses .70/.71).
     networks:
       default: {}
-      mailtest: {}
+      mailtest: { ipv4_address: 172.31.250.73 }
     depends_on:
       mail-sink: { condition: service_healthy }
       dns-sink: { condition: service_started }
@@ -1508,6 +1516,14 @@ services:
       GATEWAY_EGRESS_NETWORKS: ${GATEWAY_EGRESS_NETWORKS:-192.0.2.10/32}
       GATEWAY_RELAY_HOSTS: ${GATEWAY_RELAY_HOSTS:-out.gateway.local}
       GATEWAY_RELAY_TLS_NAME: ${GATEWAY_RELAY_TLS_NAME:-out.gateway.local}
+      # Journal intake sources (step 8.6 D1, D11): the api alone derives intake addresses and
+      # header tokens (HMAC with the secret below) and stores their SHA-256; an empty domain
+      # makes source creation answer 503 journal_intake_unavailable.
+      JOURNAL_INTAKE_DOMAIN: ${JOURNAL_INTAKE_DOMAIN:-}
+      JOURNAL_INTAKE_ADDRESS_SECRET: ${JOURNAL_INTAKE_ADDRESS_SECRET:?append the journal intake keys from .env.example}
+      JOURNAL_INTAKE_MAX_MESSAGE_BYTES: ${JOURNAL_INTAKE_MAX_MESSAGE_BYTES:-52428800}
+      JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS: ${JOURNAL_INTAKE_ROTATION_OVERLAP_DAYS:-7}
+      JOURNAL_INTAKE_MAX_SOURCES_PER_ORG: ${JOURNAL_INTAKE_MAX_SOURCES_PER_ORG:-20}
     ports: ['127.0.0.1:${API_HOST_PORT:-3000}:3000']
     healthcheck:
       <<: *node-healthcheck
@@ -1542,6 +1558,8 @@ services:
       LMTP_INBOUND_PORT: 10050
       LMTP_OUTBOUND_PORT: 10051
       LMTP_BOUNCE_PORT: 10052
+      # Step 8.6 D2.4: journal intake LMTP (Postfix transport_maps of the intake domain).
+      LMTP_JOURNAL_PORT: 10053
       MAIL_LISTEN_HOST: 0.0.0.0
       SMTP_INTERNAL_CLIENT_NETWORKS: ${SMTP_INTERNAL_CLIENT_NETWORKS:-127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       # Loop prevention (D14).
@@ -1610,6 +1628,17 @@ services:
       PROVIDER_EGRESS_EXTRA_RANGES: ${PROVIDER_EGRESS_EXTRA_RANGES:-}
       PROVIDER_PROBE_DOMAIN: ${PROVIDER_PROBE_DOMAIN:-probe.mail-gateway.test}
       PROVIDER_PROBE_TTL_SECONDS: ${PROVIDER_PROBE_TTL_SECONDS:-86400}
+      # Journal-only intake (step 8.6 D2, ADR-0087): the intake branch of the RCPT policy and the
+      # journal LMTP; both off while JOURNAL_INTAKE_DOMAIN is empty. No secret: the adapter
+      # compares SHA-256 hashes only (the address secret stays in the api).
+      JOURNAL_INTAKE_ENABLED: ${JOURNAL_INTAKE_ENABLED:-true}
+      JOURNAL_INTAKE_DOMAIN: ${JOURNAL_INTAKE_DOMAIN:-}
+      JOURNAL_INTAKE_MAX_MESSAGE_BYTES: ${JOURNAL_INTAKE_MAX_MESSAGE_BYTES:-52428800}
+      JOURNAL_INTAKE_ENVELOPE_MAX_BYTES: ${JOURNAL_INTAKE_ENVELOPE_MAX_BYTES:-1048576}
+      JOURNAL_INTAKE_MAX_RECIPIENTS: ${JOURNAL_INTAKE_MAX_RECIPIENTS:-10000}
+      JOURNAL_INTAKE_SOURCE_CACHE_SECONDS: ${JOURNAL_INTAKE_SOURCE_CACHE_SECONDS:-30}
+      JOURNAL_INTAKE_RATE_PER_SOURCE_PER_MINUTE: ${JOURNAL_INTAKE_RATE_PER_SOURCE_PER_MINUTE:-6000}
+      JOURNAL_INTAKE_COUNTER_FLUSH_SECONDS: ${JOURNAL_INTAKE_COUNTER_FLUSH_SECONDS:-30}
     # Step 8.2: `mailtest` for dns-sink (PROVIDER_RELAY_DNS_SERVERS); dynamic upper-half address.
     networks:
       default: {}
@@ -2251,6 +2280,13 @@ services:
       ARCHIVE_EXPORT_CONCURRENCY: ${ARCHIVE_EXPORT_CONCURRENCY:-1}
       ARCHIVE_CASE_SEARCH_MAX_HITS: ${ARCHIVE_CASE_SEARCH_MAX_HITS:-100000}
       ARCHIVE_CASE_SEARCH_DEADLINE_MS: ${ARCHIVE_CASE_SEARCH_DEADLINE_MS:-600000}
+      # Step 8.6 D9 (journal intake health and silence alerts, capture role) and D7 (cross-source
+      # dedupe: merge window, content variants and merged copies per record).
+      JOURNAL_INTAKE_HEALTH_INTERVAL_MS: ${JOURNAL_INTAKE_HEALTH_INTERVAL_MS:-60000}
+      JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS: ${JOURNAL_INTAKE_ALERT_MIN_INTERVAL_HOURS:-24}
+      ARCHIVE_DEDUPE_WINDOW_HOURS: ${ARCHIVE_DEDUPE_WINDOW_HOURS:-72}
+      ARCHIVE_MAX_CONTENT_VARIANTS: ${ARCHIVE_MAX_CONTENT_VARIANTS:-4}
+      ARCHIVE_MAX_MERGED_COPIES: ${ARCHIVE_MAX_MERGED_COPIES:-8}
     ports: ['127.0.0.1:${ARCHIVE_WORKER_HOST_PORT:-3060}:3060']
     healthcheck:
       <<: *node-healthcheck
@@ -2937,7 +2973,8 @@ networks:
   # 6.2: notify-relay-sink .31; the webhook-worker (resolves through dns-sink), webhook-receiver
   # and postfix-notify join it with dynamic addresses. Step 8.2: provider-sender-m365 .70,
   # provider-sender-google .71, provider-fake .72 (its relay-proof.test DNS responder for
-  # dns-sink); the smtp-adapter and integration-worker join with dynamic addresses. Dynamic
+  # dns-sink); the smtp-adapter and integration-worker join with dynamic addresses. Step 8.6:
+  # smtp-tools fixed at .73 (an on-premises journal intake sender of the stack tests). Dynamic
   # addresses come from the upper half only (ip_range), so they can never take a fixed address.
   mailtest:
     ipam:

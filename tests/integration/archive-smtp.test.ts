@@ -134,17 +134,27 @@ const org = (key: Org['key']): Org => orgs[key]!;
 const sessions: ApiSession[] = [];
 const cached = new Map<string, { session: ApiSession; at: number }>();
 
-async function as(key: Org['key'], role: string, mfa = false): Promise<ApiSession> {
-  const id = `${key}:${role}:${mfa}`;
+async function as(
+  key: Org['key'],
+  role: string,
+  mfa = false,
+  extraRoles: readonly string[] = [],
+): Promise<ApiSession> {
+  const id = `${key}:${role}:${mfa}:${extraRoles.join('+')}`;
   const hit = cached.get(id);
   if (hit && Date.now() - hit.at < 8 * 60_000) return hit.session;
   const o = org(key);
-  const session = await apiSession(fx.prisma, { id: o.id, slug: o.slug }, role, { mfa });
+  const session = await apiSession(fx.prisma, { id: o.id, slug: o.slug }, role, {
+    mfa,
+    extraRoles,
+  });
   sessions.push(session);
   cached.set(id, { session, at: Date.now() });
   return session;
 }
-const admin = (key: Org['key']) => as(key, 'organization_admin', true);
+// Step 8.6 (ADR-0089): an organization admin manages journaling only; the archive settings,
+// retention, holds and records of this suite need the migrated compliance_officer grant.
+const admin = (key: Org['key']) => as(key, 'organization_admin', true, ['compliance_officer']);
 
 function body<T>(res: ApiResponse): T {
   return res.body as T;

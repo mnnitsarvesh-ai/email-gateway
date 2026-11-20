@@ -1,5 +1,6 @@
 import {
   aliasesForIndexCreation,
+  buildIndexMappingUpdate,
   buildIndexTemplate,
   indexPattern,
   indexTemplateName,
@@ -99,6 +100,12 @@ export class IndexManager {
     return this.activeVersion;
   }
 
+  /**
+   * The template of the active version, then the additive mapping update of the current mapping
+   * revision on every existing index of the version (step 8.6: the keyword field `ingest_sources`,
+   * `buildIndexMappingUpdate`), so documents with the new field never meet an index without it.
+   * New yearly indices get the field from the template.
+   */
   async ensureTemplate(): Promise<void> {
     if (this.templateReady) return;
     await this.search.putIndexTemplate(
@@ -110,7 +117,21 @@ export class IndexManager {
         replicas: this.options.replicas,
       }),
     );
+    await this.ensureMappingRevision();
     this.templateReady = true;
+  }
+
+  /** The additive mapping update on every index of the version (no index yet: nothing to do). */
+  async ensureMappingRevision(): Promise<void> {
+    const indices = await this.indices();
+    if (indices.length === 0) return;
+    await this.search.request(
+      'PUT',
+      `/${indexPattern(this.options.prefix, this.version)}/_mapping`,
+      {
+        body: buildIndexMappingUpdate(),
+      },
+    );
   }
 
   /** Indices of the current version (`<prefix>-v<n>-*`). */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { destinationHostOptions, loadSmtpAdapterConfig, parseDeniedSuffixes } from './config';
+import { journalIntakeDomain } from './journal-intake/journal-intake.config';
 
 const BASE = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
@@ -68,5 +69,56 @@ describe('routing configuration (step 2.3 R3)', () => {
     expect(options.bounceDomain).toBe('bounces.gw.test');
     expect(options.deniedSuffixes).toEqual(['corp']);
     expect(options.allowNonPublic).toBe(false);
+  });
+});
+
+describe('journal intake configuration (step 8.6 §4.4)', () => {
+  it('is off without a domain and normalizes the domain', () => {
+    const off = loadSmtpAdapterConfig(BASE);
+    expect(off.JOURNAL_INTAKE_DOMAIN).toBeUndefined();
+    expect(journalIntakeDomain(off)).toBeNull();
+    expect(
+      journalIntakeDomain(loadSmtpAdapterConfig({ ...BASE, JOURNAL_INTAKE_DOMAIN: '' })),
+    ).toBeNull();
+    const on = loadSmtpAdapterConfig({ ...BASE, JOURNAL_INTAKE_DOMAIN: ' Journal.Gateway.TEST. ' });
+    expect(journalIntakeDomain(on)).toBe('journal.gateway.test');
+    expect(on).toMatchObject({
+      LMTP_JOURNAL_PORT: 10053,
+      JOURNAL_INTAKE_MAX_MESSAGE_BYTES: 52_428_800,
+      JOURNAL_INTAKE_ENVELOPE_MAX_BYTES: 1_048_576,
+      JOURNAL_INTAKE_MAX_RECIPIENTS: 10_000,
+      JOURNAL_INTAKE_SOURCE_CACHE_SECONDS: 30,
+      JOURNAL_INTAKE_RATE_PER_SOURCE_PER_MINUTE: 6000,
+      JOURNAL_INTAKE_COUNTER_FLUSH_SECONDS: 30,
+    });
+    const disabled = loadSmtpAdapterConfig({
+      ...BASE,
+      JOURNAL_INTAKE_DOMAIN: 'journal.gateway.test',
+      JOURNAL_INTAKE_ENABLED: 'false',
+    });
+    expect(journalIntakeDomain(disabled)).toBeNull();
+  });
+
+  it.each([
+    ['JOURNAL_INTAKE_DOMAIN', 'localhost'],
+    ['JOURNAL_INTAKE_DOMAIN', 'bad domain.test'],
+    ['JOURNAL_INTAKE_MAX_RECIPIENTS', '10001'],
+    ['JOURNAL_INTAKE_SOURCE_CACHE_SECONDS', '0'],
+    ['LMTP_JOURNAL_PORT', '70000'],
+  ])('refuses %s=%s', (key, value) => {
+    expect(() => loadSmtpAdapterConfig({ ...BASE, [key]: value })).toThrow(key);
+  });
+
+  it('refuses an intake domain overlapping the bounce or probe domain', () => {
+    expect(() =>
+      loadSmtpAdapterConfig({
+        ...BASE,
+        JOURNAL_INTAKE_DOMAIN: 'journal.bounces.gateway.internal',
+        POSTFIX_BOUNCE_DOMAIN: 'bounces.gateway.internal',
+      }),
+    ).toThrow('POSTFIX_BOUNCE_DOMAIN');
+    expect(() =>
+      loadSmtpAdapterConfig({ ...BASE, JOURNAL_INTAKE_DOMAIN: 'probe.mail-gateway.test' }),
+    ).toThrow('PROVIDER_PROBE_DOMAIN');
   });
 });

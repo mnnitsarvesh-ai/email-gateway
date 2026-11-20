@@ -43,13 +43,16 @@ test('users: invite → edit roles → disable → delete', async ({ page }) => 
   await expect(page.locator('main')).toContainText(email);
   await expect(page.locator('main').getByText('Invited', { exact: true }).first()).toBeVisible();
 
-  // Edit roles: add Security Analyst, remove Read-only User.
+  // Edit roles: add Domain Admin, remove Read-only User. (Step 8.6: a role carrying archive
+  // access, such as Security Analyst, is assignable after a confirmation — archive-split.spec —
+  // but the api's escalation guard then refuses disabling or deleting that user for an admin
+  // without archive access; recorded as an open item in §13.6 of the step 8.6 design note.)
   const roles = page.getByRole('form', { name: 'Change roles' });
-  await roles.getByRole('checkbox', { name: /Security Analyst/ }).check();
+  await roles.getByRole('checkbox', { name: /Domain Admin/ }).check();
   await roles.getByRole('checkbox', { name: /Read-only User/ }).uncheck();
   await roles.getByRole('button', { name: 'Save roles' }).click();
   const current = page.getByRole('list', { name: 'Current roles' });
-  await expect(current).toContainText('Security Analyst');
+  await expect(current).toContainText('Domain Admin');
   await expect(current).not.toContainText('Read-only User');
 
   // Disable.

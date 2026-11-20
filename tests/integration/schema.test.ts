@@ -87,6 +87,9 @@ const PARTITIONED: Record<string, string> = {
   ato_auth_events: 'occurred_at',
   ato_risk_signals: 'detected_at',
   ato_risk_scores: 'computed_at',
+  // Step 8.6 §3.2: journal intake messages (core) and the merged copies of archive records.
+  journal_intake_messages: 'received_at',
+  archive_record_sources: 'archive_received_at',
 };
 
 /**
@@ -311,6 +314,13 @@ const TENANT_OWNED = [
   // Step 8.5 §4.1: identity-provider streams and mailbox state.
   'ato_provider_streams',
   'ato_provider_mailbox_items',
+  // Step 8.6 §3.2: journal intake sources, messages and counters, archive dedupe keys and the
+  // merged copies of archive records.
+  'journal_intake_sources',
+  'journal_intake_messages',
+  'journal_intake_counters',
+  'archive_dedupe_keys',
+  'archive_record_sources',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
@@ -320,13 +330,13 @@ describe('MySQL schema', () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(164);
-    expect(new Set(ALL_TABLES).size).toBe(164);
+    expect(ALL_TABLES).toHaveLength(169);
+    expect(new Set(ALL_TABLES).size).toBe(169);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 39 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(39);
+  it('partitions the 41 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(41);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1645,10 +1655,11 @@ describe('event relay schema (step 3.2, §4)', () => {
 });
 
 describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
+  // Step 8.6 (D3, E30–E32) appended `journaled`, the final state of journal intake messages.
   const STATES =
     "enum('received','persisted','scanning','scanned','scan_failed','policy_evaluated'," +
     "'approved','quarantined','held_for_review','rejected','delivery_pending','delivery_retry'," +
-    "'delivered','archived','expired')";
+    "'delivered','archived','expired','journaled')";
 
   it('replaces MessageStatus by the fifteen lifecycle states in L2 order', async () => {
     const cols = await columns(['email_messages', 'email_message_status_history']);
@@ -1680,8 +1691,13 @@ describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
       columnDefault: null,
     });
     // 27 since step 3.3; step 4.1 §3 adds client_name; step 7.2 §3.1 the three generated search
-    // keys subject_key, sender_domain and message_id_key.
-    expect(cols.size).toBe(31);
+    // keys subject_key, sender_domain and message_id_key; step 8.6 §3.1 ingest_source.
+    expect(cols.size).toBe(32);
+    expect(cols.get('email_messages.ingest_source')).toMatchObject({
+      columnType: "enum('gateway','journal_intake')",
+      nullable: 'NO',
+      columnDefault: 'gateway',
+    });
   });
 
   it('adds the actor, correlation, idempotency and occurrence columns to the history', async () => {
@@ -4635,8 +4651,11 @@ describe('REST API schema (step 6.1, docs/plan/steps/18-rest-api.md §3.1)', () 
       unique: false,
     });
     // final_action since migration rest_api_index_coverage (index-only threats outcomes);
-    // domain_id since admin_portal_reports (step 7.1 §3.2: index-only top attacked domains).
-    expect(messages.get('email_messages_org_received_dir_verdict_idx')).toEqual({
+    // domain_id since admin_portal_reports (step 7.1 §3.2: index-only top attacked domains);
+    // step 8.6 (D5) rebuilt it under a new name with ingest_source appended (intake rows are
+    // excluded from the reports, index-only).
+    expect(messages.get('email_messages_org_received_dir_verdict_idx')).toBeUndefined();
+    expect(messages.get('email_messages_org_received_dir_verdict_src_idx')).toEqual({
       columns: [
         'organization_id',
         'received_at',
@@ -4644,6 +4663,7 @@ describe('REST API schema (step 6.1, docs/plan/steps/18-rest-api.md §3.1)', () 
         'final_verdict',
         'final_action',
         'domain_id',
+        'ingest_source',
       ],
       unique: false,
     });
@@ -5539,7 +5559,7 @@ describe('step 8.1 journaling and archiving schema (23-journaling-archiving.md �
       category: [CATEGORY, 'NO'],
       status: ["enum('active','expiry_review','disposing')", 'NO'],
       message_state: [
-        "enum('received','persisted','scanning','scanned','scan_failed','policy_evaluated','approved','quarantined','held_for_review','rejected','delivery_pending','delivery_retry','delivered','archived','expired')",
+        "enum('received','persisted','scanning','scanned','scan_failed','policy_evaluated','approved','quarantined','held_for_review','rejected','delivery_pending','delivery_retry','delivered','archived','expired','journaled')",
         'NO',
       ],
       message_state_reason: ['varchar(64)', 'YES'],
@@ -5622,6 +5642,9 @@ describe('step 8.1 journaling and archiving schema (23-journaling-archiving.md �
       last_error_code: ['varchar(64)', 'YES'],
       settings_generation: ['bigint unsigned', 'NO'],
       archive_id: ['bigint unsigned', 'YES'],
+      // Step 8.6 §3.1: the merged record's partition key and the merge flag (ADR-0088).
+      archive_received_at: ['datetime(3)', 'YES'],
+      merged: ['tinyint(1)', 'NO'],
       captured_at: ['datetime(3)', 'YES'],
       closed_at: ['datetime(3)', 'YES'],
       created_at: ['datetime(3)', 'NO'],

@@ -18,6 +18,7 @@ export {
   type RenderWithProvidersOptions,
 } from './render';
 export {
+  MIGRATED_ADMIN_PERMISSIONS,
   PLATFORM_ROLE_KEYS,
   ROLE_PERMISSIONS,
   SYSTEM_ROLE_KEYS,

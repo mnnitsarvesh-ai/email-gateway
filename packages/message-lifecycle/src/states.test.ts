@@ -19,6 +19,7 @@ describe('MESSAGE_STATES', () => {
 
   it('is the event-contracts list (re-exported, defined once)', () => {
     expect(MESSAGE_STATES).toBe(CONTRACT_STATES);
-    expect(MESSAGE_STATES).toHaveLength(15);
+    // Step 8.6 appended `journaled` (ADR-0087).
+    expect(MESSAGE_STATES).toHaveLength(16);
   });
 });

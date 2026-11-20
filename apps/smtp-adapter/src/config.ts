@@ -14,6 +14,10 @@ import { z } from 'zod';
 import { bouncesConfigShape } from './bounces/bounces.config';
 import { ingestionConfigShape } from './ingestion/ingestion.config';
 import {
+  assertJournalIntakeConfig,
+  journalIntakeConfigShape,
+} from './journal-intake/journal-intake.config';
+import {
   assertProviderRelayConfig,
   providerRelayConfigShape,
 } from './provider-relay/provider-relay.config';
@@ -232,7 +236,9 @@ export const configSchema = baseConfigSchema
   .extend(routingConfigShape)
   .extend(atoConfigShape)
   // Step 8.2 §4.4: provider relay keys (D7, D8, D10).
-  .extend(providerRelayConfigShape);
+  .extend(providerRelayConfigShape)
+  // Step 8.6 §4.4: journal intake keys (D2).
+  .extend(journalIntakeConfigShape);
 
 export type SmtpAdapterConfig = z.infer<typeof configSchema>;
 
@@ -267,6 +273,7 @@ export const loadSmtpAdapterConfig = (
     );
   }
   assertProviderRelayConfig(config);
+  assertJournalIntakeConfig(config);
   if (env.SMTP_RECIPIENT_DELIMITER === '') {
     return Object.freeze({ ...config, SMTP_RECIPIENT_DELIMITER: '' });
   }

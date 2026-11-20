@@ -330,6 +330,8 @@ describe('quarantine routes (e2e, in-memory world)', () => {
         compliance_auditor: clear,
         read_only_user: masked,
         mailbox_user: 403,
+        // Step 8.6 D12: no quarantine permission.
+        compliance_officer: 403,
       };
       expect(Object.keys(expected).sort()).toEqual(SYSTEM_ROLES.map((r) => r.key).sort());
       for (const role of SYSTEM_ROLES) {

@@ -12,6 +12,11 @@ export interface MessageRecord {
   emlObjectKey: string;
   emlSha256: string;
   sizeBytes: number;
+  /**
+   * `email_messages.ingest_source` (step 8.6 D4); absent = `gateway`. A journal intake message
+   * never gets `parse_failed.v1`, and `parsed.v1` only when its scan was requested.
+   */
+  ingestSource?: 'gateway' | 'journal_intake';
 }
 
 export interface ParseRowState {
@@ -48,10 +53,20 @@ export interface FinalizeInput {
   durationMs: number;
 }
 
+/**
+ * What the parse commit did for a journal intake message (step 8.6 D4): `scan_requested` wrote
+ * `parsed.v1` (the scan stage runs and ends the message with E31/E32); `journaled` applied E30
+ * (`intake_unscanned` or `intake_parse_failed`) and wrote no outbox row; `transition_skipped`
+ * wrote no outbox row and found the message no longer `persisted` (E30 stale or invalid).
+ */
+export type IntakeGateResult = 'scan_requested' | 'journaled' | 'transition_skipped';
+
 export interface FinalizeResult {
   outcome: HandleOutcome;
-  /** The new outbox event id (`handled` only). */
+  /** The new outbox event id (`handled` with an outbox row only). */
   outboxEventId?: string;
+  /** Journal intake messages only (step 8.6 D4). */
+  intake?: IntakeGateResult;
 }
 
 export type MarkParsingResult = { kind: 'parsing'; attempts: number } | { kind: 'final' };

@@ -9,6 +9,7 @@ import {
 import { normalizeHostForComparison } from '@email-gateway/mail-routing';
 import { z } from 'zod';
 import { ADAPTER_CONFIG, type SmtpAdapterConfig } from '../config';
+import { isUnderIntakeDomain } from '../journal-intake/journal-intake.config';
 import { cacheKeys, domainInvalidationKeys, routingInvalidationKeys } from './cache-keys';
 import { RedisJsonCache } from './redis-json-cache';
 
@@ -49,7 +50,8 @@ type ViewDto = z.infer<typeof viewDto>;
 export type DomainPolicyConfig = Pick<
   SmtpAdapterConfig,
   'SMTP_DOMAIN_CACHE_TTL_SECONDS' | 'SMTP_NEGATIVE_CACHE_TTL_SECONDS'
->;
+> &
+  Partial<Pick<SmtpAdapterConfig, 'JOURNAL_INTAKE_DOMAIN'>>;
 
 /**
  * Tenant resolution for the policy and socketmap (step 2.2 D5): `resolveActiveDomain` (active
@@ -57,6 +59,11 @@ export type DomainPolicyConfig = Pick<
  * readiness, read from the **writer** (ADR-0014) with at most three indexed queries on a miss,
  * and cached in Redis under `sa:dom:{name}` (positive and negative TTL). Cache errors fall back
  * to the database; database errors propagate (the caller fails closed).
+ *
+ * Step 8.6 D1: the journal intake domain (JOURNAL_INTAKE_DOMAIN) and its subdomains are never a
+ * tenant domain here (policy, socketmap `relay_domain` / `transport`), whatever the database
+ * holds: the api refuses such tenant domains, and this keeps a row created before the domain was
+ * reserved from capturing intake mail.
  */
 @Injectable()
 export class DomainPolicyService {
@@ -79,6 +86,7 @@ export class DomainPolicyService {
   async get(rawName: string): Promise<DomainPolicyView | null> {
     const name = DomainPolicyService.normalize(rawName);
     if (name === null) return null;
+    if (isUnderIntakeDomain(name, this.config.JOURNAL_INTAKE_DOMAIN ?? null)) return null;
     const dto = await this.cache.getOrLoad<ViewDto>({
       cache: 'domain',
       key: cacheKeys.domain(name),

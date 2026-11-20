@@ -553,6 +553,19 @@ the scan orchestration of step 4.1 moves `persisted → scanning`;
 fake producer of `scanning`/`scan_failed`. The lifecycle read API shows the parse outcome next to
 the state.
 
+**Journal intake messages (step 8.6 D4, ADR-0087).** For a message with
+`email_messages.ingest_source = journal_intake` the finalize transaction reads
+`journal_intake_messages.scan_requested` (same partition key) and, through the transition
+service (role `scanner`): without a requested scan applies **E30** `persisted → journaled`
+(`intake_unscanned`, or `intake_parse_failed`) and writes no `parsed.v1` / `parse_failed.v1`;
+with a requested scan writes `parsed.v1` on success and applies E30 `intake_parse_failed` (never
+`parse_failed.v1`) on failure. The scan completion of an intake round (engines or the deadline
+sweeper) applies E6/E7 and then **E31** / **E32** (`→ journaled`) in the same transaction in
+place of `scanned.v1`; the risk score is recorded as for any round. Signature rescans never
+select intake messages. Gateway messages are unchanged. Metric
+`mime_intake_messages_total{result}`; runbooks [mime-ingestion.md](../../docs/runbooks/mime-ingestion.md#journal-intake-messages-step-86)
+and [scan-pipeline.md](../../docs/runbooks/scan-pipeline.md#journal-intake-rounds-step-86).
+
 ## Transport (step 3.2 Q13)
 
 `AmqpModule` (`@email-gateway/common`) holds one connection (reconnects with backoff, never

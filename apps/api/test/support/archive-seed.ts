@@ -73,6 +73,19 @@ export interface SeedRecordInput {
   lockMode?: 'none' | 'governance' | 'compliance';
   attachments?: Array<{ partIndex: number; fileName: string; sha256: string; sizeBytes: number }>;
   urlSha256?: string;
+  /** Step 8.6: copy sources of the record (default: a gateway capture). */
+  sourceGateway?: boolean;
+  sourceJournalIntake?: boolean;
+  intakeSourceId?: bigint | null;
+  /** Step 8.6 D6: the intake block of the journal object (a journal intake capture). */
+  intake?: ArchiveJournal['intake'];
+  /** Step 8.6 D7: merged copies (`eml` null: same body, no content variant). */
+  mergedCopies?: Array<{
+    messagePublicId: string;
+    receivedAt: Date;
+    source: 'gateway' | 'journal_intake';
+    eml: Buffer | null;
+  }>;
 }
 
 /** The `email_archives` values of a seeded record (create input). */
@@ -118,6 +131,10 @@ export interface SeedRecordRow {
   settingsGeneration: bigint;
   archivedAt: Date;
   deletedAt: Date | null;
+  sourceGateway: boolean;
+  sourceJournalIntake: boolean;
+  intakeSourceId: bigint | null;
+  mergedCount: number;
 }
 
 export interface SeededRecord {
@@ -126,6 +143,15 @@ export interface SeededRecord {
   objects: Map<string, Buffer>;
   eml: Buffer;
   journal: ArchiveJournal;
+  /** Step 8.6: the merged copies as `archive_record_sources` describes them. */
+  merged: Array<{
+    messagePublicId: string;
+    receivedAt: Date;
+    source: 'gateway' | 'journal_intake';
+    emlSha256: string;
+    sizeBytes: number;
+    contentVariant: boolean;
+  }>;
 }
 
 const DAY_MS = 86_400_000;
@@ -222,6 +248,7 @@ export function seedRecord(tenantKey: SeedTenantKey, input: SeedRecordInput): Se
       status: 'delivered',
       finalAt: capturedAt.toISOString(),
     })),
+    ...(input.intake !== undefined && { intake: input.intake }),
   };
   const now = capturedAt;
   const snapshot = buildScanSnapshot({
@@ -350,6 +377,63 @@ export function seedRecord(tenantKey: SeedTenantKey, input: SeedRecordInput): Se
       },
     ],
   };
+  // Step 8.6 D7: merged copies under the record's DEK, subject = the copy's public id.
+  const mergedOut: SeededRecord['merged'] = [];
+  const mergedObjects = new Map<string, Buffer>();
+  if (input.mergedCopies !== undefined && input.mergedCopies.length > 0) {
+    objects.merged = input.mergedCopies.map((m) => {
+      const sub = (kind: 'eml' | 'journal') => ({
+        dek,
+        kind,
+        organizationId: org,
+        subjectId: m.messagePublicId,
+      });
+      const copyKey = (kind: 'eml' | 'journal') =>
+        archiveObjectKey({
+          organizationId: org,
+          receivedAt,
+          messagePublicId: m.messagePublicId,
+          captureId,
+          kind,
+        });
+      const copyJournal = encryptArchiveObject(
+        Buffer.from(JSON.stringify({ mergedFrom: messagePublicId }), 'utf8'),
+        sub('journal'),
+      );
+      mergedObjects.set(copyKey('journal'), copyJournal.object);
+      const copyEml = m.eml === null ? null : encryptArchiveObject(m.eml, sub('eml'));
+      if (copyEml !== null) mergedObjects.set(copyKey('eml'), copyEml.object);
+      const body = m.eml ?? eml;
+      mergedOut.push({
+        messagePublicId: m.messagePublicId,
+        receivedAt: m.receivedAt,
+        source: m.source,
+        emlSha256: createHash('sha256').update(body).digest('hex'),
+        sizeBytes: body.length,
+        contentVariant: m.eml !== null,
+      });
+      return {
+        messageId: m.messagePublicId,
+        receivedAt: m.receivedAt.toISOString(),
+        source: m.source,
+        journal: {
+          key: copyKey('journal'),
+          versionId: null,
+          sha256: copyJournal.summary.ciphertextSha256,
+          bytes: copyJournal.object.length,
+        },
+        eml:
+          copyEml === null
+            ? null
+            : {
+                key: copyKey('eml'),
+                versionId: null,
+                sha256: copyEml.summary.ciphertextSha256,
+                bytes: copyEml.object.length,
+              },
+      };
+    });
+  }
   dek.fill(0);
   const row: SeedRecordRow = {
     receivedAt,
@@ -406,6 +490,10 @@ export function seedRecord(tenantKey: SeedTenantKey, input: SeedRecordInput): Se
     settingsGeneration: 1n,
     archivedAt: capturedAt,
     deletedAt: null,
+    sourceGateway: input.sourceGateway ?? true,
+    sourceJournalIntake: input.sourceJournalIntake ?? false,
+    intakeSourceId: input.intakeSourceId ?? null,
+    mergedCount: mergedOut.length,
   };
   return {
     row,
@@ -413,9 +501,11 @@ export function seedRecord(tenantKey: SeedTenantKey, input: SeedRecordInput): Se
       [objects.eml.key, emlObject.object],
       [objects.journal.key, journalObject.object],
       [objects.scans[0]!.key, scanObject.object],
+      ...mergedObjects,
     ]),
     eml,
     journal,
+    merged: mergedOut,
   };
 }
 
@@ -445,5 +535,9 @@ export function searchSourceOf(row: SeedRecordRow): Record<string, unknown> {
     retain_until: row.retainUntil.toISOString(),
     legal_hold: row.legalHold,
     lock_mode: row.lockMode,
+    ingest_sources: [
+      ...(row.sourceGateway ? ['gateway'] : []),
+      ...(row.sourceJournalIntake ? ['journal_intake'] : []),
+    ],
   };
 }

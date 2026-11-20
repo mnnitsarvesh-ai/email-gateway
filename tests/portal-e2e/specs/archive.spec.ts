@@ -3,12 +3,14 @@
  * compliance archive through the browser, against the real api, the real archive-worker
  * (capture, encryption, index sync), MinIO and OpenSearch.
  *
- * - organization admin (MFA): enables archiving in Settings → Archive and retention; messages
- *   received afterwards are captured by the worker and appear in the archive search;
+ * - organization admin (MFA) holding the migrated compliance_officer grant (step 8.6): enables
+ *   journaling in Settings → Journaling; messages received afterwards are captured by the worker
+ *   and appear in the archive search;
  * - search (masked), details, the audited reveal (row checked through the audit API), the
  *   sanitized preview requested explicitly, and the original downloaded through
  *   re-authentication (single use);
- * - read-only user: no archive search and no content;
+ * - read-only user: no archive search, no record detail (step 8.6: `archive:search`) and no
+ *   content;
  * - tenant isolation: beta's record never appears for alpha, ids of the other tenant look missing.
  */
 import { readFileSync } from 'node:fs';
@@ -31,23 +33,29 @@ test.describe.configure({ mode: 'serial', timeout: CAPTURE_TIMEOUT_MS + 180_000 
 test('organization admin enables archiving and sees the next messages captured', async ({
   page,
 }) => {
+  // Step 8.6: the old Settings link lands on Journaling (the capture half of the old tab).
   await signIn(page, 'alphaApprover', { next: '/settings?tab=archive' });
+  await expect(page).toHaveURL(/\/settings\?tab=journaling/);
   await expect(page.getByRole('heading', { level: 1, name: 'Settings' })).toBeVisible();
-  const form = page.getByRole('form', { name: 'Archive settings' });
+  const form = page.getByRole('form', { name: 'Journaling settings' });
   await expect(form).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByText(/Immutable storage \(S3 Object Lock\)/)).toBeVisible();
-  await expectNoSeriousA11yViolations(page, 'settings archive tab');
+  await expect(page.getByRole('heading', { name: 'Journaling and the archive' })).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'settings journaling tab');
   if (!(await alphaArchivingEnabled())) {
-    const toggle = form.getByRole('switch', { name: 'Archive mail of this organization' });
+    const toggle = form.getByRole('switch', { name: 'Journal mail of this organization' });
     await expect(toggle).not.toBeChecked();
     await toggle.click();
-    await form.getByRole('button', { name: 'Save archive settings' }).click();
-    await expect(page.getByText('Archive settings saved')).toBeVisible();
+    await form.getByRole('button', { name: 'Save journaling settings' }).click();
+    await expect(page.getByText('Journaling settings saved')).toBeVisible();
     await expect(
-      form.getByRole('switch', { name: 'Archive mail of this organization' }),
+      form.getByRole('switch', { name: 'Journal mail of this organization' }),
     ).toBeChecked();
     await expect.poll(alphaArchivingEnabled).toBe(true);
   }
+  // Immutability and keys moved to Archive → Retention and lock.
+  await page.goto('/archive/retention?tab=immutability');
+  await expect(page.getByText(/Immutable storage \(S3 Object Lock\)/)).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'archive immutability tab');
   // Messages received after the enablement are journaled by the archive-worker.
   const ids = await ensureAlphaArchive();
   await page.goto(`/archive?range=24h&sender=${encodeURIComponent(ARCHIVE_SENDER)}`);
@@ -55,7 +63,7 @@ test('organization admin enables archiving and sees the next messages captured',
   await expect(page.locator(`a[href="/archive/${ids.invoice}"]`).first()).toBeVisible({
     timeout: 30_000,
   });
-  await page.goto('/settings?tab=archive');
+  await page.goto('/archive/retention?tab=immutability');
   await expect(page.getByText(/^[1-9]\d* active · /)).toBeVisible({ timeout: 20_000 });
 });
 
@@ -158,12 +166,12 @@ test('search, details, audited reveal, preview and download through re-authentic
   ).toBeVisible();
 });
 
-test('read-only user: no archive search and no content', async ({ page }) => {
+test('read-only user: no archive search, no record detail and no content', async ({ page }) => {
   const ids = await ensureAlphaArchive();
   await signIn(page, 'alphaReadOnly', { next: '/archive/retention' });
   const nav = page.getByRole('navigation', { name: 'Main' });
-  await expect(page.getByRole('heading', { level: 1, name: 'Retention and review' })).toBeVisible();
-  await expect(nav.getByRole('link', { name: 'Archive', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { level: 1, name: 'Retention and lock' })).toBeVisible();
+  await expect(nav.getByRole('link', { name: 'Search', exact: true })).toHaveCount(0);
   await expect(nav.getByRole('link', { name: 'eDiscovery' })).toHaveCount(0);
   expect(
     (
@@ -178,12 +186,14 @@ test('read-only user: no archive search and no content', async ({ page }) => {
   await expect(
     page.getByText(/You do not have access|do not have permission/i).first(),
   ).toBeVisible();
-  // Metadata of a record is readable (archive:read); content is not offered.
+  // Step 8.6 (ADR-0089, Q4): record detail needs archive:search; archive:read alone opens
+  // configuration only.
   await page.goto(`/archive/${ids.invoice}`);
-  await expect(page.getByRole('heading', { level: 1, name: 'Archived message' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Reveal' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Show sanitized preview' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Download original' })).toHaveCount(0);
+  await expect(
+    page.getByRole('heading', { level: 1, name: 'You do not have access to this page' }),
+  ).toBeVisible();
+  expect((await bff(page, 'GET', `/archive/messages/${ids.invoice}`)).status).toBe(403);
+  expect((await bff(page, 'GET', `/archive/messages/${ids.invoice}/journal`)).status).toBe(403);
   expect((await bff(page, 'GET', `/archive/messages/${ids.invoice}/preview`)).status).toBe(403);
   expect(
     (await bff(page, 'POST', `/archive/messages/${ids.invoice}/reveal`, { fields: ['subject'] }))

@@ -43,6 +43,8 @@ const intent = (over: Record<string, unknown> = {}) => ({
   createdAt: new Date('2026-11-16T11:58:00.000Z'),
   capturedAt: null,
   archiveId: null,
+  archiveReceivedAt: null,
+  merged: false,
   ...over,
 });
 

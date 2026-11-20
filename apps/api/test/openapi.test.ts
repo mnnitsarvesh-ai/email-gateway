@@ -213,9 +213,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/23-journaling-archiving.md §4.4): 320; step 8.4
     // (docs/plan/steps/24-account-takeover-core.md §5.1, §5.2): 354; plus the 24 provider-connection operations of step 8.2
     // (docs/plan/steps/25-m365-google-connectors.md §5.2): 378; plus the 13 identity-provider and
-    // mailbox state operations of step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): 391,
-    // all under /api/v1.
-    expect(count).toBe(391);
+    // mailbox state operations of step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): 391;
+    // plus the 12 journaling operations of step 8.6
+    // (docs/plan/steps/27-journal-intake-and-archive-split.md D11): 403, all under /api/v1.
+    expect(count).toBe(403);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -923,8 +924,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations; step 8.4: 14
     // transactional account takeover and incident mutations; step 8.2: 12 transactional
     // provider-connection mutations; step 8.5: 8 transactional identity-provider and mailbox
-    // state mutations.
-    expect(keyed).toHaveLength(91);
+    // state mutations; step 8.6: 4 transactional journaling mutations (settings, source create,
+    // update and address rotation).
+    expect(keyed).toHaveLength(95);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1175,7 +1177,18 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         op.key.includes(' /api/v1/ediscovery'),
     );
     expect(ops).toHaveLength(41);
+    // Step 8.6 D11: the settings and capture-issue operations are also in the journaling area.
+    const alsoJournaling = [
+      'GET /api/v1/archive/settings',
+      'PUT /api/v1/archive/settings',
+      'GET /api/v1/archive/capture-issues',
+      'POST /api/v1/archive/capture-issues/{messageId}/retry',
+    ];
     for (const op of ops) {
+      if (alsoJournaling.includes(op.key)) {
+        expect([...op.tags].sort(), op.key).toEqual(['archive', 'journaling']);
+        continue;
+      }
       expect(op.tags.length, op.key).toBe(1);
       expect(['archive', 'ediscovery'], op.key).toContain(op.tags[0]);
     }
@@ -1195,6 +1208,89 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     );
     expect(archiveDocs).toContain('archive_override_forbidden');
     expect(archiveDocs).toContain('X-EG-Index-Lag-Seconds');
+  });
+
+  it('documents the 12 step 8.6 journaling operations with their ids, permissions, the redacted replay and the tag groups (D11)', () => {
+    const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/journaling'));
+    expect(ops.map((op) => op.key).sort()).toEqual(
+      [
+        'GET /api/v1/journaling/settings',
+        'PUT /api/v1/journaling/settings',
+        'GET /api/v1/journaling/status',
+        'GET /api/v1/journaling/intake-sources',
+        'POST /api/v1/journaling/intake-sources',
+        'GET /api/v1/journaling/intake-sources/{sourceId}',
+        'PATCH /api/v1/journaling/intake-sources/{sourceId}',
+        'DELETE /api/v1/journaling/intake-sources/{sourceId}',
+        'POST /api/v1/journaling/intake-sources/{sourceId}/rotate-address',
+        'GET /api/v1/journaling/intake-sources/{sourceId}/wizard',
+        'GET /api/v1/journaling/intake-sources/{sourceId}/setup-guide',
+        'POST /api/v1/journaling/intake-sources/{sourceId}/attestations',
+      ].sort(),
+    );
+    for (const op of ops) expect(op.tags, op.key).toEqual(['journaling']);
+    const op = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    const ids: Record<string, string> = {
+      'get /api/v1/journaling/settings': 'JournalingController_get_v1',
+      'put /api/v1/journaling/settings': 'JournalingController_update_v1',
+      'get /api/v1/journaling/status': 'JournalingController_status_v1',
+      'get /api/v1/journaling/intake-sources': 'IntakeSourcesController_list_v1',
+      'post /api/v1/journaling/intake-sources': 'IntakeSourcesController_create_v1',
+      'get /api/v1/journaling/intake-sources/{sourceId}': 'IntakeSourcesController_get_v1',
+      'patch /api/v1/journaling/intake-sources/{sourceId}': 'IntakeSourcesController_update_v1',
+      'delete /api/v1/journaling/intake-sources/{sourceId}': 'IntakeSourcesController_disable_v1',
+      'post /api/v1/journaling/intake-sources/{sourceId}/rotate-address':
+        'IntakeSourcesController_rotate_v1',
+      'get /api/v1/journaling/intake-sources/{sourceId}/wizard':
+        'IntakeSourcesController_wizard_v1',
+      'get /api/v1/journaling/intake-sources/{sourceId}/setup-guide':
+        'IntakeSourcesController_guide_v1',
+      'post /api/v1/journaling/intake-sources/{sourceId}/attestations':
+        'IntakeSourcesController_attest_v1',
+    };
+    for (const [key, id] of Object.entries(ids)) {
+      const [method, path] = key.split(' ') as [string, string];
+      expect(op(method, path).operationId, key).toBe(id);
+    }
+    expect(op('get', '/api/v1/journaling/settings')['x-eg-permissions']).toEqual({
+      mode: 'any',
+      permissions: ['journal:read', 'archive:read'],
+    });
+    expect(op('post', '/api/v1/journaling/intake-sources')['x-eg-permissions']).toEqual({
+      mode: 'all',
+      permissions: ['journal:manage'],
+    });
+    for (const path of [
+      '/api/v1/journaling/intake-sources',
+      '/api/v1/journaling/intake-sources/{sourceId}/rotate-address',
+    ]) {
+      expect(op('post', path)['x-eg-secret-replay'], path).toBe('redacted');
+      expect(op('post', path)['x-eg-idempotency'], path).toBe('required');
+    }
+    // Step 8.6: the archive record routes move to archive:search; settings are per path.
+    expect(op('get', '/api/v1/archive/messages/{messageId}')['x-eg-permissions']).toEqual({
+      mode: 'all',
+      permissions: ['archive:search'],
+    });
+    expect(op('put', '/api/v1/archive/settings')['x-eg-permissions']).toEqual({
+      mode: 'any',
+      permissions: ['journal:manage', 'archive:manage'],
+    });
+    expect(JSON.stringify(op('put', '/api/v1/archive/settings'))).toContain(
+      'archive_settings_forbidden_path',
+    );
+    expect((doc as unknown as Record<string, unknown>)['x-tagGroups']).toEqual([
+      expect.objectContaining({ name: 'Gateway and platform' }),
+      { name: 'Journaling', tags: ['journaling'] },
+      { name: 'Archive', tags: ['archive', 'ediscovery'] },
+    ]);
+    const journalingDocs = JSON.stringify(
+      Object.entries(doc.paths).filter(([path]) => path.startsWith('/api/v1/journaling')),
+    );
+    expect(journalingDocs).not.toMatch(
+      /whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/,
+    );
   });
 
   it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {

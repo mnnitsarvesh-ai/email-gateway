@@ -86,7 +86,11 @@ beforeAll(async () => {
   ax = new ArchiveFixtures(ctx, ctx.config.ARCHIVE_SEARCH_INDEX_PREFIX);
   fx.registerCleanup(() => ax.cleanup());
   org = await fx.createOrganization({ planCode: 'enterprise' });
-  user = await fx.createUser(org, { roles: ['organization_admin'], mfa: true });
+  // Step 8.6 (ADR-0089): an organization admin as migrated (archive access through compliance_officer).
+  user = await fx.createUser(org, {
+    roles: ['organization_admin', 'compliance_officer'],
+    mfa: true,
+  });
   admin = archiveHttp(ctx, bearer((await loginWithMfa(ctx, fx, user)).accessToken));
   apiKey = archiveHttp(
     ctx,

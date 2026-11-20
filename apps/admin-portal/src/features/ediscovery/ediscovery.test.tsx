@@ -6,6 +6,7 @@ import {
   expectNoAxeViolations,
   expectRequestMatchesContract,
   makeMe,
+  MIGRATED_ADMIN_PERMISSIONS,
   mockApi,
   okJson,
   renderWithProviders,
@@ -38,7 +39,12 @@ const mfa = { id: '01930000-0000-7000-8000-000000000501', mfaAuthenticated: true
 const auditor = () =>
   makeMe({ role: 'compliance_auditor', overrides: { mfaEnabled: true, session: mfa } });
 const admin = () =>
-  makeMe({ role: 'organization_admin', overrides: { mfaEnabled: true, session: mfa } });
+  // Step 8.6: an existing admin keeps archive access through the migrated compliance_officer.
+  makeMe({
+    role: 'organization_admin',
+    permissions: MIGRATED_ADMIN_PERMISSIONS,
+    overrides: { mfaEnabled: true, session: mfa },
+  });
 
 describe('eDiscovery bodies and completeness (A18)', () => {
   it('builds contract-valid bodies', () => {

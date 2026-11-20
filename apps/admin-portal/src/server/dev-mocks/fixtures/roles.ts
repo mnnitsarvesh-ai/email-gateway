@@ -50,12 +50,17 @@ const CATALOG: { key: string; description: string }[] = [
   },
   { key: 'report:read', description: 'View dashboards and reports' },
   { key: 'audit:read', description: 'View the audit log' },
-  { key: 'archive:read', description: 'Search and view archived messages' },
+  {
+    key: 'archive:read',
+    description:
+      'View archive configuration, retention policies, key versions and status (no records)',
+  },
   { key: 'archive:export', description: 'Export archived messages' },
   { key: 'archive:legal_hold', description: 'Create and release legal holds' },
   {
     key: 'archive:search',
-    description: 'Search archived and journaled messages (metadata, masked) (step 8.1)',
+    description:
+      'Search archived messages and view their metadata, journal and security views (masked)',
   },
   {
     key: 'archive:retrieve',
@@ -65,11 +70,19 @@ const CATALOG: { key: string; description: string }[] = [
   {
     key: 'archive:manage',
     description:
-      'Manage archive settings, retention policies, encryption keys, capture issues and disposal of reviewed records (step 8.1)',
+      'Manage retention policies, immutability, encryption keys, access settings and disposal of reviewed records',
   },
   {
     key: 'ediscovery:manage',
     description: 'Manage eDiscovery cases, custodians, searches, review and exports (step 8.1)',
+  },
+  {
+    key: 'journal:read',
+    description: 'View journaling settings, journal intake sources and their health (step 8.6)',
+  },
+  {
+    key: 'journal:manage',
+    description: 'Manage journaling capture settings and journal intake sources (step 8.6)',
   },
   { key: 'webhook:manage', description: 'Create and edit webhook subscriptions' },
   { key: 'settings:manage', description: 'Change notification and quarantine settings' },
@@ -211,7 +224,8 @@ const SYSTEM_ROLE_INFO: Record<SystemRoleKey, { name: string; description: strin
   },
   organization_admin: {
     name: 'Organization Admin',
-    description: 'Every tenant permission within the organization',
+    description:
+      'Every tenant permission within the organization except archive access; manages journaling and may assign the Compliance Officer role',
   },
   domain_admin: {
     name: 'Domain Admin',
@@ -235,6 +249,11 @@ const SYSTEM_ROLE_INFO: Record<SystemRoleKey, { name: string; description: strin
     name: 'Mailbox User',
     description:
       'Sees, previews and requests the release of quarantined mail addressed to their own verified address only',
+  },
+  compliance_officer: {
+    name: 'Compliance Officer',
+    description:
+      'Searches and views archived mail, runs eDiscovery, manages legal holds, retention and archive access; reads the access audit',
   },
 };
 

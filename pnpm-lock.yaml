@@ -1143,6 +1143,9 @@ importers:
       '@aws-sdk/lib-storage':
         specifier: ^3.1152.0
         version: 3.1152.0(@aws-sdk/client-s3@3.1161.0)
+      '@email-gateway/archive':
+        specifier: workspace:*
+        version: link:../../packages/archive
       '@email-gateway/common':
         specifier: workspace:*
         version: link:../../packages/common

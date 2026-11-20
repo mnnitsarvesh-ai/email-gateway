@@ -6,6 +6,13 @@ import { InconsistentNotificationReadError, type NoticeUser } from './notificati
 
 type Tx = Prisma.TransactionClient;
 
+/**
+ * A kind the filter applies: the shared preference kinds plus `journal_intake_silent` (step 8.6
+ * D9), which no stored preference document can opt out of yet (the shared `PREFERENCE_KINDS`
+ * vocabulary does not list it), so it filters nobody until the vocabulary gains it.
+ */
+export type FilterKind = PreferenceKind | 'journal_intake_silent';
+
 /** Loads one page of candidate users sorted by id: after `afterId` (exclusive), ≤ `take`. */
 export type CandidatePage = (afterId: bigint | null, take: number) => Promise<NoticeUser[]>;
 
@@ -37,7 +44,7 @@ export class PreferenceFilter {
     tx: Tx,
     organizationId: bigint,
     userIds: readonly bigint[],
-    kind: PreferenceKind,
+    kind: FilterKind,
   ): Promise<Set<bigint>> {
     if (userIds.length === 0) return new Set();
     const rows = await tx.notificationUserPreference.findMany({
@@ -57,7 +64,7 @@ export class PreferenceFilter {
           userId: row.userId.toString(),
         });
       }
-      if (resolved.optOut.includes(kind)) out.add(row.userId);
+      if ((resolved.optOut as readonly string[]).includes(kind)) out.add(row.userId);
     }
     return out;
   }
@@ -69,7 +76,7 @@ export class PreferenceFilter {
   async collect(
     tx: Tx,
     organizationId: bigint,
-    kind: PreferenceKind,
+    kind: FilterKind,
     page: CandidatePage,
     cap: number,
   ): Promise<FilteredRecipients> {

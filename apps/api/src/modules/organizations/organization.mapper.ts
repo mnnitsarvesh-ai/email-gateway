@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import { toIso, toIsoOrNull } from '../../http/serialization';
+import { type ServiceProfile, serviceProfileOf } from '../../tenancy/service-profile';
 import type {
   DeletionStateResponseSchema,
   FeatureResponseSchema,
@@ -32,6 +33,20 @@ const jsonObjectOrNull = (value: unknown): Record<string, unknown> | null =>
     ? (value as Record<string, unknown>)
     : null;
 
+/** Step 8.6 D13 (ADR-0090): the profile from the feature rows, else the plan defaults. */
+export function serviceProfileOfOrganization(
+  org: Pick<OrganizationRecord, 'features' | 'plan'>,
+): ServiceProfile {
+  const defaults = jsonObjectOrNull(org.plan.defaultFeatures) ?? {};
+  const enabled = (key: string): boolean =>
+    org.features.find((f) => f.featureKey === key)?.enabled ?? defaults[key] === true;
+  return serviceProfileOf({
+    inboundFiltering: enabled('inbound_filtering'),
+    outboundFiltering: enabled('outbound_filtering'),
+    archiving: enabled('archiving'),
+  });
+}
+
 /** D12 response: explicit fields only; numeric ids and internal user ids never leave. */
 export function toOrganizationResponse(org: OrganizationRecord): OrganizationResponse {
   const deletionState = deletionStateOf(org.status);
@@ -44,6 +59,7 @@ export function toOrganizationResponse(org: OrganizationRecord): OrganizationRes
     statusReason: org.statusReason,
     statusChangedAt: toIsoOrNull(org.statusChangedAt),
     plan: { code: org.plan.code, name: org.plan.name },
+    serviceProfile: serviceProfileOfOrganization(org),
     deploymentMode: org.deploymentMode,
     dataRegion: org.dataRegion,
     deployments: org.deployments.map((d) => ({

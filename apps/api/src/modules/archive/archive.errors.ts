@@ -57,6 +57,10 @@ export const ARCHIVE_ERROR_CODES = {
   exportMaliciousAckRequired: 'ediscovery_export_malicious_ack_required',
   /** Reused from step 5.3 (§4.5): failed password/TOTP re-entry of a download grant. */
   reauthFailed: 'quarantine_reauth_failed',
+  /** Step 8.6 D11/D12: a settings change the caller's permissions do not cover (`paths`). */
+  settingsForbiddenPath: 'archive_settings_forbidden_path',
+  /** Step 8.6 D7: `variant` is not a stored content variant of the record. */
+  variantNotFound: 'archive_variant_not_found',
   inconsistentRead: INCONSISTENT_READ,
 } as const;
 
@@ -350,3 +354,18 @@ export const exportMaliciousAckRequired = (maliciousCount: number): CodedHttpExc
     'The selection contains malicious messages; set acknowledgeMalicious to include them',
     { maliciousCount },
   );
+
+/** Step 8.6 D11: `403` naming the changed settings paths the caller may not change. */
+export const archiveSettingsForbiddenPath = (
+  paths: ReadonlyArray<{ path: string; permission: string }>,
+): CodedHttpException =>
+  err(
+    HttpStatus.FORBIDDEN,
+    C.settingsForbiddenPath,
+    'Your permissions do not cover every changed archive settings path',
+    { paths: paths.map((p) => ({ path: p.path, permission: p.permission })) },
+  );
+
+/** Step 8.6 D7: the download `variant` is not a stored content variant of this record. */
+export const archiveVariantNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.variantNotFound, 'No such content variant of this archived message');

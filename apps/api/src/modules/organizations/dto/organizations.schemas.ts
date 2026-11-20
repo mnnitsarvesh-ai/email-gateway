@@ -250,6 +250,12 @@ export const OrganizationResponseSchema = z.object({
   statusReason: z.string().nullable(),
   statusChangedAt: IsoString.nullable(),
   plan: z.object({ code: z.string(), name: z.string() }),
+  serviceProfile: z
+    .enum(['gateway', 'archive_only'])
+    .describe(
+      'Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but ' +
+        'neither inbound nor outbound filtering (journal intake, journaling and archive only)',
+    ),
   deploymentMode: DeploymentModeSchema,
   dataRegion: z.string(),
   deployments: z.array(DeploymentResponseSchema),
@@ -331,11 +337,15 @@ export const UsageResponseSchema = z.object({
     suspended: z.number().int(),
   }),
   messages: z.object({
-    total: z.number().int(),
+    total: z.number().int().describe('Gateway messages of the period (journal intake excluded)'),
     inbound: z.number().int(),
     outbound: z.number().int(),
     internal: z.number().int(),
-    today: z.number().int(),
+    today: z.number().int().describe('Gateway messages since 00:00 UTC (journal intake excluded)'),
+    journalIntakeToday: z
+      .number()
+      .int()
+      .describe('Step 8.6: journal intake messages since 00:00 UTC (archive only, never filtered)'),
   }),
   quarantine: z.object({ active: z.number().int() }),
   apiKeys: z.object({ active: z.number().int() }),

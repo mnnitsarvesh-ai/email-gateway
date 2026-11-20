@@ -47,6 +47,8 @@ export class DeliveryMetrics {
   readonly contextMissing: Counter<'result'>;
   /** Step 8.2 D9, D18: internal reinjections that carried `X-EG-Route-Token`. */
   readonly routeTokenHeaders: Counter;
+  /** Step 8.6 D4: journal intake messages refused by the planner or the reinjector. */
+  readonly intakeRefusals: Counter<'stage'>;
 
   constructor(metrics: MetricsService) {
     this.approvals = metrics.counter(
@@ -56,7 +58,7 @@ export class DeliveryMetrics {
     );
     this.approvalsRejected = metrics.counter(
       'delivery_approvals_rejected_total',
-      'Delivery approvals the planner acknowledged without planning, by reason (lifecycle_state, eml_key_prefix, message_not_found, no_known_recipients)',
+      'Delivery approvals the planner acknowledged without planning, by reason (lifecycle_state, eml_key_prefix, message_not_found, no_known_recipients, intake_not_deliverable)',
       ['reason'],
     );
     this.lifecycleTransitions = metrics.counter(
@@ -132,6 +134,11 @@ export class DeliveryMetrics {
     this.routeTokenHeaders = metrics.counter(
       'delivery_route_token_headers_total',
       'Internal reinjections to a domain of a Microsoft 365 connection with internal routing that carried the X-EG-Route-Token header (step 8.2 D9)',
+    );
+    this.intakeRefusals = metrics.counter(
+      'delivery_intake_refusals_total',
+      'Journal intake messages refused by the delivery-worker (never delivered, step 8.6 D4), by stage (planning, reinjection)',
+      ['stage'],
     );
   }
 

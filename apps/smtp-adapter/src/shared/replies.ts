@@ -132,6 +132,37 @@ export const ATO_SEND_RESTRICTED = 'REJECT 5.7.1 Sending temporarily restricted 
 export const ATO_SEND_RESTRICTED_DEFER =
   'DEFER_IF_PERMIT 4.7.1 Sending temporarily restricted by security policy, try again later';
 
+/**
+ * Step 8.6 D2.2 (ADR-0087): the organization of an intake source is not active, lacks the
+ * `archiving` or `journal_intake` feature, has archiving disabled, or the source is paused. A
+ * temporary refusal: Microsoft 365 and Exchange retry for up to two days, so a short disablement
+ * loses nothing.
+ */
+export const INTAKE_UNAVAILABLE = '450 4.7.1 Journal intake temporarily unavailable';
+
+/**
+ * Step 8.6 D2.2: the client is not the source's sender (provider egress range of the bound
+ * connection, or the source's own networks outside every provider range; the client certificate
+ * when configured), or the bound connection is gone. `550` on the wire (`postfixAction`).
+ */
+export const INTAKE_SENDER_NOT_AUTHORIZED = 'REJECT 5.7.1 Journal intake sender not authorized';
+
+/**
+ * Step 8.6 D2.2.5: an intake transaction carries recipients of exactly one destination (one
+ * source, or tenant domains only); the client retries the rest in a new transaction. Keeps the
+ * recipient-scoped Rspamd setting of intake from touching any tenant's mail (ADR-0087 amending
+ * ADR-0027).
+ */
+export const INTAKE_ONE_DESTINATION = '452 4.5.3 Error: too many recipients';
+
+// --- Journal intake LMTP (step 8.6 D2.7) ---------------------------------------------------------
+
+/** A journal intake message whose content proof failed: accepted and dropped (no backscatter). */
+export const LMTP_INTAKE_DROPPED: SmtpReply = Object.freeze({
+  code: 250,
+  text: '2.0.0 Ok: dropped',
+});
+
 // --- Socketmap answers (D2, D11) ---------------------------------------------------------------
 
 /** relay_domain: active, inbound-enabled tenant domain. */

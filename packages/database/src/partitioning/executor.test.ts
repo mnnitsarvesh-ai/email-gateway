@@ -402,6 +402,10 @@ describe('runPartitionMaintenance', () => {
     expect(REGISTRY_PURGE_SQL).toContain('NOT EXISTS (SELECT 1 FROM `email_archives` a');
     expect(REGISTRY_PURGE_SQL).toContain('a.`deleted_at` IS NULL');
     expect(REGISTRY_PURGE_SQL).toContain('NOT EXISTS (SELECT 1 FROM `quarantine_messages` qm');
+    // Step 8.6 (ADR-0088): a copy merged into another message's archive record keeps its row.
+    expect(REGISTRY_PURGE_SQL).toContain(
+      'NOT EXISTS (SELECT 1 FROM `archive_record_sources` rs WHERE rs.`message_id` = `message_identities`.`id`)',
+    );
     expect(executed.filter((s) => s.includes('message_identities'))).toHaveLength(3);
   });
 

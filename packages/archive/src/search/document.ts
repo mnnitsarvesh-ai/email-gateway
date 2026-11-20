@@ -4,6 +4,7 @@ import { type NumericId } from '../ids';
 import type {
   ArchiveCategory,
   ArchiveRecordStatus,
+  IngestSource,
   MessageDirection,
   ObjectLockMode,
 } from '../vocabulary';
@@ -43,6 +44,10 @@ export interface ArchiveIndexRecord {
   retainUntil: Date | null;
   legalHold: boolean;
   lockMode: ObjectLockMode;
+  /** Step 8.6 `email_archives.source_gateway` (undefined = true, the column default). */
+  sourceGateway?: boolean;
+  /** Step 8.6 `email_archives.source_journal_intake` (undefined = false). */
+  sourceJournalIntake?: boolean;
 }
 
 /** Facts from the record's journal object and latest scan snapshot (optional). */
@@ -87,6 +92,8 @@ export interface ArchiveSearchDocument {
   legal_hold: boolean;
   lock_mode: ObjectLockMode;
   indexed_at: string;
+  /** Step 8.6: the copies merged into the record. */
+  ingest_sources: IngestSource[];
 }
 
 /** The Message-ID search key: trimmed, angle brackets removed, lower-case; null when empty. */
@@ -168,6 +175,10 @@ export function buildArchiveSearchDocument(
     legal_hold: record.legalHold,
     lock_mode: record.lockMode,
     indexed_at: options.now.toISOString(),
+    ingest_sources: [
+      ...(record.sourceGateway !== false ? (['gateway'] as const) : []),
+      ...(record.sourceJournalIntake === true ? (['journal_intake'] as const) : []),
+    ],
   };
   return {
     index: yearlyIndexName(options.prefix, record.receivedAt, options.version ?? 1),

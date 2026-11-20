@@ -2,13 +2,14 @@ import {
   type ArchiveCategory,
   ArchiveDocumentError,
   type ArchiveJournal,
+  type ArchiveJournalMergedFrom,
   archiveJournalSchema,
   isKeyOfOrganization,
 } from '@email-gateway/archive';
 import type { Prisma } from '@email-gateway/database';
 import type { ArchiveStorage } from '../storage/archive-storage';
 import { isMissing } from '../storage/archive-storage';
-import type { MessageFacts } from './facts';
+import type { IntakeFacts, MessageFacts } from './facts';
 
 type JsonValue = Prisma.JsonValue;
 
@@ -119,7 +120,12 @@ export async function readBodies(
 const clip = (value: string | null, max: number): string | null =>
   value === null ? null : value.slice(0, max);
 
-/** The `archive-journal/1` document (A5 step 4, §4.2); validated before it is encrypted. */
+/**
+ * The `archive-journal/1` document (A5 step 4, §4.2); validated before it is encrypted. Step 8.6
+ * (D6, D7): a journal intake message adds the `intake` block (source, kind, format, envelope with
+ * fields, proof codes) and each recipient's envelope `field`; the journal object of a merged copy
+ * names its record in `mergedFrom`.
+ */
 export function buildJournal(input: {
   facts: MessageFacts;
   inputs: JournalInputs;
@@ -130,7 +136,10 @@ export function buildJournal(input: {
   sources: { journal: boolean; policy: boolean };
   policyRuleRef: string | null;
   settingsGeneration: bigint;
+  intake?: IntakeFacts | null;
+  mergedFrom?: ArchiveJournalMergedFrom;
 }): ArchiveJournal {
+  const intake = input.intake ?? null;
   const m = input.facts.message;
   const seqOf = new Map(input.facts.recipients.map((r) => [r.id.toString(), r.seq]));
   const journal: ArchiveJournal = {
@@ -160,12 +169,16 @@ export function buildJournal(input: {
       clientName: clip(m.clientName, 255),
     },
     envelope: {
-      recipients: input.facts.recipients.map((r) => ({
-        seq: r.seq,
-        address: r.address.slice(0, 320),
-        direction: r.direction,
-        status: r.status,
-      })),
+      recipients: input.facts.recipients.map((r) => {
+        const field = intake?.fields.get(r.address.trim().toLowerCase());
+        return {
+          seq: r.seq,
+          address: r.address.slice(0, 320),
+          direction: r.direction,
+          status: r.status,
+          ...(field !== undefined ? { field } : {}),
+        };
+      }),
     },
     headers: input.inputs.headers.map((h) => ({
       name: h.name.slice(0, 128),
@@ -192,6 +205,8 @@ export function buildJournal(input: {
         },
       ];
     }),
+    ...(intake !== null ? { intake: intake.block } : {}),
+    ...(input.mergedFrom !== undefined ? { mergedFrom: input.mergedFrom } : {}),
   };
   const parsed = archiveJournalSchema.safeParse(journal);
   if (!parsed.success) throw new ArchiveDocumentError('archive-journal/1');

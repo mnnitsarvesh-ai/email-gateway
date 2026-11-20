@@ -45,17 +45,41 @@ export function mayCall(operationId: string, granted: ReadonlySet<string>): bool
   );
 }
 
-/** Navigation entries in display order with their gates (design §1.3, P11). */
-export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: string[] | 'any' }> = [
-  { label: 'Dashboard', href: '/dashboard', gate: ['ReportsController_traffic_v1'] },
-  { label: 'Reports', href: '/reports', gate: ['ReportsController_traffic_v1'] },
-  { label: 'Email explorer', href: '/messages', gate: ['MessagesController_list_v1'] },
+/**
+ * Navigation entries in display order with their gates (design §1.3, P11). Step 8.6: `requires`
+ * are permissions needed on top of the gate (Access audit), `gatewayOnly` entries are hidden for
+ * organizations whose `serviceProfile` is `archive_only` (ADR-0090).
+ */
+export interface NavGate {
+  label: string;
+  href: string;
+  gate: string[] | 'any';
+  requires?: string[];
+  gatewayOnly?: boolean;
+}
+
+export const NAV_GATES: ReadonlyArray<NavGate> = [
   {
+    gatewayOnly: true,
+    label: 'Dashboard',
+    href: '/dashboard',
+    gate: ['ReportsController_traffic_v1'],
+  },
+  { gatewayOnly: true, label: 'Reports', href: '/reports', gate: ['ReportsController_traffic_v1'] },
+  {
+    gatewayOnly: true,
+    label: 'Email explorer',
+    href: '/messages',
+    gate: ['MessagesController_list_v1'],
+  },
+  {
+    gatewayOnly: true,
     label: 'Quarantine',
     href: '/quarantine',
     gate: ['QuarantineEntriesController_search_v1', 'QuarantineSelfController_search_v1'],
   },
   {
+    gatewayOnly: true,
     label: 'Mail servers',
     href: '/mail-servers',
     gate: [
@@ -65,24 +89,38 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
     ],
   },
   // Step 8.4: the generic incident list (top of the Security section).
-  { label: 'Incidents', href: '/incidents', gate: ['IncidentsController_list_v1'] },
-  { label: 'Policy management', href: '/policies', gate: ['PolicyManagementController_list_v1'] },
   {
+    gatewayOnly: true,
+    label: 'Incidents',
+    href: '/incidents',
+    gate: ['IncidentsController_list_v1'],
+  },
+  {
+    gatewayOnly: true,
+    label: 'Policy management',
+    href: '/policies',
+    gate: ['PolicyManagementController_list_v1'],
+  },
+  {
+    gatewayOnly: true,
     label: 'Policy builder',
     href: '/policies/builder',
     gate: ['PolicyToolsController_catalog_v1'],
   },
   {
+    gatewayOnly: true,
     label: 'Threat intelligence',
     href: '/threat-intelligence',
     gate: ['ThreatIntelligenceController_lookup_v1', 'ThreatHashesController_list_v1'],
   },
   {
+    gatewayOnly: true,
     label: 'URL protection',
     href: '/url-protection',
     gate: ['UrlProtectionController_clicks_v1', 'ReportsController_urlClicks_v1'],
   },
   {
+    gatewayOnly: true,
     label: 'Attachment analysis',
     href: '/attachments',
     gate: ['AttachmentsController_search_v1', 'AttachmentRescansController_list_v1'],
@@ -98,15 +136,21 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
     href: '/ato/providers',
     gate: ['AtoProvidersController_list_v1'],
   },
-  // Step 8.1: Compliance.
-  { label: 'Archive', href: '/archive', gate: ['ArchiveMessagesController_list_v1'] },
+  // Step 8.1: Compliance; step 8.6: the Archive section (storage and use of archived mail).
+  { label: 'Search', href: '/archive', gate: ['ArchiveMessagesController_list_v1'] },
   {
-    label: 'Retention and review',
+    label: 'Retention and lock',
     href: '/archive/retention',
     gate: ['ArchiveRetentionController_list_v1'],
   },
   { label: 'Legal holds', href: '/legal-holds', gate: ['LegalHoldsController_list_v1'] },
   { label: 'eDiscovery', href: '/ediscovery', gate: ['EdiscoveryCasesController_list_v1'] },
+  {
+    label: 'Access audit',
+    href: '/archive/access-audit',
+    gate: ['AuditLogsController_search_v1'],
+    requires: ['archive:search'],
+  },
   { label: 'Domains', href: '/domains', gate: ['DomainsController_list_v1'] },
   { label: 'Users', href: '/users', gate: ['UsersController_list_v1'] },
   { label: 'Roles and permissions', href: '/roles', gate: ['RolesController_list_v1'] },
@@ -130,10 +174,16 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
 ];
 
 export interface Me {
-  user: { email: string; displayName: string };
-  organization: { id: string; name: string; kind: string };
+  user: { id: string; email: string; displayName: string };
+  organization: {
+    id: string;
+    name: string;
+    kind: string;
+    serviceProfile?: 'gateway' | 'archive_only';
+  };
   roles: string[];
   permissions: string[];
+  session: { id: string; mfaAuthenticated: boolean };
 }
 
 /** `GET /auth/me` through the BFF with the page's session cookie. */
@@ -143,9 +193,22 @@ export async function me(page: Page): Promise<Me> {
   return (await res.json()) as Me;
 }
 
-export function expectedNav(permissions: readonly string[]): string[] {
+export function expectedNav(
+  permissions: readonly string[],
+  profile: 'gateway' | 'archive_only' = 'gateway',
+): string[] {
+  return visibleGates(permissions, profile).map((item) => item.label);
+}
+
+export function visibleGates(
+  permissions: readonly string[],
+  profile: 'gateway' | 'archive_only' = 'gateway',
+): NavGate[] {
   const granted = new Set(permissions);
   return NAV_GATES.filter(
-    (item) => item.gate === 'any' || item.gate.some((op) => mayCall(op, granted)),
-  ).map((item) => item.label);
+    (item) =>
+      !(profile === 'archive_only' && item.gatewayOnly) &&
+      (item.gate === 'any' || item.gate.some((op) => mayCall(op, granted))) &&
+      (item.requires ?? []).every((p) => granted.has(p)),
+  );
 }

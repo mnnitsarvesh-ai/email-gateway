@@ -94,7 +94,13 @@ export function reportCompletion(
     verdict: aggregate.verdict,
     reasonCodes: aggregate.reasonCodes,
     transition: completion.transition,
+    ...(completion.intake !== undefined ? { intake: completion.intake } : {}),
   };
+  if (completion.transition === 'applied' && completion.intake !== undefined) {
+    // Step 8.6 D4: a journal intake round ends the message in `journaled`, never `scanned.v1`.
+    logger.info(log, 'journal intake scan round completed; message journaled, no scanned event');
+    return;
+  }
   if (completion.transition === 'applied') {
     if (aggregate.outcome === 'scanned') logger.info(log, 'scan round completed');
     else logger.warn(log, 'scan round failed');

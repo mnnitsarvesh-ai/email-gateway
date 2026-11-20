@@ -2,6 +2,7 @@ import { Prisma } from '@email-gateway/database';
 import type { CursorDirection } from '../../../http/cursor/cursor-codec';
 import type { ParsedFilter } from '../../../http/listing/list-query';
 import { boundaryOffset } from '../../../http/listing/scan-budget';
+import { GATEWAY_MESSAGE_SQL } from '../../tenant-data/gateway-messages';
 import { clampTake } from '../../tenant-data/page';
 import type { FilterDriver, MessageListDriver } from '../domain/message-list-plan';
 import type { TimeIdKey } from '../domain/v1-list';
@@ -247,7 +248,7 @@ export function messagesPageSql(
   ];
   return Prisma.sql`SELECT ${input.nonce} AS echo_nonce, ${MESSAGE_COLUMNS}
     FROM email_messages m ${forceIndex(spec.index)}
-    WHERE ${messagesWhere(input)}${extra.length > 0 ? Prisma.sql` AND ${allOf(extra)}` : Prisma.empty}
+    WHERE ${messagesWhere(input)} AND ${GATEWAY_MESSAGE_SQL}${extra.length > 0 ? Prisma.sql` AND ${allOf(extra)}` : Prisma.empty}
     ${keysetOrder(M_RECEIVED_AT, M_ID, input.direction)} LIMIT ${clampTake(input.take)}`;
 }
 
@@ -319,7 +320,7 @@ export function recipientPageSql(
             AND ${upToKey(R_RECEIVED_AT, R_ID, input.boundary, input.direction)}) k
     STRAIGHT_JOIN email_messages m ON m.id = k.message_id AND m.received_at = k.received_at
     WHERE m.organization_id = ${input.organizationId} AND ${range(M_RECEIVED_AT, input)}
-      AND ${allOf(input.residuals)}
+      AND ${GATEWAY_MESSAGE_SQL} AND ${allOf(input.residuals)}
     ${keysetOrder(K_RECEIVED_AT, K_ID, input.direction)} LIMIT ${clampTake(input.take)}`;
 }
 
@@ -396,7 +397,7 @@ export function foreignPageSql(
           GROUP BY ${time}, ${message}) k
     STRAIGHT_JOIN email_messages m ON m.id = k.message_id AND m.received_at = k.received_at
     WHERE m.organization_id = ${input.organizationId} AND ${range(M_RECEIVED_AT, input)}
-      AND ${allOf(input.residuals)}
+      AND ${GATEWAY_MESSAGE_SQL} AND ${allOf(input.residuals)}
     ${keysetOrder(M_RECEIVED_AT, M_ID, input.direction)} LIMIT ${clampTake(input.take)}`;
 }
 
@@ -416,7 +417,7 @@ export function messagesByKeysSql(
     ' OR ',
   );
   return Prisma.sql`SELECT ${MESSAGE_COLUMNS} FROM email_messages m
-    WHERE m.organization_id = ${organizationId} AND (${terms})`;
+    WHERE m.organization_id = ${organizationId} AND ${GATEWAY_MESSAGE_SQL} AND (${terms})`;
 }
 
 /** `/*+ MAX_EXECUTION_TIME(n) *\/` of the subject prefix statements (integer from config). */
@@ -465,6 +466,6 @@ export function prefixPageSql(
       AND m.subject_key LIKE ${input.pattern} ESCAPE '!'
       AND ${range(M_RECEIVED_AT, input)}
       AND ${afterKey(M_RECEIVED_AT, M_ID, input.after, input.direction)}
-      AND ${allOf(input.residuals)}
+      AND ${GATEWAY_MESSAGE_SQL} AND ${allOf(input.residuals)}
     ${keysetOrder(M_RECEIVED_AT, M_ID, input.direction)} LIMIT ${clampTake(input.take)}`;
 }

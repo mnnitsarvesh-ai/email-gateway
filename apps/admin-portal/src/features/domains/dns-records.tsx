@@ -8,7 +8,10 @@ import { EmptyState } from '@/components/states/empty-state';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { useApiQuery } from '@/lib/api/hooks';
+import { useArchiveOnly } from '@/lib/auth/me';
 import {
+  ARCHIVE_ONLY_LABEL,
+  ARCHIVE_ONLY_NOT_REQUIRED,
   PURPOSE_LABEL,
   REQUIREMENT_LABEL,
   RecordStatusBadge,
@@ -16,8 +19,9 @@ import {
   type DnsRecord,
 } from './model';
 
-function RecordCard({ record }: { record: DnsRecord }) {
+function RecordCard({ record, archiveOnly }: { record: DnsRecord; archiveOnly: boolean }) {
   const title = `${PURPOSE_LABEL[record.purpose]} record`;
+  const notRequired = archiveOnly && ARCHIVE_ONLY_NOT_REQUIRED.includes(record.purpose);
   return (
     <li className="grid gap-3 rounded-md border bg-card p-3 text-sm" aria-label={title}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -25,7 +29,7 @@ function RecordCard({ record }: { record: DnsRecord }) {
           <h3 className="font-semibold">{title}</h3>
           <span className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-xs">{record.type}</span>
           <span className="text-xs text-muted-foreground">
-            {REQUIREMENT_LABEL[record.requirement]}
+            {notRequired ? ARCHIVE_ONLY_LABEL : REQUIREMENT_LABEL[record.requirement]}
           </span>
         </div>
         <RecordStatusBadge status={record.status} />
@@ -94,6 +98,7 @@ function RecordCard({ record }: { record: DnsRecord }) {
  */
 export function DnsRecordsPanel({ domainId }: { domainId: string }) {
   const records = useApiQuery('DomainDnsController_dnsRecords_v1', { path: { id: domainId } });
+  const archiveOnly = useArchiveOnly();
   if (records.isLoading) return <LoadingState label="Loading DNS records" rows={4} />;
   if (records.error)
     return <ErrorState error={records.error} onRetry={() => void records.refetch()} />;
@@ -107,12 +112,15 @@ export function DnsRecordsPanel({ domainId }: { domainId: string }) {
         <p className="text-sm text-muted-foreground">
           Publish these records at your DNS provider. Changes can take from a few minutes up to the
           record&apos;s TTL to propagate.
+          {archiveOnly
+            ? ' Your organization uses the archive-only plan: only the ownership record is needed; MX, SPF and DKIM are not required because mail does not flow through the gateway.'
+            : ''}
         </p>
         <CopyButton value={all} label="Copy all records" size="sm" />
       </div>
       <ul className="grid min-w-0 gap-3 [&>*]:min-w-0" aria-label="DNS records">
         {data.records.map((record) => (
-          <RecordCard key={record.key} record={record} />
+          <RecordCard key={record.key} record={record} archiveOnly={archiveOnly} />
         ))}
       </ul>
       {data.cleanup.length > 0 ? (

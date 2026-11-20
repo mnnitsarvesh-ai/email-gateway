@@ -8,6 +8,8 @@ export interface UsageCounts {
   domainsByStatus: Map<DomainStatus, number>;
   messagesByDirection: Map<MessageDirection, number>;
   messagesToday: number;
+  /** Step 8.6 D5: journal intake messages since the start of today (not in the others). */
+  journalIntakeToday: number;
   quarantineActive: number;
   apiKeysActive: number;
   sessionsActive: number;
@@ -30,48 +32,64 @@ export class OrganizationUsageRepository {
   ): Promise<UsageCounts> {
     const db = this.reader.client;
     const organizationId = org.id;
-    const [users, domains, messages, today, quarantine, apiKeys, sessions] = await Promise.all([
-      db.user.groupBy({
-        by: ['status'],
-        where: { organizationId, deletedAt: null },
-        _count: { _all: true },
-      }),
-      db.domain.groupBy({
-        by: ['status'],
-        where: { organizationId, status: { not: 'deleted' } },
-        _count: { _all: true },
-      }),
-      db.emailMessage.groupBy({
-        by: ['direction'],
-        where: { organizationId, receivedAt: { gte: period.from, lt: period.to } },
-        _count: { _all: true },
-      }),
-      db.emailMessage.count({ where: { organizationId, receivedAt: { gte: startOfToday } } }),
-      db.quarantineMessage.count({
-        where: { organizationId, status: { in: ['held', 'pending_approval', 'releasing'] } },
-      }),
-      db.apiKey.count({
-        where: {
-          organizationId,
-          revokedAt: null,
-          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-        },
-      }),
-      // One live row per session family (D5).
-      db.userSession.count({
-        where: {
-          organizationId,
-          revokedAt: null,
-          expiresAt: { gt: now },
-          absoluteExpiresAt: { gt: now },
-        },
-      }),
-    ]);
+    const [users, domains, messages, today, intakeToday, quarantine, apiKeys, sessions] =
+      await Promise.all([
+        db.user.groupBy({
+          by: ['status'],
+          where: { organizationId, deletedAt: null },
+          _count: { _all: true },
+        }),
+        db.domain.groupBy({
+          by: ['status'],
+          where: { organizationId, status: { not: 'deleted' } },
+          _count: { _all: true },
+        }),
+        // Step 8.6 D5: gateway messages only; journal intake is counted on its own.
+        db.emailMessage.groupBy({
+          by: ['direction'],
+          where: {
+            organizationId,
+            receivedAt: { gte: period.from, lt: period.to },
+            ingestSource: 'gateway',
+          },
+          _count: { _all: true },
+        }),
+        db.emailMessage.count({
+          where: { organizationId, receivedAt: { gte: startOfToday }, ingestSource: 'gateway' },
+        }),
+        db.emailMessage.count({
+          where: {
+            organizationId,
+            receivedAt: { gte: startOfToday },
+            ingestSource: 'journal_intake',
+          },
+        }),
+        db.quarantineMessage.count({
+          where: { organizationId, status: { in: ['held', 'pending_approval', 'releasing'] } },
+        }),
+        db.apiKey.count({
+          where: {
+            organizationId,
+            revokedAt: null,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          },
+        }),
+        // One live row per session family (D5).
+        db.userSession.count({
+          where: {
+            organizationId,
+            revokedAt: null,
+            expiresAt: { gt: now },
+            absoluteExpiresAt: { gt: now },
+          },
+        }),
+      ]);
     return {
       usersByStatus: new Map(users.map((r) => [r.status, r._count._all])),
       domainsByStatus: new Map(domains.map((r) => [r.status, r._count._all])),
       messagesByDirection: new Map(messages.map((r) => [r.direction, r._count._all])),
       messagesToday: today,
+      journalIntakeToday: intakeToday,
       quarantineActive: quarantine,
       apiKeysActive: apiKeys,
       sessionsActive: sessions,

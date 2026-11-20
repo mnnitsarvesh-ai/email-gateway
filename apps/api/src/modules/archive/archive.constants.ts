@@ -17,6 +17,9 @@ export const ARCHIVE_PERMISSIONS = {
   ediscovery: 'ediscovery:manage',
   reveal: 'message:reveal',
   dlpRead: 'dlp:read',
+  /** Step 8.6 D12 (ADR-0089): the Journaling area (capture settings, intake sources). */
+  journalRead: 'journal:read',
+  journalManage: 'journal:manage',
 } as const;
 
 /** Plan feature that gates archiving (A20) and the plan limit that caps retention (A11). */

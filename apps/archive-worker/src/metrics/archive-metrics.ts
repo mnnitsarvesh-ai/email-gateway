@@ -36,6 +36,20 @@ export class ArchiveMetrics {
   readonly integrityFailures: Counter;
   /** 1 while this replica holds the named leader lock (operations view; not in A27's alert set). */
   readonly leader: Gauge<'job'>;
+  /**
+   * Step 8.6 D7 (ADR-0088): cross-source dedupe decisions of the capture executor, by result
+   * (merged, merged_variant, no_candidate, no_key, scope_gateway_gateway, variant_limit,
+   * merged_limit, record_inactive, outside_window, candidate_changed).
+   */
+  readonly dedupe: Counter<'result'>;
+  /** Step 8.6 D9: non-disabled journal intake sources by health (leader-written). */
+  readonly intakeSources: Gauge<'health'>;
+  /** Step 8.6 D9: health transitions written by the intake health job, by new health. */
+  readonly intakeHealthTransitions: Counter<'health'>;
+  /** Step 8.6 D9: `journal_intake_silent` alert requests, by result (requested, throttled). */
+  readonly intakeAlerts: Counter<'result'>;
+  /** Step 8.6: rows pruned by the lifecycle maintenance, by table. */
+  readonly pruned: Counter<'table'>;
 
   constructor(metrics: MetricsService) {
     this.captures = metrics.counter(
@@ -162,6 +176,31 @@ export class ArchiveMetrics {
       'archive_leader',
       'Leader-elected jobs this replica currently runs (1) or not (0), by job',
       ['job'],
+    );
+    this.dedupe = metrics.counter(
+      'archive_dedupe_total',
+      'Cross-source dedupe decisions of the capture executor (step 8.6), by result (merged, merged_variant, no_candidate, no_key, scope_gateway_gateway, variant_limit, merged_limit, record_inactive, outside_window, candidate_changed)',
+      ['result'],
+    );
+    this.intakeSources = metrics.gauge(
+      'journal_intake_sources',
+      'Journal intake sources that are not disabled, by health (unknown, healthy, silent, failing, paused); written by the intake health leader',
+      ['health'],
+    );
+    this.intakeHealthTransitions = metrics.counter(
+      'archive_intake_health_transitions_total',
+      'Journal intake source health transitions written by the intake health job, by new health',
+      ['health'],
+    );
+    this.intakeAlerts = metrics.counter(
+      'archive_intake_alerts_total',
+      'journal_intake_silent alert requests of the intake health job, by result (requested, throttled)',
+      ['result'],
+    );
+    this.pruned = metrics.counter(
+      'archive_pruned_rows_total',
+      'Rows pruned by the lifecycle maintenance (step 8.6), by table (archive_dedupe_keys, journal_intake_counters)',
+      ['table'],
     );
   }
 }

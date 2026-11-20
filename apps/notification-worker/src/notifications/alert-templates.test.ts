@@ -229,3 +229,46 @@ describe('integration_unhealthy template (step 8.2 D12)', () => {
     expect(text).toContain('Connection: Contoso');
   });
 });
+
+describe('journal_intake_silent template (step 8.6 D9)', () => {
+  const SOURCE = '0192f0c4-bbbb-7ccc-8ddd-000000000086';
+  const intake = (
+    over: Partial<Extract<AlertFacts, { kind: 'journal_intake_silent' }>['intake']> = {},
+  ) =>
+    ({
+      ...common,
+      severity: 'medium',
+      kind: 'journal_intake_silent',
+      intake: {
+        sourcePublicId: SOURCE,
+        name: 'On-prem journal',
+        sourceKind: 'exchange_onprem_journal',
+        healthNow: 'silent',
+        lastAcceptedAt: null,
+        silenceAlertMinutes: 60,
+        ...over,
+      },
+    }) as AlertFacts;
+
+  it('names the source and kind, says silent, links the intake page; never an address', () => {
+    const notice = renderSecurityAlert(intake());
+    expect(notice.subject).toBe(
+      '[Email Gateway] Security alert (medium): journal intake source needs attention',
+    );
+    expect(notice.text).toContain(`Journal intake source: On-prem journal (${SOURCE})`);
+    expect(notice.text).toContain('Source kind: On-premises Exchange journaling');
+    expect(notice.text).toContain('Problem: silent.');
+    expect(notice.text).toContain('Last accepted message: unknown');
+    expect(notice.text).toContain(`${PORTAL}/settings/journaling/intake/${SOURCE}`);
+  });
+
+  it('hides a display name that looks like an address; unknown kinds and codes are neutral', () => {
+    const notice = renderSecurityAlert(
+      intake({ name: 'journal-abc@journal.gateway.test', sourceKind: 'other', healthNow: 'X!' }),
+    );
+    expect(notice.text).toContain('(name not shown)');
+    expect(notice.text).toContain('Source kind: unknown');
+    expect(notice.text).toContain('Health now: unknown');
+    expect(notice.text).not.toContain('journal.gateway.test');
+  });
+});

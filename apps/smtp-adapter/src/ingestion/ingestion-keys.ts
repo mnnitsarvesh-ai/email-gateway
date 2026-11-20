@@ -1,17 +1,25 @@
 import { createHash } from 'node:crypto';
 
-export type IngestDirection = 'inbound' | 'outbound';
+/** The gateway LMTP listeners (`:10050` inbound, `:10051` outbound). */
+export type GatewayDirection = 'inbound' | 'outbound';
+
+/**
+ * The listener of a queue file: the gateway listeners, or step 8.6's journal intake listener
+ * (`:10053`, `journal`). Ingest key and object key input only (`email_messages.direction` of an
+ * intake message is computed from its parties, D3).
+ */
+export type IngestDirection = GatewayDirection | 'journal';
 
 export const sha256Hex = (value: string): string =>
   createHash('sha256').update(value, 'utf8').digest('hex');
 
 /** Identifies one Postfix queue file as seen by one LMTP listener. */
-export interface QueueFileRef {
+export interface QueueFileRef<D extends IngestDirection = IngestDirection> {
   /** The LMTP client's LHLO name (Postfix `myhostname`). */
   mtaId: string;
   /** XFORWARD IDENT (Postfix long queue id). */
   queueId: string;
-  direction: IngestDirection;
+  direction: D;
 }
 
 /**

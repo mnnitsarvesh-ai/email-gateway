@@ -203,7 +203,7 @@ describe('recipient driver (step 6.1 plan 3; step 7.2 budgeted)', () => {
       { id: 2n, receivedAt: range.to },
     ]);
     expect(flat(sql)).toContain(
-      'WHERE m.organization_id = ? AND ((m.id = ? AND m.received_at = ?) OR (m.id = ? AND m.received_at = ?))',
+      "WHERE m.organization_id = ? AND m.ingest_source = 'gateway' AND ((m.id = ? AND m.received_at = ?) OR (m.id = ? AND m.received_at = ?))",
     );
     expect(sql.values).toEqual([7n, 1n, range.from, 2n, range.to]);
     expect(() => messagesByKeysSql(7n, [])).toThrow();
@@ -307,5 +307,41 @@ describe('subject prefix driver (step 7.2 §2 E1)', () => {
     expect(() => maxExecutionTime(0)).toThrow();
     expect(() => maxExecutionTime(1.5)).toThrow();
     expect(maxExecutionTime(5).sql).toBe('/*+ MAX_EXECUTION_TIME(5) */');
+  });
+});
+
+describe('gateway views exclude journal intake messages (step 8.6 D5)', () => {
+  const GATEWAY = "m.ingest_source = 'gateway'";
+  const boundary = { at: new Date('2026-11-11T06:00:00Z'), id: 5n };
+
+  it('every page and key read carries the gateway predicate (no bound value)', () => {
+    const pages = [
+      messagesPageSql({ ...base, driver: 'none', take: 26, after }),
+      messagesPageSql({ ...base, driver: 'verdict', key: 'malicious', take: 26, boundary }),
+      recipientPageSql({ ...base, address: 'a@example.com', take: 26, boundary, residuals: [] }),
+      foreignPageSql({
+        ...base,
+        driver: Object.keys(FOREIGN_DRIVERS)[0] as keyof typeof FOREIGN_DRIVERS,
+        key: 'k',
+        take: 26,
+        boundary,
+        residuals: [],
+      }),
+      messagesByKeysSql(7n, [{ id: 1n, receivedAt: range.from }]),
+      prefixPageSql({ ...base, pattern: 'abc%', take: 26, timeoutMs: 1000, residuals: [] }),
+    ];
+    for (const sql of pages) {
+      expect(flat(sql)).toContain(GATEWAY);
+      expect(sql.values).not.toContain('gateway');
+    }
+  });
+
+  it('the index-only budget boundaries do not (they bound a scan, not the result)', () => {
+    expect(flat(messagesBoundarySql({ ...base, driver: 'none', budget: 100 }))).not.toContain(
+      GATEWAY,
+    );
+    expect(
+      flat(recipientBoundarySql({ ...base, address: 'a@example.com', budget: 100 })),
+    ).not.toContain(GATEWAY);
   });
 });

@@ -46,6 +46,14 @@ export function approvalObjectLabel(key: string, organizationId: bigint): Approv
   return 'original';
 }
 
+/**
+ * Step 8.6 D4 (ADR-0087, defence in depth): a journal intake message (`email_messages.
+ * ingest_source = journal_intake`) is never planned or reinjected. Upstream it never reaches the
+ * policy engine, so an approval for one is a fault or a forgery: refused with this code, an error
+ * log and `delivery_intake_refusals_total{stage}`, the message untouched.
+ */
+export const INTAKE_NOT_DELIVERABLE = 'intake_not_deliverable';
+
 /** Dead-letter reasons of an approval the gateway never issued (`NonRetryableError` codes). */
 export const APPROVAL_NOT_ISSUED = 'approval_not_issued';
 export const APPROVAL_MISMATCH = 'approval_mismatch';
@@ -91,7 +99,12 @@ export interface PlannerConfig {
 
 export interface PlanResult {
   status: 'planned' | 'duplicate' | 'rejected';
-  reason?: 'eml_key_prefix' | 'message_not_found' | 'no_known_recipients' | 'lifecycle_state';
+  reason?:
+    | 'eml_key_prefix'
+    | 'message_not_found'
+    | 'no_known_recipients'
+    | 'lifecycle_state'
+    | typeof INTAKE_NOT_DELIVERABLE;
   reinjections: number;
   deliveries: number;
   refused: number;
@@ -193,11 +206,19 @@ export class DeliveryPlanner {
     // longer than an approval waits), so the order adds no window for forged approvals.
     const message = await tx.emailMessage.findFirst({
       where: { id: messageId, receivedAt, organizationId },
-      select: { id: true, direction: true },
+      select: { id: true, direction: true, ingestSource: true },
     });
     if (!message) {
       this.logger.warn(ids, 'approved message not found for the organization; rejected');
       return empty('rejected', 'message_not_found');
+    }
+    if (message.ingestSource === 'journal_intake') {
+      this.deps.metrics.intakeRefusals.inc({ stage: 'planning' });
+      this.logger.error(
+        { ...ids, reason: INTAKE_NOT_DELIVERABLE },
+        'approval of a journal intake message refused: intake messages are never delivered',
+      );
+      return empty('rejected', INTAKE_NOT_DELIVERABLE);
     }
     try {
       await assertApprovalIssued(tx, event, organizationId, receivedAt);

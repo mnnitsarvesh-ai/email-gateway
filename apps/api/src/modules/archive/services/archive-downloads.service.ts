@@ -30,6 +30,7 @@ import {
   exportNotFound,
   exportNotReady,
   reauthFailed,
+  archiveVariantNotFound,
 } from '../archive.errors';
 import type { DownloadGrantBody, DownloadGrantView } from '../dto/archive.schemas';
 import { ArchiveConfigRepository } from '../repositories/archive-config.repository';
@@ -40,6 +41,7 @@ import {
 import {
   ArchiveRecordsRepository,
   type RecordRow,
+  type RecordSourceRow,
 } from '../repositories/archive-records.repository';
 import { asUser, refuseOverride } from './archive-common';
 import { ArchiveContentService } from './archive-content.service';
@@ -59,7 +61,7 @@ export const EXPORT_DOWNLOAD_AUDIT = {
 
 /** What a grant targets: one archived message or one completed export (writer facts). */
 export type GrantTarget =
-  | { kind: 'message'; record: RecordRow }
+  | { kind: 'message'; record: RecordRow; variant?: RecordSourceRow }
   | { kind: 'export'; row: ExportDownloadRow; casePublicId: string };
 
 /** The streamed download (`Content-Disposition: attachment`). */
@@ -70,6 +72,8 @@ export interface ArchiveDownload {
 }
 
 const messageFilename = (publicId: string) => `message-${publicId}.eml`;
+const variantFilename = (recordId: string, copyId: string) =>
+  `message-${recordId}.variant-${copyId}.eml`;
 const exportFilename = (publicId: string) => `ediscovery-export-${publicId}.zip`;
 
 /**
@@ -127,7 +131,20 @@ export class ArchiveDownloadsService {
       this.content.count('download_grant', 'blocked');
       throw archiveDownloadBlocked('malicious');
     }
-    return this.issue(user, scope, { kind: 'message', record }, body, client);
+    let variant: RecordSourceRow | undefined;
+    if (body.variant !== undefined) {
+      const wanted = body.variant.toLowerCase();
+      const copies = await this.records.recordSources(scope, record, 'writer');
+      variant = copies.find((c) => c.messagePublicId === wanted && c.contentVariant);
+      if (variant === undefined) throw archiveVariantNotFound();
+    }
+    return this.issue(
+      user,
+      scope,
+      { kind: 'message', record, ...(variant !== undefined && { variant }) },
+      body,
+      client,
+    );
   }
 
   /** Export grants (#41): the ediscovery service resolves and checks the export first. */
@@ -170,8 +187,13 @@ export class ArchiveDownloadsService {
         jti,
         userId: user.userId,
         kind: target.kind,
-        messageId: target.kind === 'message' ? target.record.messageId : null,
-        messageReceivedAt: target.kind === 'message' ? target.record.receivedAt : null,
+        // A variant grant is bound to the merged copy's own registry key (step 8.6).
+        messageId:
+          target.kind === 'message' ? (target.variant?.messageId ?? target.record.messageId) : null,
+        messageReceivedAt:
+          target.kind === 'message'
+            ? (target.variant?.messageReceivedAt ?? target.record.receivedAt)
+            : null,
         exportId: target.kind === 'export' ? target.row.id : null,
         expiresAt,
         sourceIp: client.ip,
@@ -262,7 +284,9 @@ export class ArchiveDownloadsService {
     const t = this.describe(target);
     const body =
       target.kind === 'message'
-        ? await this.content.openEml(scope, target.record)
+        ? target.variant !== undefined
+          ? await this.content.openVariantEml(scope, target.record, target.variant)
+          : await this.content.openEml(scope, target.record)
         : await this.content.openExport(scope, target.row);
     this.content.count('download', target.kind);
     return { body, sizeBytes: t.sizeBytes, filename: t.filename };
@@ -287,12 +311,20 @@ export class ArchiveDownloadsService {
       ) {
         throw archiveDownloadTokenInvalid();
       }
-      const record = await this.records.record(scope, key, tx);
+      let record = await this.records.record(scope, key, tx);
+      let variant: RecordSourceRow | undefined;
+      if (record === null) {
+        // Step 8.6: a variant grant targets a merged copy; its record is found through it.
+        const merged = await this.records.recordOfMergedCopy(scope, key, tx);
+        if (merged === null || !merged.source.contentVariant) throw archiveContentUnavailable();
+        variant = merged.source;
+        record = await this.records.record(scope, merged.record, tx);
+      }
       if (record === null || record.status === 'disposing' || record.wrappedDek === null) {
         throw archiveContentUnavailable();
       }
       if (record.malicious) throw archiveDownloadBlocked('malicious');
-      return { kind: 'message', record };
+      return { kind: 'message', record, ...(variant !== undefined && { variant }) };
     }
     const row = await this.grants.exportForDownload(tx, scope, targetPublicId);
     if (row === null || grant.exportId === null || row.id !== grant.exportId) {
@@ -323,6 +355,18 @@ export class ArchiveDownloadsService {
     sha256: string;
     ids: Record<string, string>;
   } {
+    if (target.kind === 'message' && target.variant !== undefined) {
+      const r = target.record;
+      const v = target.variant;
+      return {
+        publicId: v.messagePublicId,
+        resourceType: ARCHIVE_RESOURCE.message,
+        filename: variantFilename(r.messagePublicId, v.messagePublicId),
+        sizeBytes: v.sizeBytes,
+        sha256: v.emlSha256,
+        ids: { messageId: r.messagePublicId, variantId: v.messagePublicId },
+      };
+    }
     if (target.kind === 'message') {
       const r = target.record;
       return {

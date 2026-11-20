@@ -23,6 +23,7 @@ describe('role permission fixtures', () => {
       CA: 'compliance_auditor',
       RO: 'read_only_user',
       MU: 'mailbox_user',
+      CO: 'compliance_officer',
     };
     const parsed: Record<string, string[]> = Object.fromEntries(
       columns.map((c) => [abbreviations[c] ?? c, []]),

@@ -37,6 +37,13 @@ export type DownloadGrant = SuccessBody<'ArchiveMessagesController_grant_v1'>;
 export const ARCHIVE_DIRECTIONS = ['inbound', 'outbound', 'internal'] as const;
 export const ARCHIVE_CATEGORIES = ['delivered', 'rejected', 'quarantined', 'failed'] as const;
 export const ARCHIVE_SOURCES = ['journal', 'policy'] as const;
+/** Step 8.6: where a record's copies came from (API filter `ingestSource`, field `ingestSources`). */
+export const ARCHIVE_INGEST_SOURCES = ['gateway', 'journal_intake'] as const;
+export type ArchiveIngestSource = (typeof ARCHIVE_INGEST_SOURCES)[number];
+export const INGEST_SOURCE_LABEL: Record<ArchiveIngestSource, string> = {
+  gateway: 'Gateway',
+  journal_intake: 'Journal intake',
+};
 export const ARCHIVE_RECORD_STATUSES = ['active', 'expiry_review', 'disposing'] as const;
 export const ARCHIVE_VERDICTS = [
   'clean',
@@ -157,7 +164,8 @@ export const caseHref = (caseId: string, tab?: string) =>
   `/ediscovery/${enc(caseId)}${tab ? `?tab=${enc(tab)}` : ''}`;
 export const caseSearchHref = (caseId: string, searchId: string) =>
   `/ediscovery/${enc(caseId)}/searches/${enc(searchId)}`;
-export const archiveSettingsHref = '/settings?tab=archive';
+/** Step 8.6: immutability, default retention and keys moved to Archive → Retention and lock. */
+export const archiveSettingsHref = '/archive/retention?tab=immutability';
 /** The BFF download door (design P12): the browser navigates here; the token is never stored. */
 export const archiveDownloadHref = (token: string) => `/bff/api/v1/archive/downloads/${enc(token)}`;
 /** Search link of the records a hold covers now (informational, A12). */

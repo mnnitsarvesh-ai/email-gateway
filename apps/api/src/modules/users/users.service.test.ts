@@ -41,6 +41,7 @@ const ROLES = {
   organization_admin: roleRecord('organization_admin', 3n),
   domain_admin: roleRecord('domain_admin', 4n),
   read_only_user: roleRecord('read_only_user', 8n),
+  compliance_officer: roleRecord('compliance_officer', 10n),
 };
 
 function userRecord(overrides: Partial<UserRecord> = {}): UserRecord {
@@ -554,5 +555,153 @@ describe('target-side no escalation and the platform override (D8, D9)', () => {
     await t.service.updateProfile(operator, scope, TARGET_ID, { displayName: 'Fixed' }, client);
     await t.service.changeStatus(operator, scope, TARGET_ID, { status: 'disabled' }, client);
     expect(t.users.setStatus).toHaveBeenCalled();
+  });
+});
+
+describe('archive access delegation and audit (step 8.6 D12, ADR-0089)', () => {
+  /** An organization administrator after 8.6: every permission of the role, no archive access. */
+  const orgAdmin = actor(ROLES.organization_admin.permissions);
+  const archiveAudits = (t: ReturnType<typeof setup>) =>
+    t.audit.record.mock.calls
+      .map((c) => (c as unknown[])[0] as { action: string; metadata: Record<string, unknown> })
+      .filter((e) => e.action.startsWith('rbac.archive_access_'));
+
+  it('the organization_admin role holds no archive access but user:manage', () => {
+    expect(orgAdmin.permissions.has('archive:search')).toBe(false);
+    expect(orgAdmin.permissions.has('user:manage')).toBe(true);
+    expect(orgAdmin.permissions.has('journal:manage')).toBe(true);
+  });
+
+  it('an organization admin assigns compliance_officer: allowed and audited as granted', async () => {
+    const t = setup();
+    await t.service.replaceRoles(
+      orgAdmin,
+      scope,
+      TARGET_ID,
+      ['read_only_user', 'compliance_officer'],
+      client,
+    );
+    expect(t.users.replaceRoles).toHaveBeenCalled();
+    expect(archiveAudits(t)).toEqual([
+      expect.objectContaining({
+        action: 'rbac.archive_access_granted',
+        resourceType: 'user',
+        resourceId: TARGET_ID,
+        metadata: {
+          roleKey: 'compliance_officer',
+          userId: TARGET_ID,
+          permissions: [
+            'archive:export',
+            'archive:legal_hold',
+            'archive:manage',
+            'archive:retrieve',
+            'archive:search',
+            'ediscovery:manage',
+          ],
+        },
+      }),
+    ]);
+  });
+
+  it('removing compliance_officer is audited as revoked', async () => {
+    const t = setup(
+      userRecord({
+        roles: [
+          { id: 8n, key: 'read_only_user', name: 'Read-only User' },
+          { id: 10n, key: 'compliance_officer', name: 'Compliance Officer' },
+        ],
+      }),
+    );
+    await t.service.replaceRoles(orgAdmin, scope, TARGET_ID, ['read_only_user'], client);
+    expect(archiveAudits(t).map((e) => [e.action, e.metadata.roleKey])).toEqual([
+      ['rbac.archive_access_revoked', 'compliance_officer'],
+    ]);
+  });
+
+  it('a role change without archive access writes no extra row', async () => {
+    const t = setup();
+    await t.service.replaceRoles(admin, scope, TARGET_ID, ['domain_admin'], client);
+    expect(archiveAudits(t)).toEqual([]);
+  });
+
+  it('an invitation with compliance_officer is audited as granted', async () => {
+    const t = setup(null);
+    await t.service
+      .invite(
+        orgAdmin,
+        scope,
+        { email: 'co@example.test', displayName: 'CO', roleKeys: ['compliance_officer'] },
+        client,
+      )
+      .catch(() => undefined);
+    expect(archiveAudits(t).map((e) => e.action)).toEqual(['rbac.archive_access_granted']);
+  });
+
+  it('an organization admin cannot grant itself compliance_officer (403, nothing written)', async () => {
+    const t = setup(userRecord({ id: 1n }));
+    await expect(
+      t.service.replaceRoles(
+        orgAdmin,
+        scope,
+        TARGET_ID,
+        ['organization_admin', 'compliance_officer'],
+        client,
+      ),
+    ).rejects.toThrow(/cannot grant yourself archive access/);
+    expect(t.users.replaceRoles).not.toHaveBeenCalled();
+    expect(archiveAudits(t)).toEqual([]);
+  });
+
+  it('archive access is not delegable without MFA or by an API key (403)', async () => {
+    const noMfa = { ...orgAdmin, mfaAuthenticated: false };
+    const key: ApiKeyPrincipal = {
+      kind: 'api_key',
+      apiKeyId: 9n,
+      apiKeyPublicId: '0190a0b0-0000-7000-8000-000000000009',
+      organizationId: 7n,
+      organizationPublicId: '0190a0b0-0000-7000-8000-000000000007',
+      permissions: orgAdmin.permissions,
+    };
+    for (const [principal, reason] of [
+      [noMfa, /multi-factor/],
+      [key, /not by an API key/],
+    ] as const) {
+      const t = setup();
+      await expect(
+        t.service.replaceRoles(principal, scope, TARGET_ID, ['compliance_officer'], client),
+      ).rejects.toThrow(reason);
+      expect(t.users.replaceRoles).not.toHaveBeenCalled();
+      const invite = setup(null);
+      await expect(
+        invite.service.invite(
+          principal,
+          scope,
+          { email: 'co@example.test', displayName: 'CO', roleKeys: ['compliance_officer'] },
+          client,
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(invite.users.createInvited).not.toHaveBeenCalled();
+    }
+    // Removing it from someone else is a delegation too.
+    const t = setup(
+      userRecord({
+        roles: [
+          { id: 8n, key: 'read_only_user', name: 'Read-only User' },
+          { id: 10n, key: 'compliance_officer', name: 'Compliance Officer' },
+        ],
+      }),
+    );
+    await expect(
+      t.service.replaceRoles(key, scope, TARGET_ID, ['read_only_user'], client),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('without user:manage archive access is not delegable (no escalation, 403)', async () => {
+    const t = setup();
+    const limited = actor(ROLES.organization_admin.permissions.filter((p) => p !== 'user:manage'));
+    await expect(
+      t.service.replaceRoles(limited, scope, TARGET_ID, ['compliance_officer'], client),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(t.users.replaceRoles).not.toHaveBeenCalled();
   });
 });

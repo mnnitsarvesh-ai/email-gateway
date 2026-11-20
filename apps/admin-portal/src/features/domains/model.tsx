@@ -71,6 +71,10 @@ export const PURPOSE_LABEL: Record<DnsRecord['purpose'], string> = {
   tls_rpt: 'TLS-RPT',
 };
 
+/** Records an archive-only organization does not need: mail never flows through the gateway. */
+export const ARCHIVE_ONLY_NOT_REQUIRED: readonly DnsRecord['purpose'][] = ['mx', 'spf', 'dkim'];
+export const ARCHIVE_ONLY_LABEL = 'Not required for archive-only';
+
 export const REQUIREMENT_LABEL: Record<DnsRecord['requirement'], string> = {
   activation: 'Required to activate',
   inbound: 'Required for inbound mail',

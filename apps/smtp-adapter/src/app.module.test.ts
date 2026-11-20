@@ -14,10 +14,11 @@ import { AppModule } from './app.module';
 import { BOUNCES_HEALTH_INDICATORS } from './bounces/bounces.module';
 import { loadSmtpAdapterConfig } from './config';
 import { INGESTION_HEALTH_INDICATORS } from './ingestion/ingestion.module';
+import { JournalIntakePolicy } from './journal-intake/journal-intake-policy.service';
 
 /** Six distinct ephemeral high ports so the real listeners can bind during the test. */
 const base = 40_000 + Math.floor(Math.random() * 2_000) * 10;
-const config = loadSmtpAdapterConfig({
+const ENV: Record<string, string> = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
   REDIS_URL: 'redis://localhost:6379',
   S3_REGION: 'ap-south-1',
@@ -36,7 +37,8 @@ const config = loadSmtpAdapterConfig({
   // The invalidator would query the (stubbed) database on boot.
   SMTP_CACHE_INVALIDATION_POLL_MS: '0',
   LOG_LEVEL: 'fatal',
-});
+};
+const config = loadSmtpAdapterConfig(ENV);
 
 const stub = (healthName: string) => ({ healthName, checkHealth: () => Promise.resolve() });
 
@@ -68,10 +70,47 @@ describe('AppModule wiring', () => {
       ]);
       expect(lmtpChecks.length).toBeGreaterThanOrEqual(3);
       expect(report.status).toBe('ok');
+      // Journal intake is off without JOURNAL_INTAKE_DOMAIN (step 8.6 D1).
+      expect(() => moduleRef.get(JournalIntakePolicy, { strict: false })).toThrow();
       // Metrics registry is global (GET /metrics) and shared by every component.
       expect(moduleRef.get(MetricsService, { strict: false })).toBeInstanceOf(MetricsService);
       // Data plane is writer-only (ADR-0014): the read replica is not even registered.
       expect(() => moduleRef.get(PrismaReadService, { strict: false })).toThrow();
+    } finally {
+      await moduleRef.close();
+    }
+  });
+
+  it('wires journal intake (policy branch, :10053 listener, lmtp-journal check) only when on', async () => {
+    const intakeConfig = loadSmtpAdapterConfig({
+      ...ENV,
+      POLICY_PORT: String(base + 6),
+      SOCKETMAP_PORT: String(base + 7),
+      SASL_AUTH_PORT: String(base + 8),
+      LMTP_INBOUND_PORT: String(base + 9),
+      LMTP_OUTBOUND_PORT: String(base + 10),
+      LMTP_BOUNCE_PORT: String(base + 11),
+      LMTP_JOURNAL_PORT: String(base + 12),
+      JOURNAL_INTAKE_DOMAIN: 'journal.gateway.test',
+    });
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule.forRoot(intakeConfig)],
+    })
+      .overrideProvider(PrismaService)
+      .useValue({ ...stub('mysql'), providerEgressRange: { findMany: () => Promise.resolve([]) } })
+      .overrideProvider(RedisService)
+      .useValue(stub('redis'))
+      .overrideProvider(S3Service)
+      .useValue(stub('s3'))
+      .compile();
+    await moduleRef.init();
+    try {
+      const report = await moduleRef.get(HealthService).readiness();
+      expect(report.checks.map((c) => c.name)).toContain('lmtp-journal');
+      expect(moduleRef.get(JournalIntakePolicy, { strict: false })).toBeInstanceOf(
+        JournalIntakePolicy,
+      );
+      expect(report.status).toBe('ok');
     } finally {
       await moduleRef.close();
     }
