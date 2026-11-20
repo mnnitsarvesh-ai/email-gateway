@@ -186,6 +186,8 @@ unset READ_HASH ENABLE_HASH CONTROLLER_PASSWORD CONTROLLER_ENABLE_PASSWORD
 # ---------------------------------------------------------------- redis.conf
 # With RSPAMD_DNS_SERVERS set, Rspamd's own resolver (e.g. the test dns-sink) cannot resolve
 # Compose service names, so the Redis host is resolved here with the system resolver.
+# Resolved once: the Redis address must be stable (Compose: redis fixed at 172.31.254.10 on
+# rspamd-state; production: a stable endpoint), or Rspamd needs a restart after it changes.
 REDIS_TARGET=$REDIS_SERVERS
 if [ -n "$NAMESERVERS" ]; then
   _host=${REDIS_SERVERS%:*}

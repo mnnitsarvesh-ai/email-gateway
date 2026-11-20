@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { purgeDormantQueues } from './support/broker';
-import { composeOk, waitFor } from './support/compose';
+import { waitFor } from './support/compose';
 import {
   deliveriesOf,
   reinjectionsOf,
@@ -12,6 +12,7 @@ import {
 import { startWorker, stopWorker, workerHealth } from './support/delivery-worker';
 import { clearSinkDomain, sinkFiles } from './support/mail-sink';
 import { involving, listQueue } from './support/postfix';
+import { startRedis as startRedisAndRspamd, stopRedis } from './support/redis';
 import { MAIL_SINK_HOST, sendingDomain, sleep, submit } from './support/routing';
 import { routingStackGate } from './support/routing-stack';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
@@ -42,7 +43,8 @@ const extDomains = () => [1, 2, 3].map((n) => fx.sinkDomain(`rl-ext${n}`));
 const redisExt = () => fx.sinkDomain('rl-redis-ext');
 
 async function startRedis() {
-  await composeOk(['up', '-d', '--wait', '--no-deps', 'redis'], { timeoutMs: 120_000 });
+  // Also restarts Rspamd and waits until it is healthy (support/redis.ts).
+  await startRedisAndRspamd();
   redisStopped = false;
 }
 
@@ -152,7 +154,7 @@ describe.skipIf(gate.skip)('routing stack: outbound rate limits (§9 item 8)', (
         });
         messageId = (await waitForMessage(fx.prisma, orgRedis, { mtaQueueId: sent.queueId! })).id;
         redisStopped = true;
-        await composeOk(['stop', 'redis'], { timeoutMs: 60_000 });
+        await stopRedis();
       } finally {
         // The worker runs without Redis (readiness reports it); its rate check fails closed.
         await startWorker('live');

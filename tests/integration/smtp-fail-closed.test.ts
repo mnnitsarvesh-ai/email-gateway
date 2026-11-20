@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { purgeDormantQueues } from './support/broker';
 import { composeOk, runningServices, waitFor } from './support/compose';
 import { stack } from './support/env';
+import { startRedis, stopRedis } from './support/redis';
 import { SmtpFixtures, type FixtureDomain } from './support/smtp-fixtures';
 import { assertStackReady, smtpStackGate } from './support/smtp-stack';
 import { reply, swaks } from './support/smtp-tools';
@@ -23,6 +24,8 @@ let domain: FixtureDomain;
 /** Never looked up before the adapter is stopped: long-lived smtpd processes cache resolutions. */
 let unresolvedDomain: FixtureDomain;
 let sasl: { username: string; password: string };
+/** Set while this suite has Redis stopped: only then does Redis (and Rspamd) need bringing back. */
+let redisStopped = false;
 const adapterIsContainer = gate.skip ? false : (await runningServices()).has('smtp-adapter');
 
 async function adapterReady(): Promise<boolean> {
@@ -38,7 +41,11 @@ async function adapterReady(): Promise<boolean> {
 }
 
 async function redisUp(): Promise<void> {
-  await composeOk(['start', 'redis'], { timeoutMs: 120_000 });
+  if (redisStopped) {
+    // Also restarts Rspamd and waits until it is healthy (support/redis.ts).
+    await startRedis();
+    redisStopped = false;
+  }
   await waitFor('smtp-adapter ready again (Redis back)', adapterReady, {
     timeoutMs: 120_000,
     intervalMs: 1_000,
@@ -68,7 +75,8 @@ afterAll(async () => {
 describe.skipIf(gate.skip)('SMTP stack: fail closed (suite 12)', { timeout: 300_000 }, () => {
   it('defers (4xx) inbound and submission recipients while Redis is down', async () => {
     try {
-      await composeOk(['stop', 'redis'], { timeoutMs: 120_000 });
+      redisStopped = true;
+      await stopRedis();
       const inbound = await swaks({
         server: 'postfix',
         port: 25,

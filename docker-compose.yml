@@ -533,6 +533,12 @@ services:
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?}
     volumes: ['redis-data:/data']
+    # rspamd-state (fixed .10, alias redis-rspamd): the inbound Rspamd's Redis address. With
+    # RSPAMD_DNS_SERVERS set its entrypoint resolves the host once, so the address must survive a
+    # Redis restart or recreate (a dynamic default-network address does not).
+    networks:
+      default: {}
+      rspamd-state: { ipv4_address: 172.31.254.10, aliases: [redis-rspamd] }
     ports: ['127.0.0.1:${REDIS_HOST_PORT:-6379}:6379']
     healthcheck:
       test: ['CMD-SHELL', 'redis-cli ping | grep -q PONG']
@@ -605,7 +611,8 @@ services:
     entrypoint: ['/bin/sh', '/opt/rspamd/entrypoint.sh']
     mem_limit: 768m
     environment:
-      REDIS_SERVERS: redis:6379
+      # redis-rspamd = the redis service's fixed address on rspamd-state (172.31.254.10).
+      REDIS_SERVERS: redis-rspamd:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?}
       RSPAMD_REDIS_DB: ${RSPAMD_REDIS_DB:-1}
       RSPAMD_CONTROLLER_PASSWORD: ${RSPAMD_CONTROLLER_PASSWORD:?append the security scanning keys from .env.example}
@@ -637,9 +644,11 @@ services:
         '127.0.0.1:${RSPAMD_CONTROLLER_HOST_PORT:-11334}:11334',
       ]
     # mailtest (fixed .11): dns-sink is reachable as the test resolver (RSPAMD_DNS_SERVERS).
+    # rspamd-state: Redis at its fixed address (REDIS_SERVERS).
     networks:
       default: {}
       mailtest: { ipv4_address: 172.31.250.11 }
+      rspamd-state: {}
     depends_on:
       redis: { condition: service_healthy }
     healthcheck:
@@ -2941,6 +2950,16 @@ networks:
   # (its key store). internal: no route outside the network, nothing published.
   dkim-signing:
     internal: true
+  # The inbound Rspamd's path to Redis: redis fixed at .10 (alias redis-rspamd), rspamd dynamic
+  # from the upper half. Fixed because the Rspamd entrypoint resolves the Redis host once at start
+  # (RSPAMD_DNS_SERVERS set); a new dynamic address after a Redis restart left Rspamd on a stale
+  # one. A separate network, so the default network keeps its undeclared subnet.
+  rspamd-state:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.31.254.0/24
+          ip_range: 172.31.254.128/25
   # TEST-ONLY "Internet" of step 4.3 (U19): TEST-NET-3, url-test fixed at .10, step 6.2
   # webhook-receiver at .20; dynamic addresses (email-worker, click-service, url-egress-proxy,
   # webhook-worker) come from the upper half only.
