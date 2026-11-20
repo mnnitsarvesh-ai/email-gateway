@@ -329,8 +329,8 @@ function baseSettings(): Settings {
       { source: 'outbound_message', lastEventAt: iso(fixtureAnchor() - MIN) },
     ],
     identityProviders: [
-      { provider: 'microsoft_entra', availableInStep: '8.5' },
-      { provider: 'google_workspace', availableInStep: '8.5' },
+      { provider: 'microsoft_entra', integrations: [] },
+      { provider: 'google_workspace', integrations: [] },
     ],
     policy: { atoFieldsInUse: false },
     automation: {

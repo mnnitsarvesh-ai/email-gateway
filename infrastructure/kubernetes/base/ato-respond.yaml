@@ -6,7 +6,13 @@
 # provider confirmations, digests, retention, account retirement, status gauges and the
 # capabilities row. provider: the ingestion runner (idle without adapters). One replica (the jobs
 # are leader-elected; a second replica would only wait for the locks). Writer-only MySQL, Redis,
-# RabbitMQ; no object storage, no Internet egress (step 8.5 adds the provider endpoints).
+# RabbitMQ; no object storage.
+# Step 8.5 (ADR-0082, R3; docs/deployment/ato-identity-providers.md): the identity-provider
+# adapters run here only (provider polls and probes, provider actions, confirmations). This
+# deployment is the ato-worker's only holder of 8.2's credential key (decrypting customer-owned
+# ATO credentials) and of the operator's ATO platform app certificates / service-account keys,
+# and the only one with HTTPS egress to public addresses (the in-process host allow-list of the
+# provider client is the second control).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,9 +73,84 @@ spec:
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
             - { name: RABBITMQ_ATO_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-ato-url }
             - { name: ATO_HMAC_KEY_FILE, value: /var/run/secrets/ato-key/hmac-key }
+            # Step 8.5: the platform ATO app certificates must be used in production; a client
+            # secret is refused unless this is true.
+            - { name: PROVIDER_M365_ALLOW_PLATFORM_SECRET, value: 'false' }
+            # 8.2's credential key (decrypt customer-owned ATO credentials; the previous key only
+            # during a rotation). ato-detect never mounts it (R3).
+            - {
+                name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/provider-credential-key/key,
+              }
+            - name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-credential-key, key: previous-key, optional: true }
+            # Platform credentials of the six ATO profiles (D5; key names of profiles/ato.ts),
+            # plain file paths into the optional Secret email-gateway-provider-ato-platform. A
+            # profile whose client id (ConfigMap) is empty has no platform app and its path is
+            # ignored; a set client id whose file is unreadable stops the worker (fail closed).
+            - {
+                name: PROVIDER_M365_ATO_TELEMETRY_APP_CERT_PATH,
+                value: /var/run/secrets/provider-ato-platform/m365-ato-telemetry-cert.pem,
+              }
+            - name: PROVIDER_M365_ATO_TELEMETRY_APP_CERT_THUMBPRINT
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-provider-ato-platform,
+                    key: m365-ato-telemetry-cert-thumbprint,
+                    optional: true,
+                  }
+            - {
+                name: PROVIDER_M365_ATO_RESPONSE_APP_CERT_PATH,
+                value: /var/run/secrets/provider-ato-platform/m365-ato-response-cert.pem,
+              }
+            - name: PROVIDER_M365_ATO_RESPONSE_APP_CERT_THUMBPRINT
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-provider-ato-platform,
+                    key: m365-ato-response-cert-thumbprint,
+                    optional: true,
+                  }
+            - {
+                name: PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CERT_PATH,
+                value: /var/run/secrets/provider-ato-platform/m365-ato-response-extended-cert.pem,
+              }
+            - name: PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CERT_THUMBPRINT
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-provider-ato-platform,
+                    key: m365-ato-response-extended-cert-thumbprint,
+                    optional: true,
+                  }
+            - {
+                name: PROVIDER_GOOGLE_ATO_TELEMETRY_SA_KEY_PATH,
+                value: /var/run/secrets/provider-ato-platform/google-ato-telemetry-sa-key.json,
+              }
+            - {
+                name: PROVIDER_GOOGLE_ATO_RESPONSE_SA_KEY_PATH,
+                value: /var/run/secrets/provider-ato-platform/google-ato-response-sa-key.json,
+              }
+            - {
+                name: PROVIDER_GOOGLE_ATO_RESPONSE_EXTENDED_SA_KEY_PATH,
+                value: /var/run/secrets/provider-ato-platform/google-ato-response-extended-sa-key.json,
+              }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: ato-key, mountPath: /var/run/secrets/ato-key, readOnly: true }
+            - {
+                name: provider-credential-key,
+                mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-ato-platform,
+                mountPath: /var/run/secrets/provider-ato-platform,
+                readOnly: true,
+              }
             - { name: tmp, mountPath: /tmp }
           # Readiness: mysql, redis and rabbitmq (ato.responses verified passively).
           readinessProbe:
@@ -98,6 +179,15 @@ spec:
           secret:
             secretName: email-gateway-ato-key
             items: [{ key: hmac-key, path: hmac-key }]
+        - name: provider-credential-key
+          secret:
+            secretName: email-gateway-provider-credential-key
+            items: [{ key: key, path: key }]
+        # Optional: only the files of the platform methods the operator offers (step 8.5 D5).
+        - name: provider-ato-platform
+          secret:
+            secretName: email-gateway-provider-ato-platform
+            optional: true
         - name: tmp
           emptyDir: {}
 ---
@@ -116,7 +206,11 @@ spec:
   ports:
     - { name: http, port: 80, targetPort: http }
 ---
-# Egress: MySQL, Redis, RabbitMQ, DNS and OTLP only. No object storage, no Internet egress.
+# Egress: MySQL, Redis, RabbitMQ, DNS, OTLP and (step 8.5, ADR-0082) HTTPS to public addresses
+# for the identity-provider APIs (Graph, Office 365 Management, Google Admin SDK, Gmail, and 8.2's
+# token endpoints). Private, shared-address and link-local ranges are excluded; the provider
+# client also refuses any origin that is not a configured API family (D2). No object storage.
+# ato-detect keeps no Internet egress.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -149,3 +243,18 @@ spec:
         - namespaceSelector:
             matchLabels: { kubernetes.io/metadata.name: observability }
       ports: [{ protocol: TCP, port: 4318 }]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10
+      ports: [{ protocol: TCP, port: 443 }]

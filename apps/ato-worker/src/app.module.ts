@@ -40,6 +40,7 @@ import {
   RESPONSES_QUEUE,
 } from './detect/consumers';
 import { AtoMetrics } from './metrics/ato-metrics';
+import { IdpMetrics } from './metrics/idp-metrics';
 
 export const SERVICE_NAME = 'ato-worker';
 export const ATO_COMPONENTS = Symbol('ATO_COMPONENTS');
@@ -179,21 +180,28 @@ export class AppModule {
         },
         { provide: ATO_LOCKS, useFactory: () => new AdvisoryLocks(config.DATABASE_URL) },
         {
+          provide: IdpMetrics,
+          useFactory: (metrics: MetricsService) => new IdpMetrics(metrics),
+          inject: [MetricsService],
+        },
+        {
           provide: ATO_COMPONENTS,
           useFactory: (
             prisma: PrismaService,
             redis: RedisService,
             locks: AdvisoryLocks,
             metrics: AtoMetrics,
+            idpMetrics: IdpMetrics,
           ) =>
             AtoComponents.create(config, {
               prisma,
               redis: redis.client,
               locks,
               metrics,
+              idpMetrics,
               logger,
             }),
-          inject: [PrismaService, RedisService, ATO_LOCKS, AtoMetrics],
+          inject: [PrismaService, RedisService, ATO_LOCKS, AtoMetrics, IdpMetrics],
         },
         ...(broker
           ? [

@@ -1,4 +1,4 @@
-import type { AtoDigestCounts, AtoSeverity } from './ato-reads';
+import type { AtoDigestCounts, AtoNoticeIntegration, AtoSeverity } from './ato-reads';
 import { displayName } from './alert-templates';
 import { type RenderedNotice, safeText } from './templates';
 
@@ -17,13 +17,17 @@ import { type RenderedNotice, safeText } from './templates';
  * - `digest`: the period and its counts (incidents opened by severity, resolved by resolution,
  *   false positives, active critical incidents, pending approvals, active restrictions, top rule
  *   codes) and `/ato`.
+ * - `provider_unhealthy` (step 8.5 D11): the provider, the integration's display name, the failing
+ *   stream names and the missing permission names of the last probe, and
+ *   `/ato/providers/<integration id>`; never the provider tenant id, an address or a token.
  *
  * **Never** an IP address, a password or token, a mail subject, a recipient address or a URL
  * found in mail. Free text from the database is reduced to printable single-line text and a name
  * that looks like an address or a URL is not shown (`displayName`).
  */
 
-export type AtoNoticeKind = 'incident_alert' | 'approval_requested' | 'response_failed' | 'digest';
+export type AtoNoticeKind =
+  'incident_alert' | 'approval_requested' | 'response_failed' | 'digest' | 'provider_unhealthy';
 export type AtoAudience = 'tenant' | 'soc' | 'platform_soc';
 
 export interface AtoAccountView {
@@ -87,8 +91,24 @@ export interface DigestFacts extends CommonFacts {
   counts: AtoDigestCounts;
 }
 
+export interface ProviderUnhealthyFacts extends CommonFacts {
+  kind: 'provider_unhealthy';
+  integration: AtoNoticeIntegration;
+}
+
 export type AtoNoticeFacts =
-  IncidentAlertFacts | ApprovalRequestedFacts | ResponseFailedFacts | DigestFacts;
+  | IncidentAlertFacts
+  | ApprovalRequestedFacts
+  | ResponseFailedFacts
+  | DigestFacts
+  | ProviderUnhealthyFacts;
+
+/** Plain-language provider names (no logo, no tenant data). */
+const PROVIDER_LABEL: Readonly<Record<string, string>> = {
+  microsoft_entra: 'Microsoft Entra ID / Microsoft 365',
+  google_workspace: 'Google Workspace',
+};
+const PERMISSION = /^[A-Za-z0-9._:/-]{1,128}$/;
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const DOTTED = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+){1,4}$/;
@@ -154,6 +174,7 @@ const SUBJECT: Readonly<Record<AtoNoticeKind, string>> = {
   approval_requested: 'account takeover response awaits approval',
   response_failed: 'account takeover response failed',
   digest: 'account takeover digest',
+  provider_unhealthy: 'account takeover identity provider unhealthy',
 };
 
 function header(facts: AtoNoticeFacts): string[] {
@@ -214,8 +235,31 @@ function digestBody(f: DigestFacts): string[] {
   ];
 }
 
+function providerBody(f: ProviderUnhealthyFacts): string[] {
+  const i = f.integration;
+  const id = publicId(i.publicId);
+  const name = displayName(i.displayName, 128);
+  const streams = i.failingStreams
+    .filter((s) => CODE.test(s))
+    .slice(0, 7)
+    .map(words);
+  const permissions = i.missingPermissions.filter((p) => PERMISSION.test(p)).slice(0, 10);
+  return [
+    `Identity provider: ${PROVIDER_LABEL[i.provider] ?? 'unknown provider'}`,
+    `Integration: ${name || '(name not shown)'}`,
+    `Health: ${words(code(i.healthStatus))}`,
+    `Failing streams: ${streams.length === 0 ? 'none reported' : streams.join(', ')}`,
+    `Missing permissions: ${permissions.length === 0 ? 'none reported' : permissions.join(', ')}`,
+    '',
+    'Account takeover detection from this identity provider is degraded or stopped, and provider response actions may be unavailable. Mail flow is not affected.',
+    ...(id ? [`Review: ${f.portalUrl}/ato/providers/${id}`] : []),
+  ];
+}
+
 function body(facts: AtoNoticeFacts): string[] {
   switch (facts.kind) {
+    case 'provider_unhealthy':
+      return providerBody(facts);
     case 'incident_alert':
       return incidentBody(facts);
     case 'approval_requested': {

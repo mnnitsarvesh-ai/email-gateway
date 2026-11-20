@@ -43,19 +43,17 @@ import type {
   SettingsView,
   UpdateSettingsBody,
 } from '../dto/ato.schemas';
+import { AtoProvidersRepository } from '../repositories/ato-providers.repository';
 import { AtoReadRepository, type Db } from '../repositories/ato-read.repository';
 import { AtoAccessService } from './ato-access.service';
 
-/** The two identity providers whose adapters arrive in step 8.5 (§5.1 #24). */
-const IDENTITY_PROVIDERS = [
-  { provider: 'microsoft_entra' as const, availableInStep: '8.5' as const },
-  { provider: 'google_workspace' as const, availableInStep: '8.5' as const },
-];
+/** The two identity providers of step 8.5 (§5.1 #24; their adapters in @email-gateway/idp-adapters). */
+const IDENTITY_PROVIDERS = ['microsoft_entra', 'google_workspace'] as const;
 
 /**
  * ATO settings, the rule catalogue and SMTP restrictions (step 8.4 §5.1 #23–#26, §4.3): the
  * stored and effective `ato-settings/1`, version and `rowVersion`, bounds, capabilities, sources,
- * identity providers (8.5), whether a tenant policy uses `ato.*` fields; the PUT through
+ * identity providers with their integrations (step 8.5), whether a tenant policy uses `ato.*` fields; the PUT through
  * `AtoStore.saveSettings` (strict validation with paths, CAS, a new version and an audit row with
  * the changed paths); the rules with their effective state and availability; the restrictions.
  */
@@ -71,6 +69,7 @@ export class AtoSettingsService {
       | 'ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG'
     >,
     private readonly reads: AtoReadRepository,
+    private readonly providers: AtoProvidersRepository,
     private readonly access: AtoAccessService,
     private readonly stores: IncidentStores,
     private readonly idempotency: IdempotencyService,
@@ -83,13 +82,15 @@ export class AtoSettingsService {
 
   async get(scope: TenantScope, db?: Db): Promise<SettingsView> {
     const now = this.now();
-    const [featureEnabled, loaded, capabilities, sources, atoFieldsInUse] = await Promise.all([
-      this.access.enabled(scope, db),
-      this.access.settings(scope, db),
-      this.access.capabilities(),
-      this.reads.sourcesLastEvent(scope, now),
-      this.reads.atoFieldsInUse(scope),
-    ]);
+    const [featureEnabled, loaded, capabilities, sources, atoFieldsInUse, integrations] =
+      await Promise.all([
+        this.access.enabled(scope, db),
+        this.access.settings(scope, db),
+        this.access.capabilities(),
+        this.reads.sourcesLastEvent(scope, now),
+        this.reads.atoFieldsInUse(scope),
+        this.providers.nonDisabled(scope, db),
+      ]);
     return {
       featureEnabled,
       version: loaded.version,
@@ -114,7 +115,13 @@ export class AtoSettingsService {
           'outbound_message',
         ] as const
       ).map((source) => ({ source, lastEventAt: sources[source]?.toISOString() ?? null })),
-      identityProviders: IDENTITY_PROVIDERS,
+      // Step 8.5: the organization's non-disabled integrations per provider (§6).
+      identityProviders: IDENTITY_PROVIDERS.map((provider) => ({
+        provider,
+        integrations: integrations
+          .filter((r) => r.provider === provider)
+          .map((r) => ({ id: r.publicId, provider, health: r.healthStatus })),
+      })),
       policy: { atoFieldsInUse },
       automation: {
         platformEnabled: this.config.ATO_AUTOMATED_RESPONSES_ENABLED,

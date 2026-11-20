@@ -212,8 +212,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // step 7.3 (docs/plan/steps/22-policy-builder.md §4.4): 279; step 8.1
     // (docs/plan/steps/23-journaling-archiving.md §4.4): 320; step 8.4
     // (docs/plan/steps/24-account-takeover-core.md §5.1, §5.2): 354; plus the 24 provider-connection operations of step 8.2
-    // (docs/plan/steps/25-m365-google-connectors.md §5.2): 378, all under /api/v1.
-    expect(count).toBe(378);
+    // (docs/plan/steps/25-m365-google-connectors.md §5.2): 378; plus the 13 identity-provider and
+    // mailbox state operations of step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): 391,
+    // all under /api/v1.
+    expect(count).toBe(391);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -920,8 +922,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // step 6.2: 5 transactional webhook routes (create, delete, rotate, replay, range replay);
     // step 8.1: 15 transactional archive, legal hold and eDiscovery mutations; step 8.4: 14
     // transactional account takeover and incident mutations; step 8.2: 12 transactional
-    // provider-connection mutations.
-    expect(keyed).toHaveLength(83);
+    // provider-connection mutations; step 8.5: 8 transactional identity-provider and mailbox
+    // state mutations.
+    expect(keyed).toHaveLength(91);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1195,8 +1198,12 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
   });
 
   it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {
+    const isStep85 = (key: string) =>
+      key.includes('/api/v1/ato/providers') || key.includes('/mailbox-state');
     const ops = operations(doc).filter(
-      (op) => op.key.includes(' /api/v1/ato/') || /\/api\/v1\/incidents($|\/)/.test(op.key),
+      (op) =>
+        !isStep85(op.key) &&
+        (op.key.includes(' /api/v1/ato/') || /\/api\/v1\/incidents($|\/)/.test(op.key)),
     );
     expect(ops).toHaveLength(34);
     for (const op of ops) {
@@ -1205,7 +1212,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     const operationIds = Object.values(doc.paths)
       .flatMap((p) => Object.values(p as Record<string, { operationId?: string }>))
       .map((o) => o.operationId)
-      .filter((id): id is string => /^(Ato|Incidents)[A-Za-z]*Controller_/.test(id ?? ''));
+      .filter((id): id is string => /^(Ato|Incidents)[A-Za-z]*Controller_/.test(id ?? ''))
+      .filter((id) => !/^(AtoProvidersController|AtoAccountMailboxController)_/.test(id));
     expect(operationIds.sort()).toEqual(
       [
         'AtoOverviewController_overview_v1',
@@ -1257,6 +1265,95 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     const tags = new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? '']));
     expect(tags.get('ato')).toContain('Step 8.4');
     expect(tags.get('incidents')).toContain('Step 8.4');
+  });
+
+  it('documents the step 8.5 identity-provider and mailbox state operations (§6) with their operation ids, permissions and no secret-shaped examples', () => {
+    const ops = operations(doc).filter(
+      (op) => op.key.includes('/api/v1/ato/providers') || op.key.includes('/mailbox-state'),
+    );
+    expect(ops.map((op) => op.key).sort()).toEqual(
+      [
+        'GET /api/v1/ato/providers',
+        'GET /api/v1/ato/providers/requirements',
+        'GET /api/v1/ato/providers/connections',
+        'POST /api/v1/ato/providers',
+        'GET /api/v1/ato/providers/{integrationId}',
+        'PATCH /api/v1/ato/providers/{integrationId}',
+        'POST /api/v1/ato/providers/{integrationId}/pause',
+        'POST /api/v1/ato/providers/{integrationId}/resume',
+        'POST /api/v1/ato/providers/{integrationId}/health-check',
+        'POST /api/v1/ato/providers/{integrationId}/backfill',
+        'DELETE /api/v1/ato/providers/{integrationId}',
+        'GET /api/v1/ato/accounts/{accountId}/mailbox-state',
+        'POST /api/v1/ato/accounts/{accountId}/mailbox-state/refresh',
+      ].sort(),
+    );
+    for (const op of ops) expect(op.tags, op.key).toEqual(['ato']);
+    const ids = new Map<string, string>();
+    const permissions = new Map<string, unknown>();
+    for (const [path, item] of Object.entries(doc.paths)) {
+      if (!path.startsWith('/api/v1/ato/providers') && !path.includes('/mailbox-state')) continue;
+      for (const [method, op] of Object.entries(
+        item as Record<string, { operationId?: string; 'x-eg-permissions'?: unknown }>,
+      )) {
+        ids.set(`${method.toUpperCase()} ${path}`, op.operationId ?? '');
+        permissions.set(op.operationId ?? '', op['x-eg-permissions']);
+      }
+    }
+    expect([...ids.values()].sort()).toEqual(
+      [
+        'AtoProvidersController_list_v1',
+        'AtoProvidersController_requirements_v1',
+        'AtoProvidersController_connections_v1',
+        'AtoProvidersController_create_v1',
+        'AtoProvidersController_get_v1',
+        'AtoProvidersController_update_v1',
+        'AtoProvidersController_pause_v1',
+        'AtoProvidersController_resume_v1',
+        'AtoProvidersController_healthCheck_v1',
+        'AtoProvidersController_backfill_v1',
+        'AtoProvidersController_remove_v1',
+        'AtoAccountMailboxController_get_v1',
+        'AtoAccountMailboxController_refresh_v1',
+      ].sort(),
+    );
+    const perm = (id: string) =>
+      (permissions.get(id) as { permissions?: string[] } | undefined)?.permissions;
+    expect(perm('AtoProvidersController_list_v1')).toEqual(['ato:read']);
+    expect(perm('AtoProvidersController_connections_v1')).toEqual(['ato:configure']);
+    expect(perm('AtoProvidersController_create_v1')).toEqual(['ato:configure']);
+    expect(perm('AtoAccountMailboxController_get_v1')).toEqual(['ato:read']);
+    expect(perm('AtoAccountMailboxController_refresh_v1')).toEqual(['ato:manage']);
+    const docs = JSON.stringify(
+      Object.entries(doc.paths).filter(
+        ([path]) => path.startsWith('/api/v1/ato/providers') || path.includes('/mailbox-state'),
+      ),
+    );
+    expect(docs).toContain('EXAMPLE');
+    for (const code of [
+      'ato_provider_not_found',
+      'ato_provider_connection_not_found',
+      'ato_provider_connection_ineligible',
+      'ato_provider_already_bound',
+      'ato_provider_directory_in_use',
+      'ato_provider_limit_reached',
+      'ato_provider_settings_invalid',
+      'ato_provider_conflict',
+      'ato_provider_connection_inactive',
+      'ato_provider_backfill_active',
+      'ato_provider_backfill_range_invalid',
+      'ato_provider_refresh_unavailable',
+      'ato_provider_disabled',
+      'ato_not_enabled',
+    ]) {
+      expect(docs, code).toContain(code);
+    }
+    expect(docs).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    // The 8.4 settings view carries the integrations (no `availableInStep` any more).
+    expect(JSON.stringify(doc)).not.toContain('availableInStep');
+    expect(
+      new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? ''])).get('ato'),
+    ).toContain('Step 8.5');
   });
 
   it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {

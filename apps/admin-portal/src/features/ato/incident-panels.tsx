@@ -25,6 +25,7 @@ import {
   OUTCOME_TONE,
   accountLabel,
   atoAccountHref,
+  atoProvidersHref,
   countryName,
   labelOf,
   str,
@@ -33,6 +34,7 @@ import {
   type AtoActionType,
   type TrustedContextKind,
 } from './model';
+import { providerStatusText } from './providers/model';
 import { RequestResponseButton } from './response-actions';
 import { responseColumns } from './responses-page';
 import { DataTable } from '@/components/data-table';
@@ -385,7 +387,14 @@ function RecommendationsPanel({
                   />
                 ) : r.availability === 'requires_provider' ? (
                   <span className="text-xs text-muted-foreground">
-                    Needs an identity-provider adapter (step 8.5)
+                    Needs a connected identity provider with this action available (
+                    <Link
+                      href={atoProvidersHref}
+                      className="text-primary underline underline-offset-2"
+                    >
+                      Identity providers
+                    </Link>
+                    )
                   </span>
                 ) : r.availability === 'manual' && account ? (
                   <span className="text-xs">
@@ -681,8 +690,17 @@ function AtoReportSection({ section }: { section: { id: string; title: string; d
           return (
             <li key={i}>
               {labelOf(ACTION_LABELS, str(x.type))}: {humanize(str(x.status))}
-              {x.providerStatus ? ` (${humanize(str(x.providerStatus))})` : ''}, requested{' '}
-              {str(x.requestedAt).replace('T', ' ').slice(0, 16)} UTC
+              {x.providerStatus
+                ? ` (${
+                    providerStatusText({
+                      provider: str(x.provider),
+                      status: str(x.status),
+                      providerStatus: str(x.providerStatus),
+                      resultCode: str(x.resultCode) || null,
+                    }) ?? ''
+                  })`
+                : ''}
+              , requested {str(x.requestedAt).replace('T', ' ').slice(0, 16)} UTC
             </li>
           );
         })}

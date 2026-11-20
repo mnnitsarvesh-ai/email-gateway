@@ -66,6 +66,11 @@ export interface ProviderEvent {
   ip?: string;
   userAgent?: string;
   deviceIdHash?: string;
+  /**
+   * PX1 (step 8.5, ADR-0082): `<browser> · <os>` built by the adapter from structured provider
+   * device data (Entra sign-ins carry no raw user agent in Graph v1.0), ≤ 96 characters.
+   */
+  deviceLabel?: string;
   providerLocation?: { countryCode?: string; city?: string; lat?: number; lon?: number };
   riskLevel?: 'low' | 'medium' | 'high';
   riskDetail?: string;
@@ -181,6 +186,7 @@ export const providerEventSchema = z
       .optional(),
     userAgent: z.string().max(512).optional(),
     deviceIdHash: hash.optional(),
+    deviceLabel: safe(96).optional(),
     providerLocation: z
       .strictObject({
         countryCode: z
@@ -243,11 +249,36 @@ export const providerEventSchema = z
 
 // ------------------------------------------------------------------ registry
 
-export class ProviderRegistry {
+/**
+ * The integration an adapter is bound to (PX2, step 8.5): the `ato_provider_integrations` row as
+ * the worker read it. Factories read the fields they need from their own row type.
+ */
+export interface ProviderIntegrationRef {
+  id: bigint;
+  organizationId: bigint;
+  provider: string;
+}
+
+/** PX2: builds the adapter bound to one integration (one instance per binding). */
+export type ProviderAdapterFactory<TIntegration extends ProviderIntegrationRef> = (
+  integration: TIntegration,
+) => IdentityProviderAdapter;
+
+/**
+ * Provider kind → singleton adapter (8.4 D15) or, since step 8.5 (PX2, merge note M2), kind →
+ * factory with `adapterFor(integration)`. 8.4 callers of `get` keep working unchanged.
+ */
+export class ProviderRegistry<
+  TIntegration extends ProviderIntegrationRef = ProviderIntegrationRef,
+> {
   private readonly adapters = new Map<IdentityProviderKind, IdentityProviderAdapter>();
+  private readonly factories = new Map<
+    IdentityProviderKind,
+    ProviderAdapterFactory<TIntegration>
+  >();
 
   register(adapter: IdentityProviderAdapter): this {
-    if (this.adapters.has(adapter.kind))
+    if (this.adapters.has(adapter.kind) || this.factories.has(adapter.kind))
       throw new Error(`Provider ${adapter.kind} already registered`);
     if (adapter.kind === 'fake') {
       throw new Error('The fake adapter is registered only through registerFake');
@@ -273,16 +304,52 @@ export class ProviderRegistry {
     return this;
   }
 
+  /**
+   * PX2 (step 8.5, merge note M2): registers the factory of a provider kind whose adapters are
+   * bound per integration (Microsoft Entra ID, Google Workspace). Never the fake adapter.
+   */
+  registerFactory(kind: IdentityProviderKind, factory: ProviderAdapterFactory<TIntegration>): this {
+    if (kind === 'fake') {
+      throw new Error('The fake adapter is registered only through registerFake');
+    }
+    if (this.adapters.has(kind) || this.factories.has(kind)) {
+      throw new Error(`Provider ${kind} already registered`);
+    }
+    this.factories.set(kind, factory);
+    return this;
+  }
+
+  /**
+   * PX2: the adapter bound to `integration`: its kind's factory, else the kind's singleton adapter
+   * (the fake adapter's "factory" returns its single instance); `undefined` when neither exists.
+   */
+  adapterFor(integration: TIntegration): IdentityProviderAdapter | undefined {
+    const factory = this.factories.get(integration.provider as IdentityProviderKind);
+    if (factory) return factory(integration);
+    return this.adapters.get(integration.provider as IdentityProviderKind);
+  }
+
+  /** Whether the kind's adapters are bound per integration (PX2). */
+  hasFactory(kind: string): boolean {
+    return this.factories.has(kind as IdentityProviderKind);
+  }
+
+  /** Kinds served by a singleton adapter (8.4's fake adapter). */
+  singletonKinds(): IdentityProviderKind[] {
+    return [...this.adapters.keys()].sort();
+  }
+
+  /** The singleton adapter of a kind (8.4); per-integration kinds answer through `adapterFor`. */
   get(kind: string): IdentityProviderAdapter | undefined {
     return this.adapters.get(kind as IdentityProviderKind);
   }
 
   kinds(): IdentityProviderKind[] {
-    return [...this.adapters.keys()].sort();
+    return [...new Set([...this.adapters.keys(), ...this.factories.keys()])].sort();
   }
 
   get size(): number {
-    return this.adapters.size;
+    return this.adapters.size + this.factories.size;
   }
 }
 
@@ -347,10 +414,12 @@ export function normalizeProviderEvent(
       ip,
       ipPrefix: ip ? ipPrefix(ip) : null,
       geo: null,
+      // PX1: without a user agent, the provider device id hash is the device, labelled with the
+      // adapter's structured `deviceLabel` when present.
       device: device
         ? { hash: device.hash, label: device.label }
         : e.deviceIdHash
-          ? { hash: e.deviceIdHash.slice(0, 16), label: 'Provider device' }
+          ? { hash: e.deviceIdHash.slice(0, 16), label: e.deviceLabel ?? 'Provider device' }
           : null,
       reputation: null,
       dnsblListed: null,

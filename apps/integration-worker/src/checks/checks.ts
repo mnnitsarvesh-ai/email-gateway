@@ -13,6 +13,8 @@ import {
   type CheckSeverity,
   type CheckStatus,
   comparePermissions,
+  degradedSinceOf,
+  evaluateAtoIdentityProvider,
   evaluateCredentialExpiry,
   type GrantRef,
   grantsForCheck,
@@ -21,6 +23,7 @@ import {
   lockdownAttestations,
   profileByKey,
   type ProviderDomainStatus,
+  readAtoIntegrationHealth,
   type ValidationResult,
 } from '@email-gateway/provider-integrations';
 import type { IntegrationMetrics } from '../metrics/integration-metrics';
@@ -122,7 +125,9 @@ export type CheckCode =
   | 'routing.loops'
   | 'lockdown.attested'
   | 'credential.expiry'
-  | 'egress.ranges_fresh';
+  | 'egress.ranges_fresh'
+  // Step 8.5 (health/ato.ts of the library): ATO integration health, read from stored rows.
+  | 'ato.identity_provider';
 
 /** Codes that talk to the provider (back-off and grace apply, D11, D15). */
 export const PROVIDER_CHECK_CODES: ReadonlySet<string> = new Set([
@@ -199,6 +204,8 @@ export class CheckRunner {
         return this.credentialExpiry(c);
       case 'egress.ranges_fresh':
         return [await this.egressFresh(c)];
+      case 'ato.identity_provider':
+        return [await this.atoIdentityProvider(c)];
     }
   }
 
@@ -814,6 +821,32 @@ export class CheckRunner {
           : {}),
       };
     });
+  }
+
+  /**
+   * Step 8.5 D11 `ato.identity_provider`: the health the ato-worker's probe stored on the
+   * connection's ATO integration (by `connector_ref`), never a provider call or an ATO
+   * credential (R2, R3). The previous result's `degradedSince` carries "degraded for > 1 h".
+   */
+  private async atoIdentityProvider(c: ConnectionView): Promise<CheckResult> {
+    const [integrations, previous] = await Promise.all([
+      readAtoIntegrationHealth(this.deps.writer, c.organizationId, c.publicId),
+      this.deps.writer.providerHealthCheck.findFirst({
+        where: {
+          connectionId: c.id,
+          organizationId: c.organizationId,
+          checkCode: 'ato.identity_provider',
+          subject: '',
+        },
+        select: { evidence: true },
+      }),
+    ]);
+    const outcome = evaluateAtoIdentityProvider({
+      integrations,
+      previousDegradedSince: degradedSinceOf(previous?.evidence),
+      now: this.deps.now(),
+    });
+    return checkResult('ato.identity_provider', '', outcome.status, outcome.evidence);
   }
 
   private async egressFresh(c: ConnectionView): Promise<CheckResult> {

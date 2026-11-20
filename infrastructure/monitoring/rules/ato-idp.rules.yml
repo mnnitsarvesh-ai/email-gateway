@@ -1,0 +1,66 @@
+# ATO identity-provider adapter alerts (step 8.5 D11, docs/plan/steps/26-ato-provider-adapters.md;
+# ADR-0082..0086). Series: the ato-worker's ato_idp_* series (job `ato-worker`; Kubernetes: the
+# ato-respond Deployment, the only one that calls identity providers). Labels are bounded enums
+# only (provider kind, API family, stream, action, outcome, health): never a tenant, integration,
+# identity, address or IP. Status gauges (lag, integrations by health) are written by every
+# replica's probe loop, so they are aggregated with max(). 8.4's AtoProviderFailures
+# (ato.rules.yml) covers ato_provider_operations_total and is live with the 8.5 adapters. Tenants
+# are told about an unhealthy integration by the provider_unhealthy notice and 8.2's connection
+# health; these alerts are for the operator. Every alert links its section of
+# docs/runbooks/ato-identity-providers.md.
+# Validate with `promtool check rules` and `promtool test rules tests/ato-idp.rules.test.yml`.
+groups:
+  - name: ato-idp
+    rules:
+      - alert: AtoIdpStreamLagHigh
+        expr: max by (provider, stream) (ato_idp_stream_lag_seconds) > 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'An identity-provider stream lags more than 1 hour ({{ $labels.provider }} {{ $labels.stream }})'
+          description: 'The oldest watermark of an enabled primary stream of an active integration is more than 3600 seconds behind. Provider events reach detection late: check throttling, failures and the provider role (docs/runbooks/ato-identity-providers.md).'
+          runbook_url: docs/runbooks/ato-identity-providers.md#lag
+      - alert: AtoIdpIntegrationUnhealthy
+        expr: max by (provider) (ato_idp_integrations{health="unhealthy"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'An identity-provider integration is unhealthy ({{ $labels.provider }})'
+          description: 'At least one ATO identity-provider integration has been unhealthy for 15 minutes (connection inactive, token acquisition failing or every enabled stream failing). The tenant was notified (provider_unhealthy); check whether many tenants are affected at once (platform app credentials, egress, provider outage).'
+          runbook_url: docs/runbooks/ato-identity-providers.md#unhealthy
+      - alert: AtoIdpThrottledSustained
+        expr: sum by (provider, family) (rate(ato_idp_throttled_total[10m])) > 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Identity-provider throttling for 30 minutes ({{ $labels.provider }} {{ $labels.family }})'
+          description: 'The provider answers more than 0.5 throttling or quota responses per second. Streams back off and lag grows; review the per-integration rate budgets (ATO_IDP_RATE_*) and large backfills.'
+          runbook_url: docs/runbooks/ato-identity-providers.md#throttling
+      - alert: AtoIdpProbeFailures
+        expr: sum by (provider) (increase(ato_idp_probe_total{result="failed"}[1h])) >= 3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Identity-provider capability probes are failing ({{ $labels.provider }})'
+          description: 'At least three capability probes failed in the last hour (missing permission or licence, token failure, provider error). Affected capabilities are reported unavailable; provider actions may be unsupported.'
+          runbook_url: docs/runbooks/ato-identity-providers.md#probe-failures
+      - alert: AtoIdpActionsUnconfirmed
+        expr: sum by (provider, action) (increase(ato_idp_actions_total{outcome="timeout"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Provider actions ended unconfirmed ({{ $labels.provider }} {{ $labels.action }})'
+          description: 'A provider response action was not confirmed by read-back within ATO_IDP_CONFIRM_TIMEOUT_MINUTES and ended failed with provider_status unconfirmed. The effect may still have happened at the provider; an analyst must verify it.'
+          runbook_url: docs/runbooks/ato-identity-providers.md#confirmation-timeouts
+      - alert: AtoIdpCursorResets
+        expr: sum by (provider, stream) (increase(ato_idp_cursor_resets_total[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: 'An identity-provider stream cursor was reset ({{ $labels.provider }} {{ $labels.stream }})'
+          description: 'A stored cursor was malformed or of another adapter version; the stream restarted at now minus its overlap window. Events between the old watermark and the restart may be missing: request a backfill if needed.'
+          runbook_url: docs/runbooks/ato-identity-providers.md#cursor-reset

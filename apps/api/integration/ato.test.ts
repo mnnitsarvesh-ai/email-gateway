@@ -182,7 +182,11 @@ describe('reads over rows written by the stores', () => {
     expect(settings.body).toMatchObject({
       featureEnabled: true,
       schemaVersion: 'ato-settings/1',
-      identityProviders: [{ availableInStep: '8.5' }, { availableInStep: '8.5' }],
+      // Step 8.5: the integrations per provider (none bound in this suite).
+      identityProviders: [
+        { provider: 'microsoft_entra', integrations: [] },
+        { provider: 'google_workspace', integrations: [] },
+      ],
     });
     expect(settings.body.rowVersion).toBeGreaterThanOrEqual(1);
   });

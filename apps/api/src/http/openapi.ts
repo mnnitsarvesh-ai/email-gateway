@@ -500,9 +500,12 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'signals, authentication events, activity and score history, analyst overrides, ' +
       'protection and trusted contexts, the ATO evidence of incidents, response actions with ' +
       'approvals (four eyes, MFA) and rollback, SMTP sending restrictions and authentication ' +
-      'blocks, settings and the rule catalogue. `ato:read`, `ato:manage`, `ato:respond`, ' +
-      '`ato:configure`. Not offered: Microsoft Entra ID / Google Workspace adapters and ' +
-      'provider-confirmed actions (step 8.5), platform-wide views across tenants.',
+      'blocks, settings and the rule catalogue. Step 8.5: identity-provider integrations ' +
+      '(Microsoft Entra ID / Microsoft 365, Google Workspace) bound to step 8.2 connections ' +
+      '(settings, health, streams, backfill, pause, removal) and the mailbox state of an ' +
+      'account (forwarding, inbox rules, delegates) with its priority refresh. `ato:read`, ' +
+      '`ato:manage`, `ato:respond`, `ato:configure`. Not offered: platform-wide views across ' +
+      'tenants.',
   },
   {
     name: 'incidents',

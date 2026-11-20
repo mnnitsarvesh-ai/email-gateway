@@ -153,7 +153,7 @@ export function CapabilityList({ capabilities }: { capabilities: AtoCapabilities
           <span className="text-xs text-muted-foreground">
             {capabilities.providers.length > 0
               ? capabilities.providers.map(humanize).join(', ')
-              : 'None (Microsoft 365 and Google Workspace arrive in step 8.5)'}
+              : 'None reported by the detection worker (connected identity providers report their own capabilities on the Identity providers page)'}
           </span>
         </li>
       </ul>
@@ -167,10 +167,17 @@ interface Outcome {
 }
 
 /** The api's coded error explained, with its code and request id. */
-export function AtoErrorSummary({ error }: { error: ApiError }) {
+export function AtoErrorSummary({
+  error,
+  explain = explainAtoError,
+}: {
+  error: ApiError;
+  /** The texts of a feature's own codes (identity providers); the 8.4 texts by default. */
+  explain?: (error: ApiError) => string[];
+}) {
   return (
     <FormErrorSummary
-      messages={[...explainAtoError(error), `Code: ${error.code}`]}
+      messages={[...explain(error), `Code: ${error.code}`]}
       requestId={error.requestId}
     />
   );
@@ -197,6 +204,7 @@ export function AtoReasonDialog({
   onRetry,
   pending = false,
   disabled = false,
+  explain,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -214,6 +222,8 @@ export function AtoReasonDialog({
   pending?: boolean;
   /** Blocks Confirm (e.g. an incomplete form in `extra`); the reason is still validated. */
   disabled?: boolean;
+  /** Error texts of the feature's own codes (see `AtoErrorSummary`). */
+  explain?: (error: ApiError) => string[];
 }) {
   const id = useId();
   const [reason, setReason] = useState('');
@@ -299,7 +309,7 @@ export function AtoReasonDialog({
           </div>
           {apiError ? (
             <div className="grid gap-2">
-              <AtoErrorSummary error={apiError} />
+              <AtoErrorSummary error={apiError} explain={explain} />
               {onRetry && isRetryable(apiError) ? (
                 <Button
                   type="button"

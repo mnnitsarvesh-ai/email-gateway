@@ -319,3 +319,41 @@ data:
   GATEWAY_RELAY_TLS_NAME: out.replace-per-environment.invalid
   # webhook-worker: throttle of the integration_unhealthy alert per connection.
   INTEGRATION_ALERT_THROTTLE_MINUTES: '60'
+  # ATO identity-provider adapters (step 8.5 §4.2, docs/plan/steps/26-ato-provider-adapters.md;
+  # docs/deployment/ato-identity-providers.md). Read by the ato-worker (only the `ato-respond`
+  # deployment calls providers; `ato-detect` reads stored capabilities) and the api (bounds). The
+  # ATO data endpoints have exactly one legitimate value each: any other value is refused outside
+  # local/ci (D12). Secrets are NOT here: the credential key and the platform ATO app certificates
+  # / service-account keys are mounted into ato-respond only.
+  ATO_IDP_ADAPTERS_ENABLED: 'true'
+  ATO_IDP_GRAPH_BASE_URL: https://graph.microsoft.com
+  ATO_IDP_O365_MANAGEMENT_BASE_URL: https://manage.office.com
+  ATO_IDP_GOOGLE_ADMIN_BASE_URL: https://admin.googleapis.com
+  ATO_IDP_GMAIL_BASE_URL: https://gmail.googleapis.com
+  PROVIDER_M365_MANAGEMENT_URL: https://manage.office.com
+  ATO_IDP_HTTP_TIMEOUT_MS: '15000'
+  ATO_IDP_HTTP_MAX_RESPONSE_BYTES: '8388608'
+  ATO_IDP_MAX_BACKOFF_MS: '900000'
+  ATO_IDP_RATE_GRAPH_PER_SECOND: '5'
+  ATO_IDP_RATE_O365_PER_SECOND: '2'
+  ATO_IDP_RATE_GOOGLE_REPORTS_PER_SECOND: '2'
+  ATO_IDP_RATE_GOOGLE_DIRECTORY_PER_SECOND: '5'
+  ATO_IDP_RATE_GMAIL_PER_SECOND: '10'
+  ATO_IDP_PAGE_MAX_EVENTS: '200'
+  ATO_IDP_CLAIM_BATCH: '10'
+  ATO_IDP_SNAPSHOT_MAX_USERS_PER_POLL: '200'
+  ATO_IDP_GMAIL_TOKEN_CACHE_MAX: '2000'
+  ATO_IDP_HEALTH_INTERVAL_SECONDS: '900'
+  ATO_IDP_STREAM_LAG_WARN_SECONDS: '3600'
+  ATO_IDP_BACKFILL_MAX_DAYS: '30'
+  ATO_IDP_HISTORICAL_SIGNAL_AGE_HOURS: '24'
+  ATO_IDP_CONFIRM_TIMEOUT_MINUTES: '30'
+  ATO_IDP_MAX_INTEGRATIONS_PER_ORG: '5'
+  # Client ids of the operator's ATO platform apps / service accounts (one per profile, D5).
+  # Empty = that platform method is unavailable (customer-owned apps still work). Set per overlay.
+  PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_ID: ''
+  PROVIDER_M365_ATO_RESPONSE_APP_CLIENT_ID: ''
+  PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CLIENT_ID: ''
+  PROVIDER_GOOGLE_ATO_TELEMETRY_SA_CLIENT_ID: ''
+  PROVIDER_GOOGLE_ATO_RESPONSE_SA_CLIENT_ID: ''
+  PROVIDER_GOOGLE_ATO_RESPONSE_EXTENDED_SA_CLIENT_ID: ''

@@ -190,6 +190,8 @@ export const ATO_NOTIFICATION_KIND_VALUES = [
   'approval_requested',
   'response_failed',
   'digest',
+  // Step 8.5 (D11): an ATO identity-provider integration turned unhealthy (audience tenant).
+  'provider_unhealthy',
 ] as const;
 export const ATO_NOTIFICATION_AUDIENCE_VALUES = ['tenant', 'soc', 'platform_soc'] as const;
 export const ATO_DIGEST_PERIOD_VALUES = ['daily', 'weekly'] as const;
@@ -201,6 +203,7 @@ const ATO_NOTIFICATION_REQUIRED_REFS: Readonly<
   approval_requested: ['actionPublicId'],
   response_failed: ['actionPublicId'],
   digest: [],
+  provider_unhealthy: ['integrationPublicId'],
 };
 
 const actionTypeCode = snakeCode(48);
@@ -653,6 +656,8 @@ export const atoNotificationRequestedV1 = z
       incidentPublicId: uuid.optional(),
       actionPublicId: uuid.optional(),
       accountPublicId: uuid.optional(),
+      /** Step 8.5: the ATO identity-provider integration (`provider_unhealthy` only). */
+      integrationPublicId: uuid.optional(),
     }),
     window: z.strictObject({ from: iso, to: iso }),
     counts: z.strictObject({
@@ -698,6 +703,20 @@ export const atoNotificationRequestedV1 = z
         code: 'custom',
         path: ['audience'],
         message: 'The platform SOC receives critical incident alerts only',
+      });
+    }
+    if (p.kind === 'provider_unhealthy' && p.audience !== 'tenant') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['audience'],
+        message: 'A provider_unhealthy notification goes to the tenant',
+      });
+    }
+    if ((p.kind === 'provider_unhealthy') !== (p.refs.integrationPublicId !== undefined)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['refs', 'integrationPublicId'],
+        message: 'integrationPublicId is set exactly for provider_unhealthy',
       });
     }
     if (Date.parse(p.window.from) >= Date.parse(p.window.to)) {

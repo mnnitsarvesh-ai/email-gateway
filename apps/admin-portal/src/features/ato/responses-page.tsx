@@ -12,6 +12,7 @@ import { RouteGate } from '@/lib/auth/route-gate';
 import { humanize } from '@/lib/format';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
 import { EnumBadge, FilterMultiSelect, FilterSelect } from '@/features/messages/controls';
+import { providerStatusText } from './providers/model';
 import { ResponseControls } from './response-actions';
 import {
   ACTION_LABELS,
@@ -92,11 +93,7 @@ export function responseColumns(): DataTableColumn<AtoResponse>[] {
           <EnumBadge value={row.original.status} tones={RESPONSE_STATUS_TONE} />
           {row.original.providerStatus ? (
             <span className="text-xs text-muted-foreground">
-              {row.original.providerStatus === 'applied'
-                ? 'Applied by the gateway'
-                : row.original.providerStatus === 'unconfirmed'
-                  ? 'Queued (delivery not confirmed)'
-                  : humanize(row.original.providerStatus)}
+              {providerStatusText(row.original)}
             </span>
           ) : null}
           {row.original.status === 'pending_approval' && row.original.approvalExpiresAt ? (

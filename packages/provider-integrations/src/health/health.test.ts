@@ -137,14 +137,19 @@ describe('health check registry', () => {
   });
 
   it('registers a later step’s check and refuses duplicates or bad codes', () => {
+    // Step 8.5 registers the real `ato.identity_provider` at load (health/ato.ts); this test
+    // registers another later-step check (deviation WP3-5 of step 8.5).
     const ato = {
-      code: 'ato.identity_provider',
+      code: 'later_step.example_check',
       provider: 'any' as const,
       severityOnFail: 'warning' as const,
       periodic: true,
-      title: 'Identity-provider telemetry',
+      title: 'A later step check',
       remediation: 'docs/deployment/ato-identity-providers.md#troubleshooting',
     };
+    expect(() => registerHealthChecks([{ ...ato, code: 'ato.identity_provider' }])).toThrow(
+      HealthCheckRegistryError,
+    );
     const count = HEALTH_CHECKS.length;
     registerHealthChecks([ato]);
     registerHealthChecks([ato]);

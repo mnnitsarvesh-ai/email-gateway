@@ -1,12 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { ATO_WORKER_ROLES, hasRole, loadWorkerConfig } from './config';
+import {
+  ATO_WORKER_ROLES,
+  callsIdentityProviders,
+  hasRole,
+  idpEnvOf,
+  loadWorkerConfig,
+} from './config';
 
 const HMAC = 'a'.repeat(48);
+// Step 8.5: the provider-calling roles need 8.2's credential key while the adapters are on.
+const CREDENTIAL_KEY = '0123456789abcdef'.repeat(4);
 const base = {
   DATABASE_URL: 'mysql://u:p@localhost:3306/db',
   REDIS_URL: 'redis://localhost:6379/0',
   RABBITMQ_ATO_URL: 'amqp://u:p@localhost:5672/v',
   ATO_HMAC_KEY: HMAC,
+  PROVIDER_CREDENTIAL_ENCRYPTION_KEY: CREDENTIAL_KEY,
 };
 
 describe('ato-worker config (§4.2)', () => {
@@ -116,6 +125,102 @@ describe('ato-worker config (§4.2)', () => {
     const secret = `x${'s'.repeat(10)}`;
     try {
       loadWorkerConfig({ ...base, ATO_HMAC_KEY: secret });
+      expect.unreachable();
+    } catch (error) {
+      expect(String((error as Error).message)).not.toContain(secret);
+    }
+  });
+});
+
+describe('ato-worker config: identity-provider adapters (step 8.5 §4.2)', () => {
+  it('applies the §4.2 defaults (production origins, bounds)', () => {
+    const c = loadWorkerConfig(base);
+    expect(c).toMatchObject({
+      ATO_IDP_ADAPTERS_ENABLED: true,
+      ATO_IDP_GRAPH_BASE_URL: 'https://graph.microsoft.com',
+      ATO_IDP_O365_MANAGEMENT_BASE_URL: 'https://manage.office.com',
+      ATO_IDP_GOOGLE_ADMIN_BASE_URL: 'https://admin.googleapis.com',
+      ATO_IDP_GMAIL_BASE_URL: 'https://gmail.googleapis.com',
+      ATO_IDP_HTTP_TIMEOUT_MS: 15_000,
+      ATO_IDP_HTTP_MAX_RESPONSE_BYTES: 8_388_608,
+      ATO_IDP_MAX_BACKOFF_MS: 900_000,
+      ATO_IDP_RATE_GRAPH_PER_SECOND: 5,
+      ATO_IDP_RATE_O365_PER_SECOND: 2,
+      ATO_IDP_RATE_GOOGLE_REPORTS_PER_SECOND: 2,
+      ATO_IDP_RATE_GOOGLE_DIRECTORY_PER_SECOND: 5,
+      ATO_IDP_RATE_GMAIL_PER_SECOND: 10,
+      ATO_IDP_PAGE_MAX_EVENTS: 200,
+      ATO_IDP_CLAIM_BATCH: 10,
+      ATO_IDP_SNAPSHOT_MAX_USERS_PER_POLL: 200,
+      ATO_IDP_GMAIL_TOKEN_CACHE_MAX: 2000,
+      ATO_IDP_HEALTH_INTERVAL_SECONDS: 900,
+      ATO_IDP_STREAM_LAG_WARN_SECONDS: 3600,
+      ATO_IDP_BACKFILL_MAX_DAYS: 30,
+      ATO_IDP_HISTORICAL_SIGNAL_AGE_HOURS: 24,
+      ATO_IDP_CONFIRM_TIMEOUT_MINUTES: 30,
+      PROVIDER_ALLOW_HTTP_ENDPOINTS: false,
+      PROVIDER_M365_ALLOW_PLATFORM_SECRET: false,
+      PROVIDER_M365_MANAGEMENT_URL: 'https://manage.office.com',
+    });
+    expect(c.PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_ID).toBeUndefined();
+    expect(callsIdentityProviders(c)).toBe(true);
+    expect(idpEnvOf(c).ATO_IDP_GRAPH_BASE_URL).toBe('https://graph.microsoft.com');
+  });
+
+  it('needs the credential key only where a provider-calling role runs (R3)', () => {
+    const { PROVIDER_CREDENTIAL_ENCRYPTION_KEY: _key, ...noKey } = base;
+    void _key;
+    expect(() => loadWorkerConfig(noKey)).toThrow(/PROVIDER_CREDENTIAL_ENCRYPTION_KEY/);
+    // ato-detect: no credential, no provider call.
+    const detect = loadWorkerConfig({ ...noKey, ATO_WORKER_ROLES: 'detect' });
+    expect(detect.PROVIDER_CREDENTIAL_ENCRYPTION_KEY).toBeUndefined();
+    expect(callsIdentityProviders(detect)).toBe(false);
+    // Adapters switched off: no key needed.
+    const off = loadWorkerConfig({ ...noKey, ATO_IDP_ADAPTERS_ENABLED: 'false' });
+    expect(callsIdentityProviders(off)).toBe(false);
+    expect(() =>
+      loadWorkerConfig({ ...base, PROVIDER_CREDENTIAL_ENCRYPTION_KEY: 'not-hex' }),
+    ).toThrow(/PROVIDER_CREDENTIAL_ENCRYPTION_KEY/);
+  });
+
+  it('refuses endpoint overrides and http outside local and ci (D12)', () => {
+    for (const APP_ENV of ['staging', 'production']) {
+      expect(() =>
+        loadWorkerConfig({
+          ...base,
+          APP_ENV,
+          ATO_IDP_GRAPH_BASE_URL: 'https://graph.example.test',
+        }),
+      ).toThrow(/ATO_IDP_GRAPH_BASE_URL/);
+      expect(() =>
+        loadWorkerConfig({ ...base, APP_ENV, PROVIDER_ALLOW_HTTP_ENDPOINTS: 'true' }),
+      ).toThrow(/PROVIDER_ALLOW_HTTP_ENDPOINTS/);
+    }
+    // Local: the simulator over http needs PROVIDER_ALLOW_HTTP_ENDPOINTS.
+    const sim = 'http://idp-simulator:8080/graph';
+    expect(() =>
+      loadWorkerConfig({ ...base, APP_ENV: 'local', ATO_IDP_GRAPH_BASE_URL: sim }),
+    ).toThrow(/ATO_IDP_GRAPH_BASE_URL/);
+    const local = loadWorkerConfig({
+      ...base,
+      APP_ENV: 'local',
+      ATO_IDP_GRAPH_BASE_URL: sim,
+      PROVIDER_ALLOW_HTTP_ENDPOINTS: 'true',
+    });
+    expect(local.ATO_IDP_GRAPH_BASE_URL).toBe(sim);
+  });
+
+  it('treats empty platform credential keys as unset and never echoes their values', () => {
+    const c = loadWorkerConfig({
+      ...base,
+      PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_ID: '',
+      PROVIDER_GOOGLE_ATO_RESPONSE_SA_KEY_PATH: ' ',
+    });
+    expect(c.PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_ID).toBeUndefined();
+    expect(c.PROVIDER_GOOGLE_ATO_RESPONSE_SA_KEY_PATH).toBeUndefined();
+    const secret = 'zz'.repeat(31);
+    try {
+      loadWorkerConfig({ ...base, PROVIDER_CREDENTIAL_ENCRYPTION_KEY: secret });
       expect.unreachable();
     } catch (error) {
       expect(String((error as Error).message)).not.toContain(secret);

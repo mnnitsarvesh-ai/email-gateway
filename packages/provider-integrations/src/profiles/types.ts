@@ -18,6 +18,12 @@ export interface PermissionProfile {
   readOnly: boolean;
   /** Microsoft Graph application permissions, or Google OAuth scopes. */
   permissions: readonly string[];
+  /**
+   * Permissions of another API resource that the profile's (Graph) access token never lists in
+   * its `roles` (step 8.5: `ActivityFeed.Read` of the Office 365 Management APIs). Grant
+   * verification does not compare them; the consumer's own probe proves them.
+   */
+  notInToken?: readonly string[];
   authMethods: readonly ProviderAuthMethod[];
   /**
    * Configuration KEY NAMES (never values) of the operator-configured platform app or service

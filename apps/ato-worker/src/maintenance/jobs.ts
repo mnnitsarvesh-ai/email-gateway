@@ -28,6 +28,8 @@ import {
   RESPONSE_MAX_ATTEMPTS,
   RESPONSE_STALE_AFTER_MS,
 } from '../respond/respond.consumer';
+import { IDP_KINDS } from '../provider/provider-context';
+import type { IdpActionExecutor, IdpCallOutcome } from '../respond/idp-actions';
 import { big, LEDGERS, orgFilter, readCursor, writeCursor, type AtoDb } from '../shared/db';
 import { errorFields } from '../shared/errors';
 import { localDayStart, localParts } from './time';
@@ -38,6 +40,10 @@ export const CAPABILITIES_INTERVAL_MS = 5 * 60_000;
 /** Accounts without an event for this long are retired (D22, 13 months). */
 export const ACCOUNT_IDLE_DAYS = 395;
 const RESTRICTION_RETENTION_DAYS = 400;
+/** Step 8.5 (§4.1): removed mailbox items are kept 400 days after `removed_at`. */
+export const IDP_REMOVED_ITEM_RETENTION_DAYS = 400;
+/** Step 8.5 (§4.1, D4): stream rows and items of disabled integrations are kept 30 days. */
+export const IDP_DISABLED_INTEGRATION_RETENTION_DAYS = 30;
 const TRUSTED_CONTEXT_GRACE_DAYS = 30;
 const SETTINGS_VERSION_RETENTION_DAYS = 730;
 const PURGE_BATCH = 500;
@@ -73,6 +79,8 @@ export interface MaintenanceDeps {
   now: () => Date;
   config: MaintenanceConfig;
   organizationIds?: readonly bigint[];
+  /** Step 8.5: confirmations of identity-provider actions (D9.4) and their timeout. */
+  idp?: { executor: IdpActionExecutor; confirmTimeoutMinutes: number } | null;
 }
 
 /**
@@ -361,9 +369,17 @@ export class AtoMaintenance {
         continue;
       }
       const phase = action.status === 'executing' ? 'execute' : 'rollback';
+      const idp = this.deps.idp;
+      let detail: IdpCallOutcome['detail'] | undefined;
       const adapter = this.deps.registry.get(action.provider);
       let result: ProviderActionResult;
-      if (!adapter) {
+      if (idp && (IDP_KINDS.has(action.provider) || action.integrationId !== null)) {
+        // Step 8.5 (D9.4): read-back confirmation through the action's integration; after
+        // ATO_IDP_CONFIRM_TIMEOUT_MINUTES the action ends failed `unconfirmed`.
+        const outcome = await idp.executor.confirm(action, idp.confirmTimeoutMinutes, phase);
+        result = outcome.result;
+        detail = outcome.detail;
+      } else if (!adapter) {
         result = { status: 'failed', code: 'adapter_unavailable', retryable: false };
       } else {
         try {
@@ -391,6 +407,7 @@ export class AtoMaintenance {
           phase,
           result,
           final,
+          ...(detail ? { detail } : {}),
         });
         if (!final) {
           // Retry the confirmation later (exponential in the attempts, at most 15 minutes).
@@ -525,6 +542,7 @@ export class AtoMaintenance {
         where: { id: { in: versions.map((v) => big(v.id)) } },
       });
     }
+    const idp = await this.idpRetention(now);
     return [
       incidents,
       history.logs,
@@ -532,7 +550,51 @@ export class AtoMaintenance {
       restrictions,
       contexts,
       versions.length,
+      idp,
     ].some((n) => n >= PURGE_BATCH);
+  }
+
+  /**
+   * Step 8.5 retention (§4.1): mailbox items removed more than 400 days ago; stream rows and
+   * mailbox items of integrations disabled more than 30 days ago (their signals, auth events and
+   * actions follow 8.4's retention; the integration row stays while actions reference it). Returns
+   * the largest batch deleted.
+   */
+  async idpRetention(now: Date): Promise<number> {
+    const { prisma } = this.deps;
+    const filter = orgFilter('organization_id', this.deps.organizationIds);
+    const removed = await prisma.$executeRaw`
+      DELETE FROM ato_provider_mailbox_items
+      WHERE state = 'removed'
+        AND removed_at < ${new Date(now.getTime() - IDP_REMOVED_ITEM_RETENTION_DAYS * DAY_MS)}
+        ${filter}
+      LIMIT ${PURGE_BATCH}`;
+    const disabled = await prisma.$queryRaw<
+      Array<{ id: bigint | number; organization_id: bigint | number }>
+    >`
+      SELECT id, organization_id FROM ato_provider_integrations
+      WHERE status = 'disabled'
+        AND disabled_at < ${new Date(now.getTime() - IDP_DISABLED_INTEGRATION_RETENTION_DAYS * DAY_MS)}
+        ${filter}
+      ORDER BY id
+      LIMIT 50`;
+    let items = 0;
+    let streams = 0;
+    for (const row of disabled) {
+      const id = big(row.id);
+      const organizationId = big(row.organization_id);
+      items += await prisma.$executeRaw`
+        DELETE FROM ato_provider_mailbox_items
+        WHERE integration_id = ${id} AND organization_id = ${organizationId}
+        LIMIT ${PURGE_BATCH}`;
+      streams += await prisma.$executeRaw`
+        DELETE FROM ato_provider_streams
+        WHERE integration_id = ${id} AND organization_id = ${organizationId}`;
+    }
+    if (removed + items + streams > 0) {
+      this.deps.logger.info({ removed, items, streams }, 'ato idp retention');
+    }
+    return Math.max(removed, items);
   }
 
   // ------------------------------------------------------------------ account retirement (D1, D22)
@@ -654,7 +716,9 @@ export class AtoMaintenance {
       geoipAnonymous: geo('anonymous'),
       dnsblZones: this.deps.reputation.dnsblZones,
       breachIndicators: breach,
-      providers: this.deps.registry.kinds(),
+      // 8.4 meaning kept: the singleton adapters (the fake). The step 8.5 integrations carry
+      // their own effective capabilities (`ato_provider_integrations.capabilities`, D6).
+      providers: this.deps.registry.singletonKinds(),
       updatedAt: now.toISOString(),
     };
     await this.deps.prisma.systemSetting.upsert({

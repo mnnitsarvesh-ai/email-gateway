@@ -133,6 +133,7 @@ export class GrantVerifier {
             provider: true,
             status: true,
             externalTenantId: true,
+            activeTenantKey: true,
           },
         },
       },
@@ -162,6 +163,9 @@ export class GrantVerifier {
       // A verification always uses a fresh token (new consent, new credential).
       this.options.runtime.tokens.invalidate(grant.publicId);
       const token = await this.options.runtime.tokens.getAccessToken(ref, signal);
+      if (profile.purpose !== 'mail_flow') {
+        return report(await this.verifyAuxiliary(grant, claimed, profile, token, correlationId));
+      }
       const tenant = await this.options.runtime.directories[provider].tenant(ref, signal);
       const tenantId =
         provider === 'microsoft_365' ? tenant.tenantId.toLowerCase() : tenant.tenantId;
@@ -336,6 +340,91 @@ export class GrantVerifier {
       }
       throw error;
     }
+  }
+
+  /**
+   * Step 8.5 (WP6): grants of other purposes (`ato_telemetry`, `ato_response`) on a connection
+   * whose tenant the mail-flow grant already bound (D4). Their permission sets do not include the
+   * directory read 8.2's tenant check needs (and must not: least privilege, ADR-0084), so the
+   * tenant is the connection's bound one — the token was issued for it (customer app: the claimed
+   * tenant, checked against the binding above; platform app or Google delegation: the bound
+   * tenant) — and only the permissions the token can show are compared (`notInToken` excluded).
+   * Never binds a tenant or changes the connection; the ato-worker's probe proves the rest.
+   */
+  private async verifyAuxiliary(
+    grant: {
+      id: bigint;
+      publicId: string;
+      profile: string;
+      authMethod: ProviderAuthMethod;
+      rowVersion: number;
+      claimedTenantId: string | null;
+      connection: {
+        publicId: string;
+        provider: IntegrationProvider;
+        externalTenantId: string | null;
+        activeTenantKey: string | null;
+      };
+    },
+    claimed: ClaimedGrant,
+    profile: NonNullable<ReturnType<typeof profileByKey>>,
+    token: { observedPermissions: string[] },
+    correlationId: string,
+  ): Promise<VerificationResult> {
+    const provider = grant.connection.provider;
+    if (grant.connection.externalTenantId === null || grant.connection.activeTenantKey === null) {
+      return this.fail(grant, claimed, 'tenant_not_bound', correlationId, { provider });
+    }
+    if (
+      grant.claimedTenantId !== null &&
+      grant.claimedTenantId.toLowerCase() !== grant.connection.externalTenantId.toLowerCase()
+    ) {
+      return this.fail(grant, claimed, 'tenant_mismatch', correlationId, { provider });
+    }
+    const { missing, excess } = comparePermissions(profile, token.observedPermissions);
+    if (missing.length > 0) {
+      return this.fail(grant, claimed, 'permissions_missing', correlationId, {
+        provider,
+        permissions: { observed: token.observedPermissions, missing, excess },
+      });
+    }
+    const now = this.options.now();
+    return this.writer.$transaction(async (tx) => {
+      const version = await this.options.runtime.grants.updateGrantStatus(
+        grant.id,
+        grant.rowVersion,
+        {
+          status: 'active',
+          lastErrorCode: null,
+          observedPermissions: [...token.observedPermissions].sort(),
+          missingPermissions: null,
+          excessPermissions: excess.length > 0 ? excess : null,
+          verifiedAt: now,
+          verifyClaimedUntil: null,
+          lastTokenAt: now,
+          consecutiveFailures: 'reset',
+        },
+        tx,
+      );
+      if (version === null) return 'lost' as const;
+      await systemAudit(tx, {
+        organizationId: claimed.organizationId,
+        action: 'integration.grant_verified',
+        resourceId: grant.connection.publicId,
+        correlationId,
+        metadata: {
+          connectionId: grant.connection.publicId,
+          grantId: grant.publicId,
+          provider,
+          profile: grant.profile,
+          authMethod: grant.authMethod,
+          excessPermissions: excess,
+          tenantBinding: 'bound',
+        },
+        at: now,
+      });
+      return 'active' as const;
+    });
   }
 
   private async retryLater(

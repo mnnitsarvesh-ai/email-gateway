@@ -6,6 +6,7 @@ import {
   loadConfig,
   redisConfigSchema,
 } from '@email-gateway/config';
+import { idpAdapterEnvSchema, loadIdpAdapterConfig } from '@email-gateway/idp-adapters';
 import { parseDnsblZones } from '@email-gateway/url-security';
 import { z } from 'zod';
 
@@ -52,6 +53,52 @@ const DNS_SERVER =
 
 /** Environments where test seams (documentation ranges, the fake provider) are allowed. */
 const TEST_ENVIRONMENTS = ['local', 'ci'];
+
+const hex64 = z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hexadecimal characters (32 bytes)');
+const optionalText = (max: number) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.string().max(max).optional(),
+  );
+const providerUrl = (fallback: string) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+    z.url().max(512).default(fallback),
+  );
+
+/**
+ * Operator-provided platform credentials of the six ATO permission profiles (step 8.5 D5, §4.2;
+ * key names of `profiles/ato.ts` `platformApp`, deviation WP3-6). Empty = that platform app or
+ * service account is unavailable (customer-owned methods still work). Read only where a role
+ * that calls providers runs (`ato-respond` in Kubernetes, R3).
+ */
+export const ATO_PLATFORM_CREDENTIAL_KEYS = [
+  'PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_ID',
+  'PROVIDER_M365_ATO_TELEMETRY_APP_CLIENT_SECRET',
+  'PROVIDER_M365_ATO_TELEMETRY_APP_CERT_PATH',
+  'PROVIDER_M365_ATO_TELEMETRY_APP_CERT_THUMBPRINT',
+  'PROVIDER_M365_ATO_RESPONSE_APP_CLIENT_ID',
+  'PROVIDER_M365_ATO_RESPONSE_APP_CLIENT_SECRET',
+  'PROVIDER_M365_ATO_RESPONSE_APP_CERT_PATH',
+  'PROVIDER_M365_ATO_RESPONSE_APP_CERT_THUMBPRINT',
+  'PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CLIENT_ID',
+  'PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CLIENT_SECRET',
+  'PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CERT_PATH',
+  'PROVIDER_M365_ATO_RESPONSE_EXTENDED_APP_CERT_THUMBPRINT',
+  'PROVIDER_GOOGLE_ATO_TELEMETRY_SA_KEY_PATH',
+  'PROVIDER_GOOGLE_ATO_TELEMETRY_SA_CLIENT_ID',
+  'PROVIDER_GOOGLE_ATO_RESPONSE_SA_KEY_PATH',
+  'PROVIDER_GOOGLE_ATO_RESPONSE_SA_CLIENT_ID',
+  'PROVIDER_GOOGLE_ATO_RESPONSE_EXTENDED_SA_KEY_PATH',
+  'PROVIDER_GOOGLE_ATO_RESPONSE_EXTENDED_SA_CLIENT_ID',
+] as const;
+
+const platformCredentialShape = Object.fromEntries(
+  ATO_PLATFORM_CREDENTIAL_KEYS.map((key) => [key, optionalText(4096)]),
+) as Record<(typeof ATO_PLATFORM_CREDENTIAL_KEYS)[number], ReturnType<typeof optionalText>>;
+
+/** Roles that call identity providers (polls, probes, actions, confirmations). */
+export const PROVIDER_CALLING_ROLES = ['provider', 'respond', 'maintenance'] as const;
 
 /**
  * ato-worker (step 8.4 §4.2, D3, D7, D8, D13, D15, D16, D22; docs/plan/steps/24-account-takeover-core.md).
@@ -113,6 +160,30 @@ export const configSchema = baseConfigSchema
     ATO_PROVIDER_MAX_PAGES_PER_POLL: int(1, 100).default(10),
     ATO_PROVIDER_MAX_CONSECUTIVE_FAILURES: int(1, 100).default(10),
     ATO_DIGEST_ENABLED: flag.default(true),
+
+    // Step 8.5 identity-provider adapters (§4.2, D2, D12; ADR-0082, ADR-0086): the ATO_IDP_* keys
+    // of @email-gateway/idp-adapters (endpoint override rule checked below).
+    ...idpAdapterEnvSchema.shape,
+    // 8.2's credential custody (R3): decrypts customer-owned ATO credentials; the previous key
+    // only during a rotation. Required where a provider-calling role runs with the adapters on.
+    PROVIDER_CREDENTIAL_ENCRYPTION_KEY: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      hex64.optional(),
+    ),
+    PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      hex64.optional(),
+    ),
+    // 8.2's token endpoints (tokens through 8.2's token service, §0.4) and the Office 365
+    // Management token resource (R1).
+    PROVIDER_M365_LOGIN_URL: providerUrl('https://login.microsoftonline.com'),
+    PROVIDER_M365_GRAPH_URL: providerUrl('https://graph.microsoft.com'),
+    PROVIDER_M365_MANAGEMENT_URL: providerUrl('https://manage.office.com'),
+    PROVIDER_GOOGLE_TOKEN_URL: providerUrl('https://oauth2.googleapis.com/token'),
+    PROVIDER_GOOGLE_ADMIN_URL: providerUrl('https://admin.googleapis.com'),
+    PROVIDER_ALLOW_HTTP_ENDPOINTS: flag.default(false),
+    PROVIDER_M365_ALLOW_PLATFORM_SECRET: flag.default(false),
+    ...platformCredentialShape,
   })
   .superRefine((cfg, ctx) => {
     const testEnv = TEST_ENVIRONMENTS.includes(cfg.APP_ENV);
@@ -156,6 +227,44 @@ export const configSchema = baseConfigSchema
         });
       }
     }
+    // Step 8.5 (D2, D12): endpoint overrides only in local/ci, http only with
+    // PROVIDER_ALLOW_HTTP_ENDPOINTS (itself local/ci only). Messages name keys, never values.
+    if (cfg.PROVIDER_ALLOW_HTTP_ENDPOINTS && !testEnv) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PROVIDER_ALLOW_HTTP_ENDPOINTS'],
+        message: 'is allowed only when APP_ENV is local or ci',
+      });
+    }
+    try {
+      loadIdpAdapterConfig({
+        env: idpEnvOf(cfg),
+        appEnv: cfg.APP_ENV,
+        allowHttpEndpoints: cfg.PROVIDER_ALLOW_HTTP_ENDPOINTS && testEnv,
+      });
+    } catch (error) {
+      const key = (error as { key?: unknown }).key;
+      ctx.addIssue({
+        code: 'custom',
+        path: [
+          typeof key === 'string' && /^[A-Z0-9_]+$/.test(key) ? key : 'ATO_IDP_ADAPTERS_ENABLED',
+        ],
+        message: `refused: ${(error as { code?: string }).code ?? 'ato_idp_config_invalid'} (production origins only outside local/ci; https only)`,
+      });
+    }
+    const callsProviders = PROVIDER_CALLING_ROLES.some((r) => cfg.ATO_WORKER_ROLES.includes(r));
+    if (
+      cfg.ATO_IDP_ADAPTERS_ENABLED &&
+      callsProviders &&
+      cfg.PROVIDER_CREDENTIAL_ENCRYPTION_KEY === undefined
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['PROVIDER_CREDENTIAL_ENCRYPTION_KEY'],
+        message:
+          'is required for the provider, respond and maintenance roles while ATO_IDP_ADAPTERS_ENABLED is true',
+      });
+    }
     for (const [index, server] of cfg.ATO_DNS_SERVERS.entries()) {
       if (!DNS_SERVER.test(server)) {
         ctx.addIssue({
@@ -168,6 +277,25 @@ export const configSchema = baseConfigSchema
   });
 
 export type WorkerConfig = z.infer<typeof configSchema>;
+
+/** The `ATO_IDP_*` values of a parsed configuration as the adapter configuration reads them. */
+export function idpEnvOf(cfg: Record<string, unknown>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of Object.keys(idpAdapterEnvSchema.shape)) {
+    const value = cfg[key];
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      env[key] = String(value);
+    }
+  }
+  return env;
+}
+
+/** Whether this process runs a role that calls identity providers with the adapters on (R3). */
+export const callsIdentityProviders = (
+  config: Pick<WorkerConfig, 'ATO_WORKER_ROLES' | 'ATO_IDP_ADAPTERS_ENABLED'>,
+): boolean =>
+  config.ATO_IDP_ADAPTERS_ENABLED &&
+  PROVIDER_CALLING_ROLES.some((role) => config.ATO_WORKER_ROLES.includes(role));
 
 export const loadWorkerConfig = (env: NodeJS.ProcessEnv = process.env): Readonly<WorkerConfig> =>
   loadConfig(configSchema, env);

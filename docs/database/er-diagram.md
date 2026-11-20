@@ -1320,6 +1320,13 @@ erDiagram
   ato_response_actions |o..o| ato_smtp_restrictions : "restriction_id / response_action_id"
   organizations ||--o{ ato_smtp_restrictions : "RESTRICT"
   organizations ||--o{ ato_provider_integrations : "RESTRICT"
+  organizations ||--o{ ato_provider_streams : "RESTRICT (8.5)"
+  ato_provider_integrations ||--o{ ato_provider_streams : "CASCADE (8.5)"
+  organizations ||--o{ ato_provider_mailbox_items : "RESTRICT (8.5)"
+  ato_provider_integrations ||--o{ ato_provider_mailbox_items : "CASCADE (8.5)"
+  ato_accounts |o--o{ ato_provider_mailbox_items : "SET NULL (8.5)"
+  ato_provider_integrations |o--o{ ato_account_identities : "SET NULL (8.5)"
+  ato_provider_integrations |o..o{ ato_response_actions : "integration_id, no FK (8.5)"
   security_incidents {
     bigint id PK
     char public_id UK

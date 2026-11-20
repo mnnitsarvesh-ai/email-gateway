@@ -65,7 +65,9 @@ export class ProviderRunner {
 
   /** One pass; true when more integrations may be due. */
   async runOnce(): Promise<boolean> {
-    if (this.deps.registry.size === 0) return false;
+    // Step 8.5: only kinds with a singleton adapter (the fake); the Microsoft Entra ID and Google
+    // Workspace integrations are polled per stream by `IdpStreamRunner`.
+    if (this.deps.registry.singletonKinds().length === 0) return false;
     const claimed = await this.claim();
     for (const c of claimed) await this.poll(c);
     return claimed.length === PROVIDER_CLAIM_BATCH;
@@ -78,6 +80,7 @@ export class ProviderRunner {
       const rows = await tx.$queryRaw<Array<{ id: bigint | number }>>`
         SELECT id FROM ato_provider_integrations
         WHERE status = 'active' AND next_poll_at <= ${now}
+          AND provider IN (${Prisma.join(this.deps.registry.singletonKinds())})
           ${orgFilter('organization_id', this.deps.organizationIds)}
         ORDER BY next_poll_at, id
         LIMIT ${PROVIDER_CLAIM_BATCH}

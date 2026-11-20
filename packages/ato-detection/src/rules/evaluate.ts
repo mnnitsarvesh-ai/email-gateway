@@ -55,6 +55,26 @@ export const SUSPICIOUS_RULE_TRAITS = [
   'security_keywords',
 ] as const;
 
+/**
+ * Step 8.5 (merge note M3, additive): the identity-provider adapters report inbox-rule traits in
+ * their own vocabulary (`MAILBOX_RULE_TRAITS` of `@email-gateway/idp-adapters`); M2 maps them onto
+ * the 8.4 trait codes above. Traits without an alias (`moves_to_folder`, `stops_processing`,
+ * `matches_all_messages`) are not suspicious on their own.
+ */
+export const PROVIDER_RULE_TRAIT_ALIASES: Readonly<
+  Record<string, (typeof SUSPICIOUS_RULE_TRAITS)[number]>
+> = Object.freeze({
+  forwards: 'forward',
+  redirects: 'forward',
+  forwards_as_attachment: 'forward',
+  forwards_external: 'forward',
+  deletes: 'delete',
+  moves_to_rarely_used_folder: 'move_rare_folder',
+  marks_read: 'mark_read',
+  matches_finance_keywords: 'finance_keywords',
+  matches_security_keywords: 'security_keywords',
+});
+
 /** OAuth scopes that make a user consent strong when the publisher is unverified (Q1). */
 export const RISKY_OAUTH_SCOPES = [
   'mail_read',
@@ -197,7 +217,8 @@ class Evaluator {
       sourceRef: obs.key.slice(0, 64),
       messageRef: obs.type === 'outbound_message' ? obs.message : null,
       authEventRef: obs.type === 'auth' ? obs.authEventRef : null,
-      informational: this.input.context.learning && relative,
+      informational:
+        (this.input.context.learning && relative) || this.input.context.historical === true,
       seen: options.seen ?? null,
     });
   }
@@ -742,9 +763,13 @@ function evaluateProvider(e: Evaluator, input: RuleInput): void {
       e.hit(m1, { subject: m.targetDomain, evidence: { domain: m.targetDomain.slice(0, 128) } });
     }
     const m2 = e.rule('ato.mailbox.suspicious_inbox_rule');
-    const traits = m.ruleTraits.filter((t) =>
-      (SUSPICIOUS_RULE_TRAITS as readonly string[]).includes(t),
-    );
+    const traits = [
+      ...new Set(
+        m.ruleTraits
+          .map((t) => PROVIDER_RULE_TRAIT_ALIASES[t] ?? t)
+          .filter((t) => (SUSPICIOUS_RULE_TRAITS as readonly string[]).includes(t)),
+      ),
+    ];
     if (
       m2 &&
       (m.change === 'inbox_rule_added' || m.change === 'inbox_rule_changed') &&

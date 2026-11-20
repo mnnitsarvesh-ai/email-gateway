@@ -32,7 +32,7 @@ export const PROVIDER_BACKOFF_MAX_SECONDS = 3_600;
 /** Upper bound of one connection's checks. */
 const HEALTH_DEADLINE_MS = 4 * 60_000;
 
-/** Implemented periodic codes (the registry's periodic list; 8.5 checks run in their own step). */
+/** Implemented periodic codes (the registry's periodic list, including step 8.5's ATO check). */
 const IMPLEMENTED: ReadonlySet<string> = new Set<CheckCode>([
   'credentials.token',
   'permissions.granted',
@@ -44,6 +44,8 @@ const IMPLEMENTED: ReadonlySet<string> = new Set<CheckCode>([
   'routing.loops',
   'credential.expiry',
   'egress.ranges_fresh',
+  // Step 8.5 (D11): stored ATO integration health; no provider call.
+  'ato.identity_provider',
 ]);
 
 interface StoredCheck {

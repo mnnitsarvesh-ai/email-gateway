@@ -8,6 +8,9 @@
 # ato.events / ato.mail (AtoEventsBacklog, AtoMailQueueNearBound). GeoIP: the base runs without
 # the MaxMind databases (geography honestly unavailable); the component
 # components/ato-geoip adds the geoipupdate sidecar and the database paths.
+# Step 8.5 (R3, ADR-0082): ato-detect runs no provider-calling role; it reads the effective
+# capabilities the ato-respond probe stores and holds no provider credential, no credential key
+# and no Internet egress.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

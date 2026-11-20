@@ -1,0 +1,144 @@
+# promtool unit tests of rules/ato-idp.rules.yml (step 8.5 D11), one test per alert:
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/ato-idp.rules.test.yml
+rule_files:
+  - ../rules/ato-idp.rules.yml
+evaluation_interval: 1m
+tests:
+  - name: stream lag above 1 hour for 30 minutes (max over replicas)
+    interval: 1m
+    input_series:
+      - series: ato_idp_stream_lag_seconds{job="ato-worker",instance="a",provider="microsoft_entra",stream="sign_ins"}
+        values: 600x10 4000x40
+      - series: ato_idp_stream_lag_seconds{job="ato-worker",instance="b",provider="microsoft_entra",stream="sign_ins"}
+        values: 0x50
+      - series: ato_idp_stream_lag_seconds{job="ato-worker",instance="a",provider="google_workspace",stream="sign_ins"}
+        values: 3000x50
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AtoIdpStreamLagHigh
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: AtoIdpStreamLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: microsoft_entra
+              stream: sign_ins
+            exp_annotations:
+              summary: 'An identity-provider stream lags more than 1 hour (microsoft_entra sign_ins)'
+              description: 'The oldest watermark of an enabled primary stream of an active integration is more than 3600 seconds behind. Provider events reach detection late: check throttling, failures and the provider role (docs/runbooks/ato-identity-providers.md).'
+              runbook_url: docs/runbooks/ato-identity-providers.md#lag
+  - name: an unhealthy integration for 15 minutes
+    interval: 1m
+    input_series:
+      - series: ato_idp_integrations{job="ato-worker",instance="a",provider="google_workspace",health="unhealthy"}
+        values: 0x5 1x20
+      - series: ato_idp_integrations{job="ato-worker",instance="a",provider="microsoft_entra",health="unhealthy"}
+        values: 0x25
+      - series: ato_idp_integrations{job="ato-worker",instance="a",provider="microsoft_entra",health="healthy"}
+        values: 3x25
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AtoIdpIntegrationUnhealthy
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: AtoIdpIntegrationUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: google_workspace
+            exp_annotations:
+              summary: 'An identity-provider integration is unhealthy (google_workspace)'
+              description: 'At least one ATO identity-provider integration has been unhealthy for 15 minutes (connection inactive, token acquisition failing or every enabled stream failing). The tenant was notified (provider_unhealthy); check whether many tenants are affected at once (platform app credentials, egress, provider outage).'
+              runbook_url: docs/runbooks/ato-identity-providers.md#unhealthy
+  - name: sustained throttling (more than 0.5/s for 30 minutes)
+    interval: 1m
+    input_series:
+      # 60 throttled answers per minute = 1/s.
+      - series: ato_idp_throttled_total{job="ato-worker",instance="a",provider="microsoft_entra",family="graph"}
+        values: 0+60x60
+      # 12 per minute = 0.2/s: below the threshold.
+      - series: ato_idp_throttled_total{job="ato-worker",instance="a",provider="google_workspace",family="gmail"}
+        values: 0+12x60
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AtoIdpThrottledSustained
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: AtoIdpThrottledSustained
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: microsoft_entra
+              family: graph
+            exp_annotations:
+              summary: 'Identity-provider throttling for 30 minutes (microsoft_entra graph)'
+              description: 'The provider answers more than 0.5 throttling or quota responses per second. Streams back off and lag grows; review the per-integration rate budgets (ATO_IDP_RATE_*) and large backfills.'
+              runbook_url: docs/runbooks/ato-identity-providers.md#throttling
+  - name: probe failures (3 in an hour, for 15 minutes)
+    interval: 1m
+    input_series:
+      - series: ato_idp_probe_total{job="ato-worker",instance="a",provider="microsoft_entra",result="failed"}
+        values: 0x5 1 2 3 4x40
+      - series: ato_idp_probe_total{job="ato-worker",instance="a",provider="google_workspace",result="failed"}
+        values: 0x5 1x40
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AtoIdpProbeFailures
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: AtoIdpProbeFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: microsoft_entra
+            exp_annotations:
+              summary: 'Identity-provider capability probes are failing (microsoft_entra)'
+              description: 'At least three capability probes failed in the last hour (missing permission or licence, token failure, provider error). Affected capabilities are reported unavailable; provider actions may be unsupported.'
+              runbook_url: docs/runbooks/ato-identity-providers.md#probe-failures
+  - name: a provider action ended unconfirmed
+    interval: 1m
+    input_series:
+      - series: ato_idp_actions_total{job="ato-worker",instance="a",provider="google_workspace",action="suspend_account",outcome="timeout"}
+        values: 0x5 1x20
+      - series: ato_idp_actions_total{job="ato-worker",instance="a",provider="google_workspace",action="suspend_account",outcome="confirmed"}
+        values: 0+1x25
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AtoIdpActionsUnconfirmed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AtoIdpActionsUnconfirmed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: google_workspace
+              action: suspend_account
+            exp_annotations:
+              summary: 'Provider actions ended unconfirmed (google_workspace suspend_account)'
+              description: 'A provider response action was not confirmed by read-back within ATO_IDP_CONFIRM_TIMEOUT_MINUTES and ended failed with provider_status unconfirmed. The effect may still have happened at the provider; an analyst must verify it.'
+              runbook_url: docs/runbooks/ato-identity-providers.md#confirmation-timeouts
+  - name: a cursor reset
+    interval: 1m
+    input_series:
+      - series: ato_idp_cursor_resets_total{job="ato-worker",instance="a",provider="microsoft_entra",stream="mailbox_audit"}
+        values: 0x5 1x80
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AtoIdpCursorResets
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AtoIdpCursorResets
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              provider: microsoft_entra
+              stream: mailbox_audit
+            exp_annotations:
+              summary: 'An identity-provider stream cursor was reset (microsoft_entra mailbox_audit)'
+              description: 'A stored cursor was malformed or of another adapter version; the stream restarted at now minus its overlap window. Events between the old watermark and the restart may be missing: request a backfill if needed.'
+              runbook_url: docs/runbooks/ato-identity-providers.md#cursor-reset
+      - eval_time: 80m
+        alertname: AtoIdpCursorResets
+        exp_alerts: []

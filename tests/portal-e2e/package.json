@@ -17,6 +17,7 @@
     "@email-gateway/archive": "workspace:*",
     "@email-gateway/ato-detection": "workspace:*",
     "@email-gateway/database": "workspace:*",
+    "@email-gateway/idp-adapters": "workspace:*",
     "@email-gateway/policy-dsl": "workspace:*",
     "@email-gateway/risk-scoring": "workspace:*",
     "@email-gateway/security-incidents": "workspace:*",

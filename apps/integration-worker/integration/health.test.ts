@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { integrationHealthChangedV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Harness, signal } from './support/harness';
@@ -103,12 +104,68 @@ describe('connection health', () => {
         'routing.loops',
         'credential.expiry',
         'egress.ranges_fresh',
+        // Step 8.5 (D11): registered by the library; `skipped` without an ATO integration.
+        'ato.identity_provider',
       ]),
     );
     // Not due again before the interval: not claimed.
     expect(await components.health.claim(10)).not.toContain(connection.id);
     const transitions = await metrics.healthTransitions.get();
     expect(transitions.values.some((v) => v.labels.to === 'healthy')).toBe(true);
+  });
+
+  it('step 8.5 ato.identity_provider: an unhealthy ATO integration warns, never critical', async () => {
+    const { connection } = await healthyConnection('ato');
+    const { components } = h.worker({ config });
+    const skipped = await components.health.check(connection.id, signal());
+    expect(skipped).toMatchObject({ status: 'healthy' });
+    const atoCheck = () =>
+      h.prisma.providerHealthCheck.findFirstOrThrow({
+        where: { connectionId: connection.id, checkCode: 'ato.identity_provider' },
+      });
+    expect(await atoCheck()).toMatchObject({ status: 'skipped', severity: 'info' });
+    const integration = await h.prisma.atoProviderIntegration.create({
+      data: {
+        organizationId: org,
+        provider: 'microsoft_entra',
+        connectorRef: connection.publicId,
+        bindingKey: createHash('sha256')
+          .update(`microsoft_entra|${connection.publicId}`)
+          .digest('hex'),
+        status: 'active',
+        capabilities: {},
+        cursors: {},
+        settings: {},
+        nextPollAt: h.clock.now(),
+        healthStatus: 'unhealthy',
+        healthCheckedAt: h.clock.now(),
+        healthDetail: {
+          ok: false,
+          streams: { sign_ins: { availability: 'missing_permission' } },
+          grants: [{ profile: 'm365.ato_telemetry', missingPermissions: ['AuditLog.Read.All'] }],
+        },
+      },
+    });
+    try {
+      h.clock.advance(900_000);
+      const outcome = await h.worker({ config }).components.health.check(connection.id, signal());
+      // Severity warning (PQ15): the connection turns `warning`, not `critical`.
+      expect(outcome).toMatchObject({ previous: 'healthy', status: 'warning', changed: true });
+      expect(outcome!.failingChecks).toEqual(['ato.identity_provider']);
+      expect(await atoCheck()).toMatchObject({
+        status: 'fail',
+        severity: 'warning',
+        evidence: {
+          health: 'unhealthy',
+          integrationId: integration.publicId,
+          failingStreams: ['sign_ins'],
+          missingPermissions: ['AuditLog.Read.All'],
+        },
+      });
+    } finally {
+      await h.prisma.atoProviderIntegration.delete({ where: { id: integration.id } });
+      h.clock.set(new Date());
+    }
   });
 
   it('no transition on an equal status', async () => {

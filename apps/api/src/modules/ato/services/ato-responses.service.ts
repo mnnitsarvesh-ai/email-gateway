@@ -231,6 +231,44 @@ export class AtoResponsesService {
     };
   }
 
+  /**
+   * Step 8.5 (D9.7, D9.8): the provider parameters of `remove_forwarding_rule` (one present
+   * mailbox item of the account, or every external forwarding item: the default) and
+   * `revoke_oauth_grant` (`appIdHash`, required). Other action types take no `params`.
+   */
+  private async providerParams(
+    scope: TenantScope,
+    tx: Db,
+    type: RequestResponseBody['actionType'],
+    accountId: bigint,
+    params: RequestResponseBody['params'],
+  ): Promise<Record<string, string>> {
+    const given = params ?? {};
+    const keys = Object.keys(given);
+    if (type === 'remove_forwarding_rule') {
+      if (given.appIdHash !== undefined) throw invalid('appIdHash applies to revoke_oauth_grant');
+      if (given.itemId !== undefined && given.scope !== undefined) {
+        throw invalid('Give either params.itemId or params.scope, not both');
+      }
+      if (given.itemId !== undefined) {
+        const itemId = given.itemId.toLowerCase();
+        if (!(await this.reads.presentMailboxItemOfAccount(scope, accountId, itemId, tx))) {
+          throw invalid('The mailbox item is not a present item of this account');
+        }
+        return { itemId };
+      }
+      return { scope: 'all_external' };
+    }
+    if (type === 'revoke_oauth_grant') {
+      if (given.appIdHash === undefined || keys.length !== 1) {
+        throw invalid('revoke_oauth_grant needs params.appIdHash (and nothing else)');
+      }
+      return { appIdHash: given.appIdHash };
+    }
+    if (keys.length > 0) throw invalid('params apply to identity-provider actions only');
+    return {};
+  }
+
   /** `POST /ato/incidents/{incidentId}/responses` (#16): `201` with the action. */
   request(
     principal: Principal,
@@ -269,6 +307,7 @@ export class AtoResponsesService {
           ...(body.durationMinutes !== undefined && { durationMinutes: body.durationMinutes }),
           ...(body.mode !== undefined && { mode: body.mode }),
           ...(body.description !== undefined && { description: body.description }),
+          ...(await this.providerParams(scope, tx, type, account.id, body.params)),
         };
         const action = await this.stores.ato.requestResponse(tx, {
           organizationId: scope.organizationId,

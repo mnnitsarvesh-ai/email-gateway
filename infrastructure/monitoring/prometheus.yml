@@ -82,7 +82,8 @@ scrape_configs:
   # ato-worker (step 8.4 D19): ato_* detection, response, maintenance, GeoIP, reputation, Redis and
   # provider series, the shared amqp_* consumer series (detect and respond roles). Compose runs every
   # role in one container; Kubernetes scrapes the ato-detect (detect) and ato-respond
-  # (respond,maintenance,provider) Services under the same job name.
+  # (respond,maintenance,provider) Services under the same job name. Step 8.5 adds the
+  # identity-provider series ato_idp_* (D11; rules/ato-idp.rules.yml, picked up by the glob above).
   - job_name: ato-worker
     metrics_path: /metrics
     static_configs:

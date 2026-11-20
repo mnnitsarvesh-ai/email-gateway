@@ -1,12 +1,14 @@
 import { resolve } from 'node:path';
 import { AdvisoryLocks, MetricsService } from '@email-gateway/common';
 import type { IdentityProviderAdapter } from '@email-gateway/ato-detection';
+import type { ProviderConnectionAccess, RateBudget, Sleep } from '@email-gateway/idp-adapters';
 import { createLogger, type Logger } from '@email-gateway/logger';
 import { type RestrictedResolver } from '@email-gateway/url-security';
 import { Redis } from 'ioredis';
 import { AtoComponents } from '../../src/components';
 import { loadWorkerConfig, type WorkerConfig } from '../../src/config';
 import { AtoMetrics } from '../../src/metrics/ato-metrics';
+import { IdpMetrics } from '../../src/metrics/idp-metrics';
 import { requireEnv, type Fixtures } from './fixtures';
 
 const GEOIP = resolve(__dirname, '../../../../packages/ato-detection/test-fixtures/geoip');
@@ -68,6 +70,7 @@ export interface Harness {
   config: Readonly<WorkerConfig>;
   metrics: MetricsService;
   atoMetrics: AtoMetrics;
+  idpMetrics: IdpMetrics;
   redis: Redis;
   locks: AdvisoryLocks;
   clock: Clock;
@@ -85,12 +88,15 @@ export async function harness(
     fakeAdapter?: IdentityProviderAdapter;
     platformOrganizationId?: bigint;
     resolver?: RestrictedResolver;
+    /** Step 8.5 seams: the in-memory 8.2 connection port of the in-process simulators. */
+    idp?: { connections?: ProviderConnectionAccess; budget?: RateBudget; sleep?: Sleep };
   } = {},
 ): Promise<Harness> {
   const config = options.config ?? testConfig();
   const clock = options.clock ?? new Clock();
   const metrics = new MetricsService({ service: `ato-worker-it-${fx.suffix}` });
   const atoMetrics = new AtoMetrics(metrics);
+  const idpMetrics = new IdpMetrics(metrics);
   const redis = new Redis(requireEnv('REDIS_URL'), { maxRetriesPerRequest: 2 });
   const locks = new AdvisoryLocks(requireEnv('DATABASE_URL'));
   const comps = await AtoComponents.create(config, {
@@ -98,6 +104,7 @@ export async function harness(
     redis,
     locks,
     metrics: atoMetrics,
+    idpMetrics,
     logger: silent,
     now: clock.now,
     organizationIds: fx.organizationIds,
@@ -107,12 +114,14 @@ export async function harness(
       ? { platformOrganizationId: options.platformOrganizationId }
       : {}),
     ...(options.resolver ? { resolver: options.resolver } : {}),
+    ...(options.idp ? { idp: options.idp } : {}),
   });
   return {
     comps,
     config,
     metrics,
     atoMetrics,
+    idpMetrics,
     redis,
     locks,
     clock,
@@ -130,7 +139,7 @@ export async function harness(
       await comps.stop().catch(() => undefined);
       // Short-term keys of the suite's organizations (TTL-bound anyway).
       for (const org of fx.organizationIds) {
-        for (const pattern of ['w', 's', 'att', 'seen', 'last', 'sub', 'sigdd', 't4']) {
+        for (const pattern of ['w', 's', 'att', 'seen', 'last', 'sub', 'sigdd', 't4', 'idp:ev']) {
           let cursor = '0';
           do {
             const [next, keys] = await redis.scan(

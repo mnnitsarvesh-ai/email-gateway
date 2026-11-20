@@ -826,6 +826,72 @@ describe('account takeover routes (e2e, dependencies stubbed)', () => {
       expect(strict.body.code).toBe('validation_failed');
     });
 
+    it('step 8.5 provider params: forwarding item of the account, all external by default, appIdHash for OAuth', async () => {
+      const auth = await asUser(ALL);
+      const post = (body: object) =>
+        api
+          .http()
+          .post(`${BASE}/incidents/${ctx.incident}/responses`)
+          .set(auth)
+          .set('Idempotency-Key', randomUUID())
+          .send(body);
+      const account = world.accounts.find((a) => a.publicId === ctx.account)!;
+      const itemId = randomUUID();
+      world.mailboxItems.push({
+        organizationId: account.organizationId,
+        accountId: account.id,
+        publicId: itemId,
+      });
+      const reason = 'External forwarding rule after a risky sign-in';
+      const unknown = await post({
+        actionType: 'remove_forwarding_rule',
+        reason,
+        params: { itemId: randomUUID() },
+      });
+      expect(unknown.status).toBe(422);
+      expect(unknown.body.code).toBe('ato_response_invalid');
+      const both = await post({
+        actionType: 'remove_forwarding_rule',
+        reason,
+        params: { itemId, scope: 'all_external' },
+      });
+      expect(both.status).toBe(422);
+      const notForGateway = await post({
+        actionType: 'notify_soc',
+        reason: 'Inform the SOC now',
+        params: { itemId },
+      });
+      expect(notForGateway.status).toBe(422);
+      const oauthWithoutHash = await post({ actionType: 'revoke_oauth_grant', reason, params: {} });
+      expect(oauthWithoutHash.status).toBe(422);
+      const badHash = await post({
+        actionType: 'revoke_oauth_grant',
+        reason,
+        params: { appIdHash: 'NOT-HEX' },
+      });
+      expect(badHash.status).toBe(400);
+      const item = await post({ actionType: 'remove_forwarding_rule', reason, params: { itemId } });
+      expect(item.status).toBe(201);
+      expect(world.responses.find((r) => r.publicId === item.body.id)?.params).toEqual({ itemId });
+      const oauth = await post({
+        actionType: 'revoke_oauth_grant',
+        reason,
+        params: { appIdHash: 'a'.repeat(64) },
+      });
+      expect(oauth.status).toBe(201);
+      expect(world.responses.find((r) => r.publicId === oauth.body.id)?.params).toEqual({
+        appIdHash: 'a'.repeat(64),
+      });
+      world.responses
+        .filter((r) => r.actionType === 'remove_forwarding_rule')
+        .forEach((r) => (r.activeMarker = null));
+      const all = await post({ actionType: 'remove_forwarding_rule', reason });
+      expect(all.status).toBe(201);
+      expect(world.responses.find((r) => r.publicId === all.body.id)?.params).toEqual({
+        scope: 'all_external',
+      });
+    });
+
     it('cancel only pending actions; canDecide reflects the caller', async () => {
       const list = await api
         .http()

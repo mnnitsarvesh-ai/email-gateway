@@ -84,6 +84,11 @@ export interface ResponseRow extends AtoResponseAction {
   requestedByKeyCreatorPublicId: string | null;
 }
 
+/** An account identity with the public id of its step 8.5 integration (null when none). */
+export interface AccountIdentityRow extends AtoAccountIdentity {
+  integrationPublicId: string | null;
+}
+
 export interface ResponseFilters {
   statuses?: readonly AtoResponseAction['status'][] | undefined;
   actionTypes?: readonly string[] | undefined;
@@ -411,7 +416,7 @@ export class AtoReadRepository {
     baseline: AtoAccountBaseline | null;
     trustedContexts: Array<AtoTrustedContext & { incidentPublicId: string | null }>;
     linked: Array<Pick<AtoAccount, 'publicId' | 'kind' | 'riskLevel'>>;
-    identities: AtoAccountIdentity[];
+    identities: AccountIdentityRow[];
   }> {
     const client = this.db(db);
     const org = scope.organizationId;
@@ -463,6 +468,19 @@ export class AtoReadRepository {
     });
     const incidentIds = [...new Set(contexts.flatMap((c) => (c.incidentId ? [c.incidentId] : [])))];
     const incidents = await this.incidentPublicIds(scope, incidentIds, db);
+    // Step 8.5: the public id of the integration that resolved each identity.
+    const integrationIds = [
+      ...new Set(identities.flatMap((i) => (i.integrationId === null ? [] : [i.integrationId]))),
+    ];
+    const integrations =
+      integrationIds.length === 0
+        ? []
+        : await client.atoProviderIntegration.findMany({
+            where: { organizationId: org, id: { in: integrationIds } },
+            select: { id: true, organizationId: true, publicId: true },
+          });
+    assertEcho('ato.accounts.identity_integrations', integrations, { organizationId: org });
+    const integrationPublicIds = new Map(integrations.map((i) => [i.id, i.publicId]));
     return {
       restrictions: await this.joinRestrictions(scope, restrictions, db),
       baseline,
@@ -471,7 +489,11 @@ export class AtoReadRepository {
         incidentPublicId: c.incidentId ? (incidents.get(c.incidentId) ?? null) : null,
       })),
       linked: linked.map(({ organizationId: _o, ...rest }) => rest),
-      identities,
+      identities: identities.map((i) => ({
+        ...i,
+        integrationPublicId:
+          i.integrationId === null ? null : (integrationPublicIds.get(i.integrationId) ?? null),
+      })),
     };
   }
 
@@ -1046,6 +1068,25 @@ export class AtoReadRepository {
     if (row === null) return null;
     if (row.organizationId !== scope.organizationId || row.publicId !== publicId) return null;
     return row.id;
+  }
+
+  /**
+   * Step 8.5 (D9.7): whether a present mailbox item (public id) belongs to the account in the
+   * caller's organization (`remove_forwarding_rule` with `params.itemId`).
+   */
+  async presentMailboxItemOfAccount(
+    scope: TenantScope,
+    accountId: bigint,
+    publicId: string,
+    db?: Db,
+  ): Promise<boolean> {
+    const row = await this.db(db).atoProviderMailboxItem.findFirst({
+      where: { organizationId: scope.organizationId, accountId, publicId, state: 'present' },
+      select: { organizationId: true, accountId: true, publicId: true },
+    });
+    if (row === null) return false;
+    assertEcho('ato.mailbox_items.get', [row], { organizationId: scope.organizationId, publicId });
+    return row.accountId === accountId;
   }
 
   /** The active provider integration of the organization (8.5), or null. */

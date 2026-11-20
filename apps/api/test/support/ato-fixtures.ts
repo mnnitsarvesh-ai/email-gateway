@@ -74,6 +74,7 @@ import {
   type IncidentSort,
 } from '../../src/modules/incidents/repositories/incidents-read.repository';
 import { OrganizationFeaturesService } from '../../src/tenancy/organization-features.service';
+import { AtoProviderWorld, providerOverrides } from './ato-provider-fixtures';
 import { RecordingAuditService } from './messages-fixtures';
 
 const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const;
@@ -108,6 +109,8 @@ export class AtoWorld {
   }> = [];
   restrictions: AtoSmtpRestriction[] = [];
   responses: AtoResponseAction[] = [];
+  /** Step 8.5 mailbox items (only what `presentMailboxItemOfAccount` reads). */
+  mailboxItems: Array<{ organizationId: bigint; accountId: bigint; publicId: string }> = [];
   /** API key public id → public id of the user who created it (`api_keys.created_by_user_id`). */
   apiKeyCreators = new Map<string, string>();
   attempts: AtoResponseActionLog[] = [];
@@ -748,6 +751,16 @@ class FakeAtoReads extends AtoReadRepository {
 
   override providerKind() {
     return Promise.resolve(null);
+  }
+
+  /** Step 8.5 (WP6): the world's present mailbox items, `{ organizationId, accountId, publicId }`. */
+  override presentMailboxItemOfAccount(scope: TenantScope, accountId: bigint, publicId: string) {
+    return Promise.resolve(
+      this.w.mailboxItems.some(
+        (i) =>
+          i.organizationId === own(scope) && i.accountId === accountId && i.publicId === publicId,
+      ),
+    );
   }
 
   override settingsRow(scope: TenantScope) {
@@ -1604,6 +1617,30 @@ class FakeAtoStore {
     return Promise.resolve(action);
   }
 
+  /** Step 8.5: a provider result (only the `failed` end the api's removal records). */
+  completeProviderAction(
+    _tx: unknown,
+    input: {
+      organizationId: bigint;
+      actionId: bigint;
+      phase: 'execute' | 'rollback';
+      result: { status: 'failed'; code: string; retryable: boolean };
+      final?: boolean;
+    },
+  ) {
+    const action = this.w.responses.find(
+      (r) => r.id === input.actionId && r.organizationId === input.organizationId,
+    );
+    if (!action) throw new AtoStoreError('ato_response_not_found', 'Response not found');
+    action.status = input.phase === 'execute' ? 'failed' : 'rollback_failed';
+    action.providerStatus = 'failed';
+    action.resultCode = input.result.code;
+    action.completedAt = new Date();
+    action.activeMarker = null;
+    this.log(action, input.phase, 'failed');
+    return Promise.resolve(action);
+  }
+
   loadSettings(_tx: unknown, organizationId: bigint) {
     const row = this.w.settings.get(organizationId);
     return Promise.resolve(row ? { rowVersion: row.rowVersion, version: row.version } : null);
@@ -1702,7 +1739,12 @@ export function overrideAto(
   world: AtoWorld,
   audit: RecordingAuditService,
   extra: IncidentCategoryDefinition[] = [],
+  providers: AtoProviderWorld = new AtoProviderWorld(world),
 ): TestingModuleBuilder {
+  // Step 8.5: the identity-provider repositories and the 8.2 connection directory.
+  for (const [token, value] of providerOverrides(providers)) {
+    builder = builder.overrideProvider(token).useValue(value);
+  }
   return builder
     .overrideProvider(AtoReadRepository)
     .useValue(new FakeAtoReads(world))

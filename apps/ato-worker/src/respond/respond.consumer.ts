@@ -14,8 +14,10 @@ import type { AtoResponseAction, PrismaClient } from '@email-gateway/database';
 import { atoResponseRequestedV1, type EventEnvelope } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import type { AtoMetrics } from '../metrics/ato-metrics';
+import { IDP_KINDS } from '../provider/provider-context';
 import { type AtoDb, LEDGERS } from '../shared/db';
 import { errorFields, InconsistentReadError } from '../shared/errors';
+import type { IdpActionExecutor, IdpCallOutcome } from './idp-actions';
 
 /** Attempts of a retryable provider failure before the action is `failed` (queue maxAttempts). */
 export const RESPONSE_MAX_ATTEMPTS = 10;
@@ -124,6 +126,8 @@ export class RespondConsumer {
       metrics: AtoMetrics | null;
       logger: Logger;
       organizationIds?: readonly bigint[];
+      /** Step 8.5: provider actions on the Microsoft Entra ID / Google Workspace adapters. */
+      idp?: IdpActionExecutor | null;
     },
   ) {}
 
@@ -150,7 +154,7 @@ export class RespondConsumer {
     if (settled || (p.phase === 'execute' && action.status === 'executing')) return 'duplicate';
 
     const started = performance.now();
-    const result = await this.call(action, p.phase);
+    const { result, detail } = await this.outcome(action, p.phase);
     const durationMs = performance.now() - started;
     const final =
       result.status !== 'failed' ||
@@ -171,6 +175,7 @@ export class RespondConsumer {
           result,
           final: false,
           durationMs,
+          ...(detail ? { detail } : {}),
         }),
       );
       throw new ProviderRetryError(result.status === 'failed' ? result.code : 'retry');
@@ -183,6 +188,7 @@ export class RespondConsumer {
         result,
         final: true,
         durationMs,
+        ...(detail ? { detail } : {}),
       }),
     );
     if (outcome.status === 'processed') {
@@ -193,6 +199,28 @@ export class RespondConsumer {
     }
     return outcome.status === 'duplicate' ? 'duplicate' : 'handled';
   };
+
+  /**
+   * Step 8.5 (D9): actions of the identity-provider kinds — or of an organization that had no
+   * integration when the action was proposed (`unbound`) — go through the 8.5 executor
+   * (integration selection, linked-domain guard, capability, identity); 8.4's singleton adapters
+   * (the fake) keep the 8.4 path.
+   */
+  private async outcome(
+    action: AtoResponseAction,
+    phase: 'execute' | 'rollback',
+  ): Promise<{ result: ProviderActionResult; detail?: IdpCallOutcome['detail'] }> {
+    const idp = this.deps.idp;
+    if (
+      idp &&
+      (IDP_KINDS.has(action.provider) ||
+        action.integrationId !== null ||
+        (action.provider === 'unbound' && isProviderActionType(action.actionType)))
+    ) {
+      return idp.call(action, phase);
+    }
+    return { result: await this.call(action, phase) };
+  }
 
   private async call(
     action: AtoResponseAction,

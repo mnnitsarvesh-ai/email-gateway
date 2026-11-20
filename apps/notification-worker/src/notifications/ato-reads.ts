@@ -112,6 +112,61 @@ export interface AtoNoticeAction {
   accountId: bigint;
 }
 
+/** An ATO identity-provider integration as the `provider_unhealthy` notice shows it (step 8.5). */
+export interface AtoNoticeIntegration {
+  publicId: string;
+  provider: string;
+  displayName: string | null;
+  status: string;
+  healthStatus: string;
+  /** Stream codes whose last probe was not available (≤ 7). */
+  failingStreams: string[];
+  /** Permission names the last probe found missing (≤ 10). */
+  missingPermissions: string[];
+}
+
+const STREAM_CODE = /^[a-z][a-z_]{0,31}$/;
+const PERMISSION_NAME = /^[A-Za-z0-9._:/-]{1,128}$/;
+
+/**
+ * Failing streams and missing permission names of a stored probe report
+ * (`ato_provider_integrations.health_detail`, untrusted JSON), bounded, codes and names only.
+ */
+export function probeFacts(detail: unknown): {
+  failingStreams: string[];
+  missingPermissions: string[];
+} {
+  const out = { failingStreams: [] as string[], missingPermissions: [] as string[] };
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return out;
+  const d = detail as { streams?: unknown; grants?: unknown };
+  if (d.streams && typeof d.streams === 'object' && !Array.isArray(d.streams)) {
+    for (const [name, value] of Object.entries(d.streams as Record<string, unknown>)) {
+      const availability = (value as { availability?: unknown } | null)?.availability;
+      if (
+        STREAM_CODE.test(name) &&
+        typeof availability === 'string' &&
+        availability !== 'available' &&
+        availability !== 'not_offered'
+      ) {
+        out.failingStreams.push(name);
+      }
+    }
+  }
+  const missing = new Set<string>();
+  if (Array.isArray(d.grants)) {
+    for (const grant of d.grants) {
+      const names = (grant as { missingPermissions?: unknown } | null)?.missingPermissions;
+      if (!Array.isArray(names)) continue;
+      for (const name of names) {
+        if (typeof name === 'string' && PERMISSION_NAME.test(name)) missing.add(name);
+      }
+    }
+  }
+  out.failingStreams = out.failingStreams.sort().slice(0, 7);
+  out.missingPermissions = [...missing].sort().slice(0, 10);
+  return out;
+}
+
 export interface AtoDigestCounts {
   openedBySeverity: Record<AtoSeverity, number>;
   resolvedByResolution: Record<string, number>;
@@ -293,6 +348,38 @@ export class AtoNotificationReads {
     }
     const { organizationId: _org, ...rest } = row;
     return rest;
+  }
+
+  /** Step 8.5: an identity-provider integration of the organization by public id. */
+  async integration(
+    tx: Tx,
+    organizationId: bigint,
+    publicId: string,
+  ): Promise<AtoNoticeIntegration | null> {
+    const row = await tx.atoProviderIntegration.findFirst({
+      where: { organizationId, publicId },
+      select: {
+        organizationId: true,
+        publicId: true,
+        provider: true,
+        displayName: true,
+        status: true,
+        healthStatus: true,
+        healthDetail: true,
+      },
+    });
+    if (row === null) return null;
+    if (row.organizationId !== organizationId || row.publicId !== publicId) {
+      throw new InconsistentNotificationReadError('ato_provider_integration');
+    }
+    return {
+      publicId: row.publicId,
+      provider: row.provider,
+      displayName: row.displayName,
+      status: row.status,
+      healthStatus: row.healthStatus,
+      ...probeFacts(row.healthDetail),
+    };
   }
 
   /** One page of the users holding `permission`, sorted by id, after `afterId`, ≤ `take`. */

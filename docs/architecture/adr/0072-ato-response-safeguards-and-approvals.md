@@ -15,3 +15,5 @@
 **Alternatives considered.** Executing gateway actions through the queue (an extra hop for a database write; two executors). Reusing quarantine approvals (message-specific). Automatic suspension on high scores (forbidden by the brief's safeguards). Allowing API keys to approve (no human in the loop).
 
 **Consequences.** Safe defaults delay containment until an analyst approves unless a tenant opts into automation; the hourly caps can delay legitimate automation during a large attack (an alert fires); 8.5 adds adapters without changing the state machine.
+
+Amended by ADR-0085 (step 8.5): "provider-dependent" rollback is made precise per action and provider (read-back confirmation, pre-state capture, rollback only of what the gateway changed).

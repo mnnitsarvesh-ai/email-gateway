@@ -82,6 +82,12 @@ export interface DetectRequest {
   concurrentLocations?: AuthConcurrentLocations;
   /** Messages linked to an incident as evidence. */
   messages?: readonly { id: bigint; receivedAt: Date }[];
+  /**
+   * PX3 (step 8.5, D8.2): a historical observation (backfilled or initial-sweep provider event).
+   * Signals are recorded `informational`; no rescoring, incident, response, notification or
+   * same-day novelty mark follows. Auth events, day rows and the last success are still written.
+   */
+  historical?: boolean;
 }
 
 export type AuthConcurrentLocations = (account: AtoAccount) => Promise<
@@ -251,6 +257,7 @@ export class DetectionPipeline {
           timeZone: req.org.timeZone,
           trustedNetworks: settings.settings.ipReputation.trustedNetworks,
           trustedContexts,
+          historical: req.historical === true,
         },
       },
       settings.settings,
@@ -286,19 +293,24 @@ export class DetectionPipeline {
 
     // The auth event row: its reference becomes evidence of the signals.
     let authRef: { id: bigint; occurredAt: Date } | null = null;
+    // An individual auth event recorded before (same dedupe key, e.g. a provider event read again
+    // after the seen-set expired) was already counted in the day row: its delta is not applied
+    // twice. Aggregate rows (successes) count every attempt, so their delta always applies.
+    let repeated = false;
     if (req.authEvent && observation.type === 'auth') {
       const recorded = await store.recordAuthEvent(tx, {
         ...req.authEvent,
         organizationId: orgId,
         accountId: account.id,
       });
+      repeated = !recorded.created && req.authEvent.aggregate !== true;
       authRef = { id: recorded.id, occurredAt: recorded.occurredAt };
       observation = { ...observation, authEventRef: authRef };
     }
     const candidates = p.candidates.map((c) =>
       authRef && c.sourceKind === 'auth_event' ? { ...c, authEventRef: authRef } : c,
     );
-    if (p.delta) {
+    if (p.delta && !repeated) {
       await store.upsertActivityDay(tx, {
         organizationId: orgId,
         accountId: account.id,
@@ -350,6 +362,18 @@ export class DetectionPipeline {
     });
     const created = [...recorded.created];
     let duplicates = recorded.duplicates.length;
+
+    // PX3: a historical observation stops here (its signals are informational): no correlation,
+    // rescoring, incident, automation, notification or novelty mark.
+    if (req.historical === true) {
+      const metrics = this.deps.metrics;
+      after.push(() => {
+        for (const s of created)
+          metrics?.signals.inc({ category: s.category, strength: s.strength });
+        return Promise.resolve();
+      });
+      return { ...outcome, account, created, duplicates };
+    }
 
     // Correlation over the recent signals of the account and its linked accounts (same address).
     const fresh = recorded.created.filter((s) => s.status === 'active');

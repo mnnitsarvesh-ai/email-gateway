@@ -3,6 +3,7 @@ import { matchOperation, splitRawPath } from '@/lib/api/operations';
 import type { UpstreamFetch } from '@/server/upstream';
 import { fixtures as archive } from './fixtures/archive';
 import { fixtures as ato } from './fixtures/ato';
+import { fixtures as atoProviders } from './fixtures/ato-providers';
 import { fixtures as attachments } from './fixtures/attachments';
 import { fixtures as audit } from './fixtures/audit';
 import { fixtures as billing } from './fixtures/billing';
@@ -45,7 +46,9 @@ export type { FixtureHandler, FixtureHandlers };
  * its DLP and BEC handlers (with writes) replace the read-only lists of `policies`; `archive`
  * (step 8.1 WP5) adds the 41 archive and eDiscovery operations; `ato` and `incidents` (step 8.4
  * WP6) the 26 account takeover and 8 security incident operations; `provider-connections`
- * (step 8.2 WP6) the 24 Microsoft 365 and Google Workspace connection operations.
+ * (step 8.2 WP6) the 24 Microsoft 365 and Google Workspace connection operations;
+ * `ato-providers` (step 8.5 WP6) the 13 identity-provider operations and the identity-provider
+ * behaviour of four 8.4 operations (settings, request, approve, roll back), so it follows `ato`.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -70,6 +73,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   ato,
   incidents,
   'provider-connections': providerConnections,
+  'ato-providers': atoProviders,
   'dlp-bec': dlpBec,
 };
 

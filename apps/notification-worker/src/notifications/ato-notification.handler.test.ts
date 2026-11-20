@@ -15,6 +15,7 @@ const logger = { child: () => logger, info: vi.fn(), warn: vi.fn() } as never;
 const INCIDENT = '0193a1b2-1c2d-7e3f-8a4b-5c6d7e8f9012';
 const ACTION = '0193a1b2-2d3e-7f40-8b5c-6d7e8f901234';
 const ACCOUNT = '0193a1b2-0a1b-7c2d-9e3f-4a5b6c7d8e9f';
+const INTEGRATION = '0193a1b2-3e4f-7a50-9c6d-7e8f90123456';
 const WINDOW = { from: '2026-11-18T08:00:00.000Z', to: '2026-11-18T08:15:00.000Z' };
 
 let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
@@ -63,6 +64,7 @@ interface World {
   holders: Array<{ id: bigint; email: string }>;
   contact: string | null;
   orgId: bigint;
+  integrationHealth: string;
 }
 
 function setup(world: Partial<World> = {}, options: Partial<AtoNotificationOptions> = {}) {
@@ -77,6 +79,7 @@ function setup(world: Partial<World> = {}, options: Partial<AtoNotificationOptio
     ],
     contact: 'security@acme.example',
     orgId: 7n,
+    integrationHealth: 'unhealthy',
     ...world,
   };
   const holders = vi.fn(
@@ -140,6 +143,21 @@ function setup(world: Partial<World> = {}, options: Partial<AtoNotificationOptio
       ),
     ),
     holders,
+    integration: vi.fn((_tx: unknown, _org: bigint, publicId: string) =>
+      Promise.resolve(
+        publicId === INTEGRATION
+          ? {
+              publicId: INTEGRATION,
+              provider: 'microsoft_entra',
+              displayName: 'Contoso IT (example)',
+              status: 'active',
+              healthStatus: w.integrationHealth,
+              failingStreams: ['risk_events', 'sign_ins'],
+              missingPermissions: ['AuditLog.Read.All', 'IdentityRiskEvent.Read.All'],
+            }
+          : null,
+      ),
+    ),
     windowEventCount: vi.fn(() => Promise.resolve(4)),
     digest: vi.fn(() =>
       Promise.resolve({
@@ -322,6 +340,57 @@ describe('AtoNotificationHandler (step 8.4 D16)', () => {
     await expect(setup({ orgId: 8n }).handler.handle(event(), tx)).rejects.toBeInstanceOf(
       NonRetryableError,
     );
+  });
+
+  it('step 8.5 provider_unhealthy: ato:configure holders minus ato_provider_health opt-outs, no contact', async () => {
+    preferenceRows = [
+      { organizationId: 7n, userId: 2n, preferences: { optOut: ['ato_provider_health'] } },
+    ];
+    const { handler, sent, holders, inc } = setup();
+    const request = event({
+      kind: 'provider_unhealthy',
+      severity: null,
+      refs: { integrationPublicId: INTEGRATION },
+    });
+    await expect(handler.handle(request, tx)).resolves.toBe('sent');
+    expect(holders.mock.calls[0]![2]).toBe('ato:configure');
+    // The organization contact is not an integration administrator (D11).
+    expect(sent[0]!.recipients).toEqual(['responder1@acme.example']);
+    expect(sent[0]!.subject).toContain('identity provider unhealthy');
+    expect(sent[0]!.text).toContain('Microsoft Entra ID / Microsoft 365');
+    expect(sent[0]!.text).toContain('Contoso IT (example)');
+    expect(sent[0]!.text).toContain('risk events, sign ins');
+    expect(sent[0]!.text).toContain('AuditLog.Read.All, IdentityRiskEvent.Read.All');
+    expect(sent[0]!.text).toContain(`https://portal.example/ato/providers/${INTEGRATION}`);
+    expect(inc).toHaveBeenCalledWith({
+      kind: 'provider_unhealthy',
+      audience: 'tenant',
+      result: 'sent',
+    });
+    preferenceRows = [];
+  });
+
+  it('step 8.5 provider_unhealthy: recovered before sending ⇒ not_applicable; unknown ⇒ dead letter', async () => {
+    const recovered = setup({ integrationHealth: 'healthy' });
+    const request = event({
+      kind: 'provider_unhealthy',
+      severity: null,
+      refs: { integrationPublicId: INTEGRATION },
+    });
+    await expect(recovered.handler.handle(request, tx)).resolves.toBe('not_applicable');
+    expect(recovered.sent).toHaveLength(0);
+    const { handler, sent } = setup();
+    await expect(
+      handler.handle(
+        event({
+          kind: 'provider_unhealthy',
+          severity: null,
+          refs: { integrationPublicId: ACTION },
+        }),
+        tx,
+      ),
+    ).rejects.toBeInstanceOf(NonRetryableError);
+    expect(sent).toHaveLength(0);
   });
 });
 

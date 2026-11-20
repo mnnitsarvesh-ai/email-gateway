@@ -94,6 +94,7 @@ describe('navigation model (design P11)', () => {
       'ato-accounts',
       'ato-responses',
       'ato-settings',
+      'ato-providers',
       'archive',
       'retention',
       'legal-holds',
@@ -123,6 +124,7 @@ describe('navigation model (design P11)', () => {
       'ato-accounts',
       'ato-responses',
       'ato-settings',
+      'ato-providers',
       'retention',
       'domains',
       'users',
@@ -149,6 +151,7 @@ describe('navigation model (design P11)', () => {
       'ato-accounts',
       'ato-responses',
       'ato-settings',
+      'ato-providers',
       'archive',
       'retention',
       'legal-holds',
@@ -195,6 +198,7 @@ describe('navigation model (design P11)', () => {
       'ato-accounts',
       'ato-responses',
       'ato-settings',
+      'ato-providers',
       'archive',
       'retention',
       'domains',
@@ -231,6 +235,7 @@ describe('navigation model (design P11)', () => {
       'ato-accounts',
       'ato-responses',
       'ato-settings',
+      'ato-providers',
       'archive',
       'retention',
       'legal-holds',
@@ -298,6 +303,11 @@ describe('navigation model (design P11)', () => {
     expect(gateForPath('/ato/accounts/0193')).toEqual(['AtoAccountsController_get_v1']);
     expect(gateForPath('/incidents/0193/report')).toEqual(['IncidentsController_get_v1']);
     expect(navItemForPath('/ato/settings')?.id).toBe('ato-settings');
+    // Step 8.5: identity providers (list ato:read; details need the get operation).
+    expect(navItemForPath('/ato/providers')?.id).toBe('ato-providers');
+    expect(navItemForPath('/ato/providers/0193')?.id).toBe('ato-providers');
+    expect(gateForPath('/ato/providers')).toEqual(['AtoProvidersController_list_v1']);
+    expect(gateForPath('/ato/providers/0193')).toEqual(['AtoProvidersController_get_v1']);
   });
 
   it('shows the account takeover badge only on the ATO dashboard item (step 8.4 D16)', () => {

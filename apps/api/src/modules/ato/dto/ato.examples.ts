@@ -143,7 +143,16 @@ const accountDetail: AccountDetailView = {
     },
   ],
   linkedAccounts: [{ id: ID.account2, kind: 'gateway_user', riskLevel: 'low' }],
-  identities: [],
+  identities: [
+    {
+      provider: 'microsoft_entra',
+      userPrincipalName: 'jane.doe@corp.example',
+      firstSeenAt: '2026-11-19T10:05:00.000Z',
+      lastSeenAt: '2026-11-20T08:31:12.000Z',
+      integrationId: '0193b0a0-aaaa-7a00-8000-000000000001',
+      directoryStatus: 'active',
+    },
+  ],
   capabilities,
 };
 
@@ -369,8 +378,17 @@ const settings: SettingsView = {
     { source: 'outbound_message', lastEventAt: '2026-11-18T10:40:00.000Z' },
   ],
   identityProviders: [
-    { provider: 'microsoft_entra', availableInStep: '8.5' },
-    { provider: 'google_workspace', availableInStep: '8.5' },
+    {
+      provider: 'microsoft_entra',
+      integrations: [
+        {
+          id: '0193b0a0-aaaa-7a00-8000-000000000001',
+          provider: 'microsoft_entra',
+          health: 'healthy',
+        },
+      ],
+    },
+    { provider: 'google_workspace', integrations: [] },
   ],
   policy: { atoFieldsInUse: false },
   automation: {

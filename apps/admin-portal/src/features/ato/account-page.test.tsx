@@ -20,6 +20,16 @@ function mockAccount(extra: Parameters<typeof mockApi>[0] = {}) {
         : apiErrorJson(404, 'ato_account_not_found', 'Not found'),
     AtoRulesController_list_v1: () => okJson(RULES),
     AtoAccountsController_signals_v1: () => okJson(page([signal()])),
+    // Step 8.5: the mailbox changes tab reads the identity providers' mailbox state.
+    AtoAccountMailboxController_get_v1: () =>
+      okJson({
+        accountId: ACCOUNT_ID,
+        items: [],
+        truncated: false,
+        identities: [],
+        integrations: [],
+        refreshRequestedAt: null,
+      }),
     AtoAccountsController_authEvents_v1: () => okJson(page([authEvent()])),
     AtoAccountsController_scoreHistory_v1: () =>
       okJson(
@@ -138,7 +148,7 @@ describe('Account details (/ato/accounts/[accountId])', () => {
     expect(await within(dialog).findByText(/Someone else changed it/)).toBeInTheDocument();
   });
 
-  it('tabs: sign-ins, devices and IPs, outbound, mailbox (8.5), signals, history', async () => {
+  it('tabs: sign-ins, devices and IPs, outbound, mailbox, signals, history', async () => {
     mockAccount();
     const { user, container } = renderWithProviders(<AtoAccountPage accountId={ACCOUNT_ID} />, {
       route: `/ato/accounts/${ACCOUNT_ID}`,
@@ -159,7 +169,8 @@ describe('Account details (/ato/accounts/[accountId])', () => {
       'partner.example',
     );
     await user.click(screen.getByRole('tab', { name: 'Mailbox changes' }));
-    expect(screen.getByText('Arrives in step 8.5')).toBeInTheDocument();
+    // Step 8.5: the mailbox state of the identity providers replaced the unavailable state.
+    expect(await screen.findByText('No mailbox items reported')).toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Detection reasons' }));
     expect(
       await screen.findByRole('table', { name: 'Risk signals of the account' }),

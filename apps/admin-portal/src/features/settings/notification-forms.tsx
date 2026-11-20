@@ -337,6 +337,7 @@ export const KIND_LABELS: Record<Kind, string> = {
   ato_incident: 'Account takeover incidents and failed responses',
   ato_approval_requested: 'Account takeover response approval requested',
   ato_digest: 'Account takeover daily and weekly digests',
+  ato_provider_health: 'Account takeover identity provider unhealthy',
 };
 
 export const preferencesSchema = z
@@ -354,9 +355,10 @@ export const preferencesSchema = z
           'ato_incident',
           'ato_approval_requested',
           'ato_digest',
+          'ato_provider_health',
         ]),
       )
-      .max(10),
+      .max(11),
     quarantineDigestOptOut: z.boolean(),
   })
   .strict();

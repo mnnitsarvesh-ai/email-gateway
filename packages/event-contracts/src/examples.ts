@@ -589,3 +589,18 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     failingChecks: ['token.acquire', 'domain.provider_verified'],
   },
 };
+
+/**
+ * Step 8.5 (D11): the `provider_unhealthy` variant of `ato.notification.requested.v1` (an ATO
+ * identity-provider integration turned unhealthy; refs name the integration only).
+ */
+export const EXAMPLE_ATO_PROVIDER_UNHEALTHY_PAYLOAD = Object.freeze({
+  kind: 'provider_unhealthy',
+  audience: 'tenant',
+  severity: null,
+  refs: { integrationPublicId: '01890a5d-ac96-774b-bcce-b302099a80a5' },
+  window: { from: '2026-11-18T08:00:00.000Z', to: '2026-11-18T14:00:00.000Z' },
+  counts: { suppressedBefore: 0 },
+  digestPeriod: null,
+  requestedAt: '2026-11-18T08:00:01.000Z',
+});

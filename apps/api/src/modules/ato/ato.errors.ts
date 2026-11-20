@@ -30,6 +30,20 @@ export const ATO_ERROR_CODES = {
   /** The shared incident model's code (an id that is not an `account_takeover` incident). */
   incidentNotFound: 'incident_not_found',
   inconsistentRead: INCONSISTENT_READ,
+  // Step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): identity-provider integrations.
+  providerNotFound: 'ato_provider_not_found',
+  providerConnectionNotFound: 'ato_provider_connection_not_found',
+  providerConnectionIneligible: 'ato_provider_connection_ineligible',
+  providerAlreadyBound: 'ato_provider_already_bound',
+  providerDirectoryInUse: 'ato_provider_directory_in_use',
+  providerLimitReached: 'ato_provider_limit_reached',
+  providerSettingsInvalid: 'ato_provider_settings_invalid',
+  providerConflict: 'ato_provider_conflict',
+  providerConnectionInactive: 'ato_provider_connection_inactive',
+  providerBackfillActive: 'ato_provider_backfill_active',
+  providerBackfillRangeInvalid: 'ato_provider_backfill_range_invalid',
+  providerRefreshUnavailable: 'ato_provider_refresh_unavailable',
+  providerDisabled: 'ato_provider_disabled',
 } as const;
 
 const C = ATO_ERROR_CODES;
@@ -182,3 +196,106 @@ export function mapAtoStoreError(error: unknown): never {
       );
   }
 }
+
+// ============================================================ step 8.5: identity providers
+
+/** Unknown integration, one of another organization, or ATO not enabled (reads). */
+export const atoProviderNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.providerNotFound, 'Identity-provider integration not found');
+
+/** The 8.2 connection does not exist in the caller's organization. */
+export const atoProviderConnectionNotFound = (): CodedHttpException =>
+  err(
+    HttpStatus.NOT_FOUND,
+    C.providerConnectionNotFound,
+    'Provider connection not found in your organization',
+  );
+
+/** D4 eligibility failed: the reasons are stable codes (`connection_inactive`, …). */
+export const atoProviderConnectionIneligible = (reasons: readonly string[]): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerConnectionIneligible,
+    'The provider connection cannot be bound to account takeover detection',
+    { reasons: reasons.slice(0, 10).map((reason) => ({ reason })) },
+  );
+
+export const atoProviderAlreadyBound = (integrationId: string): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerAlreadyBound,
+    'The provider connection is already bound to an identity-provider integration',
+    { integrationId },
+  );
+
+/**
+ * The provider directory (Entra tenant / Google customer) is bound by another non-disabled
+ * integration. Never says which organization (ADR-0084).
+ */
+export const atoProviderDirectoryInUse = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerDirectoryInUse,
+    'The provider directory of this connection is already monitored by another integration',
+  );
+
+export const atoProviderLimitReached = (limit: number): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerLimitReached,
+    'The organization has reached its identity-provider integration limit',
+    { limit },
+  );
+
+/** `400` with the failing paths and rule codes (never values). */
+export const atoProviderSettingsInvalid = (
+  issues: ReadonlyArray<{ path: string; code: string }>,
+): CodedHttpException =>
+  err(HttpStatus.BAD_REQUEST, C.providerSettingsInvalid, 'The binding settings are invalid', {
+    issues: issues.slice(0, 50).map((i) => ({
+      path: i.path.slice(0, 200) || '(root)',
+      message: i.code.slice(0, 200),
+    })),
+  });
+
+export const atoProviderConflict = (currentRowVersion: number): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerConflict,
+    'rowVersion is not the current version of the integration',
+    { currentRowVersion },
+  );
+
+export const atoProviderConnectionInactive = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerConnectionInactive,
+    'The provider connection or its telemetry grant is not active',
+  );
+
+export const atoProviderBackfillActive = (streams: readonly string[]): CodedHttpException =>
+  err(HttpStatus.CONFLICT, C.providerBackfillActive, 'A backfill of the stream is running', {
+    streams: streams.map((stream) => ({ stream })),
+  });
+
+/** `422` with the reason (`range`, `stream_not_backfillable`, `stream_disabled`, `no_stream`). */
+export const atoProviderBackfillRangeInvalid = (
+  reason: string,
+  stream?: string,
+): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.providerBackfillRangeInvalid,
+    'The backfill range or streams are not valid',
+    { reason, ...(stream !== undefined && { stream }) },
+  );
+
+export const atoProviderRefreshUnavailable = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.providerRefreshUnavailable,
+    'No identity of the account belongs to an active identity-provider integration',
+  );
+
+export const atoProviderDisabled = (): CodedHttpException =>
+  err(HttpStatus.CONFLICT, C.providerDisabled, 'The integration was removed (disabled)');

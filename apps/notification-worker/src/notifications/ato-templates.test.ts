@@ -161,3 +161,47 @@ describe('ATO notice templates (step 8.4 D16)', () => {
     );
   });
 });
+
+describe('provider_unhealthy (step 8.5 D11)', () => {
+  const INTEGRATION = '0193a1b2-3e4f-7a50-9c6d-7e8f90123456';
+  const facts = (over: Record<string, unknown> = {}): AtoNoticeFacts => ({
+    ...common,
+    kind: 'provider_unhealthy',
+    integration: {
+      publicId: INTEGRATION,
+      provider: 'google_workspace',
+      displayName: 'Fabrikam IT (example)',
+      status: 'active',
+      healthStatus: 'unhealthy',
+      failingStreams: ['forwarding_changes'],
+      missingPermissions: ['https://www.googleapis.com/auth/gmail.settings.basic'],
+      ...over,
+    },
+  });
+
+  it('names the provider, integration, failing streams, missing permissions and the link', () => {
+    const notice = renderAtoNotice(facts());
+    expect(notice.subject).toBe('[Email Gateway] Account takeover identity provider unhealthy');
+    expect(notice.text).toContain('Identity provider: Google Workspace');
+    expect(notice.text).toContain('Integration: Fabrikam IT (example)');
+    expect(notice.text).toContain('Failing streams: forwarding changes');
+    expect(notice.text).toContain('gmail.settings.basic');
+    expect(notice.text).toContain(`/ato/providers/${INTEGRATION}`);
+    expect(notice.text).toContain('Mail flow is not affected');
+  });
+
+  it('never shows an address-like display name, odd permission text or a tenant id', () => {
+    const notice = renderAtoNotice(
+      facts({
+        displayName: 'admin@fabrikam-it.example',
+        missingPermissions: ['<script>', 'User.Read.All'],
+        failingStreams: ['Sign Ins!'],
+      }),
+    );
+    expect(notice.text).not.toContain('admin@fabrikam-it.example');
+    expect(notice.text).not.toContain('<script>');
+    expect(notice.text).toContain('User.Read.All');
+    expect(notice.text).toContain('Failing streams: none reported');
+    expect(notice.text).not.toMatch(/Cexample|tenant id/i);
+  });
+});

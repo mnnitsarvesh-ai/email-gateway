@@ -1585,6 +1585,39 @@ describe('loadApiConfig: email explorer and details (step 7.2 §2 E16)', () => {
       expect(rejection({ ...valid, [key]: value })).toContain(key);
     });
   });
+
+  describe('identity-provider keys (step 8.5 §4.2)', () => {
+    it('parses the defaults and explicit values', () => {
+      expect(loadApiConfig(valid)).toMatchObject({
+        ATO_IDP_MAX_INTEGRATIONS_PER_ORG: 5,
+        ATO_IDP_BACKFILL_MAX_DAYS: 30,
+        ATO_IDP_HEALTH_INTERVAL_SECONDS: 900,
+      });
+      expect(
+        loadApiConfig({
+          ...valid,
+          ATO_IDP_MAX_INTEGRATIONS_PER_ORG: '1',
+          ATO_IDP_BACKFILL_MAX_DAYS: '0',
+          ATO_IDP_HEALTH_INTERVAL_SECONDS: '60',
+        }),
+      ).toMatchObject({
+        ATO_IDP_MAX_INTEGRATIONS_PER_ORG: 1,
+        ATO_IDP_BACKFILL_MAX_DAYS: 0,
+        ATO_IDP_HEALTH_INTERVAL_SECONDS: 60,
+      });
+    });
+
+    it.each([
+      ['ATO_IDP_MAX_INTEGRATIONS_PER_ORG', '0'],
+      ['ATO_IDP_MAX_INTEGRATIONS_PER_ORG', '51'],
+      ['ATO_IDP_BACKFILL_MAX_DAYS', '-1'],
+      ['ATO_IDP_BACKFILL_MAX_DAYS', '31'],
+      ['ATO_IDP_HEALTH_INTERVAL_SECONDS', '59'],
+      ['ATO_IDP_HEALTH_INTERVAL_SECONDS', '86401'],
+    ])('refuses %s=%s naming the key', (key, value) => {
+      expect(rejection({ ...valid, [key]: value })).toContain(key);
+    });
+  });
 });
 
 describe('loadApiConfig: Microsoft 365 and Google Workspace connections (step 8.2 §4.4)', () => {

@@ -34,7 +34,44 @@ export const ATO_OPERATIONS = {
   responseCancel: 'ato.response_cancel',
   responseRollback: 'ato.response_rollback',
   settingsUpdate: 'ato.settings_update',
+  // Step 8.5 (§6): identity-provider integrations and the mailbox state refresh.
+  providerCreate: 'ato.provider_create',
+  providerUpdate: 'ato.provider_update',
+  providerPause: 'ato.provider_pause',
+  providerResume: 'ato.provider_resume',
+  providerHealthCheck: 'ato.provider_health_check',
+  providerBackfill: 'ato.provider_backfill',
+  providerRemove: 'ato.provider_remove',
+  mailboxRefresh: 'ato.mailbox_refresh',
 } as const;
+
+/** `audit_logs.action` of the step 8.5 provider routes (ids, provider and changed paths only). */
+export const ATO_PROVIDER_AUDIT = {
+  bound: 'ato.provider.bound',
+  updated: 'ato.provider.updated',
+  paused: 'ato.provider.paused',
+  resumed: 'ato.provider.resumed',
+  backfillRequested: 'ato.provider.backfill_requested',
+  healthCheckRequested: 'ato.provider.health_check_requested',
+  unbound: 'ato.provider.unbound',
+  mailboxRefreshRequested: 'ato.mailbox_state.refresh_requested',
+} as const;
+
+/** `audit_logs.resource_type` of an identity-provider integration. */
+export const ATO_PROVIDER_RESOURCE = 'ato_provider_integration';
+
+/** `disabled_reason` of an integration removed through `DELETE /ato/providers/{id}`. */
+export const ATO_PROVIDER_USER_DISABLED_REASON = 'user';
+
+/** `result_code` of a pending provider action ended by the removal of its integration (§6 #11). */
+export const ATO_PROVIDER_ACTION_DISABLED_CODE = 'integration_disabled';
+
+/** Mailbox items removed within this many days are still shown (§6 #12, D8.3). */
+export const ATO_MAILBOX_REMOVED_DAYS = 30;
+/** Most mailbox items one response carries. */
+export const ATO_MAILBOX_MAX_ITEMS = 500;
+/** Disabled integrations listed with `?includeDisabled=true` (newest first). */
+export const ATO_PROVIDERS_MAX_DISABLED_LISTED = 50;
 
 /** v1 cursor resources (ADR-0051) of the ATO lists. */
 export const ATO_CURSOR_RESOURCES = {
@@ -78,4 +115,7 @@ export type AtoConfig = Pick<
   | 'ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR'
   | 'ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG'
   | 'API_LIST_SCAN_BUDGET_ROWS'
+  | 'ATO_IDP_MAX_INTEGRATIONS_PER_ORG'
+  | 'ATO_IDP_BACKFILL_MAX_DAYS'
+  | 'ATO_IDP_HEALTH_INTERVAL_SECONDS'
 >;

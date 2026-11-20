@@ -22,6 +22,9 @@ describe('ATO dashboard (/ato)', () => {
         ranges.push(url.searchParams.get('range') ?? '');
         return okJson(overview({ range: (url.searchParams.get('range') ?? '7d') as '7d' }));
       },
+      // Step 8.5: the identity providers card of the dashboard.
+      AtoProvidersController_list_v1: () =>
+        okJson({ featureEnabled: true, limit: { max: 5, used: 0 }, data: [] }),
     });
     const { container, user } = renderWithProviders(<AtoDashboardPage />, { route: '/ato' });
     expect(

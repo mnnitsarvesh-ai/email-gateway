@@ -44,7 +44,9 @@
  * disconnect mutations `sensitive` (D17; grant creation and validation creation are ADR-0057
  * redacted-replay secret-bearing routes: the consent URL and the probe address), the other five
  * keyed without a class (`KEYED_8_2`; the apply and the per-connection routes have their own
- * limits).
+ * limits). Step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6) adds the 13 identity-provider
+ * and mailbox state operations (`NEW_IN_8_5`, examples required, no paged list, the ato-providers
+ * manifest): 8 transactional keyed mutations (`sensitive`).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -245,6 +247,15 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/provider-connections/:id/grants/:profile/verify',
   'delete /api/v1/provider-connections/:id/grants/:profile',
   'post /api/v1/provider-connections/:id/validations',
+  // Step 8.5 §6: every identity-provider mutation and the mailbox state refresh.
+  'post /api/v1/ato/providers',
+  'patch /api/v1/ato/providers/:integrationId',
+  'post /api/v1/ato/providers/:integrationId/pause',
+  'post /api/v1/ato/providers/:integrationId/resume',
+  'post /api/v1/ato/providers/:integrationId/health-check',
+  'post /api/v1/ato/providers/:integrationId/backfill',
+  'delete /api/v1/ato/providers/:integrationId',
+  'post /api/v1/ato/accounts/:accountId/mailbox-state/refresh',
 ];
 
 /**
@@ -438,6 +449,26 @@ const NEW_IN_8_2 = [
   'get /api/v1/provider-connections/:id/health',
   'post /api/v1/provider-connections/:id/health/check',
   'get /api/v1/provider-connections/:id/setup-guide',
+];
+
+/**
+ * Step 8.5 §6 (docs/plan/steps/26-ato-provider-adapters.md): the 13 identity-provider and mailbox
+ * state operations (examples required, no paged list, exactly the ato-providers manifest).
+ */
+const NEW_IN_8_5 = [
+  'get /api/v1/ato/providers',
+  'get /api/v1/ato/providers/requirements',
+  'get /api/v1/ato/providers/connections',
+  'post /api/v1/ato/providers',
+  'get /api/v1/ato/providers/:integrationId',
+  'patch /api/v1/ato/providers/:integrationId',
+  'post /api/v1/ato/providers/:integrationId/pause',
+  'post /api/v1/ato/providers/:integrationId/resume',
+  'post /api/v1/ato/providers/:integrationId/health-check',
+  'post /api/v1/ato/providers/:integrationId/backfill',
+  'delete /api/v1/ato/providers/:integrationId',
+  'get /api/v1/ato/accounts/:accountId/mailbox-state',
+  'post /api/v1/ato/accounts/:accountId/mailbox-state/refresh',
 ];
 
 /** Step 8.1: binary downloads (`application/octet-stream`; no JSON example applies). */
@@ -647,14 +678,15 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (378 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (391 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
     // plus the validate and sample dry-run routes of step 7.3, plus the 41 archive, legal hold
     // and eDiscovery operations of step 8.1, plus the 26 account takeover and 8 security incident
-    // operations of step 8.4, plus the 24 provider-connection operations of step 8.2.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(378);
+    // operations of step 8.4, plus the 24 provider-connection operations of step 8.2, plus the 13
+    // identity-provider and mailbox state operations of step 8.5.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(391);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -749,7 +781,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4 and 8.2 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2 and 8.5 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -760,6 +792,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_8_1,
       ...NEW_IN_8_4,
       ...NEW_IN_8_2,
+      ...NEW_IN_8_5,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -823,6 +856,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [...NEW_IN_8_2].sort(),
     );
     expect(NEW_IN_8_2).toHaveLength(24);
+    // NEW_IN_8_5 is exactly the step 8.5 ato-providers manifest (13 operations).
+    expect(COVERAGE_BY_AREA['ato-providers'].map((c) => c.route).sort()).toEqual(
+      [...NEW_IN_8_5].sort(),
+    );
+    expect(NEW_IN_8_5).toHaveLength(13);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -842,6 +880,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_8_1.includes(route), route).toBe(false);
       expect(NEW_IN_8_4.includes(route), route).toBe(false);
       expect(NEW_IN_8_2.includes(route), route).toBe(false);
+      expect(NEW_IN_8_5.includes(route), route).toBe(false);
     }
   });
 
@@ -892,7 +931,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_7_3.includes(key) ||
           NEW_IN_8_1.includes(key) ||
           NEW_IN_8_4.includes(key) ||
-          NEW_IN_8_2.includes(key)) &&
+          NEW_IN_8_2.includes(key) ||
+          NEW_IN_8_5.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -979,8 +1019,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(new Set(operations).size).toBe(operations.length);
     // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations, plus
     // the 14 keyed ATO and incident mutations of step 8.4, plus the 12 keyed provider-connection
-    // mutations of step 8.2.
-    expect(operations).toHaveLength(83);
+    // mutations of step 8.2, plus the 8 keyed identity-provider and mailbox state mutations of
+    // step 8.5.
+    expect(operations).toHaveLength(91);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

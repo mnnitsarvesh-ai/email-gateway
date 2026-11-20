@@ -308,6 +308,9 @@ const TENANT_OWNED = [
   'provider_health_checks',
   'provider_health_events',
   'provider_relay_counters',
+  // Step 8.5 §4.1: identity-provider streams and mailbox state.
+  'ato_provider_streams',
+  'ato_provider_mailbox_items',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
@@ -317,8 +320,8 @@ describe('MySQL schema', () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(162);
-    expect(new Set(ALL_TABLES).size).toBe(162);
+    expect(ALL_TABLES).toHaveLength(164);
+    expect(new Set(ALL_TABLES).size).toBe(164);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 

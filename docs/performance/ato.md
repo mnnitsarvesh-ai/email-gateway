@@ -49,3 +49,44 @@ pnpm --filter @email-gateway/ato-worker exec vitest run --config vitest.integrat
 ```
 
 The test prints one `ATO-PERF {…}` line with the measures above and removes every synthetic row afterwards.
+
+# Provider ingestion (step 8.5) — laptop baseline
+
+Volume run of [the 8.5 design](../plan/steps/26-ato-provider-adapters.md) §11.3: `apps/ato-worker/integration/idp-volume.test.ts`. **Local numbers on one developer laptop against in-process provider simulators; not a production estimate.** The provider APIs' own limits and latency are not measured (rate budgets were raised for the simulators), and no real Microsoft or Google tenant was involved.
+
+## Setup (2026-11-20)
+
+- One in-process ato-worker `provider` role (`IdpStreamRunner`): claim batch `ATO_IDP_CLAIM_BATCH=10`, `ATO_PROVIDER_MAX_PAGES_PER_POLL=10`, pages of `ATO_IDP_PAGE_MAX_EVENTS=200`, four integrations polled in parallel, the streams of one integration one after the other.
+- Same Docker Desktop stack as the 8.4 baseline (MySQL 8.4 writer with replica, Redis), the worker on the host; Graph and Office 365 Management simulators on 127.0.0.1.
+- 10 synthetic organizations, each with its own Entra directory (1 000 users) and integration, bound with a 2-day backfill (`risk_events`, `session_events`, `oauth_consents` disabled to isolate sign-ins and mailbox audit).
+- 100 000 sign-ins (10 000 per directory, 90 % successes in sessions of five per user, IP and device; 10 % failures from documentation ranges) over the last 20 hours: **live mode**.
+- 10 000 Exchange `Set-Mailbox` forwarding audits (1 000 per directory, 26–30 hours old) in Office 365 Management content blobs of 200: **historical mode** (older than `ATO_IDP_HISTORICAL_SIGNAL_AGE_HOURS`).
+
+## Results
+
+| Measure                                   | Value                                                                                                                                                      |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Wall time until every stream caught up    | 739 s                                                                                                                                                      |
+| Throughput (sign-ins + mailbox items)     | **149 events/s** (≈ 135 sign-ins/s)                                                                                                                        |
+| Pages processed (all primaries)           | 720                                                                                                                                                        |
+| `ato_auth_events` rows / attempts counted | 30 000 rows for 100 000 sign-ins (successes aggregated per account, IP, device hash and hour; failures individual); `SUM(attempt_count)` = 100 000 exactly |
+| Mailbox items                             | 10 000 (`forwarding`, target domains only)                                                                                                                 |
+| Signals                                   | 10 600, of which 10 000 informational (the historical forwarding audits); 0 incidents                                                                      |
+| Sign-in watermark lag after the run       | 120 s (the settle time of Graph sign-ins)                                                                                                                  |
+| Failures / duplicates                     | 0 stream failures after the deadlock fix below; every sign-in counted exactly once despite overlap re-reads                                                |
+
+## Observations
+
+- **Streams of one integration must not run in parallel.** Sign-ins and mailbox audit of one directory create the same new accounts and identities; polled concurrently they deadlocked MySQL (1213) at a few thousand events. The runner now polls one integration's streams sequentially per pass (integrations stay parallel) and retries a page transaction that loses a deadlock; throughput scales with the number of integrations, not of streams.
+- **Overlap re-reads cost requests, not work:** every poll re-reads its overlap window (15 minutes for Graph sign-ins, 60 for Office 365 Management); a Redis seen-set skips events already processed, so aggregated successes are never double counted.
+- **Historical mode is cheap:** informational signals skip correlation, rescoring and the incident policy; the 10 000 historical audits added little to the wall time compared with the sign-ins.
+- The per-event cost is the 8.4 pipeline's (≈ 120–160 events/s on this laptop for both 8.4 sources and provider events); D22's reference load (≈ 250 000 provider events/day ≈ 3/s) is far inside it. Production sizing still needs production-like MySQL and the real providers' latency and throttling (a Graph page of 200 sign-ins typically takes seconds, not milliseconds).
+
+## Reproduce
+
+```sh
+pnpm --filter @email-gateway/ato-worker exec vitest run --config vitest.integration.config.ts integration/idp-volume.test.ts
+# smaller: IT_ATO_IDP_VOLUME_INTEGRATIONS=2 IT_ATO_IDP_VOLUME_SIGNINS=4000 IT_ATO_IDP_VOLUME_ITEMS=400
+```
+
+The test prints one `ATO-IDP-PERF {…}` line and removes every synthetic row afterwards.

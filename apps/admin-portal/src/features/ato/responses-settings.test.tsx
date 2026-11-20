@@ -222,7 +222,8 @@ describe('ATO settings (/ato/settings)', () => {
     expect(screen.getByText(/needs the ato:configure permission/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: 'Identity providers' }));
-    expect(screen.getAllByText('Arrives in step 8.5')).toHaveLength(2);
+    expect(screen.getAllByText('Not connected')).toHaveLength(2);
+    expect(screen.queryByText('Arrives in step 8.5')).toBeNull();
     await user.click(screen.getByRole('tab', { name: 'Delivery policy' }));
     expect(screen.getByText('None')).toBeInTheDocument();
   });

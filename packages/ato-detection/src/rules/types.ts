@@ -291,6 +291,13 @@ export interface RuleContext {
   timeZone: string;
   trustedNetworks: readonly string[];
   trustedContexts: readonly TrustedContextView[];
+  /**
+   * PX3 (step 8.5, ADR-0083): the observation is historical (a backfilled or initial-sweep provider
+   * event). Every signal is recorded `informational` (weight 0, never scored), and the worker opens
+   * or escalates no incident, proposes no response and requests no notification; auth events,
+   * daily activity and baselines are still written. Default `false`.
+   */
+  historical?: boolean;
 }
 
 export interface RuleInput {
@@ -315,7 +322,10 @@ export interface SignalCandidate {
   sourceRef: string | null;
   messageRef: { id: bigint; receivedAt: Date } | null;
   authEventRef: { id: bigint; occurredAt: Date } | null;
-  /** Learning period: stored with status `informational` (weight 0, never scored). */
+  /**
+   * Learning period (baseline-relative rules) or a historical observation (PX3): stored with status
+   * `informational` (weight 0, never scored).
+   */
   informational: boolean;
   /** Novelty values to add to `ato:seen:*` once persisted (one signal per value and day). */
   seen?: { kind: keyof SeenToday; value: string } | null;

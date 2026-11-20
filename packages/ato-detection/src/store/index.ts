@@ -216,10 +216,17 @@ export interface RequestResponseInput {
 
 export interface NotificationInput {
   organizationId: bigint;
-  kind: 'incident_alert' | 'approval_requested' | 'response_failed' | 'digest';
+  /** Step 8.5 (D11) appends `provider_unhealthy` (audience tenant, `refs.integrationPublicId`). */
+  kind:
+    'incident_alert' | 'approval_requested' | 'response_failed' | 'digest' | 'provider_unhealthy';
   audience: 'tenant' | 'soc' | 'platform_soc';
   severity: SecurityIncidentSeverity | null;
-  refs: { incidentPublicId?: string; actionPublicId?: string; accountPublicId?: string };
+  refs: {
+    incidentPublicId?: string;
+    actionPublicId?: string;
+    accountPublicId?: string;
+    integrationPublicId?: string;
+  };
   /** Throttle window: kind (`notification_alert_windows.kind`), scope and length. */
   throttle: { kind: string; scope: string; minutes: number; windowStart?: Date };
   counts?: {
@@ -2300,6 +2307,44 @@ export class AtoStore {
   }
 
   /**
+   * Step 8.5 (D4, ADR-0085): the provider actions of an integration that was disabled (unbound by a
+   * user, or its 8.2 connection removed) and that are still in flight (`approved`, `executing`,
+   * `rollback_requested`, bound to the integration through `integration_id`) end `failed` /
+   * `rollback_failed` with `integration_disabled`, through the normal completion path (timeline,
+   * audit, completion event, failure notification). Returns the number settled (≤ `limit`).
+   */
+  async failProviderActionsOfIntegration(
+    tx: Tx,
+    input: { organizationId: bigint; integrationId: bigint; limit?: number },
+  ): Promise<number> {
+    const rows = await tx.atoResponseAction.findMany({
+      where: {
+        organizationId: input.organizationId,
+        integrationId: input.integrationId,
+        status: { in: ['approved', 'executing', 'rollback_requested'] },
+      },
+      select: { id: true, organizationId: true, status: true },
+      orderBy: { id: 'asc' },
+      take: input.limit ?? 500,
+    });
+    let settled = 0;
+    for (const row of rows) {
+      if (row.organizationId !== input.organizationId) {
+        throw new AtoStoreError('ato_inconsistent_read', 'Action read did not echo the key');
+      }
+      const done = await this.completeProviderAction(tx, {
+        organizationId: row.organizationId,
+        actionId: row.id,
+        phase: row.status === 'rollback_requested' ? 'rollback' : 'execute',
+        result: { status: 'failed', code: 'integration_disabled', retryable: false },
+        final: true,
+      });
+      if (done.status !== row.status) settled += 1;
+    }
+    return settled;
+  }
+
+  /**
    * Requests a rollback (D13): users only, a `succeeded` action whose type supports rollback.
    * Gateway restrictions are lifted in the same transaction (`rolled_back`); provider actions get
    * `rollback_requested` and `ato.response.requested.v1` (phase rollback).
@@ -2400,6 +2445,18 @@ export class AtoStore {
         | { status: 'failed'; code: string; retryable: boolean };
       final?: boolean;
       durationMs?: number;
+      /**
+       * Step 8.5 (ADR-0085, additive): the adapter's result code (`already_in_state`,
+       * `restored_previous_state_noop`, an `unsupported` reason such as `no_integration`, or
+       * `confirmation_timeout`) instead of the generic `provider_confirmed` /
+       * `provider_unsupported`; `providerStatus: 'unconfirmed'` for a confirmation timeout; the
+       * integration that executed the action (`ato_response_actions.integration_id`).
+       */
+      detail?: {
+        resultCode?: string | null;
+        providerStatus?: 'unconfirmed';
+        integrationId?: bigint | null;
+      };
     },
   ): Promise<AtoResponseAction> {
     const now = this.clock();
@@ -2504,6 +2561,12 @@ export class AtoStore {
               nextCheckAt: null,
             };
       event = input.phase === 'execute' ? 'failed' : 'rollback_failed';
+    }
+    const detail = input.detail;
+    if (detail?.integrationId !== undefined) data.integrationId = detail.integrationId;
+    if (detail?.resultCode && r.status !== 'pending') data.resultCode = clip(detail.resultCode, 64);
+    if (detail?.providerStatus === 'unconfirmed' && r.status === 'failed') {
+      data.providerStatus = 'unconfirmed';
     }
     const done = await this.updateAction(tx, action, { ...data, attempts: { increment: 1 } });
     await this.logAction(

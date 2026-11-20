@@ -1070,6 +1070,13 @@ export const atoApiConfigShape = {
   ATO_AUTOMATED_RESPONSES_ENABLED: bool.default(true),
   ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR: int(0, 100).default(10),
   ATO_MAX_ACTIVE_RESTRICTIONS_PER_ORG: int(1, 500).default(500),
+  // Step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §4.2, D4, D6, D8.1): the most
+  // non-disabled identity-provider integrations per organization, the longest backfill the api
+  // accepts (also capped by the provider retention of each stream) and the probe interval the
+  // ato-worker uses (a probe older than 3 × it makes every capability `unknown` in the api).
+  ATO_IDP_MAX_INTEGRATIONS_PER_ORG: int(1, 50).default(5),
+  ATO_IDP_BACKFILL_MAX_DAYS: int(0, 30).default(30),
+  ATO_IDP_HEALTH_INTERVAL_SECONDS: int(60, 86_400).default(900),
 };
 
 export type AtoApiConfigKeys = {

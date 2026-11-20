@@ -39,6 +39,8 @@ export const ATO_RECIPIENT_PERMISSION: Readonly<Record<AtoNoticeKind, string>> =
   approval_requested: 'ato:respond',
   response_failed: 'ato:respond',
   digest: 'ato:read',
+  // Step 8.5 (D11, PQ16): the people who configure identity-provider integrations.
+  provider_unhealthy: 'ato:configure',
 });
 
 /** Opt-out kind per notice kind (`PREFERENCE_KINDS`, D16). */
@@ -47,6 +49,7 @@ export const ATO_PREFERENCE_KIND: Readonly<Record<AtoNoticeKind, PreferenceKind>
   response_failed: 'ato_incident',
   approval_requested: 'ato_approval_requested',
   digest: 'ato_digest',
+  provider_unhealthy: 'ato_provider_health',
 });
 
 /** `notification_alert_windows.kind` of each notice kind (the producer's throttle windows). */
@@ -55,6 +58,7 @@ export const ATO_WINDOW_KIND: Readonly<Record<AtoNoticeKind, string>> = Object.f
   response_failed: 'ato_incident',
   approval_requested: 'ato_approval',
   digest: 'ato_digest',
+  provider_unhealthy: 'ato_provider_health',
 });
 
 type KindFacts = AtoNoticeFacts extends infer F
@@ -84,7 +88,8 @@ type KindFacts = AtoNoticeFacts extends infer F
  *    dead-lettered): incident (category `account_takeover`), account, action, digest counts;
  *    an incident alert below `notifications.incidentMinSeverity` (raised since), an approval
  *    no longer pending, a digest period switched off → `not_applicable` / `disabled`;
- * 3. the recipients per audience: `tenant` → active, verified users holding
+ * 3. the recipients per audience (`provider_unhealthy`, step 8.5 D11: `tenant` only, users with
+ *    `ato:configure` minus `ato_provider_health` opt-outs, no organization contact): `tenant` → active, verified users holding
  *    `ATO_RECIPIENT_PERMISSION[kind]` minus opt-outs (`ATO_PREFERENCE_KIND[kind]`), sorted by id,
  *    ≤ `NOTIFICATION_MAX_RECIPIENTS`, plus `organization_settings.notification_email` with
  *    `notifications.includeOrganizationContact`; `soc` → `notifications.socEmails`;
@@ -105,7 +110,8 @@ export class AtoNotificationHandler {
 
   async handle(event: EventEnvelope<AtoNotificationRequestedV1>, tx: Tx): Promise<AtoNoticeResult> {
     const p = event.payload;
-    const { kind, audience } = p;
+    const kind: AtoNoticeKind = p.kind;
+    const { audience } = p;
     const organizationId = BigInt(event.organizationId);
     const log = this.logger.child({
       eventId: event.eventId,
@@ -184,6 +190,8 @@ export class AtoNotificationHandler {
         return p.refs.actionPublicId ?? '-';
       case 'digest':
         return p.digestPeriod ?? '-';
+      case 'provider_unhealthy':
+        return p.refs.integrationPublicId ?? '-';
       default:
         return '-';
     }
@@ -288,6 +296,18 @@ export class AtoNotificationHandler {
         );
         return { kind: 'digest', period, counts };
       }
+      case 'provider_unhealthy': {
+        // Step 8.5 (D11): sent only while the integration is still unhealthy and bound.
+        const ref = p.refs.integrationPublicId;
+        if (!ref) return this.deadLetter(p.kind, p.audience, 'notice_refs_missing');
+        const integration = await this.reads.integration(tx, organizationId, ref);
+        if (integration === null)
+          return this.deadLetter(p.kind, p.audience, 'integration_not_found');
+        if (integration.status === 'disabled' || integration.healthStatus !== 'unhealthy') {
+          return 'not_applicable';
+        }
+        return { kind: 'provider_unhealthy', integration };
+      }
     }
   }
 
@@ -315,7 +335,12 @@ export class AtoNotificationHandler {
       (afterId, take) => this.reads.holders(tx, organization.id, permission, take, afterId),
       this.options.maxRecipients,
     );
-    if (settings.includeOrganizationContact && organization.notificationEmail) {
+    // The provider-health notice goes to the integration administrators only (D11).
+    if (
+      kind !== 'provider_unhealthy' &&
+      settings.includeOrganizationContact &&
+      organization.notificationEmail
+    ) {
       const contact = addressDomain(organization.notificationEmail);
       if (contact === null) {
         this.metrics.alertsSuppressed.inc({

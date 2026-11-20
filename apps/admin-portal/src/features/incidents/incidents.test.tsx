@@ -181,7 +181,9 @@ describe('Incident details (/incidents/[incidentId])', () => {
     const recommendations = screen.getByRole('list', { name: 'Recommendations' });
     expect(within(recommendations).getByRole('button', { name: 'Request' })).toBeInTheDocument();
     expect(
-      within(recommendations).getByText(/Needs an identity-provider adapter \(step 8.5\)/),
+      within(recommendations).getByText(
+        /Needs a connected identity provider with this action available/,
+      ),
     ).toBeInTheDocument();
     expect(
       within(recommendations).getByRole('link', { name: 'Create a hold rule' }),

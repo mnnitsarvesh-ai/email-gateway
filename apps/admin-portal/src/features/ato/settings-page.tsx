@@ -6,7 +6,6 @@ import { DateTime, ToneBadge } from '@/components/domain';
 import { PageHeader } from '@/components/page-header';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -28,6 +27,7 @@ import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
 import { DetailList, Section } from '@/features/messages/controls';
 import { ATO_HIGH_RISK_PRESET_ID } from '@/features/policies/builder/facts';
 import { AtoErrorSummary, CapabilityList, FeatureOffNotice, ScrollRegion } from './components';
+import { IdentityProvidersSettingsSummary } from './providers/summary';
 import {
   ACTION_LABELS,
   ATO_SIGNAL_CATEGORIES,
@@ -1092,18 +1092,7 @@ function ProvidersTab({ settings }: { settings: AtoSettings }) {
           }))}
         />
       </Section>
-      {settings.identityProviders.map((p) => (
-        <UnavailableState
-          key={p.provider}
-          step={p.availableInStep}
-          title={
-            p.provider === 'microsoft_entra'
-              ? 'Microsoft Entra ID / Microsoft 365'
-              : 'Google Workspace'
-          }
-          description="Provider sign-ins, risk events, OAuth consents, mailbox rules and provider-confirmed responses (revoke sessions, require MFA, suspend) arrive with the identity-provider adapters."
-        />
-      ))}
+      <IdentityProvidersSettingsSummary settings={settings} />
     </div>
   );
 }

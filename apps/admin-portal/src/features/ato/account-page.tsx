@@ -9,12 +9,12 @@ import { PageHeader } from '@/components/page-header';
 import { EmptyState } from '@/components/states/empty-state';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
-import { UnavailableState } from '@/components/states/unavailable-state';
 import { ApiError } from '@/lib/api/errors';
 import { useApiQuery, useCursorList } from '@/lib/api/hooks';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { formatNumber, humanize } from '@/lib/format';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
+import { MailboxChangesTab } from './providers/mailbox-tab';
 import {
   CursorPager,
   DetailList,
@@ -134,13 +134,7 @@ function AccountContent({ accountId }: { accountId: string }) {
             case 'outbound':
               return <OutboundTab account={data} />;
             case 'mailbox':
-              return (
-                <UnavailableState
-                  step="8.5"
-                  title="Mailbox changes"
-                  description="Forwarding rules, inbox rules, delegates and OAuth grants come from the identity provider (Microsoft 365 and Google Workspace adapters). The gateway cannot see them; they arrive with the provider integrations."
-                />
-              );
+              return <MailboxChangesTab account={data} />;
             case 'signals':
               return <SignalsTab account={data} />;
             case 'history':
@@ -363,18 +357,39 @@ function OverviewTab({ account }: { account: AtoAccountDetail }) {
         {account.identities.length > 0 ? (
           <ul className="grid gap-1 text-sm">
             {account.identities.map((i) => (
-              <li key={`${i.provider}-${i.userPrincipalName ?? ''}`}>
-                {humanize(i.provider)}: {i.userPrincipalName ?? 'unnamed'} (last seen{' '}
-                <DateTime value={i.lastSeenAt} />)
+              <li
+                key={`${i.provider}-${i.userPrincipalName ?? ''}-${i.integrationId ?? ''}`}
+                className="flex flex-wrap items-center gap-x-2"
+              >
+                <span>
+                  {humanize(i.provider)}: {i.userPrincipalName ?? 'unnamed'} (last seen{' '}
+                  <DateTime value={i.lastSeenAt} />)
+                </span>
+                {i.directoryStatus !== 'unknown' ? (
+                  <ToneBadge tone={i.directoryStatus === 'active' ? 'success' : 'danger'}>
+                    Directory: {humanize(i.directoryStatus)}
+                  </ToneBadge>
+                ) : null}
+                {i.integrationId ? (
+                  <Link
+                    href={`/ato/providers/${i.integrationId}`}
+                    className="text-xs text-primary underline-offset-2 hover:underline"
+                  >
+                    Identity provider
+                  </Link>
+                ) : null}
               </li>
             ))}
           </ul>
         ) : (
-          <UnavailableState
-            step="8.5"
-            title="No provider identities"
-            description="Identity-provider sign-ins and identities arrive with the Microsoft 365 and Google Workspace adapters."
-          />
+          <p className="text-sm text-muted-foreground">
+            No identity-provider identity is mapped to this account. Identities appear when a
+            connected Microsoft 365 or Google Workspace identity provider reports this mailbox (
+            <Link href="/ato/providers" className="text-primary underline underline-offset-2">
+              Identity providers
+            </Link>
+            ).
+          </p>
         )}
       </Section>
     </div>

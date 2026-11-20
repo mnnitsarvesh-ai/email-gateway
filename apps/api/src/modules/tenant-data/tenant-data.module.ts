@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ArchiveRecordsRepository } from '../archive/repositories/archive-records.repository';
 import { DlpEvidenceStore } from '../dlp/services/dlp-evidence-store';
 import { ArchiveTenantDataRepository } from './archive-tenant-data.repository';
+import { AtoProviderTenantDataRepository } from './ato-provider-tenant-data.repository';
 import { BecTenantDataRepository } from './bec-tenant-data.repository';
 import { DlpTenantDataRepository } from './dlp-tenant-data.repository';
 import { DomainsRepository } from './domains.repository';
@@ -25,7 +26,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * step 8.1: ArchiveTenantDataRepository its archive (disposal decisions, then the archive and
  * eDiscovery rows and the tenant keys; refused under an active hold or running retention); step
  * 8.2: ProviderTenantDataRepository its Microsoft 365 / Google Workspace connection rows (purge
- * order of §3.3) and their tenant data export (never credential material).
+ * order of §3.3) and their tenant data export (never credential material); step 8.5:
+ * AtoProviderTenantDataRepository its ATO identity-provider rows (mailbox items, stream rows,
+ * account identities, integrations) and their export (never a token or an address).
  */
 @Module({
   providers: [
@@ -42,6 +45,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ArchiveRecordsRepository,
     ArchiveTenantDataRepository,
     ProviderTenantDataRepository,
+    AtoProviderTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -55,6 +59,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     QuarantineTenantDataRepository,
     ArchiveTenantDataRepository,
     ProviderTenantDataRepository,
+    AtoProviderTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

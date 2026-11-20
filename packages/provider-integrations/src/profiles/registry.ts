@@ -122,8 +122,10 @@ export function comparePermissions(
   const norm = (p: string) => p.trim().toLowerCase();
   const want = new Set(profile.permissions.map(norm));
   const have = new Set(observed.map(norm));
+  // Permissions of another resource never appear in the token (`notInToken`, step 8.5).
+  const unobservable = new Set((profile.notInToken ?? []).map(norm));
   return {
-    missing: profile.permissions.filter((p) => !have.has(norm(p))),
+    missing: profile.permissions.filter((p) => !have.has(norm(p)) && !unobservable.has(norm(p))),
     excess: [...new Set(observed.map((p) => p.trim()))]
       .filter((p) => p && !want.has(norm(p)))
       .sort(),

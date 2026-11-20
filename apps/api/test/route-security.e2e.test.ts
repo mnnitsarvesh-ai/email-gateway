@@ -975,7 +975,13 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'get /api/v1/incidents/:incidentId/messages': [[R], { any: true, cursor: true }],
       'get /api/v1/incidents/:incidentId/report': [[R], { any: true, cls: 'expensive' }],
     };
-    const stepRoutes = routes.filter((r) => /^\/api\/v1\/(ato|incidents)(\/|$)/.test(r.path));
+    // Step 8.5's identity-provider and mailbox state routes have their own block below.
+    const stepRoutes = routes.filter(
+      (r) =>
+        /^\/api\/v1\/(ato|incidents)(\/|$)/.test(r.path) &&
+        !r.path.startsWith('/api/v1/ato/providers') &&
+        !r.path.includes('/mailbox-state'),
+    );
     expect(stepRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
       Object.keys(expected).sort(),
     );
@@ -992,6 +998,53 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route.returnsSecret, key).toBe(false);
       expect(route.rateLimits, key).toEqual([]);
       expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
+  it('the step 8.5 identity-provider and mailbox state routes: exact permissions, users, MFA, classes and keys; no tenant header (§6)', () => {
+    type Flags = { mfa?: boolean; user?: boolean; key?: string };
+    const R = 'ato:read';
+    const M = 'ato:manage';
+    const C = 'ato:configure';
+    const P = '/api/v1/ato/providers';
+    const expected: Record<string, [string[], Flags?]> = {
+      [`get ${P}`]: [[R]],
+      [`get ${P}/requirements`]: [[R]],
+      [`get ${P}/connections`]: [[C]],
+      [`post ${P}`]: [[C], { user: true, mfa: true, key: 'ato.provider_create' }],
+      [`get ${P}/:integrationId`]: [[R]],
+      [`patch ${P}/:integrationId`]: [[C], { user: true, mfa: true, key: 'ato.provider_update' }],
+      [`post ${P}/:integrationId/pause`]: [[C], { user: true, key: 'ato.provider_pause' }],
+      [`post ${P}/:integrationId/resume`]: [[C], { user: true, key: 'ato.provider_resume' }],
+      [`post ${P}/:integrationId/health-check`]: [[C], { key: 'ato.provider_health_check' }],
+      [`post ${P}/:integrationId/backfill`]: [[C], { user: true, key: 'ato.provider_backfill' }],
+      [`delete ${P}/:integrationId`]: [[C], { user: true, mfa: true, key: 'ato.provider_remove' }],
+      'get /api/v1/ato/accounts/:accountId/mailbox-state': [[R]],
+      'post /api/v1/ato/accounts/:accountId/mailbox-state/refresh': [
+        [M],
+        { key: 'ato.mailbox_refresh' },
+      ],
+    };
+    const stepRoutes = routes.filter(
+      (r) => r.path.startsWith(P) || r.path.includes('/mailbox-state'),
+    );
+    expect(stepRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    expect(stepRoutes).toHaveLength(13);
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      // No new permission: the four 8.4 `ato:*` keys only.
+      expect(route.requirement, key).toEqual({ mode: 'all', permissions });
+      expect(route.requireMfa, key).toBe(flags?.mfa ?? false);
+      expect(route.userOnly, key).toBe(flags?.user ?? false);
+      // Every mutation is keyed (transactional) and `sensitive`; reads have no class.
+      expect(route.rateClass, key).toBe(flags?.key ? 'sensitive' : null);
+      expect(route.idempotency, key).toBeNull();
+      expect(route.returnsSecret, key).toBe(false);
+      expect(route.rateLimits, key).toEqual([]);
+      expect(route.cursor, key).toBeNull();
     }
   });
 

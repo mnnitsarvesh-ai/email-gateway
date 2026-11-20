@@ -31,20 +31,44 @@ function runningContainers(): Set<string> {
   );
 }
 
+/** Services whose container exists but is paused (left paused by an aborted earlier run). */
+function pausedContainers(): Set<string> {
+  return new Set(
+    run('docker', [...COMPOSE, 'ps', '--status', 'paused', '--services'])
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0),
+  );
+}
+
+/**
+ * Host processes listening on the port, never Docker's own port forwarder: a published container
+ * port is held by the Docker Desktop backend, and stopping it hangs the whole engine (step 8.5
+ * WP4 fix).
+ */
 function hostPids(port: number): number[] {
   return run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'])
     .split('\n')
     .map((l) => Number(l.trim()))
-    .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid);
+    .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid)
+    .filter(
+      (pid) => !/docker|vpnkit|com\.docker/i.test(run('ps', ['-o', 'command=', '-p', String(pid)])),
+    );
 }
 
 export default function setup(): () => void {
   const running = runningContainers();
+  const alreadyPaused = pausedContainers();
   const paused: string[] = [];
   const stopped: number[] = [];
   for (const { service, port } of SERVICES) {
     if (running.has(service)) {
       run('docker', [...COMPOSE, 'pause', service]);
+      paused.push(service);
+      continue;
+    }
+    // Paused by an aborted earlier run: keep it paused for this run and resume it afterwards.
+    if (alreadyPaused.has(service)) {
       paused.push(service);
       continue;
     }

@@ -523,6 +523,46 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/ato/accounts/{accountId}/mailbox-state': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the mailbox state of a monitored account
+     * @description Forwarding, inbox rules (Graph message rules, Gmail filters), delegates, mailbox permissions and send-as rights the identity-provider integrations observed for the account: present items and items removed in the last 30 days (≤ 500; `truncated`) with kind, state, target **domain** (never the address), trait codes (never the rule keywords), enabled, source (snapshot or audit), provider and integration; the account’s provider identities with their directory status and refresh request; each integration’s last mailbox sweep. `404 ato_account_not_found` for an unknown or foreign account or while ATO is not enabled.
+     */
+    get: operations['AtoAccountMailboxController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/accounts/{accountId}/mailbox-state/refresh': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Request a priority refresh of the mailbox state
+     * @description Flags the account’s identities whose integration supports a priority refresh (active, its mailbox-state stream enabled and available); the ato-worker reads their mailbox settings first in its next poll. `202`; `409 ato_provider_refresh_unavailable` when no identity qualifies. Audited `ato.mailbox_state.refresh_requested`. Users and API keys. No body. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoAccountMailboxController_refresh_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/ato/accounts/{accountId}/override': {
     parameters: {
       query?: never;
@@ -735,6 +775,178 @@ export interface paths {
      * @description Figures of your organization for the last `range` (`24h`, `7d` default, `30d`): monitoring state (feature, mode, learning period), monitored accounts by kind and risk, ATO incidents (active by severity, opened in range with a trend, resolved by resolution), failed and suspicious logins, suspicious outbound activity, restricted accounts, mail held by an `ato.*` policy rule (`policyHeldInRange`: evaluations with ATO facts and a hold disposition), geography (only when the GeoIP City database is loaded: `available: false` with a reason otherwise), responses and the attention counts. Cached per organization and range for API_ATO_OVERVIEW_CACHE_SECONDS (default 60). From the read replica. Rate class `expensive`. With ATO not enabled: `monitoring.featureEnabled: false` and zero figures.
      */
     get: operations['AtoOverviewController_overview_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List identity-provider integrations
+     * @description The Microsoft Entra ID / Microsoft 365 and Google Workspace integrations of your organization (not disabled; `includeDisabled=true` adds the 50 most recently removed): provider, the bound connection, status, health (`stale` when the last probe is older than 3 × the probe interval), a stream summary (enabled, available, failing, backfilling, largest lag) and the available streams and actions, plus the limit ATO_IDP_MAX_INTEGRATIONS_PER_ORG and its use. No cursor (a handful of rows). When ATO is not enabled for the organization (plan feature `ato_detection`, off by default; a platform operator enables it per organization), lists are empty and details answer 404.
+     */
+    get: operations['AtoProvidersController_list_v1'];
+    put?: never;
+    /**
+     * Bind a provider connection to account takeover detection
+     * @description Creates the identity-provider integration of a step 8.2 connection (`connectionId`) with optional `settings` (`ato-idp-binding/1`; defaults otherwise): the connection must be active with an active telemetry grant (`409 ato_provider_connection_ineligible` with `reasons`), not already bound (`409 ato_provider_already_bound` with `integrationId`), its provider directory not monitored by another integration (`409 ato_provider_directory_in_use`; the other organization is never named) and the organization below ATO_IDP_MAX_INTEGRATIONS_PER_ORG (`409 ato_provider_limit_reached`). Creates one stream row per stream (backfilling the last `backfillDays` days where the provider keeps them) and schedules the first probe now. A connection removed earlier is bound again under its previous id. Audited `ato.provider.bound`. Users with an MFA session only (`403 mfa_required`; API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoProvidersController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/{integrationId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an identity-provider integration
+     * @description The full view: the bound connection, settings with `rowVersion` (send with PATCH), health (status, last and next probe, the probe’s grants with missing permissions), every stream (role, enabled, status, availability, capability, watermark and lag, last attempt/success/event/error, failures, throttling, backfill, totals), every action (enabled, capability, rollback, confirmation, required configuration), required, granted and missing permissions per profile, and the directory domain count. When ATO is not enabled for the organization (plan feature `ato_detection`, off by default; a platform operator enables it per organization), lists are empty and details answer 404.
+     */
+    get: operations['AtoProvidersController_get_v1'];
+    put?: never;
+    post?: never;
+    /**
+     * Remove an identity-provider integration
+     * @description Disables the integration (`status: disabled`, `disabledReason: user`): every poll, probe and provider action stops; provider actions still in flight end `failed` with `integration_disabled`. Signals, authentication events and actions stay; stream rows and mailbox state are deleted by the worker after 30 days. The step 8.2 connection is not changed. `reason` is audited (`ato.provider.unbound`). Idempotent. Users with an MFA session only (`403 mfa_required`; API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    delete: operations['AtoProvidersController_remove_v1'];
+    options?: never;
+    head?: never;
+    /**
+     * Update the settings of an identity-provider integration
+     * @description Replaces the `ato-idp-binding/1` settings (the full document) with `rowVersion` (`409 ato_provider_conflict` with `currentRowVersion`). Validated as a whole (`400 ato_provider_settings_invalid` with the failing paths: a companion stream needs its primary, `groupId` only for Microsoft, `orgUnitPath` only for Google, `backfillDays` ≤ ATO_IDP_BACKFILL_MAX_DAYS). Enabling a stream schedules it now. Audited `ato.provider.updated` with the changed paths. A removed integration answers `409 ato_provider_disabled`. Users with an MFA session only (`403 mfa_required`; API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    patch: operations['AtoProvidersController_update_v1'];
+    trace?: never;
+  };
+  '/api/v1/ato/providers/{integrationId}/backfill': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Backfill provider telemetry of an integration
+     * @description Re-reads the enabled primary streams (or `streams`) from `from` (within ATO_IDP_BACKFILL_MAX_DAYS, clamped per stream to what the provider keeps; snapshot streams have no backfill). Backfilled events build history and baselines but never open incidents, propose responses or notify (historical mode). `202` with the integration; `409 ato_provider_backfill_active` while a stream is still backfilling; `422 ato_provider_backfill_range_invalid` with `reason` (`range`, `stream_not_backfillable`, `stream_disabled`, `no_stream`). Audited `ato.provider.backfill_requested`. Users only (API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoProvidersController_backfill_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/{integrationId}/health-check': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Request a probe of an identity-provider integration
+     * @description Schedules the read-only probe (connection, tokens per grant, one cheap read per stream, action prerequisites) for the ato-worker’s next tick and answers `202` with the current health. Audited `ato.provider.health_check_requested`. Users and API keys. No body. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoProvidersController_healthCheck_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/{integrationId}/pause': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Pause an identity-provider integration
+     * @description Stops every poll, probe and provider action of the integration (`status: paused`, `pausedReason: user`) until it is resumed; `reason` is audited (`ato.provider.paused`). Idempotent. A removed integration answers `409 ato_provider_disabled`. Users only (API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoProvidersController_pause_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/{integrationId}/resume': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resume an identity-provider integration
+     * @description Returns a paused (or failed) integration to `active` with its polls and a probe scheduled now; `409 ato_provider_connection_inactive` while the step 8.2 connection or its telemetry grant is not active. Idempotent. Audited `ato.provider.resumed`. No body. Users only (API keys `403 user_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together); rate class `sensitive`; `403 ato_not_enabled` while ATO is not enabled for the organization.
+     */
+    post: operations['AtoProvidersController_resume_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/connections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List provider connections that can be bound
+     * @description The Microsoft 365 and Google Workspace connections of your organization (step 8.2) with their eligibility for account takeover detection: `eligible`, `already_bound` (with `integrationId`), `wrong_provider` or `inactive` with the reasons (`connection_inactive`, `telemetry_grant_missing`, `telemetry_grant_inactive`), the number of provider-verified linked domains and, per ATO permission profile, the required, observed, missing and excess permissions. Empty while ATO is not enabled.
+     */
+    get: operations['AtoProvidersController_connections_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/ato/providers/requirements': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the identity-provider permission requirements
+     * @description For Microsoft and Google: the six least-privilege permission profiles (one app or service account each, consented through the provider connection’s grant routes), the permissions or scopes each stream and action needs, stream roles (primary, companion, unsupported), provider retention (the backfill bound), licences and notes. Static catalogue; the probe proves what is actually granted.
+     */
+    get: operations['AtoProvidersController_requirements_v1'];
     put?: never;
     post?: never;
     delete?: never;
@@ -11919,8 +12131,12 @@ export interface operations {
             /** Format: uuid */
             id: string;
             identities: {
+              /** @enum {string} */
+              directoryStatus: 'unknown' | 'active' | 'suspended' | 'deleted';
               /** Format: date-time */
               firstSeenAt: string;
+              /** Format: uuid */
+              integrationId: string | null;
               /** Format: date-time */
               lastSeenAt: string;
               provider: string;
@@ -12282,8 +12498,12 @@ export interface operations {
             /** Format: uuid */
             id: string;
             identities: {
+              /** @enum {string} */
+              directoryStatus: 'unknown' | 'active' | 'suspended' | 'deleted';
               /** Format: date-time */
               firstSeenAt: string;
+              /** Format: uuid */
+              integrationId: string | null;
               /** Format: date-time */
               lastSeenAt: string;
               provider: string;
@@ -13006,6 +13226,448 @@ export interface operations {
       };
     };
   };
+  AtoAccountMailboxController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Monitored account public id (UUID) */
+        accountId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The mailbox state */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            accountId: string;
+            identities: {
+              /** @enum {string} */
+              directoryStatus: 'unknown' | 'active' | 'suspended' | 'deleted';
+              /** Format: date-time */
+              directoryStatusAt: string | null;
+              /** Format: uuid */
+              integrationId: string | null;
+              provider: string;
+              /** Format: date-time */
+              refreshRequestedAt: string | null;
+              refreshSupported: boolean;
+              userPrincipalName: string | null;
+            }[];
+            integrations: {
+              displayName: string | null;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              lastSweepAt: string | null;
+              /** @enum {string} */
+              provider: 'microsoft_entra' | 'google_workspace';
+              /** @enum {string} */
+              status: 'active' | 'paused' | 'error' | 'disabled';
+            }[];
+            items: {
+              enabled: boolean | null;
+              /** Format: date-time */
+              firstSeenAt: string;
+              /** Format: uuid */
+              id: string;
+              /** Format: uuid */
+              integrationId: string;
+              /** @enum {string} */
+              kind: 'forwarding' | 'inbox_rule' | 'delegate' | 'mailbox_permission' | 'send_as';
+              /** @enum {string} */
+              lastChange: 'added' | 'changed' | 'removed';
+              /** Format: date-time */
+              lastSeenAt: string;
+              /** @enum {string} */
+              provider: 'microsoft_entra' | 'google_workspace';
+              /** Format: date-time */
+              removedAt: string | null;
+              /** @enum {string} */
+              source: 'snapshot' | 'audit';
+              /** @enum {string} */
+              state: 'present' | 'removed';
+              targetDomain: string | null;
+              traits: string[];
+            }[];
+            /** Format: date-time */
+            refreshRequestedAt: string | null;
+            truncated: boolean;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown account, one of another organization, or ATO is not enabled (`ato_account_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_account_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoAccountMailboxController_refresh_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Monitored account public id (UUID) */
+        accountId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The refresh is requested */
+      202: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            accountId: string;
+            identities: number;
+            integrationIds: string[];
+            /** Format: date-time */
+            requestedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown account, one of another organization, or ATO is not enabled (`ato_account_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_account_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_refresh_unavailable` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_request_in_progress' | 'ato_provider_refresh_unavailable';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   AtoAccountsController_setOverride_v1: {
     parameters: {
       query?: never;
@@ -13128,8 +13790,12 @@ export interface operations {
             /** Format: uuid */
             id: string;
             identities: {
+              /** @enum {string} */
+              directoryStatus: 'unknown' | 'active' | 'suspended' | 'deleted';
               /** Format: date-time */
               firstSeenAt: string;
+              /** Format: uuid */
+              integrationId: string | null;
               /** Format: date-time */
               lastSeenAt: string;
               provider: string;
@@ -13540,8 +14206,12 @@ export interface operations {
             /** Format: uuid */
             id: string;
             identities: {
+              /** @enum {string} */
+              directoryStatus: 'unknown' | 'active' | 'suspended' | 'deleted';
               /** Format: date-time */
               firstSeenAt: string;
+              /** Format: uuid */
+              integrationId: string | null;
               /** Format: date-time */
               lastSeenAt: string;
               provider: string;
@@ -15100,6 +15770,13 @@ export interface operations {
           durationMinutes?: number;
           /** @enum {string} */
           mode?: 'reject' | 'defer';
+          params?: {
+            appIdHash?: string;
+            /** Format: uuid */
+            itemId?: string;
+            /** @enum {string} */
+            scope?: 'all_external';
+          };
           reason: string;
           target?: {
             cidr?: string;
@@ -15795,6 +16472,3909 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_list_v1: {
+    parameters: {
+      query?: {
+        includeDisabled?: 'true' | 'false';
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The integrations */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              capabilities: {
+                actions: (
+                  | 'revoke_sessions'
+                  | 'require_mfa'
+                  | 'require_password_reset'
+                  | 'suspend_account'
+                  | 'remove_forwarding_rule'
+                  | 'revoke_oauth_grant'
+                )[];
+                streams: (
+                  | 'sign_ins'
+                  | 'risk_events'
+                  | 'oauth_consents'
+                  | 'mailbox_audit'
+                  | 'forwarding_changes'
+                  | 'delegation_changes'
+                  | 'session_events'
+                )[];
+              };
+              connection: {
+                displayName: string;
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                provider: 'microsoft_365' | 'google_workspace';
+                /** @enum {string} */
+                status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+              } | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              disabledAt: string | null;
+              disabledReason: string | null;
+              displayName: string | null;
+              health: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                stale: boolean;
+                /** @enum {string} */
+                status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+              };
+              /** Format: uuid */
+              id: string;
+              pausedReason: string | null;
+              /** @enum {string} */
+              provider: 'microsoft_entra' | 'google_workspace';
+              /** @enum {string} */
+              status: 'active' | 'paused' | 'error' | 'disabled';
+              streams: {
+                available: number;
+                backfilling: number;
+                enabled: number;
+                failing: number;
+                maxLagSeconds: number | null;
+              };
+              /** Format: date-time */
+              updatedAt: string;
+            }[];
+            featureEnabled: boolean;
+            limit: {
+              max: number;
+              used: number;
+            };
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_create_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** Format: uuid */
+          connectionId: string;
+          /** @description `ato-idp-binding/1` (strict, every field required): per-stream and per-action `enabled`, `pollIntervalSeconds` (60–3600), `backfillDays` (0–30, ≤ ATO_IDP_BACKFILL_MAX_DAYS), `snapshot.sweepIntervalHours` (6–168 or null = provider default), `mfaEnforcement` (`groupId` for Microsoft, `orgUnitPath` for Google) and `forwardingRemoval.mode`. A companion stream may be enabled only with its primary. `400 ato_provider_settings_invalid` lists the failing paths. */
+          settings?: {
+            actions: {
+              remove_forwarding_rule: {
+                enabled: boolean;
+              };
+              require_mfa: {
+                enabled: boolean;
+              };
+              require_password_reset: {
+                enabled: boolean;
+              };
+              revoke_oauth_grant: {
+                enabled: boolean;
+              };
+              revoke_sessions: {
+                enabled: boolean;
+              };
+              suspend_account: {
+                enabled: boolean;
+              };
+            };
+            backfillDays: number;
+            forwardingRemoval: {
+              /** @enum {string} */
+              mode: 'disable' | 'delete';
+            };
+            mfaEnforcement: {
+              groupId: string | null;
+              orgUnitPath: string | null;
+            };
+            pollIntervalSeconds: number;
+            snapshot: {
+              sweepIntervalHours: number | null;
+            };
+            streams: {
+              delegation_changes: {
+                enabled: boolean;
+              };
+              forwarding_changes: {
+                enabled: boolean;
+              };
+              mailbox_audit: {
+                enabled: boolean;
+              };
+              oauth_consents: {
+                enabled: boolean;
+              };
+              risk_events: {
+                enabled: boolean;
+              };
+              session_events: {
+                enabled: boolean;
+              };
+              sign_ins: {
+                enabled: boolean;
+              };
+            };
+          };
+        };
+      };
+    };
+    responses: {
+      /** @description The new integration */
+      201: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`), or `ato_provider_settings_invalid` */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'validation_failed'
+              | 'idempotency_key_required'
+              | 'idempotency_key_invalid'
+              | 'ato_provider_settings_invalid';
+            correlationId?: string;
+            error: string;
+            issues?: {
+              message?: string;
+              path?: string;
+            }[];
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description The connection is not one of your organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_connection_ineligible`, `ato_provider_already_bound`, `ato_provider_directory_in_use`, `ato_provider_limit_reached` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'idempotency_request_in_progress'
+              | 'ato_provider_connection_ineligible'
+              | 'ato_provider_already_bound'
+              | 'ato_provider_directory_in_use'
+              | 'ato_provider_limit_reached';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The integration */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_remove_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The removed integration */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_update_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          rowVersion: number;
+          /** @description `ato-idp-binding/1` (strict, every field required): per-stream and per-action `enabled`, `pollIntervalSeconds` (60–3600), `backfillDays` (0–30, ≤ ATO_IDP_BACKFILL_MAX_DAYS), `snapshot.sweepIntervalHours` (6–168 or null = provider default), `mfaEnforcement` (`groupId` for Microsoft, `orgUnitPath` for Google) and `forwardingRemoval.mode`. A companion stream may be enabled only with its primary. `400 ato_provider_settings_invalid` lists the failing paths. */
+          settings: {
+            actions: {
+              remove_forwarding_rule: {
+                enabled: boolean;
+              };
+              require_mfa: {
+                enabled: boolean;
+              };
+              require_password_reset: {
+                enabled: boolean;
+              };
+              revoke_oauth_grant: {
+                enabled: boolean;
+              };
+              revoke_sessions: {
+                enabled: boolean;
+              };
+              suspend_account: {
+                enabled: boolean;
+              };
+            };
+            backfillDays: number;
+            forwardingRemoval: {
+              /** @enum {string} */
+              mode: 'disable' | 'delete';
+            };
+            mfaEnforcement: {
+              groupId: string | null;
+              orgUnitPath: string | null;
+            };
+            pollIntervalSeconds: number;
+            snapshot: {
+              sweepIntervalHours: number | null;
+            };
+            streams: {
+              delegation_changes: {
+                enabled: boolean;
+              };
+              forwarding_changes: {
+                enabled: boolean;
+              };
+              mailbox_audit: {
+                enabled: boolean;
+              };
+              oauth_consents: {
+                enabled: boolean;
+              };
+              risk_events: {
+                enabled: boolean;
+              };
+              session_events: {
+                enabled: boolean;
+              };
+              sign_ins: {
+                enabled: boolean;
+              };
+            };
+          };
+        };
+      };
+    };
+    responses: {
+      /** @description The updated integration */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`), or `ato_provider_settings_invalid` */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'validation_failed'
+              | 'idempotency_key_required'
+              | 'idempotency_key_invalid'
+              | 'ato_provider_settings_invalid';
+            correlationId?: string;
+            error: string;
+            issues?: {
+              message?: string;
+              path?: string;
+            }[];
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_conflict`, `ato_provider_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              'idempotency_request_in_progress' | 'ato_provider_conflict' | 'ato_provider_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_backfill_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** Format: date-time */
+          from: string;
+          streams?: (
+            | 'sign_ins'
+            | 'risk_events'
+            | 'oauth_consents'
+            | 'mailbox_audit'
+            | 'forwarding_changes'
+            | 'delegation_changes'
+            | 'session_events'
+          )[];
+        };
+      };
+    };
+    responses: {
+      /** @description The backfill is scheduled */
+      202: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_backfill_active`, `ato_provider_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'idempotency_request_in_progress'
+              | 'ato_provider_backfill_active'
+              | 'ato_provider_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`), or `ato_provider_backfill_range_invalid` */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused' | 'ato_provider_backfill_range_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_healthCheck_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The probe is scheduled; the current health */
+      202: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            requestedAt: string;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_request_in_progress' | 'ato_provider_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_pause_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The paused integration */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_request_in_progress' | 'ato_provider_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_resume_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Identity-provider integration public id (UUID) */
+        integrationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The resumed integration */
+      200: {
+        headers: {
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            actions: {
+              /** @enum {string} */
+              action:
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant';
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              code: string | null;
+              /** @enum {string} */
+              confirmation: 'synchronous' | 'polling';
+              enabled: boolean;
+              requiresConfiguration: string | null;
+              rollback: boolean;
+            }[];
+            capabilities: {
+              actions: (
+                | 'revoke_sessions'
+                | 'require_mfa'
+                | 'require_password_reset'
+                | 'suspend_account'
+                | 'remove_forwarding_rule'
+                | 'revoke_oauth_grant'
+              )[];
+              streams: (
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+              )[];
+            };
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled' | 'missing';
+            } | null;
+            /** Format: date-time */
+            createdAt: string;
+            directory: {
+              domainCount: number;
+            };
+            /** Format: date-time */
+            disabledAt: string | null;
+            disabledReason: string | null;
+            displayName: string | null;
+            health: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            healthDetail: {
+              /** Format: date-time */
+              checkedAt: string | null;
+              code: string | null;
+              grants: {
+                missingPermissions: string[];
+                profile: string;
+                /** @enum {string} */
+                status: 'active' | 'pending' | 'error' | 'revoked' | 'absent';
+              }[];
+              /** Format: date-time */
+              nextCheckAt: string | null;
+              ok: boolean | null;
+              stale: boolean;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+            };
+            /** Format: uuid */
+            id: string;
+            pausedReason: string | null;
+            permissions: {
+              granted: string[];
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+            };
+            /** @enum {string} */
+            provider: 'microsoft_entra' | 'google_workspace';
+            rowVersion: number;
+            settings: {
+              [key: string]: unknown;
+            };
+            settingsInvalid: boolean;
+            /** @enum {string} */
+            settingsSchema: 'ato-idp-binding/1';
+            settingsVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'paused' | 'error' | 'disabled';
+            streamDetails: {
+              /** @enum {string} */
+              availability:
+                | 'unknown'
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error';
+              availabilityCode: string | null;
+              backfill: {
+                active: boolean;
+                /** Format: date-time */
+                completedAt: string | null;
+                /** Format: date-time */
+                from: string | null;
+                /** Format: date-time */
+                requestedAt: string | null;
+              };
+              /** @enum {string} */
+              capability:
+                | 'available'
+                | 'missing_permission'
+                | 'missing_license'
+                | 'not_configured'
+                | 'not_offered'
+                | 'error'
+                | 'unknown'
+                | 'disabled';
+              consecutiveFailures: number;
+              enabled: boolean;
+              eventsTotal: number;
+              lagSeconds: number | null;
+              /** Format: date-time */
+              lastAttemptAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastEventAt: string | null;
+              /** Format: date-time */
+              lastSuccessAt: string | null;
+              /** Format: date-time */
+              nextPollAt: string | null;
+              pagesTotal: number;
+              /** @enum {string|null} */
+              primary:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events'
+                | null;
+              /** @enum {string} */
+              role: 'primary' | 'companion' | 'unsupported';
+              /** @enum {string} */
+              status: 'active' | 'backfilling' | 'paused' | 'error' | 'unsupported';
+              /** @enum {string} */
+              stream:
+                | 'sign_ins'
+                | 'risk_events'
+                | 'oauth_consents'
+                | 'mailbox_audit'
+                | 'forwarding_changes'
+                | 'delegation_changes'
+                | 'session_events';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              /** Format: date-time */
+              watermarkAt: string | null;
+            }[];
+            streams: {
+              available: number;
+              backfilling: number;
+              enabled: number;
+              failing: number;
+              maxLagSeconds: number | null;
+            };
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`), ATO not enabled for the organization (`ato_not_enabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required' | 'ato_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown integration, one of another organization, or ATO is not enabled (`ato_provider_not_found`) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'ato_provider_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description A request with this Idempotency-Key is still in progress, or `ato_provider_connection_inactive`, `ato_provider_disabled` */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'idempotency_request_in_progress'
+              | 'ato_provider_connection_inactive'
+              | 'ato_provider_disabled';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** Format: uuid */
+            responseId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (`idempotency_key_reused`) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_connections_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The connections */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              displayName: string;
+              /** @enum {string} */
+              eligibility: 'eligible' | 'already_bound' | 'wrong_provider' | 'inactive';
+              /** Format: uuid */
+              id: string;
+              /** Format: uuid */
+              integrationId: string | null;
+              /** @enum {string|null} */
+              kind: 'microsoft_entra' | 'google_workspace' | null;
+              profiles: {
+                grant: {
+                  excess: string[];
+                  /** Format: uuid */
+                  id: string;
+                  missing: string[];
+                  observed: string[] | null;
+                  /** @enum {string} */
+                  status: 'active' | 'pending' | 'error' | 'revoked';
+                } | null;
+                notObservable: string[];
+                profile: string;
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                required: string[];
+                title: string;
+              }[];
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              providerVerifiedDomainCount: number;
+              reasons: (
+                | 'already_bound'
+                | 'wrong_provider'
+                | 'connection_inactive'
+                | 'telemetry_grant_missing'
+                | 'telemetry_grant_inactive'
+              )[];
+              /** @enum {string} */
+              status: 'configuring' | 'active' | 'error' | 'disabled';
+            }[];
+            featureEnabled: boolean;
+            limit: {
+              max: number;
+              used: number;
+            };
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), session without MFA on an MFA route (`mfa_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, cache) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AtoProvidersController_requirements_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The requirements */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            providers: {
+              actions: {
+                /** @enum {string} */
+                action:
+                  | 'revoke_sessions'
+                  | 'require_mfa'
+                  | 'require_password_reset'
+                  | 'suspend_account'
+                  | 'remove_forwarding_rule'
+                  | 'revoke_oauth_grant';
+                /** @enum {string} */
+                confirmation: 'synchronous' | 'polling';
+                /** @enum {string} */
+                impact: 'low' | 'medium' | 'high';
+                notes: string;
+                permissions: string[];
+                profile: string | null;
+                requiresConfiguration: string | null;
+                rollback: boolean;
+                supported: boolean;
+              }[];
+              /** @enum {string} */
+              connectionProvider: 'microsoft_365' | 'google_workspace';
+              licences: {
+                code: string;
+                enables: string;
+                title: string;
+              }[];
+              notes: string[];
+              profiles: {
+                description: string;
+                key: string;
+                permissions: {
+                  /** @enum {string} */
+                  api: 'graph' | 'o365_management' | 'google_oauth_scope';
+                  name: string;
+                }[];
+                /** @enum {string} */
+                purpose: 'ato_telemetry' | 'ato_response';
+                readOnly: boolean;
+                title: string;
+                version: number;
+              }[];
+              /** @enum {string} */
+              provider: 'microsoft_entra' | 'google_workspace';
+              streams: {
+                licences: string[];
+                notes: string;
+                optionalPermissions: string[];
+                permissions: string[];
+                /** @enum {string|null} */
+                primary:
+                  | 'sign_ins'
+                  | 'risk_events'
+                  | 'oauth_consents'
+                  | 'mailbox_audit'
+                  | 'forwarding_changes'
+                  | 'delegation_changes'
+                  | 'session_events'
+                  | null;
+                profile: string | null;
+                retentionDays: number;
+                /** @enum {string} */
+                role: 'primary' | 'companion' | 'unsupported';
+                /** @enum {string} */
+                stream:
+                  | 'sign_ins'
+                  | 'risk_events'
+                  | 'oauth_consents'
+                  | 'mailbox_audit'
+                  | 'forwarding_changes'
+                  | 'delegation_changes'
+                  | 'session_events';
+              }[];
+            }[];
           };
         };
       };
@@ -18320,8 +22900,14 @@ export interface operations {
             };
             featureEnabled: boolean;
             identityProviders: {
-              /** @enum {string} */
-              availableInStep: '8.5';
+              integrations: {
+                /** @enum {string} */
+                health: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                provider: 'microsoft_entra' | 'google_workspace';
+              }[];
               /** @enum {string} */
               provider: 'microsoft_entra' | 'google_workspace';
             }[];
@@ -18683,8 +23269,14 @@ export interface operations {
             };
             featureEnabled: boolean;
             identityProviders: {
-              /** @enum {string} */
-              availableInStep: '8.5';
+              integrations: {
+                /** @enum {string} */
+                health: 'unknown' | 'healthy' | 'degraded' | 'unhealthy';
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                provider: 'microsoft_entra' | 'google_workspace';
+              }[];
               /** @enum {string} */
               provider: 'microsoft_entra' | 'google_workspace';
             }[];
@@ -52722,6 +57314,7 @@ export interface operations {
               | 'ato_incident'
               | 'ato_approval_requested'
               | 'ato_digest'
+              | 'ato_provider_health'
             )[];
             optOut: (
               | 'threat_detected'
@@ -52734,6 +57327,7 @@ export interface operations {
               | 'ato_incident'
               | 'ato_approval_requested'
               | 'ato_digest'
+              | 'ato_provider_health'
             )[];
             quarantineDigestOptOut: boolean;
             /** @description Whether the organization allows opting out of the quarantine digest */
@@ -52856,6 +57450,7 @@ export interface operations {
             | 'ato_incident'
             | 'ato_approval_requested'
             | 'ato_digest'
+            | 'ato_provider_health'
           )[];
           /** @description Opt out of the quarantine digest (the same setting as `/quarantine/me/preferences`); opting out needs the organization’s `digest.allowOptOut` */
           quarantineDigestOptOut: boolean;
@@ -52888,6 +57483,7 @@ export interface operations {
               | 'ato_incident'
               | 'ato_approval_requested'
               | 'ato_digest'
+              | 'ato_provider_health'
             )[];
             optOut: (
               | 'threat_detected'
@@ -52900,6 +57496,7 @@ export interface operations {
               | 'ato_incident'
               | 'ato_approval_requested'
               | 'ato_digest'
+              | 'ato_provider_health'
             )[];
             quarantineDigestOptOut: boolean;
             /** @description Whether the organization allows opting out of the quarantine digest */

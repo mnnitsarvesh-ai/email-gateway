@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ATO_ACCOUNT_CHANGE_ACTIONS,
+  ATO_NOTIFICATION_KIND_VALUES,
   atoAccountRiskUpdatedV1,
   atoNotificationRequestedV1,
   atoResponseCompletedV1,
@@ -15,7 +16,7 @@ import {
   smtpSubmissionRecordedV1,
 } from './ato-events';
 import { EventTypes } from './events';
-import { EXAMPLE_EVENT_PAYLOADS } from './examples';
+import { EXAMPLE_ATO_PROVIDER_UNHEALTHY_PAYLOAD, EXAMPLE_EVENT_PAYLOADS } from './examples';
 import { EVENT_REGISTRY, type RegisteredEventType } from './registry';
 
 const example = (type: RegisteredEventType) =>
@@ -309,6 +310,43 @@ describe('step 8.4 ATO and security incident events (D2)', () => {
       expect(ok(atoRestrictionChangedV1, { ...base, mailboxSha256: null })).toBe(false);
       expect(ok(atoRestrictionChangedV1, { ...base, mailboxSha256: 'C'.repeat(64) })).toBe(false);
       expect(ok(atoRestrictionChangedV1, { ...base, mailboxAddress: 'a@b.example' })).toBe(false);
+    });
+  });
+
+  describe('ato.notification.requested.v1: provider_unhealthy (step 8.5 D11)', () => {
+    const unhealthy = EXAMPLE_ATO_PROVIDER_UNHEALTHY_PAYLOAD as Record<string, unknown>;
+    it('accepts the example and requires the integration ref for that kind only', () => {
+      expect(ok(atoNotificationRequestedV1, unhealthy)).toBe(true);
+      expect(ATO_NOTIFICATION_KIND_VALUES.at(-1)).toBe('provider_unhealthy');
+      expect(ok(atoNotificationRequestedV1, { ...unhealthy, refs: {} })).toBe(false);
+      expect(
+        ok(atoNotificationRequestedV1, {
+          ...unhealthy,
+          refs: { integrationPublicId: 'not-a-uuid' },
+        }),
+      ).toBe(false);
+      const base = example('ato.notification.requested.v1');
+      expect(
+        ok(atoNotificationRequestedV1, {
+          ...base,
+          refs: {
+            ...(base.refs as object),
+            integrationPublicId: '01890a5d-ac96-774b-bcce-b302099a80a5',
+          },
+        }),
+      ).toBe(false);
+    });
+    it('goes to the tenant audience only and carries no address', () => {
+      expect(ok(atoNotificationRequestedV1, { ...unhealthy, audience: 'soc' })).toBe(false);
+      expect(
+        ok(atoNotificationRequestedV1, {
+          ...unhealthy,
+          refs: {
+            integrationPublicId: '01890a5d-ac96-774b-bcce-b302099a80a5',
+            address: 'a@b.example',
+          },
+        }),
+      ).toBe(false);
     });
   });
 

@@ -26,6 +26,8 @@ export const PREFERENCE_KINDS = [
   'ato_incident',
   'ato_approval_requested',
   'ato_digest',
+  // Step 8.5 (D11): opt-out of the ATO identity-provider outage e-mail (`provider_unhealthy`).
+  'ato_provider_health',
 ] as const;
 export type PreferenceKind = (typeof PREFERENCE_KINDS)[number];
 

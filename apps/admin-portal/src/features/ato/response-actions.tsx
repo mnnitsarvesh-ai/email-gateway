@@ -177,6 +177,10 @@ export function ResponseControls({ response }: { response: AtoResponse }) {
 export interface RequestPreset {
   actionType: AtoActionType;
   target?: AtoRequestBody['target'];
+  /** Step 8.5: provider parameters (one mailbox item for `remove_forwarding_rule`). */
+  params?: AtoRequestBody['params'];
+  /** What the preset item is (shown in the dialog, e.g. "Inbox rule forwarding to example.net"). */
+  subject?: string;
 }
 
 /**
@@ -241,6 +245,8 @@ export function RequestResponseButton({
     ...(action?.needsDuration ? { durationMinutes: duration } : {}),
     ...(action?.type === 'restrict_smtp_sending' ? { mode } : {}),
     ...(manual ? { description: description.trim() } : {}),
+    // A preset mailbox item applies only to the preset's own action type.
+    ...(preset?.params && actionType === preset.actionType ? { params: preset.params } : {}),
   });
   return (
     <>
@@ -252,9 +258,29 @@ export function RequestResponseButton({
         onOpenChange={setOpen}
         title="Request a response"
         description={
-          action && action.impact !== 'low'
-            ? 'This is a high-impact response: it needs the approval of a second analyst (with MFA) unless the tenant’s automation allows it.'
-            : 'Low-impact responses run at once.'
+          <span className="grid gap-1">
+            <span>
+              {action && action.impact !== 'low'
+                ? 'This is a high-impact response: it needs the approval of a second analyst (with MFA) unless the tenant’s automation allows it.'
+                : 'Low-impact responses run at once.'}
+            </span>
+            {action?.provider ? (
+              <span>
+                The identity provider carries it out; it counts as done only when the provider
+                confirms it.
+                {actionType === 'remove_forwarding_rule' &&
+                !(preset?.params?.itemId && preset.actionType === actionType)
+                  ? ' Without a selected item it removes every forwarding to an external domain.'
+                  : ''}
+                {actionType === 'revoke_sessions'
+                  ? ' Users sign in and authorize their applications again.'
+                  : ''}
+              </span>
+            ) : null}
+            {preset?.subject && preset.actionType === actionType ? (
+              <span>Item: {preset.subject}</span>
+            ) : null}
+          </span>
         }
         confirmLabel="Request"
         disabled={!descriptionOk || !cidrOk}

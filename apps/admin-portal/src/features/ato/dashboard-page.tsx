@@ -23,6 +23,7 @@ import { RouteGate } from '@/lib/auth/route-gate';
 import { formatNumber, humanize } from '@/lib/format';
 import { DetailList, Section } from '@/features/messages/controls';
 import { FeatureOffNotice } from './components';
+import { IdentityProvidersCard } from './providers/summary';
 import {
   OVERVIEW_RANGES,
   atoIncidentsHref,
@@ -329,6 +330,7 @@ function Overview({ data }: { data: AtoOverview }) {
           ]}
         />
       </Section>
+      <IdentityProvidersCard />
     </div>
   );
 }

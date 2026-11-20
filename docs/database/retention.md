@@ -79,10 +79,12 @@ Step 8.4 ([§3](../plan/steps/24-account-takeover-core.md#3-data-model-two-forwa
 | `ato_trusted_contexts`                                                                                                          | 30 days after `expires_at`                                                                                      |
 | `ato_settings_versions`                                                                                                         | 730 days, except the current version                                                                            |
 | `ato_accounts` with `ato_account_baselines`, `ato_account_identities`                                                           | retired accounts (subject deleted, or no event for 13 months and no active incident) are deleted                |
-| `ato_provider_integrations`                                                                                                     | with the 8.5 provider binding                                                                                   |
+| `ato_provider_integrations`                                                                                                     | kept while referenced by actions; disabled rows stay (8.5)                                                      |
+| `ato_provider_streams` (8.5)                                                                                                    | 30 days after the integration's `disabled_at`                                                                   |
+| `ato_provider_mailbox_items` (8.5)                                                                                              | removed items 400 days after `removed_at`; all items 30 days after `disabled_at`                                |
 | `policy_execution_logs.ato_facts`, `bec_scan_results.outbound_observations`                                                     | columns of existing tables: with the row (core, 6 months)                                                       |
 
-The deferred organization purge must delete every `ato_*` and `security_incident*` row of the organization (the foreign keys to `organizations` are RESTRICT).
+The deferred organization purge must delete every `ato_*` and `security_incident*` row of the organization (the foreign keys to `organizations` are RESTRICT). Step 8.5: `ato_provider_mailbox_items`, then `ato_provider_streams` of the organization are deleted **before** 8.4's `ato_provider_integrations` and `ato_account_identities` rows (the maintenance role of the ato-worker runs the two 8.5 retention rules above; built in 8.5 WP4, the purge entries in WP5).
 
 ## Purges run by the maintenance job
 

@@ -123,15 +123,18 @@ export const PENDING_STATUSES = [
 ] as const satisfies readonly AtoResponseStatus[];
 
 /**
- * Gateway response types an analyst may request in 8.4 with their impact (D13 catalogue). Provider
- * actions (revoke sessions, require MFA, …) need an identity-provider adapter (step 8.5): the api
- * records them as `unsupported`, so the portal does not offer them as buttons.
+ * Response types an analyst may request with their impact (D13 catalogue). Gateway actions of
+ * 8.4 for every kind; the identity-provider actions of step 8.5 for mailboxes (the worker picks
+ * the connected provider and answers `unsupported` with a reason when none can do it).
+ * `revoke_oauth_grant` needs the hashed application id of a consent signal and is requested
+ * through the API, not offered here.
  */
 export const REQUESTABLE_ACTIONS: ReadonlyArray<{
   type: AtoActionType;
   impact: 'low' | 'medium' | 'high';
   kinds: readonly AtoAccountKind[];
   needsDuration: boolean;
+  provider?: true;
 }> = [
   { type: 'alert_tenant_admins', impact: 'low', kinds: ATO_ACCOUNT_KINDS, needsDuration: false },
   { type: 'notify_soc', impact: 'low', kinds: ATO_ACCOUNT_KINDS, needsDuration: false },
@@ -153,6 +156,41 @@ export const REQUESTABLE_ACTIONS: ReadonlyArray<{
     impact: 'low',
     kinds: ATO_ACCOUNT_KINDS,
     needsDuration: false,
+  },
+  {
+    type: 'revoke_sessions',
+    impact: 'medium',
+    kinds: ['mailbox'],
+    needsDuration: false,
+    provider: true,
+  },
+  {
+    type: 'require_mfa',
+    impact: 'medium',
+    kinds: ['mailbox'],
+    needsDuration: false,
+    provider: true,
+  },
+  {
+    type: 'require_password_reset',
+    impact: 'high',
+    kinds: ['mailbox'],
+    needsDuration: false,
+    provider: true,
+  },
+  {
+    type: 'suspend_account',
+    impact: 'high',
+    kinds: ['mailbox'],
+    needsDuration: false,
+    provider: true,
+  },
+  {
+    type: 'remove_forwarding_rule',
+    impact: 'medium',
+    kinds: ['mailbox'],
+    needsDuration: false,
+    provider: true,
   },
 ];
 
@@ -260,6 +298,7 @@ export const atoAccountHref = (id: string, tab?: string) =>
 export const atoResponsesHref = (status?: string) =>
   `/ato/responses${status ? `?status=${status}` : ''}`;
 export const atoSettingsHref = (tab?: string) => `/ato/settings${tab ? `?tab=${tab}` : ''}`;
+export const atoProvidersHref = '/ato/providers';
 export const incidentHref = (id: string) => `/incidents/${id}`;
 export const atoIncidentsHref = (extra: Record<string, string> = {}) =>
   `/incidents?${new URLSearchParams({ category: 'account_takeover', ...extra }).toString()}`;

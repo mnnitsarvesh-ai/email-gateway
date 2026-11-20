@@ -3,14 +3,14 @@ import {
   AtoStore,
   AtoWindows,
   type IdentityProviderAdapter,
-  type ProviderRegistry,
 } from '@email-gateway/ato-detection';
 import type { PrismaClient } from '@email-gateway/database';
+import type { ProviderConnectionAccess, RateBudget, Sleep } from '@email-gateway/idp-adapters';
 import type { Logger } from '@email-gateway/logger';
 import { IncidentCategoryRegistry, IncidentStore } from '@email-gateway/security-incidents';
 import type { RestrictedResolver } from '@email-gateway/url-security';
 import type { Redis } from 'ioredis';
-import { hasRole, type WorkerConfig } from './config';
+import { callsIdentityProviders, hasRole, type WorkerConfig } from './config';
 import { AccountChangeHandler } from './detect/account-change.handler';
 import { AtoEventsConsumer, AtoMailConsumer } from './detect/consumers';
 import type { DetectDeps } from './detect/context';
@@ -24,10 +24,15 @@ import { MeteredRedis, type IoRedisLike } from './enrichment/redis';
 import { createAtoReputation, type AtoReputation } from './enrichment/reputation';
 import { AtoMaintenance } from './maintenance/jobs';
 import type { AtoMetrics } from './metrics/ato-metrics';
+import type { IdpMetrics } from './metrics/idp-metrics';
+import { IdpRuntime, type IdpRegistry } from './provider/idp-runtime';
+import { IdpProbeLoop } from './provider/probe-loop';
 import { ProviderContextCache } from './provider/provider-context';
 import { createProviderRegistry } from './provider/registry';
 import { ProviderRunner } from './provider/runner';
+import { IdpStreamRunner } from './provider/stream-runner';
 import { OrgContextCache } from './reads/org-context';
+import { IdpActionExecutor } from './respond/idp-actions';
 import { RespondConsumer } from './respond/respond.consumer';
 import { AtoDb } from './shared/db';
 import { LeaderJob, Periodic, type LeaderLock } from './shared/loops';
@@ -38,6 +43,8 @@ export interface ComponentDeps {
   redis: Redis;
   locks: LeaderLock;
   metrics: AtoMetrics | null;
+  /** Step 8.5 identity-provider series (D11); null without a metrics registry. */
+  idpMetrics?: IdpMetrics | null;
   logger: Logger;
   now?: () => Date;
   /** Restricts every consumer and job to these organizations (integration suites). */
@@ -49,6 +56,11 @@ export interface ComponentDeps {
   lockPrefix?: string;
   /** TEST SEAM: a synthetic organization acting as the platform organization (D5, D21). */
   platformOrganizationId?: bigint;
+  /**
+   * TEST SEAMS of the step 8.5 adapters (integration suites): an in-memory 8.2 connection port
+   * bound to the in-process provider simulators, a rate budget and the budget wait's sleep.
+   */
+  idp?: { connections?: ProviderConnectionAccess; budget?: RateBudget; sleep?: Sleep };
 }
 
 /** Leader lock names of the maintenance jobs (`GET_LOCK('eg:ato:<job>')`, D3). */
@@ -92,6 +104,11 @@ export class AtoComponents {
   readonly respond: RespondConsumer;
   readonly maintenance: AtoMaintenance;
   readonly runner: ProviderRunner;
+  /** Step 8.5 (null where no provider-calling role runs or the adapters are off). */
+  readonly idp: IdpRuntime | null;
+  readonly streamRunner: IdpStreamRunner | null;
+  readonly probeLoop: IdpProbeLoop | null;
+  readonly idpActions: IdpActionExecutor | null;
   readonly jobs: Map<MaintenanceJob, LeaderJob>;
   private readonly periodics: Periodic[] = [];
   private readonly roleJobs: LeaderJob[] = [];
@@ -102,10 +119,26 @@ export class AtoComponents {
     readonly deps: ComponentDeps,
     readonly geo: AtoGeoIp,
     readonly reputation: AtoReputation,
-    readonly registry: ProviderRegistry,
+    readonly registry: IdpRegistry,
   ) {
     const now = deps.now ?? (() => new Date());
     const { prisma, metrics, logger } = deps;
+    const idpMetrics = deps.idpMetrics ?? null;
+    // Step 8.5 (R3): the adapters, the 8.2 credential custody and provider egress only where a
+    // provider-calling role runs (`ato-respond`); `ato-detect` reads stored capabilities only.
+    this.idp = callsIdentityProviders(config)
+      ? new IdpRuntime(config, {
+          prisma,
+          redis: deps.redis,
+          logger,
+          metrics: idpMetrics,
+          now,
+          ...(deps.idp?.connections ? { connections: deps.idp.connections } : {}),
+          ...(deps.idp?.budget ? { budget: deps.idp.budget } : {}),
+          ...(deps.idp?.sleep ? { sleep: deps.idp.sleep } : {}),
+        })
+      : null;
+    this.idp?.register(registry);
     this.db = new AtoDb(prisma, config.ATO_TX_TIMEOUT_MS);
     const ttlMs = config.ATO_SETTINGS_CACHE_SECONDS * 1000;
     this.orgs = new OrgContextCache(prisma, ttlMs, now, 10_000, deps.platformOrganizationId);
@@ -135,7 +168,13 @@ export class AtoComponents {
       now,
     });
     this.capabilities = new WorkerCapabilities(geo, reputation);
-    this.providers = new ProviderContextCache(prisma, registry, ttlMs, now);
+    this.providers = new ProviderContextCache(
+      prisma,
+      registry,
+      ttlMs,
+      now,
+      config.ATO_IDP_ADAPTERS_ENABLED,
+    );
     this.pipeline = new DetectionPipeline({
       store,
       windows: this.windows,
@@ -177,6 +216,16 @@ export class AtoComponents {
       deps.organizationIds,
     );
     this.mailConsumer = new AtoMailConsumer(this.mail, metrics, logger, deps.organizationIds);
+    this.idpActions = this.idp
+      ? new IdpActionExecutor({
+          prisma,
+          registry,
+          metrics: idpMetrics,
+          logger,
+          now,
+          healthIntervalSeconds: this.idp.config.healthIntervalSeconds,
+        })
+      : null;
     this.respond = new RespondConsumer({
       db: this.db,
       prisma,
@@ -184,6 +233,7 @@ export class AtoComponents {
       registry,
       metrics,
       logger,
+      idp: this.idpActions,
       ...(deps.organizationIds !== undefined && { organizationIds: deps.organizationIds }),
     });
     this.maintenance = new AtoMaintenance({
@@ -209,6 +259,13 @@ export class AtoComponents {
         retentionIncidentDays: config.ATO_RETENTION_INCIDENT_DAYS,
         digestEnabled: config.ATO_DIGEST_ENABLED,
       },
+      idp:
+        this.idpActions && this.idp
+          ? {
+              executor: this.idpActions,
+              confirmTimeoutMinutes: this.idp.config.confirmTimeoutMinutes,
+            }
+          : null,
       ...(deps.organizationIds !== undefined && { organizationIds: deps.organizationIds }),
     });
     this.runner = new ProviderRunner({
@@ -224,6 +281,42 @@ export class AtoComponents {
         maxConsecutiveFailures: config.ATO_PROVIDER_MAX_CONSECUTIVE_FAILURES,
       },
     });
+    this.streamRunner = this.idp
+      ? new IdpStreamRunner({
+          ...this.detectDeps,
+          pipelineRef: this.pipeline,
+          registry,
+          store,
+          metrics,
+          idpMetrics,
+          seen: deps.redis,
+          logger,
+          config: {
+            claimBatch: this.idp.config.claimBatch,
+            maxPagesPerPoll: config.ATO_PROVIDER_MAX_PAGES_PER_POLL,
+            maxConsecutiveFailures: config.ATO_PROVIDER_MAX_CONSECUTIVE_FAILURES,
+            defaultPollIntervalSeconds: config.ATO_PROVIDER_POLL_INTERVAL_SECONDS,
+            historicalSignalAgeHours: this.idp.config.historicalSignalAgeHours,
+          },
+        })
+      : null;
+    this.probeLoop = this.idp
+      ? new IdpProbeLoop({
+          db: this.db,
+          prisma,
+          store,
+          runtime: this.idp,
+          orgs: this.orgs,
+          idpMetrics,
+          logger,
+          now,
+          config: {
+            healthIntervalSeconds: this.idp.config.healthIntervalSeconds,
+            lagWarnSeconds: this.idp.config.streamLagWarnSeconds,
+          },
+          ...(deps.organizationIds !== undefined && { organizationIds: deps.organizationIds }),
+        })
+      : null;
 
     const maintenanceMs = config.ATO_MAINTENANCE_INTERVAL_SECONDS * 1000;
     const intervals: Record<MaintenanceJob, number> = {
@@ -320,6 +413,20 @@ export class AtoComponents {
         deps.logger,
       );
       this.periodics.push(this.providerLoop);
+      // Step 8.5: the stream runner (due streams every few seconds; immediately while busy) and
+      // the probe loop (due integrations, D6).
+      const streamRunner = this.streamRunner;
+      const probeLoop = this.probeLoop;
+      if (streamRunner) {
+        this.periodics.push(
+          new Periodic('idp-stream-runner', 5_000, () => streamRunner.runOnce(), deps.logger),
+        );
+      }
+      if (probeLoop) {
+        this.periodics.push(
+          new Periodic('idp-probe-loop', 15_000, () => probeLoop.runOnce(), deps.logger),
+        );
+      }
     }
     for (const p of this.periodics) p.start();
     for (const j of this.roleJobs) j.start();

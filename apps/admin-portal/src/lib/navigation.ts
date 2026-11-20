@@ -9,6 +9,7 @@ import {
   Gavel,
   Globe,
   History,
+  KeyRound,
   LayoutDashboard,
   Link2,
   Mail,
@@ -196,6 +197,15 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/ato/settings',
         icon: Settings2,
         gate: ['AtoSettingsController_get_v1'],
+      },
+      {
+        // Step 8.5 (§7): identity-provider integrations of ATO detection.
+        id: 'ato-providers',
+        label: 'Identity providers',
+        href: '/ato/providers',
+        icon: KeyRound,
+        gate: ['AtoProvidersController_list_v1'],
+        childGate: ['AtoProvidersController_get_v1'],
       },
     ],
   },

@@ -15,3 +15,5 @@
 - CI runs all three layers. The `stack` job brings up the full Compose stack, including application images.
 
 **Consequences.** Integration tests need the stack (`pnpm infra:up`). Application tests skip automatically when the `apps` profile isn't running.
+
+Amended by ADR-0086 (step 8.5): dependency-free local simulators of the identity-provider APIs (in-process and the Compose `idp-simulator`) join the local test doubles, and the 8.4 provider contract kit is a release gate for both adapters.

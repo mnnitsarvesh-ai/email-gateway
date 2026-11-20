@@ -505,11 +505,26 @@ Design [24-account-takeover-core.md](../plan/steps/24-account-takeover-core.md) 
 
 **Per-category incident access (D17, D24).** The generic incident routes admit a principal that holds the read (or manage) permission of **any** registered incident category; the lists are derived from the category registry (`apps/api/src/modules/incidents/incident-categories.ts`), so the categories advanced threat protection adds later bring their own permissions without a route change. The service then restricts every query to the categories whose read permission the principal holds (and whose plan feature is enabled): an incident of another category answers `404 incident_not_found`, exactly like an unknown id or another tenant's; a mutation needs the incident category's manage permission (else `404`) and its feature (else that category's `403`, ATO: `ato_not_enabled`). A `category` filter never widens access.
 
-**Separation of duties (ADR-0072).** Medium- and high-impact responses wait for an approval by a user with `ato:respond` and an MFA session who is not the requester (`403 ato_approval_self`); API keys may request and cancel, never approve, reject or roll back. Low-impact gateway actions (alerts, SOC notification, escalation) run on request; identity-provider actions are `unsupported` until step 8.5.
+**Separation of duties (ADR-0072).** Medium- and high-impact responses wait for an approval by a user with `ato:respond` and an MFA session who is not the requester (`403 ato_approval_self`); API keys may request and cancel, never approve, reject or roll back. Low-impact gateway actions (alerts, SOC notification, escalation) run on request; identity-provider actions run through a bound identity-provider integration (step 8.5, below) and are `unsupported` without one.
 
 **Role matrix excerpt** (seed catalog): super_admin and organization_admin all four; security_analyst `ato:read`, `ato:manage`, `ato:respond` (not `ato:configure`: the analyst who investigates does not change detection); compliance_auditor and platform_admin `ato:read`; quarantine_reviewer, domain_admin, read_only_user and mailbox_user none. Auditors therefore read ATO incidents and export their reports but cannot triage them.
 
 **Audited reads.** The first page of an account's authentication events (`ato.auth_events.viewed`: account, range, filter names; no IP addresses) and every incident report (`security_incident.report_exported`). Every mutation is audited by the ATO and incident stores (actor, changed paths or states, never values of secrets).
+
+## ATO identity-provider integrations (step 8.5)
+
+Design [26-ato-provider-adapters.md](../plan/steps/26-ato-provider-adapters.md) §6; [ADR-0084](../architecture/adr/0084-ato-provider-least-privilege-and-capability-probing.md). **No new permission, role or seed change**: the 13 routes reuse the four step 8.4 `ato:*` permissions, the ATO feature gate (`ato_detection`) and the organization from the authenticated scope only (another organization's integration, connection or account answers like an unknown id). Binding, settings and removal change what the gateway may read from, and do in, a customer's Microsoft 365 / Google Workspace directory, so they need an MFA session.
+
+| Route                                                                                                          | Permission      | Principal  | API keys |
+| -------------------------------------------------------------------------------------------------------------- | --------------- | ---------- | -------- |
+| `GET /ato/providers`, `/ato/providers/requirements`, `/ato/providers/{id}`, `/ato/accounts/{id}/mailbox-state` | `ato:read`      | —          | yes      |
+| `GET /ato/providers/connections`                                                                               | `ato:configure` | —          | yes      |
+| `POST /ato/providers`, `PATCH /ato/providers/{id}`, `DELETE /ato/providers/{id}`                               | `ato:configure` | users, MFA | no       |
+| `POST /ato/providers/{id}/pause`, `…/resume`, `…/backfill`                                                     | `ato:configure` | users      | no       |
+| `POST /ato/providers/{id}/health-check`                                                                        | `ato:configure` | —          | yes      |
+| `POST /ato/accounts/{id}/mailbox-state/refresh`                                                                | `ato:manage`    | —          | yes      |
+
+Every mutation needs an `Idempotency-Key` (transactional) and is in the `sensitive` class; feature off → `403 ato_not_enabled`. The provider credentials and consent stay with step 8.2 (`integration:manage`; a tenant that wants telemetry only never grants a write permission, D5); provider actions keep the 8.4 response rules (`ato:respond`, four eyes and MFA for medium/high impact). A directory monitored by another organization's integration is refused (`409 ato_provider_directory_in_use`) without naming that organization. Audited: `ato.provider.bound`, `.updated` (changed paths), `.paused`, `.resumed`, `.health_check_requested`, `.backfill_requested`, `.unbound`, `ato.mailbox_state.refresh_requested`.
 
 ## Microsoft 365 and Google Workspace connections (step 8.2)
 

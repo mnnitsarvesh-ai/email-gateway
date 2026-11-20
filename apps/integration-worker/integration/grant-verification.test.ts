@@ -1,5 +1,7 @@
 import {
   GOOGLE_MAIL_FLOW_PROFILE,
+  M365_ATO_RESPONSE_PROFILE,
+  M365_ATO_TELEMETRY_PROFILE,
   M365_MAIL_FLOW_PROFILE,
   testing,
 } from '@email-gateway/provider-integrations';
@@ -472,5 +474,82 @@ describe('grant verification', () => {
       where: { id: { in: grants.map((g) => g.id) } },
       data: { status: 'error', verifyClaimedUntil: null },
     });
+  });
+  it('step 8.5 ATO grants on a bound connection: no tenant read, ActivityFeed.Read not compared, connection unchanged', async () => {
+    const domainName = h.name('m365-ato');
+    const telemetryGraph = M365_ATO_TELEMETRY_PROFILE.permissions.filter(
+      (p) => p !== 'ActivityFeed.Read',
+    );
+    const tenant = h.m365Tenant({ domains: [{ name: domainName }] });
+    const domain = await h.domain(org, domainName);
+    const connection = await h.connection(org, 'microsoft_365');
+    await h.link(connection, domain.id);
+    const credential = { method: 'customer_app_secret' as const, clientSecret: tenant.secret };
+    await h.grant(connection, {
+      authMethod: 'customer_app_secret',
+      clientId: tenant.clientId,
+      claimedTenantId: tenant.tenantId,
+      credential,
+    });
+    const { components } = h.worker();
+    await components.verifier.runOnce(10, signal());
+    const bound = await h.prisma.providerConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
+    expect(bound.status).toBe('active');
+    // The customer app now also holds the ATO Graph roles (telemetry and response).
+    h.fake.consent(tenant.tenantId, tenant.clientId, [
+      ...M365_MAIL_FLOW_PROFILE.permissions,
+      ...telemetryGraph,
+      ...M365_ATO_RESPONSE_PROFILE.permissions,
+    ]);
+    const options = {
+      authMethod: 'customer_app_secret' as const,
+      clientId: tenant.clientId,
+      claimedTenantId: tenant.tenantId,
+      credential,
+    };
+    const telemetry = await h.grant(connection, {
+      ...options,
+      profile: M365_ATO_TELEMETRY_PROFILE,
+    });
+    const response = await h.grant(connection, { ...options, profile: M365_ATO_RESPONSE_PROFILE });
+    await components.verifier.runOnce(10, signal());
+    const t = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: telemetry.id },
+    });
+    const r = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: response.id },
+    });
+    expect(t).toMatchObject({ status: 'active', lastErrorCode: null, missingPermissions: null });
+    // The response profile has no directory read: 8.2's tenant read would have refused it.
+    expect(r).toMatchObject({ status: 'active', lastErrorCode: null, missingPermissions: null });
+    const after = await h.prisma.providerConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
+    expect(after).toMatchObject({
+      status: 'active',
+      externalTenantId: bound.externalTenantId,
+      activeTenantKey: bound.activeTenantKey,
+      rowVersion: bound.rowVersion,
+    });
+
+    // A missing Graph role still errs; a grant on an unbound connection errs tenant_not_bound.
+    h.fake.consent(tenant.tenantId, tenant.clientId, [...M365_MAIL_FLOW_PROFILE.permissions]);
+    // Re-verification (new consent) of the telemetry grant.
+    await h.prisma.providerConnectionGrant.update({
+      where: { id: telemetry.id },
+      data: { status: 'verifying', verifyClaimedUntil: null, verifyRequestedAt: new Date() },
+    });
+    const unbound = await h.connection(org, 'microsoft_365');
+    const early = await h.grant(unbound, { ...options, profile: M365_ATO_TELEMETRY_PROFILE });
+    await components.verifier.runOnce(10, signal());
+    const m = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: telemetry.id },
+    });
+    expect(m).toMatchObject({ status: 'error', lastErrorCode: 'permissions_missing' });
+    expect(m.missingPermissions).not.toContain('ActivityFeed.Read');
+    const e = await h.prisma.providerConnectionGrant.findUniqueOrThrow({ where: { id: early.id } });
+    expect(e).toMatchObject({ status: 'error', lastErrorCode: 'tenant_not_bound' });
   });
 });

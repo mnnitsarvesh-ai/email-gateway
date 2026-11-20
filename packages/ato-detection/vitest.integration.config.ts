@@ -14,5 +14,7 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 120_000,
     hookTimeout: 120_000,
+    // Pauses a live ato-worker so it cannot consume the suites' outbox events (see the file).
+    globalSetup: ['integration/support/live-worker.ts'],
   },
 });

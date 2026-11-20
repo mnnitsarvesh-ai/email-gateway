@@ -35,6 +35,8 @@ describe('kinds and permissions (N1, N3)', () => {
       'ato_incident',
       'ato_approval_requested',
       'ato_digest',
+      // Step 8.5 D11 (ATO identity-provider outage e-mail), appended after 8.4's kinds.
+      'ato_provider_health',
     ]);
     expect(ALERT_RECIPIENT_PERMISSION).toEqual({
       threat_detected: 'quarantine:approve',
@@ -162,6 +164,9 @@ describe('notification settings (§6.3)', () => {
 describe('notification preferences (N3)', () => {
   it('accepts unique known kinds only', () => {
     expect(notificationPreferencesSchema.safeParse({ optOut: [] }).success).toBe(true);
+    expect(
+      notificationPreferencesSchema.safeParse({ optOut: ['ato_provider_health'] }).success,
+    ).toBe(true);
     expect(notificationPreferencesSchema.safeParse({ optOut: [...PREFERENCE_KINDS] }).success).toBe(
       true,
     );

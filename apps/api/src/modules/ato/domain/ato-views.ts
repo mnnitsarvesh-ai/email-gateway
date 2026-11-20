@@ -267,7 +267,7 @@ export function accountDetail(
       kind: AccountRow['kind'];
       riskLevel: AccountRow['riskLevel'];
     }>;
-    identities: AtoAccountIdentity[];
+    identities: Array<AtoAccountIdentity & { integrationPublicId: string | null }>;
   },
   capabilities: CapabilitiesView,
 ): AccountDetailView {
@@ -303,6 +303,8 @@ export function accountDetail(
       userPrincipalName: i.userPrincipalName,
       firstSeenAt: i.firstSeenAt.toISOString(),
       lastSeenAt: i.lastSeenAt.toISOString(),
+      integrationId: i.integrationPublicId,
+      directoryStatus: i.directoryStatus,
     })),
     capabilities,
   };

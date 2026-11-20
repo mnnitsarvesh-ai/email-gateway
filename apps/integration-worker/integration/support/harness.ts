@@ -6,6 +6,7 @@ import {
   credentialFingerprint,
   GOOGLE_MAIL_FLOW_PROFILE,
   M365_MAIL_FLOW_PROFILE,
+  type PermissionProfile,
   type PlatformCredentials,
   ProviderCredentialCipher,
   type ProviderCredential,
@@ -203,10 +204,13 @@ export class Harness {
       status?: 'verifying' | 'active' | 'error';
       expiresAt?: Date;
       keyCipher?: ProviderCredentialCipher;
+      /** Another registered profile (step 8.5: the ATO profiles); default the mail-flow one. */
+      profile?: PermissionProfile;
     },
   ) {
     const profile =
-      connection.provider === 'microsoft_365' ? M365_MAIL_FLOW_PROFILE : GOOGLE_MAIL_FLOW_PROFILE;
+      input.profile ??
+      (connection.provider === 'microsoft_365' ? M365_MAIL_FLOW_PROFILE : GOOGLE_MAIL_FLOW_PROFILE);
     const created = await this.prisma.providerConnectionGrant.create({
       data: {
         organizationId: connection.organizationId,
@@ -352,6 +356,8 @@ export class Harness {
         await this.prisma.providerConnectionDomain.deleteMany({ where });
         await this.prisma.providerConnectionGrant.deleteMany({ where });
         await this.prisma.smtpConnector.deleteMany({ where });
+        // Step 8.5: ATO integrations bound to fixture connections (ato.identity_provider tests).
+        await this.prisma.atoProviderIntegration.deleteMany({ where });
         await this.prisma.providerConnection.deleteMany({ where });
         await this.prisma.domainDnsRecord.deleteMany({ where });
         await this.prisma.domainMailServer.deleteMany({ where });

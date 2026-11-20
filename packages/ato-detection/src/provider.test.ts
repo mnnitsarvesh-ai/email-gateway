@@ -218,6 +218,25 @@ describe('normalizeProviderEvent', () => {
     expect(o.key).toBe(providerEventKey(event('sign_ins', 1)));
   });
 
+  it('PX1: a provider device without a user agent keeps its hash and structured label', () => {
+    const base = event('sign_ins', 4);
+    delete base.userAgent;
+    const o = normalizeProviderEvent({
+      ...base,
+      deviceIdHash: '0123456789abcdef',
+      deviceLabel: 'Edge · Windows 10',
+    });
+    expect(o.type === 'auth' && o.device).toEqual({
+      hash: '0123456789abcdef',
+      label: 'Edge · Windows 10',
+    });
+    const unlabelled = normalizeProviderEvent({ ...base, deviceIdHash: '0123456789abcdef' });
+    expect(unlabelled.type === 'auth' && unlabelled.device?.label).toBe('Provider device');
+    expect(providerEventSchema.safeParse({ ...base, deviceLabel: 'x'.repeat(97) }).success).toBe(
+      false,
+    );
+  });
+
   it('interrupted maps to mfa_required, failure to failure', () => {
     const a = normalizeProviderEvent(event('sign_ins', 2, { outcome: 'interrupted' }));
     const b = normalizeProviderEvent(

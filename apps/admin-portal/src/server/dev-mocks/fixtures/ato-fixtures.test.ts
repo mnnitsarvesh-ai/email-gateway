@@ -90,7 +90,10 @@ describe('ATO and incident dev fixtures (step 8.4 WP6)', () => {
     expect(INCIDENT_OPERATIONS).toHaveLength(8);
     for (const op of [...ATO_OPERATIONS, ...INCIDENT_OPERATIONS])
       expect(handlers[op], op).toBeDefined();
-    const fromSpec = Object.keys(operations).filter((id) => /^(Ato|Incidents)/.test(id));
+    // Step 8.5's identity-provider operations have their own fixtures (ato-providers.ts).
+    const fromSpec = Object.keys(operations).filter(
+      (id) => /^(Ato|Incidents)/.test(id) && !/^(AtoProviders|AtoAccountMailbox)/.test(id),
+    );
     expect([...fromSpec].sort()).toEqual([...ATO_OPERATIONS, ...INCIDENT_OPERATIONS].sort());
   });
 

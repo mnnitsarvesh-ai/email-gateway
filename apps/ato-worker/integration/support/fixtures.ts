@@ -538,6 +538,9 @@ export class Fixtures {
       await p.atoAuthEvent.deleteMany({ where });
       await p.atoAccountActivityDaily.deleteMany({ where });
       await p.atoAccountBaseline.deleteMany({ where });
+      // Step 8.5 tables before the 8.4 rows they reference.
+      await p.atoProviderMailboxItem.deleteMany({ where });
+      await p.atoProviderStream.deleteMany({ where });
       await p.atoAccountIdentity.deleteMany({ where });
       await p.atoAccount.deleteMany({ where });
       await p.atoProviderIntegration.deleteMany({ where });

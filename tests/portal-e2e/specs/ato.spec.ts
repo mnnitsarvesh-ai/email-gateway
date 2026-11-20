@@ -143,7 +143,7 @@ test('account explorer: filters in the URL, kinds, levels, prefix; beta never li
   await expect(table.getByRole('row').nth(1)).toContainText(traveller.address);
 });
 
-test('account details: overview, sign-ins, signals, history, mailbox (8.5), trusted contexts', async ({
+test('account details: overview, sign-ins, signals, history, mailbox, trusted contexts', async ({
   page,
 }) => {
   const victim = atoAccount('victim');
@@ -175,8 +175,10 @@ test('account details: overview, sign-ins, signals, history, mailbox (8.5), trus
   await page.getByRole('tab', { name: 'Score history' }).click();
   await expect(page.getByRole('table', { name: 'Score changes' })).toContainText('Signal');
 
+  // Step 8.5: the identity providers' mailbox state (no provider reports these seeded mailboxes).
   await page.getByRole('tab', { name: 'Mailbox changes' }).click();
-  await expect(page.getByText('Arrives in step 8.5')).toBeVisible();
+  await expect(page.getByText('No mailbox items reported')).toBeVisible();
+  await expect(page.getByText('Arrives in step 8.5')).toHaveCount(0);
 
   await page.getByRole('tab', { name: 'Trusted contexts' }).click();
   await page.getByRole('button', { name: 'Add trusted context' }).click();
@@ -241,8 +243,10 @@ test('settings: save a change as a new version, then a stale tab gets the confli
     'href',
     '/policies/new?testPreset=outbound_high_risk_account',
   );
+  // Step 8.5: the identity providers summary (alpha has no integration outside ato-providers.spec).
   await page.goto('/ato/settings?tab=providers');
-  await expect(page.getByText('Arrives in step 8.5')).toHaveCount(2);
+  await expect(page.getByText('Not connected')).toHaveCount(2);
+  await expect(page.getByText('Arrives in step 8.5')).toHaveCount(0);
 });
 
 test('RBAC: read-only user sees no Account security; auditor reads; analyst cannot configure', async ({
@@ -308,8 +312,11 @@ test('every account takeover page renders without an error state; axe', async ({
     {
       path: `/ato/accounts/${victim.accountId}?tab=mailbox`,
       heading: victim.address,
-      unavailable: ['8.5'],
+      // Step 8.5 replaced the "Arrives in step 8.5" state with the mailbox state.
+      markers: ['Mailbox state'],
+      absent: ['Arrives in step 8.5'],
     },
+    { path: '/ato/providers', heading: 'Identity providers' },
     { path: '/ato/responses', heading: 'Responses' },
     { path: '/ato/responses?tab=all', heading: 'Responses' },
     { path: '/ato/responses?tab=restrictions', heading: 'Responses' },

@@ -16,3 +16,5 @@
 **Consequences.** One more key to provision and rotate per deployment; credential exposure requires both the database and the worker's key. A KMS-backed key provider can replace the environment key later behind the same `kid` format.
 
 **Alternatives considered.** Reusing `DATA_ENCRYPTION_KEY` (coupled rotation and blast radius); the 8.1 per-tenant envelope hierarchy (overkill for a handful of credentials); storing refresh tokens (no flow in 8.2 needs them).
+
+Amended by ADR-0082 (step 8.5): the ato-worker's `ato-respond` deployment joins the decrypting holders for ATO grants and holds the platform ATO app credentials; `ato-detect` and the integration-worker hold no ATO credential.

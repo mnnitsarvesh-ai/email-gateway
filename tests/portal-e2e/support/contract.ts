@@ -92,6 +92,12 @@ export const NAV_GATES: ReadonlyArray<{ label: string; href: string; gate: strin
   { label: 'Accounts', href: '/ato/accounts', gate: ['AtoAccountsController_list_v1'] },
   { label: 'Responses', href: '/ato/responses', gate: ['AtoResponsesController_list_v1'] },
   { label: 'ATO settings', href: '/ato/settings', gate: ['AtoSettingsController_get_v1'] },
+  // Step 8.5: identity-provider integrations (last item of Account security).
+  {
+    label: 'Identity providers',
+    href: '/ato/providers',
+    gate: ['AtoProvidersController_list_v1'],
+  },
   // Step 8.1: Compliance.
   { label: 'Archive', href: '/archive', gate: ['ArchiveMessagesController_list_v1'] },
   {

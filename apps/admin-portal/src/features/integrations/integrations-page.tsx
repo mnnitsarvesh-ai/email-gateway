@@ -1,6 +1,6 @@
 'use client';
 
-import { ArchiveIcon, CableIcon, KeyRoundIcon } from 'lucide-react';
+import { ArchiveIcon, CableIcon, KeyRoundIcon, UserCheckIcon } from 'lucide-react';
 import Link from 'next/link';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
@@ -12,7 +12,8 @@ import { WebhooksSection } from './webhooks-section';
 
 /**
  * `/integrations`: webhooks (full list), the Microsoft 365 and Google Workspace connections
- * (step 8.2 §6), API keys and SMTP connectors (link cards) and the archive link card (step 8.1).
+ * (step 8.2 §6), API keys and SMTP connectors (link cards), the archive link card (step 8.1) and
+ * the account takeover identity providers link card (step 8.5).
  */
 export function IntegrationsPage() {
   return (
@@ -36,6 +37,7 @@ function Integrations() {
   const canProviders = useCan('ProviderConnectionsController_list_v1');
   const canArchiveSettings = useCan('ArchiveAdminController_get_v1');
   const canArchiveSearch = useCan('ArchiveMessagesController_list_v1');
+  const canAtoProviders = useCan('AtoProvidersController_list_v1');
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <PageHeader
@@ -43,6 +45,19 @@ function Integrations() {
         description="Connect the gateway to your systems: Microsoft 365 and Google Workspace mail flow, webhooks for events, API keys for the REST API, SMTP connectors for relaying."
       />
       {canProviders ? <ProvidersSection /> : null}
+      {canAtoProviders ? (
+        <Section
+          title="Account takeover identity providers"
+          description="Use a Microsoft 365 or Google Workspace connection for account takeover detection: sign-ins, risk events, OAuth consents, mailbox changes and provider-confirmed responses."
+        >
+          <Button asChild variant="outline" className="justify-self-start">
+            <Link href="/ato/providers">
+              <UserCheckIcon aria-hidden />
+              Manage identity providers
+            </Link>
+          </Button>
+        </Section>
+      ) : null}
       {canWebhooks ? <WebhooksSection /> : null}
       <div className="grid min-w-0 gap-6 md:grid-cols-2 [&>*]:min-w-0">
         {canKeys ? (

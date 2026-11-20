@@ -199,6 +199,9 @@ export const AccountDetailSchema = AccountSummarySchema.extend({
       userPrincipalName: z.string().nullable(),
       firstSeenAt: isoInstant,
       lastSeenAt: isoInstant,
+      /** Step 8.5: the identity-provider integration that resolved the identity. */
+      integrationId: PublicIdSchema.nullable(),
+      directoryStatus: z.enum(['unknown', 'active', 'suspended', 'deleted']),
     }),
   ),
   capabilities: CapabilitiesSchema,
@@ -481,10 +484,17 @@ export const SettingsViewSchema = z.object({
       lastEventAt: nullableInstant,
     }),
   ),
+  /** Step 8.5: the non-disabled identity-provider integrations of each provider. */
   identityProviders: z.array(
     z.object({
       provider: z.enum(['microsoft_entra', 'google_workspace']),
-      availableInStep: z.literal('8.5'),
+      integrations: z.array(
+        z.object({
+          id: PublicIdSchema,
+          provider: z.enum(['microsoft_entra', 'google_workspace']),
+          health: z.enum(['unknown', 'healthy', 'degraded', 'unhealthy']),
+        }),
+      ),
     }),
   ),
   policy: z.object({ atoFieldsInUse: z.boolean() }),
@@ -585,6 +595,22 @@ export const RequestResponseBodySchema = z.strictObject({
   reason: reasonText(10, 1000),
   /** What the analyst did elsewhere (`record_manual_action` only). */
   description: reasonText(10, 1000).optional(),
+  /**
+   * Step 8.5 (D9.7, D9.8): parameters of identity-provider actions. `remove_forwarding_rule`
+   * takes the public id of one present mailbox item of the account (`itemId`, from
+   * `GET /ato/accounts/{id}/mailbox-state`) or `scope: 'all_external'` (the default when absent);
+   * `revoke_oauth_grant` requires the `appIdHash` of a consent signal's evidence.
+   */
+  params: z
+    .strictObject({
+      itemId: PublicIdSchema.optional(),
+      scope: z.literal('all_external').optional(),
+      appIdHash: z
+        .string()
+        .regex(/^[0-9a-f]{64}$/, 'must be 64 lower-case hex characters')
+        .optional(),
+    })
+    .optional(),
 });
 export type RequestResponseBody = z.infer<typeof RequestResponseBodySchema>;
 
