@@ -63,6 +63,14 @@ const PARTITION_COLUMN: Record<string, string> = {
 
 /** Delete order (every table with `organization_id` except `audit_logs` and `organizations`). */
 const ORDER = [
+  // Step AI-1: assistant conversations and their children, usage and settings (the purge order of
+  // AssistantTenantDataRepository; every table references organizations RESTRICT).
+  'ai_chat_tool_executions',
+  'ai_chat_messages',
+  'ai_chat_turns',
+  'ai_chat_conversations',
+  'ai_chat_usage_daily',
+  'ai_chat_settings',
   // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
   ...ATO_TABLES,
   // Step 8.2: provider connection rows (ProviderTenantDataRepository purge order, design §3.3);

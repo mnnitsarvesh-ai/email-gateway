@@ -29,6 +29,12 @@ export const USER_KEYS = [
   'alphaAccessAdmin',
   'betaAdmin',
   'gammaAdmin',
+  // Step AI-1: the assistant tenants (seed/assistant.ts): delta has the assistant on (admin,
+  // analyst with assistant:use, mailbox user without it); epsilon has the tenant setting off.
+  'deltaAdmin',
+  'deltaAnalyst',
+  'deltaMailbox',
+  'epsilonAdmin',
   'platformAdmin',
 ] as const;
 export type UserKey = (typeof USER_KEYS)[number];
@@ -37,7 +43,7 @@ export interface E2eUser {
   email: string;
   password: string;
   roles: string[];
-  organization: 'alpha' | 'beta' | 'gamma' | 'platform';
+  organization: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'platform';
   /** Base32 TOTP secret once MFA is enabled (seeded, or enrolled through the UI). */
   totpSecret?: string;
   /** Last TOTP step sent to the api (each step is accepted once). */
@@ -73,7 +79,10 @@ export interface E2eState {
   runId: string;
   seededAt: string;
   users: Record<UserKey, E2eUser>;
-  orgs: Record<'alpha' | 'beta' | 'gamma', { id: string; name: string; slug: string }>;
+  orgs: Record<
+    'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon',
+    { id: string; name: string; slug: string }
+  >;
   alpha: {
     domainId: string;
     domainName: string;
@@ -144,6 +153,15 @@ export interface E2eState {
       failedLogins: number;
       suspiciousLogins: number;
       suspiciousOutbound: number;
+    };
+  };
+  /** Step AI-1: the assistant tenant delta (seed/assistant.ts). */
+  assistant: {
+    delta: {
+      /** Delta's policies in creation order (two active, one draft). */
+      policies: Array<{ id: string; name: string; status: 'active' | 'draft' }>;
+      /** Subjects of delta's messages held in quarantine today. */
+      quarantinedSubjects: string[];
     };
   };
   archive: {

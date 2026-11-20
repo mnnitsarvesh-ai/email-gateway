@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ArchiveRecordsRepository } from '../archive/repositories/archive-records.repository';
 import { DlpEvidenceStore } from '../dlp/services/dlp-evidence-store';
 import { ArchiveTenantDataRepository } from './archive-tenant-data.repository';
+import { AssistantTenantDataRepository } from './assistant-tenant-data.repository';
 import { AtoProviderTenantDataRepository } from './ato-provider-tenant-data.repository';
 import { BecTenantDataRepository } from './bec-tenant-data.repository';
 import { DlpTenantDataRepository } from './dlp-tenant-data.repository';
@@ -31,7 +32,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * AtoProviderTenantDataRepository its ATO identity-provider rows (mailbox items, stream rows,
  * account identities, integrations) and their export (never a token or an address); step 8.6:
  * JournalIntakeTenantDataRepository its journal intake counters, intake messages and sources
- * (before the provider connections, which the sources reference).
+ * (before the provider connections, which the sources reference); step AI-1:
+ * AssistantTenantDataRepository its AI assistant tool executions, messages, turns,
+ * conversations, daily usage and settings.
  */
 @Module({
   providers: [
@@ -50,6 +53,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
     JournalIntakeTenantDataRepository,
+    AssistantTenantDataRepository,
   ],
   exports: [
     DomainsRepository,
@@ -65,6 +69,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
     JournalIntakeTenantDataRepository,
+    AssistantTenantDataRepository,
   ],
 })
 export class TenantDataModule {}

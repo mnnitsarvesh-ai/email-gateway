@@ -215,8 +215,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/25-m365-google-connectors.md §5.2): 378; plus the 13 identity-provider and
     // mailbox state operations of step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): 391;
     // plus the 12 journaling operations of step 8.6
-    // (docs/plan/steps/27-journal-intake-and-archive-split.md D11): 403, all under /api/v1.
-    expect(count).toBe(403);
+    // (docs/plan/steps/27-journal-intake-and-archive-split.md D11): 403; plus the 15 assistant
+    // operations of step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1): 418, all under
+    // /api/v1.
+    expect(count).toBe(418);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1452,6 +1454,145 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     ).toContain('Step 8.5');
   });
 
+  it('documents the 15 step AI-1 assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
+    const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/assistant'));
+    const expected: Record<string, [string, string, string | null, 'v1' | null]> = {
+      'GET /api/v1/assistant/status': [
+        'AssistantStatusController_get_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/settings': [
+        'AssistantSettingsController_get_v1',
+        'assistant:configure',
+        null,
+        null,
+      ],
+      'PUT /api/v1/assistant/settings': [
+        'AssistantSettingsController_update_v1',
+        'assistant:configure',
+        'sensitive',
+        null,
+      ],
+      'GET /api/v1/assistant/usage': [
+        'AssistantUsageController_get_v1',
+        'assistant:configure',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/tools': [
+        'AssistantToolsController_list_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/conversations': [
+        'AssistantConversationsController_list_v1',
+        'assistant:use',
+        null,
+        'v1',
+      ],
+      'POST /api/v1/assistant/conversations': [
+        'AssistantConversationsController_create_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/conversations/{conversationId}': [
+        'AssistantConversationsController_get_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'PATCH /api/v1/assistant/conversations/{conversationId}': [
+        'AssistantConversationsController_update_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'DELETE /api/v1/assistant/conversations/{conversationId}': [
+        'AssistantConversationsController_remove_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/conversations/{conversationId}/messages': [
+        'AssistantMessagesController_list_v1',
+        'assistant:use',
+        null,
+        'v1',
+      ],
+      'POST /api/v1/assistant/conversations/{conversationId}/turns': [
+        'AssistantTurnsController_create_v1',
+        'assistant:use',
+        'expensive',
+        null,
+      ],
+      'POST /api/v1/assistant/turns/{turnId}/cancel': [
+        'AssistantTurnsController_cancel_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/executions/{executionId}': [
+        'AssistantExecutionsController_get_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'POST /api/v1/assistant/executions/{executionId}/more': [
+        'AssistantExecutionsController_more_v1',
+        'assistant:use',
+        'expensive',
+        null,
+      ],
+    };
+    expect(ops.map((op) => op.key).sort()).toEqual(Object.keys(expected).sort());
+    for (const [key, [operationId, permission, rateClass, cursor]] of Object.entries(expected)) {
+      const [method, path] = key.split(' ') as [string, string];
+      const raw = (doc.paths[path] as Record<string, Record<string, unknown>>)[
+        method.toLowerCase()
+      ]!;
+      expect(raw.operationId, key).toBe(operationId);
+      expect(raw.tags, key).toEqual(['assistant']);
+      expect(raw['x-eg-permissions'], key).toEqual({ mode: 'all', permissions: [permission] });
+      expect(raw['x-eg-rate-class'] ?? null, key).toBe(rateClass);
+      expect(raw['x-eg-cursor'] ?? null, key).toBe(cursor);
+      expect(raw['x-eg-idempotency'], key).toBeUndefined();
+      // Users only: the access-token scheme, never X-API-Key.
+      const schemes = ((raw.security ?? []) as Array<Record<string, unknown>>).flatMap((s) =>
+        Object.keys(s),
+      );
+      expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME]);
+    }
+    const docs = JSON.stringify(
+      Object.entries(doc.paths).filter(([path]) => path.startsWith('/api/v1/assistant')),
+    );
+    for (const code of [
+      'assistant_disabled',
+      'assistant_not_enabled',
+      'assistant_tenant_disabled',
+      'assistant_provider_unavailable',
+      'assistant_busy',
+      'assistant_budget_exhausted',
+      'assistant_turn_in_progress',
+      'assistant_conversation_limit',
+      'assistant_conversation_not_found',
+      'assistant_execution_not_found',
+      'assistant_no_more_results',
+      'assistant_settings_conflict',
+      'text/event-stream',
+      'turn.completed',
+    ]) {
+      expect(docs, code).toContain(code);
+    }
+    expect(docs).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    expect(
+      new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? ''])).get('assistant'),
+    ).toContain('Step AI-1');
+  });
+
   it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {
     const bounds = {
       POLICY_PLATFORM_DEFAULT: config.POLICY_PLATFORM_DEFAULT,
@@ -1493,6 +1634,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     ).toEqual(committed);
   });
 
+  // Serializing the ~420-operation document through Prettier takes seconds when the whole e2e
+  // suite runs in parallel: an explicit timeout instead of the 5 s default.
   it('matches the committed snapshot docs/api/openapi.json', async () => {
     const serialized = await serialize(doc);
     if (UPDATE) {
@@ -1512,5 +1655,5 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       JSON.parse(serialized),
       'The API changed: regenerate docs/api/openapi.json with UPDATE_OPENAPI=1',
     ).toEqual(committed);
-  });
+  }, 60_000);
 });

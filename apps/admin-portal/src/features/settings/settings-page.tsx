@@ -11,6 +11,7 @@ import { Can } from '@/lib/auth/can';
 import { useMe } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { ChangePasswordForm, MfaPanel, SessionsPanel } from '@/features/account';
+import { AssistantSettingsPanel } from '@/features/assistant/settings-panel';
 import { JournalingPanel } from '@/features/journaling/journaling-panel';
 import { ProfileForm } from '@/features/organizations/profile-form';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
@@ -33,6 +34,8 @@ export const SETTINGS_TABS: readonly TabDefinition[] = [
   // Step 8.6 (D14): the capture half of the former "Archive and retention" tab; immutability,
   // default retention, keys and access moved to Archive → Retention and lock.
   { id: 'journaling', label: 'Journaling', ops: ['JournalingController_get_v1'] },
+  // Step AI-1 (D13): enable with the external-processing acknowledgement, budget, retention, usage.
+  { id: 'assistant', label: 'AI assistant', ops: ['AssistantSettingsController_get_v1'] },
 ];
 
 /**
@@ -53,8 +56,8 @@ export function SettingsPage() {
           title="Settings"
           description={
             <>
-              Organization, notification, account security, scanning and journaling settings.
-              Archive retention, immutability, keys and access are under{' '}
+              Organization, notification, account security, scanning, journaling and AI assistant
+              settings. Archive retention, immutability, keys and access are under{' '}
               <Link href="/archive/retention" className="text-primary underline underline-offset-2">
                 Archive → Retention and lock
               </Link>
@@ -94,6 +97,8 @@ export function SettingsPage() {
                 return <ScanSettingsPanel />;
               case 'journaling':
                 return <JournalingPanel />;
+              case 'assistant':
+                return <AssistantSettingsPanel />;
               default:
                 return null;
             }

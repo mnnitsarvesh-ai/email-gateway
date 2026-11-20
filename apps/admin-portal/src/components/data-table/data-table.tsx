@@ -142,6 +142,13 @@ export interface DataTableProps<Row> {
    * (e.g. a search refusal that the page explains next to the search).
    */
   errorState?: (error: unknown) => ReactNode;
+  /**
+   * Embedded tables (step AI-1 assistant result cards) render their own footer ("Load more") and
+   * no toolbar: `toolbar={false}` drops density and column controls, `pagination={false}` the
+   * Previous/Next footer.
+   */
+  toolbar?: boolean;
+  pagination?: boolean;
 }
 
 /** The per-viewer column visibility of a table (localStorage, design P2). */
@@ -184,6 +191,8 @@ export function DataTable<Row>({
   columnVisibility: controlledVisibility,
   onColumnVisibilityChange,
   errorState,
+  toolbar = true,
+  pagination = true,
 }: DataTableProps<Row>) {
   const isMobile = useMediaQuery(MOBILE_QUERY);
   const captionId = useId();
@@ -485,7 +494,7 @@ export function DataTable<Row>({
       className={cn('flex flex-col rounded-lg border bg-card shadow-xs', className)}
       aria-label={caption}
     >
-      {(filters || search || hideable.length > 0) && (
+      {toolbar && (filters || search || hideable.length > 0) && (
         <div className="flex flex-wrap items-center gap-2 border-b p-2">
           {search ? (
             <div className="relative min-w-48 flex-1 sm:max-w-xs">
@@ -590,35 +599,37 @@ export function DataTable<Row>({
           </Button>
         </div>
       ) : null}
-      <nav
-        aria-label={`${caption} pagination`}
-        className="flex items-center justify-between gap-2 border-t px-3 py-2"
-      >
-        <p className="text-xs text-muted-foreground" aria-live="polite">
-          Page {list.page}
-          {!isLoading ? ` · ${list.rows.length} ${list.rows.length === 1 ? 'row' : 'rows'}` : ''}
-        </p>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={list.previous}
-            disabled={!list.hasPrevious || isFetching}
-          >
-            <ChevronLeftIcon aria-hidden />
-            Previous
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={list.next}
-            disabled={!list.hasNext || isFetching}
-          >
-            Next
-            <ChevronRightIcon aria-hidden />
-          </Button>
-        </div>
-      </nav>
+      {pagination ? (
+        <nav
+          aria-label={`${caption} pagination`}
+          className="flex items-center justify-between gap-2 border-t px-3 py-2"
+        >
+          <p className="text-xs text-muted-foreground" aria-live="polite">
+            Page {list.page}
+            {!isLoading ? ` · ${list.rows.length} ${list.rows.length === 1 ? 'row' : 'rows'}` : ''}
+          </p>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={list.previous}
+              disabled={!list.hasPrevious || isFetching}
+            >
+              <ChevronLeftIcon aria-hidden />
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={list.next}
+              disabled={!list.hasNext || isFetching}
+            >
+              Next
+              <ChevronRightIcon aria-hidden />
+            </Button>
+          </div>
+        </nav>
+      ) : null}
     </section>
   );
 }

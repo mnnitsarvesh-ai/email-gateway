@@ -9,6 +9,7 @@ import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
+import { AssistantLauncher, AssistantProvider } from '@/features/assistant';
 import { DESKTOP_QUERY, MOBILE_QUERY, useMediaQuery } from '@/hooks/use-media-query';
 import { SESSION_QUERY_KEY, useMe, useSession } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
@@ -27,13 +28,16 @@ import { UserMenu } from './user-menu';
 /**
  * The authenticated console frame (design P11): navy sidebar (expanded ≥ 1280 px, icon rail at
  * 768–1279 px, modal drawer below 768 px), sticky top bar, tenant indicator and switcher,
- * override banner, theme toggle, user menu; keeps the session fresh (P4) and sends users who
+ * override banner, "Ask AI" (step AI-1), theme toggle, user menu; keeps the session fresh (P4) and sends users who
  * must enroll in MFA to /mfa/enroll. The navigation item owning the route gates it.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <ShellSlotProvider>
-      <ShellFrame>{children}</ShellFrame>
+      {/* Step AI-1 (D14): the assistant's state outlives the panel and page navigation. */}
+      <AssistantProvider>
+        <ShellFrame>{children}</ShellFrame>
+      </AssistantProvider>
     </ShellSlotProvider>
   );
 }
@@ -209,6 +213,7 @@ function ShellFrame({ children }: { children: ReactNode }) {
                 <span className="hidden lg:inline">Switch tenant</span>
               </Button>
             ) : null}
+            {meData ? <AssistantLauncher /> : null}
             <ThemeToggle />
             {meData ? <UserMenu me={meData} /> : null}
           </div>

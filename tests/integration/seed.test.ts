@@ -115,17 +115,18 @@ describe('db:seed', () => {
     expect(second.status, second.output).toBe(0);
     expect(await counts()).toEqual(afterFirst);
 
-    // Step 8.6: 72 permissions (journal:read, journal:manage), 10 system roles
-    // (compliance_officer), two more limits (journal intake) and one more feature (journal_intake).
+    // Step 8.6: 10 system roles (compliance_officer), two more limits (journal intake). Step AI-1:
+    // 74 permissions (assistant:use, assistant:configure) and one more feature (ai_assistant, off
+    // in every plan).
     expect(afterFirst).toMatchObject({
-      permissions: 72,
+      permissions: 74,
       systemRoles: 10,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
       demoLimits: 13,
-      demoFeatures: 13,
+      demoFeatures: 14,
       demoDeployments: 1,
       demoDomains: 1,
       demoPolicies: 1,
@@ -133,7 +134,7 @@ describe('db:seed', () => {
       platformUserRoles: 1,
       platformSettings: 1,
       platformLimits: 13,
-      platformFeatures: 13,
+      platformFeatures: 14,
       platformDeployments: 1,
     });
     // The demo admin's organization_admin + analyst's role (2); on a schema where the demo admin

@@ -2,7 +2,8 @@
  * Permission sets of the 10 system roles, transcribed from the matrix in docs/security/rbac.md
  * (`roles.test.ts` parses the document and asserts equality, so a catalogue change fails here).
  * Used by tests (navigation gating, `<Can>`) and by the dev fixture `me` of each role. Step 8.6
- * added `compliance_officer` (archive access) and `journal:read` / `journal:manage`.
+ * added `compliance_officer` (archive access) and `journal:read` / `journal:manage`; step AI-1
+ * `assistant:use` (every role but `mailbox_user`) and `assistant:configure`.
  */
 export const SYSTEM_ROLE_KEYS = [
   'super_admin',
@@ -96,6 +97,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:manage',
     'journal:read',
     'journal:manage',
+    'assistant:use',
+    'assistant:configure',
   ],
   platform_admin: [
     'organization:read',
@@ -122,6 +125,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:read',
     'integration:read',
     'journal:read',
+    'assistant:use',
   ],
   organization_admin: [
     'organization:read',
@@ -183,6 +187,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:manage',
     'journal:read',
     'journal:manage',
+    'assistant:use',
+    'assistant:configure',
   ],
   domain_admin: [
     'organization:read',
@@ -203,6 +209,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:manage',
     'journal:read',
     'journal:manage',
+    'assistant:use',
   ],
   security_analyst: [
     'organization:read',
@@ -239,6 +246,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:respond',
     'integration:read',
     'journal:read',
+    'assistant:use',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -251,6 +259,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:read',
     'quarantine:approve',
     'quarantine:reject',
+    'assistant:use',
   ],
   compliance_auditor: [
     'organization:read',
@@ -279,6 +288,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'ato:read',
     'integration:read',
     'journal:read',
+    'assistant:use',
   ],
   read_only_user: [
     'organization:read',
@@ -295,6 +305,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'delivery:read',
     'integration:read',
     'journal:read',
+    'assistant:use',
   ],
   mailbox_user: ['quarantine:self'],
   compliance_officer: [
@@ -312,6 +323,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'archive:manage',
     'ediscovery:manage',
     'journal:read',
+    'assistant:use',
   ],
 };
 

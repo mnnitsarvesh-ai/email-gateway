@@ -1735,3 +1735,369 @@ describe('loadApiConfig: journal intake (step 8.6 §4.4)', () => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });
 });
+
+describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
+  // Synthetic, deliberately not secret-shaped placeholder credentials.
+  const KEY = 'placeholder-assistant-credential-MARKER';
+
+  it('is off by default with the fake provider and the documented defaults', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      ASSISTANT_ENABLED: false,
+      ASSISTANT_PROVIDER: 'fake',
+      ASSISTANT_MODEL: 'claude-opus-5-5',
+      ASSISTANT_EFFORT: 'low',
+      ASSISTANT_REFUSAL_FALLBACK: 'default',
+      ASSISTANT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      ASSISTANT_AZURE_OPENAI_API_VERSION: '2024-10-21',
+      ASSISTANT_TIMEOUT_MS: 30_000,
+      ASSISTANT_TURN_DEADLINE_MS: 90_000,
+      ASSISTANT_MAX_OUTPUT_TOKENS: 4096,
+      ASSISTANT_MAX_TOOL_ROUNDS: 6,
+      ASSISTANT_MAX_TOOL_CALLS_PER_TURN: 12,
+      ASSISTANT_TOOL_TIMEOUT_MS: 15_000,
+      ASSISTANT_TOOL_RESULT_MAX_BYTES: 12_288,
+      ASSISTANT_TOOL_RESULT_MAX_ROWS: 25,
+      ASSISTANT_CONTEXT_MAX_TOKENS: 60_000,
+      ASSISTANT_USER_MESSAGE_MAX_CHARS: 4000,
+      ASSISTANT_TURNS_PER_USER_PER_MINUTE: 6,
+      ASSISTANT_MAX_CONCURRENT_TURNS: 20,
+      ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT: 1_000_000,
+      ASSISTANT_TENANT_DAILY_TOKENS_MAX: 5_000_000,
+      ASSISTANT_PLATFORM_DAILY_TOKENS: 0,
+      ASSISTANT_RETENTION_DEFAULT_DAYS: 30,
+      ASSISTANT_EXECUTION_RETENTION_DAYS: 400,
+      ASSISTANT_MAX_CONVERSATIONS_PER_USER: 500,
+      ASSISTANT_BACKGROUND_JOBS_ENABLED: true,
+      ASSISTANT_BREAKER_THRESHOLD: 5,
+      ASSISTANT_BREAKER_RESET_MS: 60_000,
+      ASSISTANT_CONFIRMATION_TTL_SECONDS: 300,
+      ASSISTANT_REAUTH_WINDOW_SECONDS: 300,
+    });
+    for (const key of [
+      'ASSISTANT_ANTHROPIC_API_KEY',
+      'ASSISTANT_ANTHROPIC_BASE_URL',
+      'ASSISTANT_OPENAI_API_KEY',
+      'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+      'ASSISTANT_AZURE_OPENAI_API_KEY',
+      'ASSISTANT_AZURE_OPENAI_DEPLOYMENT',
+      'ASSISTANT_LOOPBACK_URL',
+      'ASSISTANT_MODEL_PRICES',
+    ] as const) {
+      expect(cfg[key], key).toBeUndefined();
+    }
+  });
+
+  it('treats the empty keys of .env.example as unset (enabled with the fake provider locally)', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      ASSISTANT_ENABLED: 'true',
+      ASSISTANT_PROVIDER: 'fake',
+      ASSISTANT_ANTHROPIC_API_KEY: '',
+      ASSISTANT_ANTHROPIC_BASE_URL: '',
+      ASSISTANT_OPENAI_API_KEY: '',
+      ASSISTANT_AZURE_OPENAI_ENDPOINT: '',
+      ASSISTANT_AZURE_OPENAI_API_KEY: '',
+      ASSISTANT_AZURE_OPENAI_DEPLOYMENT: '',
+      ASSISTANT_LOOPBACK_URL: '',
+      ASSISTANT_MODEL_PRICES: '',
+    });
+    expect(cfg.ASSISTANT_ENABLED).toBe(true);
+    expect(cfg.ASSISTANT_PROVIDER).toBe('fake');
+    expect(cfg.ASSISTANT_LOOPBACK_URL).toBeUndefined();
+  });
+
+  it('refuses the fake provider when NODE_ENV=production and the assistant is enabled', () => {
+    const message = rejection({
+      ...valid,
+      NODE_ENV: 'production',
+      ASSISTANT_ENABLED: 'true',
+      ASSISTANT_PROVIDER: 'fake',
+    });
+    expect(message).toContain('ASSISTANT_PROVIDER');
+    expect(message).toContain('NODE_ENV=production');
+    // Off (the default): a production deployment needs no provider configuration at all.
+    expect(loadApiConfig({ ...valid, NODE_ENV: 'production' }).ASSISTANT_PROVIDER).toBe('fake');
+    expect(
+      loadApiConfig({
+        ...valid,
+        NODE_ENV: 'production',
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_ANTHROPIC_API_KEY: KEY,
+      }).ASSISTANT_PROVIDER,
+    ).toBe('anthropic');
+  });
+
+  it.each([
+    ['anthropic', {}, ['ASSISTANT_ANTHROPIC_API_KEY']],
+    ['openai', {}, ['ASSISTANT_OPENAI_API_KEY']],
+    [
+      'azure_openai',
+      {},
+      [
+        'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+        'ASSISTANT_AZURE_OPENAI_API_KEY',
+        'ASSISTANT_AZURE_OPENAI_DEPLOYMENT',
+      ],
+    ],
+    [
+      'azure_openai',
+      {
+        ASSISTANT_AZURE_OPENAI_ENDPOINT: 'https://example-resource.openai.azure.test',
+        ASSISTANT_AZURE_OPENAI_API_KEY: KEY,
+      },
+      ['ASSISTANT_AZURE_OPENAI_DEPLOYMENT'],
+    ],
+  ] as const)(
+    'requires the credentials of provider %s when enabled, naming the keys',
+    (provider, extra, keys) => {
+      const env = { ...valid, ASSISTANT_ENABLED: 'true', ASSISTANT_PROVIDER: provider, ...extra };
+      const message = rejection(env);
+      for (const key of keys) expect(message).toContain(key);
+      expect(message).not.toContain('MARKER');
+      // Disabled: the provider may stay unconfigured (no request is ever made).
+      expect(loadApiConfig({ ...env, ASSISTANT_ENABLED: 'false' }).ASSISTANT_PROVIDER).toBe(
+        provider,
+      );
+    },
+  );
+
+  it('accepts each provider with its credentials', () => {
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_ANTHROPIC_API_KEY: KEY,
+        ASSISTANT_ANTHROPIC_BASE_URL: 'https://llm-proxy.example.test',
+        ASSISTANT_MODEL: 'claude-sonnet-5-5',
+        ASSISTANT_EFFORT: 'medium',
+        ASSISTANT_REFUSAL_FALLBACK: 'off',
+      }),
+    ).toMatchObject({
+      ASSISTANT_ANTHROPIC_API_KEY: KEY,
+      ASSISTANT_MODEL: 'claude-sonnet-5-5',
+      ASSISTANT_EFFORT: 'medium',
+      ASSISTANT_REFUSAL_FALLBACK: 'off',
+    });
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'openai',
+        ASSISTANT_OPENAI_API_KEY: KEY,
+        ASSISTANT_MODEL: 'example-model-1',
+      }).ASSISTANT_OPENAI_API_KEY,
+    ).toBe(KEY);
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'azure_openai',
+        ASSISTANT_AZURE_OPENAI_ENDPOINT: 'https://example-resource.openai.azure.test',
+        ASSISTANT_AZURE_OPENAI_API_KEY: KEY,
+        ASSISTANT_AZURE_OPENAI_DEPLOYMENT: 'chat-prod',
+        ASSISTANT_AZURE_OPENAI_API_VERSION: '2025-01-01-preview',
+      }),
+    ).toMatchObject({
+      ASSISTANT_AZURE_OPENAI_DEPLOYMENT: 'chat-prod',
+      ASSISTANT_AZURE_OPENAI_API_VERSION: '2025-01-01-preview',
+    });
+  });
+
+  it('reads the provider credentials from <KEY>_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-assistant-key-'));
+    const file = join(dir, 'key');
+    const fromFile = `placeholder-${randomBytes(12).toString('hex')}`;
+    writeFileSync(file, `${fromFile}\n`);
+    try {
+      for (const [provider, key] of [
+        ['anthropic', 'ASSISTANT_ANTHROPIC_API_KEY'],
+        ['openai', 'ASSISTANT_OPENAI_API_KEY'],
+      ] as const) {
+        const cfg = loadApiConfig({
+          ...valid,
+          ASSISTANT_ENABLED: 'true',
+          ASSISTANT_PROVIDER: provider,
+          [`${key}_FILE`]: file,
+        });
+        expect(cfg[key]).toBe(fromFile);
+      }
+      expect(
+        loadApiConfig({
+          ...valid,
+          ASSISTANT_ENABLED: 'true',
+          ASSISTANT_PROVIDER: 'azure_openai',
+          ASSISTANT_AZURE_OPENAI_ENDPOINT: 'https://example-resource.openai.azure.test',
+          ASSISTANT_AZURE_OPENAI_DEPLOYMENT: 'chat-prod',
+          ASSISTANT_AZURE_OPENAI_API_KEY_FILE: file,
+        }).ASSISTANT_AZURE_OPENAI_API_KEY,
+      ).toBe(fromFile);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names a malformed credential, never its value', () => {
+    for (const bad of ['short', 'has MARKER spaces in it']) {
+      const message = rejection({ ...valid, ASSISTANT_OPENAI_API_KEY: bad });
+      expect(message).toContain('ASSISTANT_OPENAI_API_KEY');
+      expect(message).not.toContain(bad);
+    }
+  });
+
+  it('allows http provider endpoints only in APP_ENV local/ci', () => {
+    const env = {
+      ...valid,
+      ASSISTANT_OPENAI_BASE_URL: 'http://llm-fake.test:8080/v1',
+      ASSISTANT_ANTHROPIC_BASE_URL: 'http://llm-fake.test:8081',
+      ASSISTANT_AZURE_OPENAI_ENDPOINT: 'http://llm-fake.test:8082',
+    };
+    expect(loadApiConfig({ ...env, APP_ENV: 'ci' }).ASSISTANT_OPENAI_BASE_URL).toBe(
+      'http://llm-fake.test:8080/v1',
+    );
+    const message = rejection({ ...env, APP_ENV: 'staging' });
+    for (const key of [
+      'ASSISTANT_OPENAI_BASE_URL',
+      'ASSISTANT_ANTHROPIC_BASE_URL',
+      'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+    ]) {
+      expect(message).toContain(key);
+    }
+    expect(rejection({ ...valid, ASSISTANT_OPENAI_BASE_URL: 'ftp://llm.test' })).toContain(
+      'ASSISTANT_OPENAI_BASE_URL',
+    );
+    // The loopback URL is internal: http is fine everywhere.
+    expect(
+      loadApiConfig({
+        ...valid,
+        APP_ENV: 'staging',
+        PORTAL_PUBLIC_URL: 'https://admin.example.test',
+        ASSISTANT_LOOPBACK_URL: 'http://api:3000',
+      }).ASSISTANT_LOOPBACK_URL,
+    ).toBe('http://api:3000');
+    expect(rejection({ ...valid, ASSISTANT_LOOPBACK_URL: 'not a url' })).toContain(
+      'ASSISTANT_LOOPBACK_URL',
+    );
+  });
+
+  it('requires the tenant default budget <= the tenant maximum', () => {
+    expect(
+      rejection({
+        ...valid,
+        ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT: '6000000',
+        ASSISTANT_TENANT_DAILY_TOKENS_MAX: '5000000',
+      }),
+    ).toContain('ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT');
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT: '5000000',
+        ASSISTANT_TENANT_DAILY_TOKENS_MAX: '5000000',
+      }).ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT,
+    ).toBe(5_000_000);
+  });
+
+  it('requires the provider and tool timeouts below the turn deadline', () => {
+    const message = rejection({
+      ...valid,
+      ASSISTANT_TURN_DEADLINE_MS: '20000',
+      ASSISTANT_TIMEOUT_MS: '20000',
+      ASSISTANT_TOOL_TIMEOUT_MS: '25000',
+    });
+    expect(message).toContain('ASSISTANT_TIMEOUT_MS');
+    expect(message).toContain('ASSISTANT_TOOL_TIMEOUT_MS');
+  });
+
+  it('parses and validates ASSISTANT_MODEL_PRICES, never echoing the value', () => {
+    const prices = loadApiConfig({
+      ...valid,
+      ASSISTANT_MODEL_PRICES: JSON.stringify({
+        'example-model-1': { inputPerMTokMicros: 1_250_000, outputPerMTokMicros: 10_000_000 },
+        'claude-opus-5-5': {
+          inputPerMTokMicros: 4_000_000,
+          outputPerMTokMicros: 20_000_000,
+          cacheReadPerMTokMicros: 200_000,
+          cacheWritePerMTokMicros: 5_000_000,
+        },
+      }),
+    }).ASSISTANT_MODEL_PRICES;
+    expect(prices?.['example-model-1']).toEqual({
+      inputPerMTokMicros: 1_250_000,
+      outputPerMTokMicros: 10_000_000,
+    });
+    expect(prices?.['claude-opus-5-5']?.cacheReadPerMTokMicros).toBe(200_000);
+    for (const bad of [
+      '{MARKER',
+      '["MARKER"]',
+      JSON.stringify({ 'bad model MARKER': { inputPerMTokMicros: 1, outputPerMTokMicros: 1 } }),
+      JSON.stringify({ m: { inputPerMTokMicros: 1 } }),
+      JSON.stringify({ m: { inputPerMTokMicros: -1, outputPerMTokMicros: 1 } }),
+      JSON.stringify({ m: { inputPerMTokMicros: 1.5, outputPerMTokMicros: 1 } }),
+      JSON.stringify({ m: { inputPerMTokMicros: 1, outputPerMTokMicros: 1, MARKER: 1 } }),
+    ]) {
+      const message = rejection({ ...valid, ASSISTANT_MODEL_PRICES: bad });
+      expect(message, bad).toContain('ASSISTANT_MODEL_PRICES');
+      expect(message, bad).not.toContain('MARKER');
+    }
+  });
+
+  it('accepts every bounded key at its bounds', () => {
+    const bounds: Record<string, [number, number]> = {
+      ASSISTANT_TIMEOUT_MS: [5000, 120_000],
+      ASSISTANT_TURN_DEADLINE_MS: [10_000, 300_000],
+      ASSISTANT_MAX_OUTPUT_TOKENS: [256, 16_000],
+      ASSISTANT_MAX_TOOL_ROUNDS: [1, 10],
+      ASSISTANT_MAX_TOOL_CALLS_PER_TURN: [1, 30],
+      ASSISTANT_TOOL_TIMEOUT_MS: [1000, 60_000],
+      ASSISTANT_TOOL_RESULT_MAX_BYTES: [2048, 65_536],
+      ASSISTANT_TOOL_RESULT_MAX_ROWS: [1, 100],
+      ASSISTANT_CONTEXT_MAX_TOKENS: [8000, 400_000],
+      ASSISTANT_USER_MESSAGE_MAX_CHARS: [100, 16_000],
+      ASSISTANT_TURNS_PER_USER_PER_MINUTE: [1, 120],
+      ASSISTANT_MAX_CONCURRENT_TURNS: [1, 500],
+      ASSISTANT_RETENTION_DEFAULT_DAYS: [1, 365],
+      ASSISTANT_EXECUTION_RETENTION_DAYS: [30, 3650],
+      ASSISTANT_MAX_CONVERSATIONS_PER_USER: [1, 10_000],
+      ASSISTANT_CONFIRMATION_TTL_SECONDS: [60, 900],
+      ASSISTANT_REAUTH_WINDOW_SECONDS: [0, 1800],
+      ASSISTANT_BREAKER_THRESHOLD: [1, 100],
+      ASSISTANT_BREAKER_RESET_MS: [1000, 3_600_000],
+    };
+    // The deadline must stay above both timeouts while the others move.
+    const roomy = { ASSISTANT_TURN_DEADLINE_MS: '300000' };
+    for (const [key, [min, max]] of Object.entries(bounds)) {
+      const base = key === 'ASSISTANT_TURN_DEADLINE_MS' ? {} : roomy;
+      const timeouts =
+        key === 'ASSISTANT_TURN_DEADLINE_MS'
+          ? { ASSISTANT_TIMEOUT_MS: '5000', ASSISTANT_TOOL_TIMEOUT_MS: '1000' }
+          : {};
+      for (const value of [min, max]) {
+        const cfg = loadApiConfig({ ...valid, ...base, ...timeouts, [key]: String(value) });
+        expect(cfg[key as keyof typeof cfg], `${key}=${value}`).toBe(value);
+      }
+      expect(rejection({ ...valid, ...base, ...timeouts, [key]: String(min - 1) })).toContain(key);
+      expect(rejection({ ...valid, ...base, ...timeouts, [key]: String(max + 1) })).toContain(key);
+    }
+    expect(loadApiConfig({ ...valid, ASSISTANT_PLATFORM_DAILY_TOKENS: '0' })).toMatchObject({
+      ASSISTANT_PLATFORM_DAILY_TOKENS: 0,
+    });
+    expect(rejection({ ...valid, ASSISTANT_PLATFORM_DAILY_TOKENS: '-1' })).toContain(
+      'ASSISTANT_PLATFORM_DAILY_TOKENS',
+    );
+  });
+
+  it.each([
+    ['ASSISTANT_PROVIDER', 'gemini'],
+    ['ASSISTANT_EFFORT', 'max'],
+    ['ASSISTANT_REFUSAL_FALLBACK', 'none'],
+    ['ASSISTANT_ENABLED', 'yes'],
+    ['ASSISTANT_BACKGROUND_JOBS_ENABLED', 'maybe'],
+    ['ASSISTANT_MODEL', 'model with spaces'],
+    ['ASSISTANT_AZURE_OPENAI_DEPLOYMENT', 'bad/deployment'],
+    ['ASSISTANT_AZURE_OPENAI_API_VERSION', 'latest'],
+  ])('refuses %s=%s naming the key', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});

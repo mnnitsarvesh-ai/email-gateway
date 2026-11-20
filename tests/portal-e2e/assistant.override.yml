@@ -1,0 +1,21 @@
+# Step AI-1 (docs/plan/steps/28-ai-chat-management.md §9 item 7): the api container of the portal
+# end-to-end run with the AI assistant on and the deterministic fake provider. Compose passes no
+# ASSISTANT_* key to the api (the assistant is off by default, ASSISTANT_ENABLED=false), and the
+# image runs NODE_ENV=production, where `fake` is refused (D6, I8). This file is for local and CI
+# test stacks only; it sets no credential, and the fake never reaches an LLM or the internet.
+#
+# Use it together with the other test overrides when recreating the api, e.g.
+#   docker compose -f docker-compose.yml -f <other overrides> \
+#     -f tests/portal-e2e/assistant.override.yml --profile apps \
+#     up -d --no-deps --force-recreate --wait api
+# and recreate the api without it after the run.
+services:
+  api:
+    environment:
+      NODE_ENV: development
+      ASSISTANT_ENABLED: 'true'
+      ASSISTANT_PROVIDER: fake
+      ASSISTANT_ANTHROPIC_API_KEY: ''
+      ASSISTANT_OPENAI_API_KEY: ''
+      ASSISTANT_AZURE_OPENAI_API_KEY: ''
+      ASSISTANT_LOOPBACK_URL: ''

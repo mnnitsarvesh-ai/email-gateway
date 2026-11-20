@@ -1433,6 +1433,261 @@ export function validateJournalIntakeConfig(
   }
 }
 
+/** LLM providers of the AI assistant (step AI-1 D6, ADR-0092); `fake` is the deterministic test stand-in. */
+export const ASSISTANT_PROVIDERS = ['fake', 'anthropic', 'openai', 'azure_openai'] as const;
+export type AssistantProviderId = (typeof ASSISTANT_PROVIDERS)[number];
+
+/** An external LLM credential (`_FILE` accepted); never echoed. Supplied by the operator. */
+const assistantApiKey = z
+  .string()
+  .min(8, 'must be 8 to 1024 characters')
+  .max(1024, 'must be 8 to 1024 characters')
+  .regex(/^[\x21-\x7e]+$/, 'must be printable ASCII without spaces');
+
+/** Provider endpoint: https (http only in APP_ENV local/ci, checked in validateAssistantConfig). */
+const assistantEndpoint = z.url({ protocol: /^https?$/ });
+
+/** Model and deployment ids (`ai_chat_turns.model` is VARCHAR(64)). */
+const ASSISTANT_MODEL_ID = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/** Per-model token prices in micro-USD per million tokens (D6 "Cost"). */
+const assistantModelPriceSchema = z.strictObject({
+  inputPerMTokMicros: z.number().int().min(0).max(1_000_000_000),
+  outputPerMTokMicros: z.number().int().min(0).max(1_000_000_000),
+  cacheReadPerMTokMicros: z.number().int().min(0).max(1_000_000_000).optional(),
+  cacheWritePerMTokMicros: z.number().int().min(0).max(1_000_000_000).optional(),
+});
+export type AssistantModelPrice = z.output<typeof assistantModelPriceSchema>;
+
+/**
+ * `ASSISTANT_MODEL_PRICES`: a JSON object `{ "<model id>": { inputPerMTokMicros,
+ * outputPerMTokMicros, cacheReadPerMTokMicros?, cacheWritePerMTokMicros? } }` that adds to or
+ * overrides the package's built-in prices (OpenAI/Azure models are priced only here). Unset =
+ * built-in prices only. The message never echoes the value.
+ */
+const assistantModelPrices = z
+  .string()
+  .optional()
+  .transform((value, ctx): Readonly<Record<string, AssistantModelPrice>> | undefined => {
+    if (value === undefined) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: 'must be a JSON object (model id → prices)' });
+      return z.NEVER;
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      ctx.addIssue({ code: 'custom', message: 'must be a JSON object (model id → prices)' });
+      return z.NEVER;
+    }
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.length > 64) {
+      ctx.addIssue({ code: 'custom', message: 'must name at most 64 models' });
+      return z.NEVER;
+    }
+    const prices: Record<string, AssistantModelPrice> = {};
+    for (const [model, price] of entries) {
+      if (!ASSISTANT_MODEL_ID.test(model)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'has a model id that is not 1-64 of [A-Za-z0-9._:-]',
+        });
+        return z.NEVER;
+      }
+      const result = assistantModelPriceSchema.safeParse(price);
+      if (!result.success) {
+        ctx.addIssue({
+          code: 'custom',
+          message:
+            'every model needs integer inputPerMTokMicros and outputPerMTokMicros ' +
+            '(optional cacheReadPerMTokMicros, cacheWritePerMTokMicros), 0..1e9, no other field',
+        });
+        return z.NEVER;
+      }
+      prices[model] = result.data;
+    }
+    return Object.freeze(prices);
+  });
+
+/**
+ * AI assistant (step AI-1 D6, D7, D11, D12; docs/plan/steps/28-ai-chat-management.md, ADR-0091,
+ * ADR-0092): the platform switch (`ASSISTANT_ENABLED`, off by default: `503 assistant_disabled`),
+ * the LLM provider and model (default the deterministic `fake`; production needs a real provider,
+ * which needs its credential: `_FILE` accepted, never logged or echoed), the provider endpoints
+ * and timeouts, the per-turn limits (rounds, tool calls, output tokens, deadline, tool timeout and
+ * result caps, context window, message length), the per-user and per-process turn limits, the
+ * tenant and platform daily token budgets, content and execution retention, the conversations per
+ * user, the loopback URL of tool calls (empty = the api's own listening address), the background
+ * jobs (retention purge, stale-turn sweeper), the provider breaker, optional model prices and the
+ * AI-2 confirmation lifetime and re-authentication window (validated now, used from AI-2).
+ * Start-up errors name the key, never the value.
+ */
+export const assistantConfigShape = {
+  ASSISTANT_ENABLED: bool.default(false),
+  ASSISTANT_PROVIDER: z.enum(ASSISTANT_PROVIDERS).default('fake'),
+  ASSISTANT_MODEL: z
+    .string()
+    .regex(ASSISTANT_MODEL_ID, 'must be 1-64 of [A-Za-z0-9._:-]')
+    .default('claude-opus-5-5'),
+  ASSISTANT_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
+  /** Anthropic server-side refusal fallback (`default`) or plain requests without the beta (`off`). */
+  ASSISTANT_REFUSAL_FALLBACK: z.enum(['default', 'off']).default('default'),
+  ASSISTANT_ANTHROPIC_API_KEY: assistantApiKey.optional(),
+  /** Empty = the SDK's default endpoint. */
+  ASSISTANT_ANTHROPIC_BASE_URL: assistantEndpoint.optional(),
+  ASSISTANT_OPENAI_API_KEY: assistantApiKey.optional(),
+  ASSISTANT_OPENAI_BASE_URL: assistantEndpoint.default('https://api.openai.com/v1'),
+  ASSISTANT_AZURE_OPENAI_ENDPOINT: assistantEndpoint.optional(),
+  ASSISTANT_AZURE_OPENAI_API_KEY: assistantApiKey.optional(),
+  ASSISTANT_AZURE_OPENAI_DEPLOYMENT: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]{1,64}$/, 'must be 1-64 of [A-Za-z0-9._-]')
+    .optional(),
+  ASSISTANT_AZURE_OPENAI_API_VERSION: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}(?:-preview)?$/, 'must be YYYY-MM-DD or YYYY-MM-DD-preview')
+    .default('2024-10-21'),
+  /** One provider call (connect to last byte). */
+  ASSISTANT_TIMEOUT_MS: int(5000, 120_000).default(30_000),
+  /** Whole turn (every round and tool call). */
+  ASSISTANT_TURN_DEADLINE_MS: int(10_000, 300_000).default(90_000),
+  ASSISTANT_MAX_OUTPUT_TOKENS: int(256, 16_000).default(4096),
+  ASSISTANT_MAX_TOOL_ROUNDS: int(1, 10).default(6),
+  ASSISTANT_MAX_TOOL_CALLS_PER_TURN: int(1, 30).default(12),
+  /** One loopback tool call. */
+  ASSISTANT_TOOL_TIMEOUT_MS: int(1000, 60_000).default(15_000),
+  /** Envelope sent to the model (D8). */
+  ASSISTANT_TOOL_RESULT_MAX_BYTES: int(2048, 65_536).default(12_288),
+  ASSISTANT_TOOL_RESULT_MAX_ROWS: int(1, 100).default(25),
+  ASSISTANT_CONTEXT_MAX_TOKENS: int(8000, 400_000).default(60_000),
+  ASSISTANT_USER_MESSAGE_MAX_CHARS: int(100, 16_000).default(4000),
+  ASSISTANT_TURNS_PER_USER_PER_MINUTE: int(1, 120).default(6),
+  /** Concurrent turns per api process (`503 assistant_busy` beyond). */
+  ASSISTANT_MAX_CONCURRENT_TURNS: int(1, 500).default(20),
+  /** Tenant budget when its setting has none; a tenant may set at most the max. */
+  ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT: int(1, 4_294_967_295).default(1_000_000),
+  ASSISTANT_TENANT_DAILY_TOKENS_MAX: int(1, 4_294_967_295).default(5_000_000),
+  /** Platform-wide tokens per UTC day; 0 = no cap. */
+  ASSISTANT_PLATFORM_DAILY_TOKENS: int(0).default(0),
+  /** Content retention after the last turn when the tenant set none. */
+  ASSISTANT_RETENTION_DEFAULT_DAYS: int(1, 365).default(30),
+  /** Hard delete of conversation, turn and execution rows (metadata). */
+  ASSISTANT_EXECUTION_RETENTION_DAYS: int(30, 3650).default(400),
+  ASSISTANT_MAX_CONVERSATIONS_PER_USER: int(1, 10_000).default(500),
+  /** Base URL of tool calls; empty = `http://127.0.0.1:${HTTP_PORT}`. */
+  ASSISTANT_LOOPBACK_URL: z.url({ protocol: /^https?$/ }).optional(),
+  /** Retention purge and stale-turn sweeper of this process. */
+  ASSISTANT_BACKGROUND_JOBS_ENABLED: bool.default(true),
+  ASSISTANT_BREAKER_THRESHOLD: int(1, 100).default(5),
+  ASSISTANT_BREAKER_RESET_MS: int(1000, 3_600_000).default(60_000),
+  ASSISTANT_MODEL_PRICES: assistantModelPrices,
+  /** AI-2: lifetime of a pending action confirmation (ADR-0093). */
+  ASSISTANT_CONFIRMATION_TTL_SECONDS: int(60, 900).default(300),
+  /** AI-2: a re-authentication this recent satisfies a high-risk confirmation; 0 = always ask. */
+  ASSISTANT_REAUTH_WINDOW_SECONDS: int(0, 1800).default(300),
+};
+
+export type AssistantConfigKeys = {
+  [K in keyof typeof assistantConfigShape]: z.output<(typeof assistantConfigShape)[K]>;
+};
+
+/**
+ * Cross-field rules of the assistant keys (step AI-1 D6, D11): when ASSISTANT_ENABLED, the fake
+ * provider is refused with NODE_ENV=production (as BEC_LLM_PROVIDER=fake, ADR-0034; `fake` is the
+ * default, so a production deployment with the assistant off needs no provider) and the selected
+ * provider needs its credential (Azure also its endpoint and deployment); provider endpoints are
+ * https unless APP_ENV is local/ci; the tenant default budget is at most the tenant maximum; the
+ * provider and tool timeouts fit in the turn deadline. Messages name the key, never the value.
+ */
+export function validateAssistantConfig(
+  cfg: Pick<
+    AssistantConfigKeys,
+    | 'ASSISTANT_ENABLED'
+    | 'ASSISTANT_PROVIDER'
+    | 'ASSISTANT_OPENAI_BASE_URL'
+    | 'ASSISTANT_TIMEOUT_MS'
+    | 'ASSISTANT_TURN_DEADLINE_MS'
+    | 'ASSISTANT_TOOL_TIMEOUT_MS'
+    | 'ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT'
+    | 'ASSISTANT_TENANT_DAILY_TOKENS_MAX'
+  > & {
+    ASSISTANT_ANTHROPIC_API_KEY?: string | undefined;
+    ASSISTANT_ANTHROPIC_BASE_URL?: string | undefined;
+    ASSISTANT_OPENAI_API_KEY?: string | undefined;
+    ASSISTANT_AZURE_OPENAI_ENDPOINT?: string | undefined;
+    ASSISTANT_AZURE_OPENAI_API_KEY?: string | undefined;
+    ASSISTANT_AZURE_OPENAI_DEPLOYMENT?: string | undefined;
+    NODE_ENV: string;
+    APP_ENV: string;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const refuse = (key: keyof AssistantConfigKeys, message: string) =>
+    ctx.addIssue({ code: 'custom', path: [key], message });
+  if (cfg.ASSISTANT_ENABLED) {
+    // The default provider is `fake`, so the refusal applies only when the assistant would run:
+    // a production deployment with the assistant off needs no provider at all.
+    if (cfg.ASSISTANT_PROVIDER === 'fake' && cfg.NODE_ENV === 'production') {
+      refuse(
+        'ASSISTANT_PROVIDER',
+        'fake is refused when NODE_ENV=production and ASSISTANT_ENABLED (test stand-in)',
+      );
+    }
+    if (cfg.ASSISTANT_PROVIDER === 'anthropic' && cfg.ASSISTANT_ANTHROPIC_API_KEY === undefined) {
+      refuse('ASSISTANT_ANTHROPIC_API_KEY', 'is required when ASSISTANT_PROVIDER=anthropic');
+    }
+    if (cfg.ASSISTANT_PROVIDER === 'openai' && cfg.ASSISTANT_OPENAI_API_KEY === undefined) {
+      refuse('ASSISTANT_OPENAI_API_KEY', 'is required when ASSISTANT_PROVIDER=openai');
+    }
+    if (cfg.ASSISTANT_PROVIDER === 'azure_openai') {
+      if (cfg.ASSISTANT_AZURE_OPENAI_ENDPOINT === undefined) {
+        refuse(
+          'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+          'is required when ASSISTANT_PROVIDER=azure_openai',
+        );
+      }
+      if (cfg.ASSISTANT_AZURE_OPENAI_API_KEY === undefined) {
+        refuse(
+          'ASSISTANT_AZURE_OPENAI_API_KEY',
+          'is required when ASSISTANT_PROVIDER=azure_openai',
+        );
+      }
+      if (cfg.ASSISTANT_AZURE_OPENAI_DEPLOYMENT === undefined) {
+        refuse(
+          'ASSISTANT_AZURE_OPENAI_DEPLOYMENT',
+          'is required when ASSISTANT_PROVIDER=azure_openai',
+        );
+      }
+    }
+  }
+  const testEnv = cfg.APP_ENV === 'local' || cfg.APP_ENV === 'ci';
+  const endpoints = {
+    ASSISTANT_ANTHROPIC_BASE_URL: cfg.ASSISTANT_ANTHROPIC_BASE_URL,
+    ASSISTANT_OPENAI_BASE_URL: cfg.ASSISTANT_OPENAI_BASE_URL,
+    ASSISTANT_AZURE_OPENAI_ENDPOINT: cfg.ASSISTANT_AZURE_OPENAI_ENDPOINT,
+  } as const;
+  for (const [key, value] of Object.entries(endpoints)) {
+    if (value?.startsWith('http://') && !testEnv) {
+      refuse(
+        key as keyof typeof endpoints,
+        'must be an https:// URL unless APP_ENV is local or ci',
+      );
+    }
+  }
+  if (cfg.ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT > cfg.ASSISTANT_TENANT_DAILY_TOKENS_MAX) {
+    refuse(
+      'ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT',
+      'must be less than or equal to ASSISTANT_TENANT_DAILY_TOKENS_MAX',
+    );
+  }
+  for (const key of ['ASSISTANT_TIMEOUT_MS', 'ASSISTANT_TOOL_TIMEOUT_MS'] as const) {
+    if (cfg[key] >= cfg.ASSISTANT_TURN_DEADLINE_MS) {
+      refuse(key, 'must be below ASSISTANT_TURN_DEADLINE_MS');
+    }
+  }
+}
+
 export const apiConfigSchema = baseConfigSchema
   .extend(httpConfigSchema(3000).shape)
   .extend(databaseConfigSchema.shape)
@@ -1471,6 +1726,8 @@ export const apiConfigSchema = baseConfigSchema
   .extend(providerApiConfigShape)
   // Step 8.6 §4.4: journal intake (address derivation, limits); empty domain = intake off.
   .extend(journalIntakeApiConfigShape)
+  // Step AI-1 (D6, D11): the AI assistant (off by default; local/CI use the fake provider).
+  .extend(assistantConfigShape)
   .extend({
     /** Comma-separated allow-list of admin portal origins. */
     CORS_ORIGINS: z
@@ -1501,6 +1758,7 @@ export const apiConfigSchema = baseConfigSchema
     validateArchiveApiConfig(cfg, ctx);
     validateProviderConfig(cfg, ctx);
     validateJournalIntakeConfig(cfg, ctx);
+    validateAssistantConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({
         code: 'custom',

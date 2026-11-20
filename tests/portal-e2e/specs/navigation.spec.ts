@@ -4,7 +4,8 @@
  * `x-eg-permissions` and the user's `GET /auth/me` permissions (not from the portal's code);
  * `/` lands on the first permitted entry; direct URLs of hidden pages show the 403 page; actions
  * the role cannot perform are not offered. Step 8.6: the Archive section (Search, Retention and
- * lock, Legal holds, eDiscovery, Access audit) and the compliance officer role.
+ * lock, Legal holds, eDiscovery, Access audit) and the compliance officer role. Step AI-1: the
+ * "AI assistant" entry (`assistant:use`; hidden for the mailbox user, whose `/assistant` is 403).
  */
 import type { Page } from '@playwright/test';
 import { signIn } from '../support/auth';
@@ -45,9 +46,12 @@ for (const { key, role, minVisible } of ROLES) {
     expect(expected.length).toBeGreaterThanOrEqual(minVisible);
     expect(await visibleNav(page)).toEqual(expected);
 
-    // `/` lands on the first permitted entry.
+    // `/` lands on the first permitted entry that can be a start page (step AI-1: the AI
+    // assistant never is).
     await page.goto('/');
-    const first = NAV_GATES.find((item) => item.label === expected[0])!;
+    const first = NAV_GATES.find(
+      (item) => expected.includes(item.label) && item.landing !== false,
+    )!;
     await expect(page).toHaveURL(new RegExp(`${first.href.replace('/', '\\/')}(\\?|$)`));
 
     for (const hidden of NAV_GATES.filter((item) => !expected.includes(item.label))) {

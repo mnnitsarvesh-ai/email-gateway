@@ -315,6 +315,21 @@ export const PERMISSIONS = Object.freeze([
     description: 'Manage journaling capture settings and journal intake sources',
     category: 'journaling',
   },
+  // Step AI-1 (docs/plan/steps/28-ai-chat-management.md D13, ADR-0091): the AI assistant.
+  // organization_admin and super_admin hold both through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // every other system role except mailbox_user gets assistant:use explicitly (PO Q3). The
+  // assistant's tools are always bounded by the user's own permissions.
+  {
+    key: 'assistant:use',
+    description: "Use the AI assistant; tools are limited to the user's own permissions",
+    category: 'assistant',
+  },
+  {
+    key: 'assistant:configure',
+    description:
+      'Enable the AI assistant for the organization, set its budget and retention, view its usage',
+    category: 'assistant',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -449,6 +464,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'threat_intel:read',
       // Step 8.4: account takeover read access (platform view of tenant ATO data).
       'ato:read',
+      // Step AI-1 (D13): the AI assistant (tools bounded by the role's own permissions).
+      'assistant:use',
     ],
   },
   {
@@ -487,6 +504,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       // Step 8.6 (D12): IT / mail administrators configure journaling and intake sources.
       'journal:read',
       'journal:manage',
+      // Step AI-1 (D13).
+      'assistant:use',
     ],
   },
   {
@@ -529,6 +548,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'integration:read',
       // Step 8.6 (D12).
       'journal:read',
+      // Step AI-1 (D13).
+      'assistant:use',
     ],
   },
   {
@@ -547,6 +568,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'quarantine:delete',
       'quarantine:request_release',
       'report:read',
+      // Step AI-1 (D13).
+      'assistant:use',
     ],
   },
   {
@@ -567,13 +590,16 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'archive:retrieve',
       'ediscovery:manage',
       'ato:read',
+      // Step AI-1 (D13).
+      'assistant:use',
     ],
   },
   {
     key: 'read_only_user',
     name: 'Read-only User',
     description: 'Read-only access to the organization',
-    permissions: TENANT_READ_PERMISSIONS,
+    // Step AI-1 (D13): assistant:use is explicit (not a read permission of TENANT_READ).
+    permissions: [...TENANT_READ_PERMISSIONS, 'assistant:use'],
   },
   {
     key: 'mailbox_user',
@@ -600,6 +626,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'message:reveal',
       'audit:read',
       'report:read',
+      // Step AI-1 (D13).
+      'assistant:use',
     ],
   },
 ]);
@@ -650,6 +678,9 @@ export const FEATURE_KEYS = [
   // Step 8.6 (D13, ADR-0090): journal-only intake (journal reports and copies on journal intake
   // addresses). Enterprise, dedicated and archive_only; not trial or standard.
   'journal_intake',
+  // Step AI-1 (docs/plan/steps/28-ai-chat-management.md D11, D13, ADR-0092): the AI assistant.
+  // Operator-enabled (off in every plan); the tenant setting and assistant:use gate it further.
+  'ai_assistant',
 ] as const;
 export type FeatureKey = (typeof FEATURE_KEYS)[number];
 
@@ -659,6 +690,8 @@ export type FeatureKey = (typeof FEATURE_KEYS)[number];
  */
 export const OPERATOR_ENABLED_FEATURE_KEYS: readonly FeatureKey[] = Object.freeze([
   'ato_detection',
+  // Step AI-1 (D13).
+  'ai_assistant',
 ]);
 
 export interface PlanDef {

@@ -935,6 +935,45 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step AI-1 assistant routes: exact permissions, users only, no MFA requirement, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
+    type Flags = { cls?: string; cursor?: boolean };
+    const USE = 'assistant:use';
+    const CONFIGURE = 'assistant:configure';
+    const expected: Record<string, [string, Flags?]> = {
+      'get /api/v1/assistant/status': [USE],
+      'get /api/v1/assistant/settings': [CONFIGURE],
+      'put /api/v1/assistant/settings': [CONFIGURE, { cls: 'sensitive' }],
+      'get /api/v1/assistant/usage': [CONFIGURE],
+      'get /api/v1/assistant/tools': [USE],
+      'get /api/v1/assistant/conversations': [USE, { cursor: true }],
+      'post /api/v1/assistant/conversations': [USE],
+      'get /api/v1/assistant/conversations/:conversationId': [USE],
+      'patch /api/v1/assistant/conversations/:conversationId': [USE],
+      'delete /api/v1/assistant/conversations/:conversationId': [USE],
+      'get /api/v1/assistant/conversations/:conversationId/messages': [USE, { cursor: true }],
+      'post /api/v1/assistant/conversations/:conversationId/turns': [USE, { cls: 'expensive' }],
+      'post /api/v1/assistant/turns/:turnId/cancel': [USE],
+      'get /api/v1/assistant/executions/:executionId': [USE],
+      'post /api/v1/assistant/executions/:executionId/more': [USE, { cls: 'expensive' }],
+    };
+    const assistant = routes.filter((r) => /^\/api\/v1\/assistant(\/|$)/.test(r.path));
+    expect(assistant.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permission, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+      // API keys never chat (D1, §4.1); MFA is the organization's login policy, not per route.
+      expect(route.userOnly, key).toBe(true);
+      expect(route.requireMfa, key).toBe(false);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      expect(route.idempotency, key).toBeNull();
+      expect(route.returnsSecret, key).toBe(false);
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
   it('the step 8.4 account takeover and incident routes: exact permissions incl. the registry lists, users, MFA, classes, keys and cursors (§5.1, §5.2)', () => {
     type Flags = {
       any?: boolean;

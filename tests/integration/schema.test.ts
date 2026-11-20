@@ -321,17 +321,25 @@ const TENANT_OWNED = [
   'journal_intake_counters',
   'archive_dedupe_keys',
   'archive_record_sources',
+  // Step AI-1 §3: the AI assistant's settings, conversations, turns, messages, tool executions
+  // and daily usage (organization_id NOT NULL on all six).
+  'ai_chat_settings',
+  'ai_chat_conversations',
+  'ai_chat_turns',
+  'ai_chat_messages',
+  'ai_chat_tool_executions',
+  'ai_chat_usage_daily',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 151 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 175 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(169);
-    expect(new Set(ALL_TABLES).size).toBe(169);
+    expect(ALL_TABLES).toHaveLength(175);
+    expect(new Set(ALL_TABLES).size).toBe(175);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 

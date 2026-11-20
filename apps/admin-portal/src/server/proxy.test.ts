@@ -390,4 +390,69 @@ describe('generic proxy (design P5)', () => {
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect(await response.text()).toBe('chunk-1,chunk-2');
   });
+
+  it('streams an assistant turn (text/event-stream) event by event without buffering headers', async () => {
+    const encoder = new TextEncoder();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(encoder.encode('event: turn.started\ndata: {"turnId":"t"}\n\n'));
+        await gate;
+        controller.enqueue(encoder.encode('event: text.delta\ndata: {"text":"hi"}\n\n'));
+        controller.close();
+      },
+    });
+    const upstream = fakeUpstream(
+      () =>
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        }),
+    );
+    const csrf = baseSession(now).csrf;
+    const response = await handleProxy(
+      await request(
+        '/bff/api/v1/assistant/conversations/01930000-0000-7000-8000-00000000e001/turns',
+        {
+          method: 'POST',
+          headers: {
+            origin: PORTAL,
+            'x-csrf-token': csrf,
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+          },
+          body: '{"clientTurnId":"5f0c2c1e-8b8a-4f7e-9a0e-2d3c4b5a6f70","message":"hi"}',
+        },
+      ),
+      testDeps(upstream.fetch, { now }),
+    );
+    expect(upstream.calls[0]!.headers.get('accept')).toBe('text/event-stream');
+    expect(response.headers.get('content-type')).toBe('text/event-stream; charset=utf-8');
+    expect(response.headers.get('cache-control')).toBe('no-store, no-transform');
+    expect(response.headers.get('x-accel-buffering')).toBe('no');
+    // The first event is readable before the upstream produced the second one.
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain('turn.started');
+    release();
+    const rest: string[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest.push(new TextDecoder().decode(value));
+    }
+    expect(rest.join('')).toContain('text.delta');
+  });
+
+  it('keeps the default cache-control for other responses', async () => {
+    const response = await handleProxy(
+      await request('/bff/api/v1/domains'),
+      testDeps(ok().fetch, { now }),
+    );
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('x-accel-buffering')).toBeNull();
+  });
 });

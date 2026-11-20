@@ -24,6 +24,7 @@ import {
   ScanSearch,
   ShieldCheck,
   Siren,
+  Sparkles,
   UserCheck,
   UserSearch,
   Users,
@@ -72,6 +73,11 @@ export interface NavItem {
    * reads the audit log with `audit:read` and is part of the archive audience, `archive:search`).
    */
   readonly requires?: readonly string[];
+  /**
+   * `false`: never the landing page of `/` (step AI-1: the AI assistant is an entry point to the
+   * other pages, not a start page).
+   */
+  readonly landing?: false;
 }
 
 export interface NavSection {
@@ -100,6 +106,16 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/reports',
         icon: BarChart3,
         gate: ['ReportsController_traffic_v1'],
+      },
+      {
+        // Step AI-1 (D14): the full-screen AI assistant (gateway and archive-only profiles); the
+        // header's "Ask AI" panel uses the same gate plus `GET /assistant/status`.
+        id: 'assistant',
+        label: 'AI assistant',
+        href: '/assistant',
+        icon: Sparkles,
+        gate: ['AssistantConversationsController_list_v1'],
+        landing: false,
       },
     ],
   },
@@ -412,7 +428,10 @@ export function firstPermittedHref(
     if (search && itemVisible(search, granted, profile)) return search.href;
     if (passesGate(['JournalingController_get_v1'], granted)) return JOURNALING_SETTINGS_HREF;
   }
-  return NAV_ITEMS.find((item) => itemVisible(item, granted, profile))?.href ?? '/settings';
+  return (
+    NAV_ITEMS.find((item) => item.landing !== false && itemVisible(item, granted, profile))?.href ??
+    '/settings'
+  );
 }
 
 /** Whether a route belongs to an item the organization's plan does not offer (D13). */

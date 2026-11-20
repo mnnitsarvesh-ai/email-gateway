@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@email-gateway/archive": "workspace:*",
+    "@email-gateway/assistant": "workspace:*",
     "@email-gateway/ato-detection": "workspace:*",
     "@email-gateway/bec": "workspace:*",
     "@email-gateway/common": "workspace:*",

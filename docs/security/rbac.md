@@ -89,10 +89,12 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `integration:manage`           | Connect, consent, upload credentials, validate and change Microsoft 365 and Google Workspace connections (step 8.2)                      |
 | `journal:read`                 | View journaling settings, journal intake sources and their health (step 8.6; in the read set; category `journaling`)                     |
 | `journal:manage`               | Manage journaling capture settings and journal intake sources (step 8.6; category `journaling`)                                          |
+| `assistant:use`                | Use the AI assistant; tools are limited to the user's own permissions (step AI-1; category `assistant`)                                  |
+| `assistant:configure`          | Enable the AI assistant for the organization, set its budget and retention, view its usage (step AI-1; category `assistant`)             |
 
 Step 8.6 (ADR-0089) also re-scoped `archive:read` to "View archive configuration, retention policies, key versions and status (no records)" (it is in the read set) and exports `ARCHIVE_ACCESS_PERMISSIONS` = `archive:search`, `archive:retrieve`, `archive:export`, `archive:legal_hold`, `archive:manage`, `ediscovery:manage` (the permissions that open archived mail or govern it).
 
-The catalog has **72** permissions (70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
+The catalog has **74** permissions (72 before step AI-1, 70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -190,6 +192,8 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `integration:manage`           |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
 | `journal:read`                 |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |  ✓  |
 | `journal:manage`               |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
+| `assistant:use`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |
+| `assistant:configure`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -587,6 +591,17 @@ Design [25-m365-google-connectors.md](../plan/steps/25-m365-google-connectors.md
 **Role matrix excerpt** (seed catalog): super_admin and organization_admin both; domain_admin both (with its `domain:routing_manage` and `connector:manage` it can run the whole wizard); security_analyst, compliance_auditor, read_only_user and platform_admin `integration:read`; quarantine_reviewer and mailbox_user none.
 
 **Rate limits (D17).** Grant, consent, credential, verification, revocation, disconnect and validation creation are `sensitive`; validation runs are limited to 10 per hour and "check now" to 6 per hour per connection; applies to 30 per minute per principal.
+
+## AI assistant (step AI-1)
+
+Design [28-ai-chat-management.md](../plan/steps/28-ai-chat-management.md) D5, D11, D13 (product-owner decision Q3, 2026-11-20); [ADR-0091](../architecture/adr/0091-assistant-architecture-loopback-tools.md), [ADR-0092](../architecture/adr/0092-llm-provider-abstraction-and-data-handling.md). Two tenant permissions (category `assistant`, not platform-only, not in `TENANT_READ_PERMISSIONS`):
+
+- `assistant:use` opens the chat (conversations, turns, executions, tool list, status). It grants **no data access of its own**: every assistant tool is one existing `/api/v1` operation, filtered before the model sees it by the same predicate as `PermissionsGuard` (`satisfiesRequirement`) and executed through the api's own HTTP pipeline with the user's own bearer token, so `AuthGuard`, `PermissionsGuard`, MFA requirements, tenant scope, rate limits, idempotency and masking apply exactly as in the portal. A user without `quarantine:read` cannot list quarantine through the assistant; a forced call is recorded as `denied_permission` without any request. Conversations are private to their owner (no admin reads another user's conversation; the tool-execution audit trail is visible with `audit:read`). API keys cannot chat (`@UserOnly`), even with the scope.
+- `assistant:configure` governs the organization's assistant setting (`GET/PUT /assistant/settings`: enable with the external-processing acknowledgement, daily token budget, content retention) and reads its usage (`GET /assistant/usage`). It does not grant `assistant:use`.
+
+Gates in order: platform switch `ASSISTANT_ENABLED`, the operator-enabled organization feature `ai_assistant` (off in every plan; `PUT /organizations/{id}/features/ai_assistant`, `platform:organizations`), the tenant setting, then the permission.
+
+**Holders** (seed catalog and the migration `ai_assistant`): `assistant:use` every system role except `mailbox_user` (super_admin and organization_admin through all/tenant permissions, the others explicitly, `platform_admin` included); `assistant:configure` `super_admin` and `organization_admin` only (organization_admin through `TENANT_PERMISSIONS`). Custom roles get them only when an administrator adds them. The migration `20261120141509_ai_assistant` upserts both permissions and grants them with `INSERT IGNORE` (idempotent, grant-preserving: nothing is removed).
 
 ## Custom roles
 

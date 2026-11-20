@@ -439,6 +439,242 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/assistant/conversations': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List your assistant conversations
+     * @description Your own conversations (never another user’s, also not for admins), newest activity first; filters `status` (`active`, `archived`) and `q` (title contains). Deleted conversations are never listed. Under a platform override: the conversations you held in the override’s target organization. v1 list (`assistant_conversations`). From the read replica. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantConversationsController_list_v1'];
+    put?: never;
+    /**
+     * Start an assistant conversation
+     * @description A new, empty conversation (optional `title`; otherwise the first message names it). Needs the assistant available to your organization (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`) and fewer than ASSISTANT_MAX_CONVERSATIONS_PER_USER conversations (`409 assistant_conversation_limit` with `limit`; delete one first). Under a platform override the conversation belongs to the override’s target organization and records the override. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantConversationsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/conversations/{conversationId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an assistant conversation
+     * @description One of your own conversations: title, status, turn count, last activity, when its content is purged and whether it was. Another user’s or organization’s id answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantConversationsController_get_v1'];
+    put?: never;
+    post?: never;
+    /**
+     * Delete an assistant conversation
+     * @description Deletes one of your own conversations: it disappears at once and its content (title, messages, transcripts, result cards) is purged immediately; execution metadata stays for ASSISTANT_EXECUTION_RETENTION_DAYS and the audit trail (`assistant.tool_executed`) per audit retention. Audited `assistant.conversation_deleted`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    delete: operations['AssistantConversationsController_remove_v1'];
+    options?: never;
+    head?: never;
+    /**
+     * Rename or archive an assistant conversation
+     * @description Changes the `title` and/or the `status` (`active`, `archived`) of one of your own conversations. A new turn makes an archived conversation active again. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    patch: operations['AssistantConversationsController_update_v1'];
+    trace?: never;
+  };
+  '/api/v1/assistant/conversations/{conversationId}/messages': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the messages of an assistant conversation
+     * @description Your messages and the assistant’s answers, oldest first, each with its turn (status, error code) and the turn’s tool executions with their result cards (`assistant-card/1`, masked metadata as the API returned it; null after the content purge). v1 list (`assistant_messages`). From the read replica. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantMessagesController_list_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/conversations/{conversationId}/turns': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Ask the AI assistant
+     * @description Runs one turn: your `message` (1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters, `413 payload_too_large` beyond) goes to the configured AI provider with the catalogue of the tools you may use; the model may call tools, each one existing `/api/v1` operation executed with YOUR credential through the api’s own pipeline (same permissions, tenant, MFA, rate limits and audit as the portal; only reads in AI-1), recorded and audited (`assistant.tool_executed` / `assistant.tool_denied`). Limits per turn: ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`, `503 assistant_provider_unavailable`, `429 assistant_budget_exhausted` with `scope`), ASSISTANT_TURNS_PER_USER_PER_MINUTE (`429 rate_limited`), the per-process concurrency (`503 assistant_busy`) and one running turn per conversation (`409 assistant_turn_in_progress`). The same `clientTurnId` again replays a finished turn (`409` while it runs). Rate class `expensive`. With `accept: text/event-stream` the answer is `assistant-stream/1` (Server-Sent Events: `event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started { turnId, conversationId, seq }` (flushed before the first model call), then any interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, `tool.completed { executionId, status, decision, card }` and `tool.denied { executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes `assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, `assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions }` after the turn ended. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantTurnsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/executions/{executionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an assistant tool execution
+     * @description One tool execution of your own conversations: tool, operation, decision, status, HTTP status, error code and the result card (`assistant-card/1`; null for refused calls and after the content purge). Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantExecutionsController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/executions/{executionId}/more': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Load the next page of an assistant result
+     * @description The next page of a list execution WITHOUT a model call: the same tool with the stored parameters and the stored cursor goes through the same permission pre-filter, schema check and loopback as in a turn, recorded and audited as a new execution whose `parentExecutionId` is this one. `409 assistant_no_more_results` when the result has no next page (or its content was purged); `409 assistant_turn_in_progress` while a turn runs in the conversation. Rate class `expensive`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantExecutionsController_more_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/settings': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the AI assistant settings
+     * @description Your organization’s `assistant-settings/1`: `enabled`, the external-processing acknowledgement (who and when), `dailyTokenBudget` (null = the platform default) and the effective budget, the content `retentionDays` (1-365), `dataSharing` (`metadata`), whether the feature `ai_assistant` is on, and the `rowVersion` to send with PUT (0 before the first save). Needs `assistant:configure`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantSettingsController_get_v1'];
+    /**
+     * Update the AI assistant settings
+     * @description Replaces `assistant-settings/1` with `expectedRowVersion` (`409 assistant_settings_conflict` with `currentRowVersion`). Enabling needs `externalProcessingAcknowledged: true` (`400 validation_failed`): your users’ messages and the masked metadata of tool results are processed by the platform’s AI provider; the acknowledging user and time are recorded. Enabling also needs the organization feature `ai_assistant`, which a platform operator turns on (`403 assistant_not_enabled`). `dailyTokenBudget` is at most ASSISTANT_TENANT_DAILY_TOKENS_MAX (`400`). Audited `assistant.settings_updated` (changed field names, never values). Needs `assistant:configure`; rate class `sensitive`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    put: operations['AssistantSettingsController_update_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/status': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the AI assistant status
+     * @description Whether the AI assistant can answer for you now and, if not, why: `platform_disabled` (ASSISTANT_ENABLED off), `feature_disabled` (organization feature `ai_assistant` off), `tenant_disabled` (your organization has not enabled it with the external-processing acknowledgement), `provider_unavailable` (the provider breaker is open) or `budget_exhausted` (the daily token budget of your organization or of the platform is used up). Also the configured provider and model, the message limit, the turns per minute and today’s token use (UTC day). Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantStatusController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/tools': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List your AI assistant tools
+     * @description The tools the assistant may use for you: every enabled tool of the registry (one existing `/api/v1` operation each) whose permission requirement you hold, the `platform:*` tools for platform operators only. `name`, `module`, `title`, `access` and `risk`, with the `registryVersion`. In AI-1 every tool is a read. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantToolsController_list_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/turns/{turnId}/cancel': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Cancel a running assistant turn
+     * @description Stops one of your own running turns: the model call and pending tool calls are aborted and the turn ends `cancelled` with the partial text. Idempotent: a finished turn answers with its status. Another user’s or organization’s turn answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantTurnsController_cancel_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/usage': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the AI assistant usage
+     * @description Your organization’s assistant use per UTC day, provider and model between `from` and `to` (YYYY-MM-DD, inclusive, at most 92 days; default the last 30 days): turns, input, output, cache read and cache write tokens and the advisory cost in micro-USD (`null` for a model without a price), with totals. Needs `assistant:configure`. From the read replica. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantUsageController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/ato/accounts': {
     parameters: {
       query?: never;
@@ -12086,6 +12322,3001 @@ export interface operations {
         };
       };
       /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConversationsController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description Title contains (case-insensitive), at most 100 characters */
+        q?: string;
+        /** @description `-lastTurnAt` (newest activity first) */
+        sort?: '-lastTurnAt';
+        /** @description `active`, `archived`; comma list (default both; deleted conversations are never listed) */
+        status?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              contentPurged: boolean;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              lastTurnAt: string | null;
+              /**
+               * Format: date-time
+               * @description When the content (title, messages, cards) is purged
+               */
+              purgeAfter: string | null;
+              rowVersion: number;
+              /** @enum {string} */
+              status: 'active' | 'archived';
+              title: string | null;
+              turnCount: number;
+              underPlatformOverride: boolean;
+              /** Format: date-time */
+              updatedAt: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConversationsController_create_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          title?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The new conversation */
+      201: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            contentPurged: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            lastTurnAt: string | null;
+            /**
+             * Format: date-time
+             * @description When the content (title, messages, cards) is purged
+             */
+            purgeAfter: string | null;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'archived';
+            title: string | null;
+            turnCount: number;
+            underPlatformOverride: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`) or the organization turned the assistant off (`assistant_tenant_disabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'mfa_enrollment_required'
+              | 'assistant_not_enabled'
+              | 'assistant_tenant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description You have the maximum number of conversations */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_limit';
+            correlationId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`); the AI assistant is off on this platform (`assistant_disabled`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable' | 'assistant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConversationsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Conversation public id (UUID) */
+        conversationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The conversation */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            contentPurged: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            lastTurnAt: string | null;
+            /**
+             * Format: date-time
+             * @description When the content (title, messages, cards) is purged
+             */
+            purgeAfter: string | null;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'archived';
+            title: string | null;
+            turnCount: number;
+            underPlatformOverride: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown conversation, one of another user or organization, or a deleted one */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConversationsController_remove_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Conversation public id (UUID) */
+        conversationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Deleted and purged */
+      204: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown conversation, one of another user or organization, or a deleted one */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConversationsController_update_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Conversation public id (UUID) */
+        conversationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          status?: 'active' | 'archived';
+          title?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The updated conversation */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            contentPurged: boolean;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            lastTurnAt: string | null;
+            /**
+             * Format: date-time
+             * @description When the content (title, messages, cards) is purged
+             */
+            purgeAfter: string | null;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'active' | 'archived';
+            title: string | null;
+            turnCount: number;
+            underPlatformOverride: boolean;
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown conversation, one of another user or organization, or a deleted one */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantMessagesController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `seq` (oldest first) */
+        sort?: 'seq';
+      };
+      header?: never;
+      path: {
+        /** @description Conversation public id (UUID) */
+        conversationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of messages */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @description null after the content purge */
+              content: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** @description The turn’s tool executions (and their "more" pages) on its assistant message, or on the user message when the turn has no assistant message (failed or running) */
+              executions: {
+                /** @enum {string} */
+                access: 'read' | 'write';
+                /** @description null for refused calls and after the content purge */
+                card: {
+                  columns?: {
+                    key: string;
+                    label: string;
+                  }[];
+                  error?: {
+                    code: string;
+                    httpStatus: number;
+                    message: string;
+                  };
+                  /** Format: uuid */
+                  executionId: string;
+                  fields?: {
+                    key: string;
+                    label: string;
+                    value: string | number | boolean | null;
+                  }[];
+                  /** @enum {string} */
+                  kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                  message?: string;
+                  /** @description A next page exists (POST …/more) */
+                  nextCursor?: boolean;
+                  portalLinks: {
+                    href: string;
+                    label: string;
+                    ref?: string;
+                  }[];
+                  refs: string[];
+                  rows?: {
+                    [key: string]: string | number | boolean | null;
+                  }[];
+                  series?: {
+                    series: {
+                      name: string;
+                      values: (number | null)[];
+                    }[];
+                    x: string[];
+                  };
+                  /** @enum {string} */
+                  status: 'ok' | 'error';
+                  title: string;
+                  tool: string;
+                  total?: number;
+                  truncated?: boolean;
+                  /** @enum {string} */
+                  version: 'assistant-card/1';
+                } | null;
+                /** Format: uuid */
+                conversationId: string;
+                /** Format: date-time */
+                createdAt: string;
+                /** @enum {string} */
+                decision:
+                  | 'allowed'
+                  | 'denied_permission'
+                  | 'denied_unknown_tool'
+                  | 'denied_disabled'
+                  | 'denied_not_applicable'
+                  | 'denied_schema'
+                  | 'denied_ref'
+                  | 'denied_budget';
+                errorCode: string | null;
+                hasMore: boolean;
+                httpStatus: number | null;
+                /** Format: uuid */
+                id: string;
+                latencyMs: number | null;
+                operationId: string;
+                /** Format: uuid */
+                parentExecutionId: string | null;
+                /** @description `r<seq>`: how the assistant refers to this result */
+                ref: string;
+                /** @enum {string} */
+                risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+                seq: number;
+                /** @enum {string} */
+                status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+                tool: string;
+                /**
+                 * Format: uuid
+                 * @description null for a "more" page
+                 */
+                turnId: string | null;
+              }[];
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              role: 'user' | 'assistant';
+              seq: number;
+              turn: {
+                errorCode: string | null;
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                status: 'running' | 'completed' | 'failed' | 'cancelled';
+              };
+              /** Format: uuid */
+              turnId: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown conversation, one of another user or organization, or a deleted one */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantTurnsController_create_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Conversation public id (UUID) */
+        conversationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /**
+           * Format: uuid
+           * @description A UUID chosen by the client; a retried POST with the same id replays the turn
+           */
+          clientTurnId: string;
+          /** @description The question, 1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters (413 beyond) */
+          message: string;
+          /** @description The browser’s IANA time zone, for relative dates */
+          timeZone?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The finished turn (JSON) or the event stream (`text/event-stream`) */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            executions: {
+              /** @enum {string} */
+              access: 'read' | 'write';
+              /** @description null for refused calls and after the content purge */
+              card: {
+                columns?: {
+                  key: string;
+                  label: string;
+                }[];
+                error?: {
+                  code: string;
+                  httpStatus: number;
+                  message: string;
+                };
+                /** Format: uuid */
+                executionId: string;
+                fields?: {
+                  key: string;
+                  label: string;
+                  value: string | number | boolean | null;
+                }[];
+                /** @enum {string} */
+                kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                message?: string;
+                /** @description A next page exists (POST …/more) */
+                nextCursor?: boolean;
+                portalLinks: {
+                  href: string;
+                  label: string;
+                  ref?: string;
+                }[];
+                refs: string[];
+                rows?: {
+                  [key: string]: string | number | boolean | null;
+                }[];
+                series?: {
+                  series: {
+                    name: string;
+                    values: (number | null)[];
+                  }[];
+                  x: string[];
+                };
+                /** @enum {string} */
+                status: 'ok' | 'error';
+                title: string;
+                tool: string;
+                total?: number;
+                truncated?: boolean;
+                /** @enum {string} */
+                version: 'assistant-card/1';
+              } | null;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** @enum {string} */
+              decision:
+                | 'allowed'
+                | 'denied_permission'
+                | 'denied_unknown_tool'
+                | 'denied_disabled'
+                | 'denied_not_applicable'
+                | 'denied_schema'
+                | 'denied_ref'
+                | 'denied_budget';
+              errorCode: string | null;
+              hasMore: boolean;
+              httpStatus: number | null;
+              /** Format: uuid */
+              id: string;
+              latencyMs: number | null;
+              operationId: string;
+              /** Format: uuid */
+              parentExecutionId: string | null;
+              /** @description `r<seq>`: how the assistant refers to this result */
+              ref: string;
+              /** @enum {string} */
+              risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+              seq: number;
+              /** @enum {string} */
+              status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+              tool: string;
+              /**
+               * Format: uuid
+               * @description null for a "more" page
+               */
+              turnId: string | null;
+            }[];
+            /** @description The assistant message (null when the turn failed) */
+            message: {
+              /** @description null after the content purge */
+              content: string | null;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              role: 'user' | 'assistant';
+              seq: number;
+              /** Format: uuid */
+              turnId: string;
+            } | null;
+            turn: {
+              /** Format: uuid */
+              conversationId: string;
+              errorCode: string | null;
+              /** Format: date-time */
+              finishedAt: string | null;
+              /** Format: uuid */
+              id: string;
+              latencyMs: number | null;
+              model: string;
+              provider: string;
+              responseModel: string | null;
+              rounds: number;
+              seq: number;
+              /** Format: date-time */
+              startedAt: string;
+              /** @enum {string} */
+              status: 'running' | 'completed' | 'failed' | 'cancelled';
+              toolCalls: number;
+              usage: {
+                cacheReadTokens: number;
+                cacheWriteTokens: number;
+                inputTokens: number;
+                outputTokens: number;
+              };
+            };
+          };
+          'text/event-stream': string;
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`) or the organization turned the assistant off (`assistant_tenant_disabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'mfa_enrollment_required'
+              | 'assistant_not_enabled'
+              | 'assistant_tenant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown conversation, one of another user or organization, or a deleted one */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_conversation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Another turn runs in this conversation, or this `clientTurnId` is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_turn_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The message is longer than ASSISTANT_USER_MESSAGE_MAX_CHARS */
+      413: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            limit?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
+      /** @description Too many turns this minute (`rate_limited`, `scope: route` or a rate-class scope) or the daily token budget is used up (`assistant_budget_exhausted`, `scope: tenant | platform`) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited' | 'assistant_budget_exhausted';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            scope?: string;
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`); the assistant is off on this platform (`assistant_disabled`), the provider is unavailable (`assistant_provider_unavailable`) or this api process is busy (`assistant_busy`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'inconsistent_read'
+              | 'service_unavailable'
+              | 'assistant_disabled'
+              | 'assistant_provider_unavailable'
+              | 'assistant_busy';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantExecutionsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Tool execution public id (UUID) */
+        executionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The execution */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            access: 'read' | 'write';
+            /** @description null for refused calls and after the content purge */
+            card: {
+              columns?: {
+                key: string;
+                label: string;
+              }[];
+              error?: {
+                code: string;
+                httpStatus: number;
+                message: string;
+              };
+              /** Format: uuid */
+              executionId: string;
+              fields?: {
+                key: string;
+                label: string;
+                value: string | number | boolean | null;
+              }[];
+              /** @enum {string} */
+              kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+              message?: string;
+              /** @description A next page exists (POST …/more) */
+              nextCursor?: boolean;
+              portalLinks: {
+                href: string;
+                label: string;
+                ref?: string;
+              }[];
+              refs: string[];
+              rows?: {
+                [key: string]: string | number | boolean | null;
+              }[];
+              series?: {
+                series: {
+                  name: string;
+                  values: (number | null)[];
+                }[];
+                x: string[];
+              };
+              /** @enum {string} */
+              status: 'ok' | 'error';
+              title: string;
+              tool: string;
+              total?: number;
+              truncated?: boolean;
+              /** @enum {string} */
+              version: 'assistant-card/1';
+            } | null;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            decision:
+              | 'allowed'
+              | 'denied_permission'
+              | 'denied_unknown_tool'
+              | 'denied_disabled'
+              | 'denied_not_applicable'
+              | 'denied_schema'
+              | 'denied_ref'
+              | 'denied_budget';
+            errorCode: string | null;
+            hasMore: boolean;
+            httpStatus: number | null;
+            /** Format: uuid */
+            id: string;
+            latencyMs: number | null;
+            operationId: string;
+            /** Format: uuid */
+            parentExecutionId: string | null;
+            /** @description `r<seq>`: how the assistant refers to this result */
+            ref: string;
+            /** @enum {string} */
+            risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+            seq: number;
+            /** @enum {string} */
+            status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+            tool: string;
+            /**
+             * Format: uuid
+             * @description null for a "more" page
+             */
+            turnId: string | null;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown execution, or one of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_execution_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantExecutionsController_more_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Tool execution public id (UUID) */
+        executionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The new execution with the next page */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            access: 'read' | 'write';
+            /** @description null for refused calls and after the content purge */
+            card: {
+              columns?: {
+                key: string;
+                label: string;
+              }[];
+              error?: {
+                code: string;
+                httpStatus: number;
+                message: string;
+              };
+              /** Format: uuid */
+              executionId: string;
+              fields?: {
+                key: string;
+                label: string;
+                value: string | number | boolean | null;
+              }[];
+              /** @enum {string} */
+              kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+              message?: string;
+              /** @description A next page exists (POST …/more) */
+              nextCursor?: boolean;
+              portalLinks: {
+                href: string;
+                label: string;
+                ref?: string;
+              }[];
+              refs: string[];
+              rows?: {
+                [key: string]: string | number | boolean | null;
+              }[];
+              series?: {
+                series: {
+                  name: string;
+                  values: (number | null)[];
+                }[];
+                x: string[];
+              };
+              /** @enum {string} */
+              status: 'ok' | 'error';
+              title: string;
+              tool: string;
+              total?: number;
+              truncated?: boolean;
+              /** @enum {string} */
+              version: 'assistant-card/1';
+            } | null;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string} */
+            decision:
+              | 'allowed'
+              | 'denied_permission'
+              | 'denied_unknown_tool'
+              | 'denied_disabled'
+              | 'denied_not_applicable'
+              | 'denied_schema'
+              | 'denied_ref'
+              | 'denied_budget';
+            errorCode: string | null;
+            hasMore: boolean;
+            httpStatus: number | null;
+            /** Format: uuid */
+            id: string;
+            latencyMs: number | null;
+            operationId: string;
+            /** Format: uuid */
+            parentExecutionId: string | null;
+            /** @description `r<seq>`: how the assistant refers to this result */
+            ref: string;
+            /** @enum {string} */
+            risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+            seq: number;
+            /** @enum {string} */
+            status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+            tool: string;
+            /**
+             * Format: uuid
+             * @description null for a "more" page
+             */
+            turnId: string | null;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`) or the organization turned the assistant off (`assistant_tenant_disabled`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'mfa_enrollment_required'
+              | 'assistant_not_enabled'
+              | 'assistant_tenant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown execution, or one of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_execution_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description No next page, or a turn runs in the conversation */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_no_more_results' | 'assistant_turn_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`); the assistant is off on this platform (`assistant_disabled`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable' | 'assistant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantSettingsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The assistant settings */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description null = the platform default (ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT) */
+            dailyTokenBudget: number | null;
+            /** @enum {string} */
+            dataSharing: 'metadata';
+            effectiveDailyTokenBudget: number;
+            enabled: boolean;
+            externalProcessingAcknowledged: boolean;
+            /** Format: date-time */
+            externalProcessingAcknowledgedAt: string | null;
+            /** @description Public id of the user who acknowledged the external processing */
+            externalProcessingAcknowledgedBy: string | null;
+            /** @description Whether the organization feature `ai_assistant` is on */
+            featureEnabled: boolean;
+            retentionDays: number;
+            /** @description 0 when the settings were never saved */
+            rowVersion: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+            /** @enum {string} */
+            version: 'assistant-settings/1';
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantSettingsController_update_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Tokens per UTC day (≤ ASSISTANT_TENANT_DAILY_TOKENS_MAX); null = platform default */
+          dailyTokenBudget: number | null;
+          /**
+           * @default metadata
+           * @enum {string}
+           */
+          dataSharing?: 'metadata';
+          enabled: boolean;
+          /** @description `rowVersion` of the settings you read (0 before the first save) */
+          expectedRowVersion: number;
+          /** @description Must be true to enable: user text and masked metadata go to the AI provider */
+          externalProcessingAcknowledged: boolean;
+          /** @description Content retention after the last turn */
+          retentionDays: number;
+        };
+      };
+    };
+    responses: {
+      /** @description The updated settings */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description null = the platform default (ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT) */
+            dailyTokenBudget: number | null;
+            /** @enum {string} */
+            dataSharing: 'metadata';
+            effectiveDailyTokenBudget: number;
+            enabled: boolean;
+            externalProcessingAcknowledged: boolean;
+            /** Format: date-time */
+            externalProcessingAcknowledgedAt: string | null;
+            /** @description Public id of the user who acknowledged the external processing */
+            externalProcessingAcknowledgedBy: string | null;
+            /** @description Whether the organization feature `ai_assistant` is on */
+            featureEnabled: boolean;
+            retentionDays: number;
+            /** @description 0 when the settings were never saved */
+            rowVersion: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+            /** @enum {string} */
+            version: 'assistant-settings/1';
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), `assistant_not_enabled` when enabling without the feature `ai_assistant` */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              'forbidden' | 'user_required' | 'mfa_enrollment_required' | 'assistant_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description `expectedRowVersion` is not the stored version (`currentRowVersion` given) */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_settings_conflict';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantStatusController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The assistant status */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            available: boolean;
+            budget: {
+              /** @description The organization’s daily token budget (UTC day) */
+              dailyTokens: number;
+              usedToday: number;
+            };
+            limits: {
+              messageMaxChars: number;
+              turnsPerMinute: number;
+            };
+            model: string;
+            /** @description Configured provider: anthropic, openai, azure_openai or fake */
+            provider: string;
+            /**
+             * @description Why the assistant is not available (absent when available)
+             * @enum {string}
+             */
+            reason?:
+              | 'platform_disabled'
+              | 'feature_disabled'
+              | 'tenant_disabled'
+              | 'provider_unavailable'
+              | 'budget_exhausted';
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantToolsController_list_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Your enabled tools */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            registryVersion: string;
+            tools: {
+              /** @enum {string} */
+              access: 'read' | 'write';
+              module: string;
+              name: string;
+              /** @enum {string} */
+              risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+              title: string;
+            }[];
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A dependency is unavailable (service_unavailable or a specific code) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  AssistantTurnsController_cancel_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Turn public id (UUID) */
+        turnId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Cancellation requested */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            status: 'running' | 'completed' | 'failed' | 'cancelled';
+            /** Format: uuid */
+            turnId: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown turn, or one of another user or organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_turn_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantUsageController_get_v1: {
+    parameters: {
+      query?: {
+        /** @description First UTC day (YYYY-MM-DD) */
+        from?: string;
+        /** @description Last UTC day (YYYY-MM-DD) */
+        to?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Usage per day and model */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date */
+            from: string;
+            rows: {
+              cacheReadTokens: number;
+              cacheWriteTokens: number;
+              /** @description Advisory cost in micro-USD; null = no price */
+              costMicros: number | null;
+              /** Format: date */
+              day: string;
+              inputTokens: number;
+              model: string;
+              outputTokens: number;
+              provider: string;
+              turns: number;
+            }[];
+            /** Format: date */
+            to: string;
+            totals: {
+              cacheReadTokens: number;
+              cacheWriteTokens: number;
+              costMicros: number | null;
+              inputTokens: number;
+              outputTokens: number;
+              turns: number;
+            };
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
       503: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -63145,7 +66376,8 @@ export interface operations {
           | 'sso'
           | 'webhooks'
           | 'ato_detection'
-          | 'journal_intake';
+          | 'journal_intake'
+          | 'ai_assistant';
         /** @description Organization public id */
         id: string;
       };
@@ -63343,7 +66575,8 @@ export interface operations {
           | 'sso'
           | 'webhooks'
           | 'ato_detection'
-          | 'journal_intake';
+          | 'journal_intake'
+          | 'ai_assistant';
         /** @description Organization public id */
         id: string;
       };

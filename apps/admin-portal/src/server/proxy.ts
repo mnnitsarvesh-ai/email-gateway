@@ -35,6 +35,11 @@ export const PASSED_RESPONSE_HEADERS = [
   'x-eg-index-lag-seconds',
 ] as const;
 
+/** Whether a response is a Server-Sent Events stream (`text/event-stream`). */
+export function isEventStream(contentType: string | null): boolean {
+  return (contentType ?? '').split(';')[0]?.trim().toLowerCase() === 'text/event-stream';
+}
+
 function rawApiPath(url: URL): string | null {
   // Keep the raw (percent-encoded) pathname: decoding first would hide %2F and friends.
   const pathname = url.pathname;
@@ -154,6 +159,13 @@ export async function handleProxy(request: Request, deps: BffDeps): Promise<Resp
     if (value !== null) headers.set(name, value);
   }
   if (!headers.has('x-correlation-id')) headers.set('x-correlation-id', correlationId);
+  if (isEventStream(upstream.headers.get('content-type'))) {
+    // Step AI-1 (D14): an assistant turn streams Server-Sent Events. `no-transform` keeps the
+    // Next server's response compression (which buffers) and any intermediary from holding the
+    // stream back; `x-accel-buffering: no` does the same for an nginx ingress.
+    headers.set('cache-control', 'no-store, no-transform');
+    headers.set('x-accel-buffering', 'no');
+  }
   const noBody = upstream.status === 204 || upstream.status === 304 || method === 'HEAD';
   return new Response(noBody ? null : upstream.body, { status: upstream.status, headers });
 }

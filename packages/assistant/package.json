@@ -1,0 +1,30 @@
+{
+  "name": "@email-gateway/assistant",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "prompts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src scripts",
+    "test": "vitest run && tsx scripts/generate-registry.ts --check",
+    "test:integration": "echo 'no infrastructure suites in @email-gateway/assistant (unit + registry:check run in test)'",
+    "registry:generate": "tsx scripts/generate-registry.ts",
+    "registry:check": "tsx scripts/generate-registry.ts --check"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.1.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "prettier": "^3.6.2"
+  }
+}

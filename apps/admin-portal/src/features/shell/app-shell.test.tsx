@@ -26,6 +26,15 @@ describe('AppShell (design P11)', () => {
     mockApi({
       AtoOverviewController_attention_v1: () =>
         okJson({ criticalIncidents: 0, pendingApprovals: 0 }),
+      // Step AI-1 (D14): the shell asks whether the "Ask AI" entry is available.
+      AssistantStatusController_get_v1: () =>
+        okJson({
+          available: true,
+          provider: 'fake',
+          model: 'fake-model',
+          limits: { messageMaxChars: 4000, turnsPerMinute: 6 },
+          budget: { dailyTokens: 1000000, usedToday: 0 },
+        }),
     });
   });
 
@@ -398,6 +407,21 @@ describe('PlatformHealthCard', () => {
 });
 
 describe('override form contract', () => {
+  // Step AI-1 (D14): every shell render asks for the assistant status (assistant:use holders).
+  beforeEach(() => {
+    mockApi({
+      AssistantStatusController_get_v1: () =>
+        okJson({
+          available: false,
+          reason: 'platform_disabled',
+          provider: 'fake',
+          model: 'fake-model',
+          limits: { messageMaxChars: 4000, turnsPerMinute: 6 },
+          budget: { dailyTokens: 0, usedToday: 0 },
+        }),
+    });
+  });
+
   it('produces a body that matches POST /platform/overrides', () => {
     const parsed = overrideFormSchema.parse({
       organizationId: '01930000-0000-7000-8000-0000000000e1',
@@ -414,6 +438,15 @@ describe('override form contract', () => {
     mockApi({
       AtoOverviewController_attention_v1: () =>
         okJson({ criticalIncidents: 2, pendingApprovals: 1 }),
+      // Step AI-1 (D14): the shell asks whether the "Ask AI" entry is available.
+      AssistantStatusController_get_v1: () =>
+        okJson({
+          available: true,
+          provider: 'fake',
+          model: 'fake-model',
+          limits: { messageMaxChars: 4000, turnsPerMinute: 6 },
+          budget: { dailyTokens: 1000000, usedToday: 0 },
+        }),
     });
     const { container } = renderWithProviders(<AppShell>{page}</AppShell>, {
       role: 'security_analyst',

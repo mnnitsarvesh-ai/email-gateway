@@ -553,6 +553,18 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'Gmail, customer certificate credentials, automatic outbound suspension on health.',
   },
   {
+    name: 'assistant',
+    description:
+      'Step AI-1: the AI assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091–0094). ' +
+      'Status, organization settings (enable with the external-processing acknowledgement, ' +
+      'daily token budget, content retention), usage, your tool catalogue, your conversations ' +
+      'and messages, turns answered as JSON or as the `assistant-stream/1` event stream, ' +
+      'cancellation, stored tool executions and their next pages. Every tool is an existing ' +
+      '`/api/v1` operation executed with your own credential through this API (same ' +
+      'permissions, tenant, MFA, rate limits and audit as the portal); AI-1 tools are reads ' +
+      'only. Users only; these routes are never tools themselves.',
+  },
+  {
     name: 'platform',
     description:
       'Platform staff only: overrides (1.3), dead letters (3.2), scan training (4.1), threat ' +

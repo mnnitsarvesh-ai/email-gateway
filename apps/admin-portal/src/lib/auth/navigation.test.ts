@@ -53,7 +53,25 @@ describe('navigation model (design P11)', () => {
     // row 20 (Integrations) gained `integration:read` in step 8.2 (provider connections).
     const changedLater = new Set([20]);
     const fromInventory = (n: number) => n > 22 || changedLater.has(n);
+    // Step AI-1: the /assistant row is added to docs/frontend/page-inventory.md by the step's
+    // documentation package; until it exists the design note's gate (D14) is the reference.
+    const pendingInventory: Record<string, string[]> = { '/assistant': ['assistant:use'] };
     for (const item of NAV_ITEMS) {
+      const documented =
+        inventoryRows.some((r) => (cells(r)[2] ?? '').includes(`\`${item.href}\``)) ||
+        rows.some((r) => (cells(r)[2] ?? '').includes(`(\`${item.href}\``));
+      const pending = pendingInventory[item.href];
+      if (!documented && pending && item.gate !== 'authenticated') {
+        const actual = [
+          ...new Set(
+            item.gate.flatMap(
+              (op) => operations[op].permissions?.flatMap((r) => r.permissions) ?? [],
+            ),
+          ),
+        ].sort();
+        expect(actual, item.href).toEqual(pending);
+        continue;
+      }
       const row =
         inventoryRows.find(
           (r) =>
@@ -87,6 +105,7 @@ describe('navigation model (design P11)', () => {
     super_admin: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -118,6 +137,7 @@ describe('navigation model (design P11)', () => {
     platform_admin: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -145,6 +165,7 @@ describe('navigation model (design P11)', () => {
     organization_admin: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -172,6 +193,7 @@ describe('navigation model (design P11)', () => {
     domain_admin: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -189,6 +211,7 @@ describe('navigation model (design P11)', () => {
     security_analyst: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -216,6 +239,7 @@ describe('navigation model (design P11)', () => {
     quarantine_reviewer: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -228,6 +252,7 @@ describe('navigation model (design P11)', () => {
     compliance_auditor: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -258,6 +283,7 @@ describe('navigation model (design P11)', () => {
     read_only_user: [
       'dashboard',
       'reports',
+      'assistant',
       'messages',
       'quarantine',
       'mail-servers',
@@ -278,6 +304,7 @@ describe('navigation model (design P11)', () => {
     compliance_officer: [
       'dashboard',
       'reports',
+      'assistant',
       'mail-servers',
       'url-protection',
       'archive',
@@ -303,6 +330,11 @@ describe('navigation model (design P11)', () => {
 
   it('sends each role to its first permitted page', () => {
     expect(firstPermittedHref(ROLE_PERMISSIONS.organization_admin)).toBe('/dashboard');
+    // Step AI-1: the assistant is never a landing page.
+    expect(firstPermittedHref(['assistant:use'])).toBe('/settings');
+    expect(firstPermittedHref(ROLE_PERMISSIONS.read_only_user, 'archive_only')).not.toBe(
+      '/assistant',
+    );
     expect(firstPermittedHref(ROLE_PERMISSIONS.mailbox_user)).toBe('/quarantine');
     expect(firstPermittedHref([])).toBe('/settings');
   });

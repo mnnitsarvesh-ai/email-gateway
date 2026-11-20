@@ -46,7 +46,11 @@
  * keyed without a class (`KEYED_8_2`; the apply and the per-connection routes have their own
  * limits). Step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6) adds the 13 identity-provider
  * and mailbox state operations (`NEW_IN_8_5`, examples required, no paged list, the ato-providers
- * manifest): 8 transactional keyed mutations (`sensitive`).
+ * manifest): 8 transactional keyed mutations (`sensitive`). Step 8.6 adds the 12 journaling
+ * operations (`NEW_IN_8_6`). Step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1) adds the 15
+ * assistant operations (`NEW_IN_AI_1`, examples required, both lists v1, the assistant manifest):
+ * no keyed route, the settings update `sensitive` (`SENSITIVE_UNKEYED_AI_1`), turns and "more"
+ * pages `expensive`.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -493,6 +497,31 @@ const NEW_IN_8_6 = [
   'post /api/v1/journaling/intake-sources/:sourceId/attestations',
 ];
 
+/**
+ * Step AI-1 §4.1 (docs/plan/steps/28-ai-chat-management.md): the 15 assistant operations
+ * (examples required, two v1 lists, exactly the assistant manifest).
+ */
+const NEW_IN_AI_1 = [
+  'get /api/v1/assistant/status',
+  'get /api/v1/assistant/settings',
+  'put /api/v1/assistant/settings',
+  'get /api/v1/assistant/usage',
+  'get /api/v1/assistant/tools',
+  'get /api/v1/assistant/conversations',
+  'post /api/v1/assistant/conversations',
+  'get /api/v1/assistant/conversations/:conversationId',
+  'patch /api/v1/assistant/conversations/:conversationId',
+  'delete /api/v1/assistant/conversations/:conversationId',
+  'get /api/v1/assistant/conversations/:conversationId/messages',
+  'post /api/v1/assistant/conversations/:conversationId/turns',
+  'post /api/v1/assistant/turns/:turnId/cancel',
+  'get /api/v1/assistant/executions/:executionId',
+  'post /api/v1/assistant/executions/:executionId/more',
+];
+
+/** Step AI-1: the settings update is `sensitive` without an Idempotency-Key (CAS on rowVersion). */
+const SENSITIVE_UNKEYED_AI_1 = ['put /api/v1/assistant/settings'];
+
 const NEW_IN_8_5 = [
   'get /api/v1/ato/providers',
   'get /api/v1/ato/providers/requirements',
@@ -548,6 +577,9 @@ const EXPENSIVE = [
   // Step 8.4 §5: the ATO overview and the incident report.
   'get /api/v1/ato/overview',
   'get /api/v1/incidents/:incidentId/report',
+  // Step AI-1 §4.1: an assistant turn and the next page of a result (loopback calls count too).
+  'post /api/v1/assistant/conversations/:conversationId/turns',
+  'post /api/v1/assistant/executions/:executionId/more',
 ];
 
 /**
@@ -728,8 +760,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // and eDiscovery operations of step 8.1, plus the 26 account takeover and 8 security incident
     // operations of step 8.4, plus the 24 provider-connection operations of step 8.2, plus the 13
     // identity-provider and mailbox state operations of step 8.5, plus the 12 journaling
-    // operations of step 8.6.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(403);
+    // operations of step 8.6, plus the 15 assistant operations of step AI-1.
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(418);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -824,7 +856,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5 and 8.6 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5, 8.6 and AI-1 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -837,6 +869,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_8_2,
       ...NEW_IN_8_5,
       ...NEW_IN_8_6,
+      ...NEW_IN_AI_1,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -908,6 +941,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
+    // NEW_IN_AI_1 is exactly the step AI-1 assistant manifest (15 operations).
+    expect(COVERAGE_BY_AREA.assistant.map((c) => c.route).sort()).toEqual([...NEW_IN_AI_1].sort());
+    expect(NEW_IN_AI_1).toHaveLength(15);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -929,6 +965,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_8_2.includes(route), route).toBe(false);
       expect(NEW_IN_8_5.includes(route), route).toBe(false);
       expect(NEW_IN_8_6.includes(route), route).toBe(false);
+      expect(NEW_IN_AI_1.includes(route), route).toBe(false);
     }
   });
 
@@ -981,7 +1018,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_8_4.includes(key) ||
           NEW_IN_8_2.includes(key) ||
           NEW_IN_8_5.includes(key) ||
-          NEW_IN_8_6.includes(key)) &&
+          NEW_IN_8_6.includes(key) ||
+          NEW_IN_AI_1.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -995,8 +1033,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
     // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
     // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
-    // sources list of 8.6 are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 36 });
+    // sources list of 8.6 and the 2 of AI-1 (conversations, messages) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 38 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1121,6 +1159,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           ...SECRET_BEARING,
           ...SECRET_BEARING_REDACTED_REPLAY,
           ...SENSITIVE_UNKEYED_8_6,
+          ...SENSITIVE_UNKEYED_AI_1,
         ]),
       ].sort(),
     );

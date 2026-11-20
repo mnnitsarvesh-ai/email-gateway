@@ -56,6 +56,8 @@ export interface NavGate {
   gate: string[] | 'any';
   requires?: string[];
   gatewayOnly?: boolean;
+  /** `false`: never the landing page of `/` (step AI-1: the AI assistant). */
+  landing?: false;
 }
 
 export const NAV_GATES: ReadonlyArray<NavGate> = [
@@ -66,6 +68,13 @@ export const NAV_GATES: ReadonlyArray<NavGate> = [
     gate: ['ReportsController_traffic_v1'],
   },
   { gatewayOnly: true, label: 'Reports', href: '/reports', gate: ['ReportsController_traffic_v1'] },
+  // Step AI-1 (D14): the full-screen AI assistant (both service profiles; never the landing page).
+  {
+    label: 'AI assistant',
+    href: '/assistant',
+    gate: ['AssistantConversationsController_list_v1'],
+    landing: false,
+  },
   {
     gatewayOnly: true,
     label: 'Email explorer',

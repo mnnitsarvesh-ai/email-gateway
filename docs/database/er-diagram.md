@@ -95,6 +95,11 @@ flowchart LR
     provider_health[provider_validation_runs, provider_probe_observations, provider_health_checks, provider_health_events, provider_relay_counters]
     provider_egress[provider_egress_range_sets, provider_egress_ranges]
   end
+  subgraph assistant[AI assistant]
+    ai_chat_settings
+    ai_chat_conversations[ai_chat_conversations, ai_chat_turns, ai_chat_messages, ai_chat_tool_executions]
+    ai_chat_usage_daily
+  end
   subgraph ops[Platform operations]
     message_outbox[(message_outbox P)]
     audit_logs[(audit_logs P)]
@@ -172,6 +177,11 @@ flowchart LR
   webhook_subscriptions -.-> webhook_deliveries
   webhook_events -.-> webhook_deliveries
   organizations --> notification_settings
+  organizations --> ai_chat_settings
+  organizations --> ai_chat_conversations
+  users --> ai_chat_conversations
+  organizations --> ai_chat_usage_daily
+  ai_chat_conversations -.-> audit_logs
 ```
 
 Solid arrows are foreign keys, dotted arrows are logical references. Cylinders (`P`) are partitioned tables.
@@ -1567,6 +1577,81 @@ erDiagram
     bigint id PK
     enum auth_type "+ provider_relay (8.2)"
     bigint provider_connection_id FK,UK
+  }
+```
+
+## AI assistant
+
+Step AI-1 ([design §3](../plan/steps/28-ai-chat-management.md#3-data-model-migration-ai_assistant-ai-1-wp1), ADR-0094). Not partitioned. Every table references `organizations` (RESTRICT; the organization purge deletes them explicitly); a conversation belongs to one user (CASCADE, private data) and its turns, messages and tool executions cascade from it. Dotted lines are logical references (no FK). No email body or attachment is stored.
+
+```mermaid
+erDiagram
+  organizations ||--o| ai_chat_settings : "RESTRICT"
+  organizations ||--o{ ai_chat_conversations : "RESTRICT"
+  users ||--o{ ai_chat_conversations : "CASCADE"
+  ai_chat_conversations ||--o{ ai_chat_turns : "CASCADE"
+  ai_chat_conversations ||--o{ ai_chat_messages : "CASCADE"
+  ai_chat_turns ||--o{ ai_chat_messages : "CASCADE"
+  ai_chat_conversations ||--o{ ai_chat_tool_executions : "CASCADE"
+  ai_chat_turns |o--o{ ai_chat_tool_executions : "CASCADE (NULL for more)"
+  ai_chat_tool_executions |o..o{ ai_chat_tool_executions : "parent_execution_id, no FK"
+  ai_chat_tool_executions ||..o{ audit_logs : "correlation_id, resource id"
+  organizations ||--o{ ai_chat_usage_daily : "RESTRICT"
+  ai_chat_settings {
+    bigint organization_id PK
+    bool enabled
+    datetime external_processing_ack_at
+    int daily_token_budget "NULL = platform default"
+    smallint retention_days "1-365"
+    enum data_sharing "metadata"
+    int row_version
+  }
+  ai_chat_conversations {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint user_id FK
+    char platform_override_id "no FK"
+    varchar title "content, purged"
+    enum status "active, archived, deleted"
+    datetime last_turn_at
+    datetime purge_after
+  }
+  ai_chat_turns {
+    bigint id PK
+    char public_id UK
+    bigint conversation_id FK "UQ with seq, UQ with client_turn_id"
+    bigint organization_id FK
+    bigint user_id "no FK"
+    enum status "running, completed, failed, cancelled"
+    mediumtext provider_transcript "content, purged"
+  }
+  ai_chat_messages {
+    bigint id PK
+    char public_id UK
+    bigint conversation_id FK "UQ with seq"
+    bigint turn_id FK
+    bigint organization_id FK
+    enum role "user, assistant"
+    text content "content, purged"
+  }
+  ai_chat_tool_executions {
+    bigint id PK
+    char public_id UK
+    bigint conversation_id FK "UQ with seq (refs r<seq>)"
+    bigint turn_id FK "NULL for more"
+    bigint organization_id FK
+    bigint parent_execution_id "no FK"
+    enum decision "allowed, denied_*"
+    enum status "succeeded, failed, refused, timeout"
+    varchar correlation_id
+    json result_card "content, purged"
+  }
+  ai_chat_usage_daily {
+    bigint organization_id PK
+    date day PK
+    varchar provider PK
+    varchar model PK
   }
 ```
 

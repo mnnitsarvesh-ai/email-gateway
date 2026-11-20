@@ -320,6 +320,17 @@ export class Fixtures {
     // Step 7.2: saved views reference the organization (RESTRICT) and the user (CASCADE); they
     // go first so neither delete below is blocked.
     await p.savedView.deleteMany({ where: byOrgOrUser });
+    // Step AI-1: assistant rows of the fixture organizations and platform users (every ai_chat_*
+    // table references the organization with RESTRICT, conversations and turns the user), in
+    // the order of AssistantTenantDataRepository (children first).
+    const byOrgOnly = { where: { organizationId: { in: orgs } } };
+    await p.aiChatToolExecution.deleteMany({ where: byOrgOrUser });
+    await p.aiChatMessage.deleteMany(byOrgOnly);
+    await p.aiChatMessage.deleteMany({ where: { conversation: { userId: { in: users } } } });
+    await p.aiChatTurn.deleteMany({ where: byOrgOrUser });
+    await p.aiChatConversation.deleteMany({ where: byOrgOrUser });
+    await p.aiChatUsageDaily.deleteMany(byOrgOnly);
+    await p.aiChatSettings.deleteMany(byOrgOnly);
     await p.loginAuditLog.deleteMany({
       where: { OR: [...byOrgOrUser.OR, { emailAttempted: { in: emails } }] },
     });

@@ -470,6 +470,16 @@ Microsoft Entra ID / Microsoft 365 and Google Workspace as account takeover sour
 - **Local:** the TEST-ONLY `idp-simulator` (profile `smtp-test`; build it first with `pnpm --filter @email-gateway/idp-adapters build`) serves the Graph, Office 365 Management, Admin SDK and Gmail endpoints; tokens come from 8.2's `provider-fake`. Stack suite `tests/integration/ato-idp.test.ts`, Playwright `ato-providers.spec.ts`.
 - **Not in 8.5:** push subscriptions, Exchange mailbox-level forwarding removal, owner `MailItemsAccessed`, IdP account-change signals, Google Alert Center, Graph beta. **Live verification against real Microsoft and Google test tenants is pending** (PQ7): verified against the local simulators only.
 
+## AI assistant (step AI-1)
+
+Chat-based management in the admin portal ([docs/assistant](docs/assistant/README.md); [design and verification record](docs/plan/steps/28-ai-chat-management.md), ADRs [0091](docs/architecture/adr/0091-assistant-architecture-loopback-tools.md)–[0094](docs/architecture/adr/0094-assistant-conversation-storage-retention-audit.md), [contracts §35](docs/architecture/contracts.md)). Built and verified on the local stack; **not complete**: commit, CI and a test against a real LLM provider are pending.
+
+- **What it is.** An "Ask AI" panel in the portal header (`Ctrl/Cmd+J`) and the full-screen `/assistant` page. The api's `assistant` module sends the conversation and the user's permitted tool catalogue to the configured LLM provider; every tool is one existing `/api/v1` operation (generated from `docs/api/openapi.json`, [capability matrix](docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md)) executed by a loopback HTTP call into the api's own pipeline with the user's own bearer token, so permissions, tenant scope, MFA, rate limits, masking and audit are exactly the portal's. Results come back as tables, key-value and chart cards built from the real API response, with links to the portal pages.
+- **Scope of AI-1:** 174 read tools (every eligible read operation), no writes (AI-2 … AI-5 add them behind server-issued confirmations, [ADR-0093](docs/architecture/adr/0093-assistant-action-confirmation.md)). Credential ceremonies, secret-returning operations, previews, downloads, reveal and critical actions stay portal only. No email body or attachment is ever sent to the model or stored.
+- **Switches:** `ASSISTANT_ENABLED` (platform), the operator-enabled organization feature `ai_assistant`, the tenant setting (Settings → AI assistant, with the external-processing acknowledgement) and the permissions `assistant:use` / `assistant:configure`. Budgets per user, tenant and platform; conversations kept 30 days after the last turn by default; every tool call audited (`assistant.tool_executed` / `assistant.tool_denied`).
+- **Local:** the `.env` uses the deterministic fake provider (`ASSISTANT_PROVIDER=fake`, no API key, no network): ask "show active policies", "what was quarantined today", or `/tool policy_management_list {}`. Enable the feature for an organization (platform operator) and turn it on in Settings → AI assistant. The containerized api gets no `ASSISTANT_*` keys; a test stack adds [tests/portal-e2e/assistant.override.yml](tests/portal-e2e/assistant.override.yml). Real providers: `anthropic` (default model `claude-opus-5-5`), `openai`, `azure_openai`, with the key as an external secret; see [AI_CHAT_ARCHITECTURE.md](docs/assistant/AI_CHAT_ARCHITECTURE.md#configuration) and [AI_SECURITY_STANDARDS.md](docs/assistant/AI_SECURITY_STANDARDS.md).
+- **Tests:** `packages/assistant` unit and registry checks, api unit and e2e, integration suites `apps/api/integration/assistant*.test.ts` and `tenant-isolation-assistant.test.ts` (tool sweep over every enabled tool, injection with an adversarial fake), Playwright `assistant.spec.ts`; none reaches an LLM or the internet ([testing report](docs/assistant/CHAT_TESTING_REPORT.md)).
+
 ## Common commands
 
 | Command                                                       | Does                                                                                          |
@@ -539,6 +549,7 @@ packages/
   mail-routing/         Direction resolution, destination safety, route planning, delivery status recorder; provider-relay proof rules and route tokens (8.2)
   provider-integrations/ Provider-integration framework (8.2): permission profiles, credential cipher, provider HTTP primitive, token service, Graph and Admin SDK clients, health checks, setup guides, impact tokens, in-process provider fake
   message-lifecycle/    Message state machine: transition table, ordering rule, transition service (3.3)
+  assistant/            AI assistant (AI-1): LLM providers (Anthropic, OpenAI, Azure OpenAI, fake), prompt, context, result cards and envelopes, the tool registry generated from OpenAPI
 infrastructure/         docker, kubernetes, terraform, postfix, rspamd, clamav, rabbitmq, mysql, minio, monitoring
 docs/                   architecture (+ ADRs), database, api, security, deployment, runbooks
 tests/integration/      Tests against the running stack
@@ -551,6 +562,7 @@ scripts/                Developer tooling
 ## Documentation
 
 - [Architecture overview](docs/architecture/overview.md)
+- AI assistant (step AI-1): [documentation index](docs/assistant/README.md) (architecture, tool registry, capability matrix, chat API, security standards, RBAC, audit, database, testing report, implementation status), the [design and verification record](docs/plan/steps/28-ai-chat-management.md), ADRs [0091](docs/architecture/adr/0091-assistant-architecture-loopback-tools.md)–[0094](docs/architecture/adr/0094-assistant-conversation-storage-retention-audit.md)
 - [Technology decision records](docs/architecture/adr/README.md)
 - [Database: conventions, schema reference, partitioning, retention, backups](docs/database/README.md)
 - [MySQL replication and the read/write split](docs/database/replication.md)

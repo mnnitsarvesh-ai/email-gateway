@@ -6,7 +6,9 @@
  * through the api); step 8.1: both tenants on the enterprise plan, archive settings and a
  * retention policy, a beta archive message (seed/archive.ts); step 8.4: `ato_detection` enabled
  * for both e2e tenants with accounts, signals and incidents written through the ATO stores
- * (seed/ato.ts). Idempotent: the previous run's data is removed first (cleanup.ts).
+ * (seed/ato.ts); step AI-1: the assistant tenants `delta` (assistant on, policies and messages)
+ * and `epsilon` (feature on, tenant setting off) (seed/assistant.ts). Idempotent: the previous
+ * run's data is removed first (cleanup.ts).
  *
  * Rows are written on the writer as the api integration helpers do (preconditions, metadata
  * only; message content lives only in MinIO). Reserved `.test` domains only. Passwords are
@@ -32,6 +34,14 @@ import {
   alphaArchiveDashboardPlans,
   prepareArchive,
 } from './archive';
+import {
+  DELTA,
+  DELTA_DOMAIN,
+  EPSILON,
+  EPSILON_DOMAIN,
+  planDeltaMessages,
+  prepareAssistant,
+} from './assistant';
 import { ALPHA_ATO_PLAN, BETA_ATO_PLAN, expectAtoDashboard, seedAto } from './ato';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
@@ -250,7 +260,7 @@ function smtpCodeOf(status: DeliveryPlan['status']): number {
   return status === 'delivered' ? 250 : status === 'deferred' ? 451 : 550;
 }
 
-async function insertMessages(
+export async function insertMessages(
   p: PrismaClient,
   org: Org,
   plans: readonly MessagePlan[],
@@ -545,6 +555,9 @@ export async function seed(): Promise<SeedSummary> {
     const alpha = await createOrganization(p, ALPHA.slug, ALPHA.name);
     const beta = await createOrganization(p, BETA.slug, BETA.name);
     const gamma = await createOrganization(p, GAMMA.slug, GAMMA.name, GAMMA_PLAN);
+    // Step AI-1: the assistant tenants (seed/assistant.ts).
+    const delta = await createOrganization(p, DELTA.slug, DELTA.name);
+    const epsilon = await createOrganization(p, EPSILON.slug, EPSILON.name);
     // The suite drives alpha's whole traffic through ten users within minutes (step 7.2 adds 14
     // details sections per role): the tenant budget of the standard plan (300 requests per
     // minute for the whole organization) would answer `429` to later specs. Alpha gets the
@@ -558,6 +571,8 @@ export async function seed(): Promise<SeedSummary> {
     const alphaDomain = await createDomain(p, alpha, ALPHA_DOMAIN);
     const alphaDeleted = await createDomain(p, alpha, ALPHA_DELETED_DOMAIN, true);
     const betaDomain = await createDomain(p, beta, BETA_DOMAIN);
+    const deltaDomain = await createDomain(p, delta, DELTA_DOMAIN);
+    await createDomain(p, epsilon, EPSILON_DOMAIN);
 
     // Users (one password each; the 32 pagination members share one hash).
     const platform = await p.organization.findUniqueOrThrow({
@@ -566,7 +581,12 @@ export async function seed(): Promise<SeedSummary> {
     });
     const spec: Record<
       UserKey,
-      { email: string; roles: string[]; org: 'alpha' | 'beta' | 'gamma' | 'platform'; name: string }
+      {
+        email: string;
+        roles: string[];
+        org: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'platform';
+        name: string;
+      }
     > = {
       alphaAdmin: {
         email: `admin@${ALPHA_DOMAIN}`,
@@ -655,6 +675,32 @@ export async function seed(): Promise<SeedSummary> {
         org: 'gamma',
         name: 'Gamma Archive Admin',
       },
+      // Step AI-1: the assistant tenants. The analyst chats (assistant:use + reads), the mailbox
+      // user holds no assistant:use; epsilon's admin sees why the assistant is off.
+      deltaAdmin: {
+        email: `admin@${DELTA_DOMAIN}`,
+        roles: ['organization_admin'],
+        org: 'delta',
+        name: 'Delta Admin',
+      },
+      deltaAnalyst: {
+        email: `analyst@${DELTA_DOMAIN}`,
+        roles: ['security_analyst'],
+        org: 'delta',
+        name: 'Delta Analyst',
+      },
+      deltaMailbox: {
+        email: `mailbox@${DELTA_DOMAIN}`,
+        roles: ['mailbox_user'],
+        org: 'delta',
+        name: 'Delta Mailbox',
+      },
+      epsilonAdmin: {
+        email: `admin@${EPSILON_DOMAIN}`,
+        roles: ['organization_admin'],
+        org: 'epsilon',
+        name: 'Epsilon Admin',
+      },
       platformAdmin: {
         email: 'platform-admin@e2e-portal.test',
         roles: ['platform_admin'],
@@ -662,7 +708,7 @@ export async function seed(): Promise<SeedSummary> {
         name: 'E2E Platform Admin',
       },
     };
-    const orgOf = { alpha, beta, gamma, platform } as const;
+    const orgOf = { alpha, beta, gamma, delta, epsilon, platform } as const;
     const users = {} as Record<UserKey, E2eUser>;
     const userIds = new Map<string, bigint>();
     for (const [key, s] of Object.entries(spec) as Array<[UserKey, (typeof spec)[UserKey]]>) {
@@ -748,6 +794,9 @@ export async function seed(): Promise<SeedSummary> {
       { primary: betaDomain.id, deleted: null },
       userIds,
     );
+    // Step AI-1: delta's messages (two held in quarantine today) for the assistant's read tools.
+    const deltaPlans = planDeltaMessages(now);
+    await insertMessages(p, delta, deltaPlans, { primary: deltaDomain.id, deleted: null }, userIds);
 
     // Step 7.2: attachments, URLs and the engine rows of the details sections.
     await writeMessageDetails(p, alpha.id, alphaMessages);
@@ -1012,6 +1061,20 @@ export async function seed(): Promise<SeedSummary> {
       await betaApi.logout();
     }
 
+    // Step AI-1: the assistant on for delta (feature + tenant setting through the api) with its
+    // policies, the feature only for epsilon (seed/assistant.ts).
+    const deltaApi = await apiSession(users.deltaAdmin.email, users.deltaAdmin.password);
+    let deltaPolicies: Awaited<ReturnType<typeof prepareAssistant>>;
+    try {
+      deltaPolicies = await prepareAssistant(p, {
+        deltaOrg: delta.id,
+        epsilonOrg: epsilon.id,
+        deltaAdmin: deltaApi,
+      });
+    } finally {
+      await deltaApi.logout();
+    }
+
     // Step 8.4: account takeover accounts, signals and incidents of both tenants (seed/ato.ts).
     const ato = await seedAto(p, {
       alpha: { id: alpha.id, domain: ALPHA_DOMAIN },
@@ -1032,18 +1095,31 @@ export async function seed(): Promise<SeedSummary> {
     // The api reads lists and reports from the replica: wait until it has every row.
     const lastAlpha = alphaMessages.at(-1)!;
     await waitForReplica(async (r) => {
-      const [messages, audits, approvalRow, members, versions, suppressions, atoAccounts] =
-        await Promise.all([
-          r.emailMessage.count({ where: { organizationId: alpha.id } }),
-          r.auditLog.count({
-            where: { organizationId: alpha.id, correlationId: `e2e-portal-${runId}` },
-          }),
-          r.quarantineApprovalRequest.count({ where: { id: betaApproval.id } }),
-          r.user.count({ where: { organizationId: alpha.id } }),
-          r.policyVersion.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
-          r.becSuppressionRule.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
-          r.atoAccount.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
-        ]);
+      const [
+        messages,
+        audits,
+        approvalRow,
+        members,
+        versions,
+        suppressions,
+        atoAccounts,
+        deltaPolicyRows,
+        deltaSettings,
+        deltaEntries,
+      ] = await Promise.all([
+        r.emailMessage.count({ where: { organizationId: alpha.id } }),
+        r.auditLog.count({
+          where: { organizationId: alpha.id, correlationId: `e2e-portal-${runId}` },
+        }),
+        r.quarantineApprovalRequest.count({ where: { id: betaApproval.id } }),
+        r.user.count({ where: { organizationId: alpha.id } }),
+        r.policyVersion.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+        r.becSuppressionRule.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+        r.atoAccount.count({ where: { organizationId: { in: [alpha.id, beta.id] } } }),
+        r.emailPolicy.count({ where: { organizationId: delta.id } }),
+        r.aiChatSettings.count({ where: { organizationId: delta.id, enabled: true } }),
+        r.quarantineMessage.count({ where: { organizationId: delta.id } }),
+      ]);
       return (
         messages === alphaMessages.length &&
         audits === ALPHA_AUDIT_ROWS + 2 &&
@@ -1051,7 +1127,10 @@ export async function seed(): Promise<SeedSummary> {
         members === MEMBER_COUNT + ALPHA_ROLE_USERS &&
         versions === 4 &&
         suppressions === 2 &&
-        atoAccounts === ALPHA_ATO_PLAN.length + BETA_ATO_PLAN.length
+        atoAccounts === ALPHA_ATO_PLAN.length + BETA_ATO_PLAN.length &&
+        deltaPolicyRows === deltaPolicies.length &&
+        deltaSettings === 1 &&
+        deltaEntries === deltaPlans.filter((m) => m.quarantine).length
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -1063,6 +1142,8 @@ export async function seed(): Promise<SeedSummary> {
         alpha: { id: alpha.publicId, name: alpha.name, slug: alpha.slug },
         beta: { id: beta.publicId, name: beta.name, slug: beta.slug },
         gamma: { id: gamma.publicId, name: gamma.name, slug: gamma.slug },
+        delta: { id: delta.publicId, name: delta.name, slug: delta.slug },
+        epsilon: { id: epsilon.publicId, name: epsilon.name, slug: epsilon.slug },
       },
       alpha: {
         domainId: alphaDomain.publicId,
@@ -1124,6 +1205,12 @@ export async function seed(): Promise<SeedSummary> {
         policyId: archive.alphaPolicyId,
         policyName: ARCHIVE_POLICY_NAME,
         betaMessageId: archive.betaMessages[0]!.publicId,
+      },
+      assistant: {
+        delta: {
+          policies: deltaPolicies,
+          quarantinedSubjects: deltaPlans.filter((m) => m.quarantine).map((m) => m.subject),
+        },
       },
       ato: {
         alpha: ato.alpha,
