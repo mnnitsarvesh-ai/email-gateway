@@ -1584,6 +1584,11 @@ export const assistantConfigShape = {
   ASSISTANT_MODEL_PRICES: assistantModelPrices,
   /** AI-2: lifetime of a pending action confirmation (ADR-0093). */
   ASSISTANT_CONFIRMATION_TTL_SECONDS: int(60, 900).default(300),
+  /**
+   * AI-2 (design D1 step 1): live `pending` confirmations per conversation; a write tool call
+   * beyond it is refused `denied_budget` until the user confirms or cancels one.
+   */
+  ASSISTANT_MAX_PENDING_CONFIRMATIONS: int(1, 20).default(5),
   /** AI-2: a re-authentication this recent satisfies a high-risk confirmation; 0 = always ask. */
   ASSISTANT_REAUTH_WINDOW_SECONDS: int(0, 1800).default(300),
 };

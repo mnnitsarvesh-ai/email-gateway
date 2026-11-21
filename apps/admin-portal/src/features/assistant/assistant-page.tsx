@@ -64,7 +64,7 @@ function AssistantWorkspace() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="AI assistant"
-        description="Ask questions about your organization's email security in plain language. The assistant uses your own permissions, reads data only and links to the pages it used."
+        description="Ask questions about your organization's email security in plain language. The assistant uses your own permissions and links to the pages it used. It changes nothing until you confirm the action in its card."
       />
       {access.loading ? (
         <LoadingState label="Checking the AI assistant" rows={4} />

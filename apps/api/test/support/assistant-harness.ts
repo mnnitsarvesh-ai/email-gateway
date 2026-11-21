@@ -26,6 +26,9 @@ import type { ConversationsRepository } from '../../src/modules/assistant/reposi
 import { AssistantRetentionService } from '../../src/modules/assistant/services/assistant-retention.service';
 import { AssistantSettingsService } from '../../src/modules/assistant/services/assistant-settings.service';
 import { AssistantUsageService } from '../../src/modules/assistant/services/assistant-usage.service';
+import { ConfirmationService } from '../../src/modules/assistant/services/confirmation.service';
+import { ConfirmationProposer } from '../../src/modules/assistant/services/confirmation-proposer.service';
+import { ConfirmationViewsService } from '../../src/modules/assistant/services/confirmation-views.service';
 import { ConversationService } from '../../src/modules/assistant/services/conversation.service';
 import { ExecutionsService } from '../../src/modules/assistant/services/executions.service';
 import type { TurnSink } from '../../src/modules/assistant/services/sse-writer';
@@ -39,6 +42,7 @@ import { stubbedApiEnv } from './api-test-app';
 import {
   AssistantWorld,
   FakeLoopback,
+  FakeReauthentication,
   immediateAssistantRunner,
   RecordingAssistantAudit,
   testUser,
@@ -145,6 +149,9 @@ export interface AssistantHarness {
   engine: TurnEngineService;
   executions: ExecutionsService;
   retention: AssistantRetentionService;
+  proposer: ConfirmationProposer;
+  confirmations: ConfirmationService;
+  reauth: FakeReauthentication;
   /** The conversations repository double (tests may wrap a method). */
   conversationsRepo: ConversationsRepository;
   user: UserPrincipal;
@@ -175,6 +182,8 @@ export function createAssistantHarness(
   const conversationsRepo = world.conversationsDouble();
   const executionsRepo = world.executionsDouble();
   const usageRepo = world.usageDouble();
+  const confirmationsRepo = world.confirmationsDouble();
+  const reauth = new FakeReauthentication();
   const features = world.featuresDouble();
   const runner = immediateAssistantRunner;
   const provider = new AssistantProviderService(
@@ -203,6 +212,7 @@ export function createAssistantHarness(
   );
   const usage = new AssistantUsageService(usageRepo, provider);
   const codec = new CursorCodec(config);
+  const confirmationViews = new ConfirmationViewsService(confirmationsRepo, limits);
   const conversations = new ConversationService(
     c,
     conversationsRepo,
@@ -212,8 +222,20 @@ export function createAssistantHarness(
     codec,
     runner,
     audit,
+    confirmationsRepo,
+    confirmationViews,
+    metrics,
   );
-  const executor = new ToolExecutorService(c, executionsRepo, loopback, runner, audit, metrics);
+  const proposer = new ConfirmationProposer(c, confirmationsRepo, loopback, limits, audit);
+  const executor = new ToolExecutorService(
+    c,
+    executionsRepo,
+    loopback,
+    runner,
+    audit,
+    metrics,
+    proposer,
+  );
   const engine = new TurnEngineService(
     c,
     conversationsRepo,
@@ -227,8 +249,16 @@ export function createAssistantHarness(
     loopback,
     runner,
     metrics,
+    confirmationsRepo,
+    confirmationViews,
   );
-  const executions = new ExecutionsService(executionsRepo, executor, availability, limits);
+  const executions = new ExecutionsService(
+    executionsRepo,
+    executor,
+    availability,
+    limits,
+    confirmationViews,
+  );
   const retention = new AssistantRetentionService(
     c,
     kv,
@@ -236,6 +266,21 @@ export function createAssistantHarness(
     executionsRepo,
     usageRepo,
     runner,
+    metrics,
+    confirmationsRepo,
+    audit,
+  );
+  const confirmations = new ConfirmationService(
+    c,
+    confirmationsRepo,
+    executionsRepo,
+    executor,
+    proposer,
+    availability,
+    limits,
+    reauth,
+    runner,
+    audit,
     metrics,
   );
   const scope = scopeFromPrincipal(principal);
@@ -257,6 +302,9 @@ export function createAssistantHarness(
     engine,
     executions,
     retention,
+    proposer,
+    confirmations,
+    reauth,
     conversationsRepo,
     user: principal,
     scope,

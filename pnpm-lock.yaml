@@ -1388,6 +1388,12 @@ importers:
         specifier: ^4.1.5
         version: 4.6.7
     devDependencies:
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../policy-dsl
+      fast-check:
+        specifier: 3.23.2
+        version: 3.23.2
       prettier:
         specifier: ^3.6.2
         version: 3.9.10

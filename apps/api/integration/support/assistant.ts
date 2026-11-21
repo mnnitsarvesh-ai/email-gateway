@@ -9,7 +9,7 @@
  * the model envelopes). Synthetic `it-*` organizations only; tests never reach an LLM or the
  * internet.
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   FakeProvider,
   type FakeProviderOptions,
@@ -22,7 +22,12 @@ import {
   type OperationTool,
 } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
-import { type AiChatToolExecution, TENANT_PERMISSIONS } from '@email-gateway/database';
+import {
+  type AiChatActionConfirmation,
+  type AiChatToolExecution,
+  type AuditLog,
+  TENANT_PERMISSIONS,
+} from '@email-gateway/database';
 import type { Response } from 'supertest';
 import type { UserPrincipal } from '../../src/auth-contracts/principal';
 import { systemScope } from '../../src/auth-contracts/tenant-scope';
@@ -38,6 +43,8 @@ import {
   type LoopbackCall,
   LoopbackClient,
 } from '../../src/modules/assistant/services/loopback-client';
+import { ConfirmationService } from '../../src/modules/assistant/services/confirmation.service';
+import { ConfirmationViewsService } from '../../src/modules/assistant/services/confirmation-views.service';
 import {
   type ExecutionOutcome,
   ToolExecutorService,
@@ -503,16 +510,26 @@ export function withheldColumns(card: Record<string, unknown> | null): string[] 
     .filter((key) => CREDENTIAL_KEY.test(key) && !SAFE_KEYS.has(key));
 }
 
+export type RecordedCall = Pick<LoopbackCall, 'method' | 'path' | 'correlationId'> & {
+  /** The `Idempotency-Key` the executor set (confirmed writes of `required`/`legacy` routes). */
+  idempotencyKey: string | null;
+};
+
 /** Records every loopback request of the app (the real client still sends it). */
 export function recordLoopback(ctx: IntegrationApp): {
-  calls: Array<Pick<LoopbackCall, 'method' | 'path' | 'correlationId'>>;
+  calls: RecordedCall[];
   restore: () => void;
 } {
   const client = ctx.get(LoopbackClient);
   const original = client.send.bind(client);
-  const calls: Array<Pick<LoopbackCall, 'method' | 'path' | 'correlationId'>> = [];
+  const calls: RecordedCall[] = [];
   client.send = (c: LoopbackCall) => {
-    calls.push({ method: c.method, path: c.path, correlationId: c.correlationId });
+    calls.push({
+      method: c.method,
+      path: c.path,
+      correlationId: c.correlationId,
+      idempotencyKey: c.idempotencyKey ?? null,
+    });
     return original(c);
   };
   return { calls, restore: () => void (client.send = original) };
@@ -527,8 +544,16 @@ export async function clearAssistantCounters(
   for (const id of organizationIds) await ctx.kv.del(`as:tok:o:${id}:${day}`);
 }
 
-/** The enabled tools of the registry (AI-1: the read tools). */
+/** The enabled tools of the registry (AI-2: the reads and the confirmable writes). */
 export const ENABLED_TOOLS: readonly OperationTool[] = OPERATION_TOOLS.filter((t) => t.enabled);
+/** The enabled read tools (step AI-2: 178). */
+export const ENABLED_READS: readonly OperationTool[] = ENABLED_TOOLS.filter(
+  (t) => t.access === 'read',
+);
+/** The enabled write tools (step AI-2: 31, each behind a confirmation). */
+export const ENABLED_WRITES: readonly OperationTool[] = ENABLED_TOOLS.filter(
+  (t) => t.access === 'write',
+);
 
 /** Values of required parameters that are not UUIDs, enums, dates or integers. */
 const SPECIAL_VALUES: Readonly<Record<string, unknown>> = {
@@ -538,6 +563,26 @@ const SPECIAL_VALUES: Readonly<Record<string, unknown>> = {
   suppressionId: '999999999999',
   versionNo: 1,
 };
+
+/**
+ * The required members of an object schema, recursively (the request bodies of the AI-2 tools:
+ * an object member is built from its own required members, `{}` when it has none).
+ */
+function minimalObject(schema: Record<string, unknown>): Record<string, unknown> {
+  const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
+  const out: Record<string, unknown> = {};
+  for (const name of (schema.required as string[] | undefined) ?? []) {
+    const prop = properties[name] ?? {};
+    if (prop.type === 'object') out[name] = minimalObject(prop);
+    else if (Array.isArray(prop.enum)) out[name] = prop.enum[0];
+    else if (prop.type === 'integer' || prop.type === 'number') {
+      out[name] = typeof prop.minimum === 'number' ? prop.minimum : 1;
+    } else if (prop.type === 'boolean') out[name] = false;
+    else if (prop.type === 'array') out[name] = [];
+    else out[name] = 'it-unknown';
+  }
+  return out;
+}
 
 /**
  * Minimal valid arguments from a tool's input schema: required parameters and the path
@@ -561,6 +606,7 @@ export function minimalArguments(
   for (const name of names) {
     const prop = schema.properties?.[name] ?? {};
     if (name in SPECIAL_VALUES) args[name] = SPECIAL_VALUES[name];
+    else if (prop.type === 'object') args[name] = minimalObject(prop);
     else if (Array.isArray(prop.enum)) args[name] = prop.enum[0];
     else if (prop.format === 'uuid') args[name] = randomUUID();
     else if (prop.format === 'date-time') {
@@ -654,3 +700,300 @@ export class DirectExecutor {
     );
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-2: write proposals and their confirmations (docs/plan/steps/29-ai-chat-confirmations-
+// mail-writes.md D1, D2, D6, D7, §9 item 4; contracts §35.1)
+// ---------------------------------------------------------------------------------------------
+
+/** The `ConfirmationView` of the routes and turn results (contracts §35.1). */
+export interface ConfirmationJson {
+  id: string;
+  executionId: string;
+  resultExecutionId: string | null;
+  conversationId: string;
+  tool: string;
+  operationId: string;
+  risk: 'low' | 'medium' | 'high';
+  requiresReauth: boolean;
+  reauthFresh: boolean;
+  status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+  summary: {
+    version: string;
+    title: string;
+    action: string;
+    target: Array<{ label: string; value: string; untrusted?: boolean }>;
+    changes: Array<{ label: string; before?: string | null; after: string }>;
+    impact: string[];
+    warnings: string[];
+    reversible: boolean;
+    request: { method: string; path: string };
+  } | null;
+  actionDigest: string;
+  expiresAt: string;
+  createdAt: string;
+  decidedAt: string | null;
+  executedAt: string | null;
+  result: { httpStatus: number | null; error: string | null } | null;
+}
+
+/** A pending proposal as the proposing tab holds it: the card's data and the single-use token. */
+export interface Pending {
+  confirmation: ConfirmationJson;
+  token: string;
+}
+
+/** A turn that proposed exactly one write. */
+export interface Proposal extends Pending {
+  res: Response;
+  conversation: string;
+  /** The proposal execution (`status: 'pending_confirmation'`). */
+  execution: Record<string, unknown>;
+}
+
+/** `{ confirmation, token }` pairs of a JSON turn result (`token` null on a replay). */
+export function confirmationsOfTurn(
+  body: Record<string, unknown>,
+): Array<{ confirmation: ConfirmationJson; token: string | null }> {
+  return (
+    (body.confirmations as Array<{ confirmation: ConfirmationJson; token: string | null }>) ?? []
+  );
+}
+
+/** `{ confirmation, token }` of every `confirmation.required` event of a stream. */
+export function requiredOf(events: readonly StreamEvent[]): Pending[] {
+  return events
+    .filter(([name]) => name === 'confirmation.required')
+    .map(([, data]) => data as unknown as Pending);
+}
+
+/**
+ * A JSON turn that must propose exactly one write (`pending_confirmation`): in `conversation`
+ * when given, else in a new conversation of `who`. Throws with the turn's answer otherwise.
+ */
+export async function propose(
+  ctx: IntegrationApp,
+  who: Member,
+  message: string,
+  conversation?: string,
+): Promise<Proposal> {
+  const id = conversation ?? (await newConversation(ctx, who));
+  const res = await turn(ctx, who.headers, id, message);
+  const pairs = res.status === 200 ? confirmationsOfTurn(res.body) : [];
+  const execution = (res.body?.executions as Array<Record<string, unknown>> | undefined)?.find(
+    (e) => e.status === 'pending_confirmation',
+  );
+  const token = pairs[0]?.token;
+  if (pairs.length !== 1 || !execution || typeof token !== 'string') {
+    throw new Error(
+      `expected one proposal: ${res.status} ${JSON.stringify(
+        (res.body?.executions as Array<Record<string, unknown>> | undefined)?.map((e) => ({
+          tool: e.tool,
+          decision: e.decision,
+          status: e.status,
+          httpStatus: e.httpStatus,
+          errorCode: e.errorCode,
+        })) ?? res.body,
+      )}`,
+    );
+  }
+  return {
+    res,
+    conversation: id,
+    execution,
+    confirmation: pairs[0]!.confirmation,
+    token,
+  };
+}
+
+/** A fresh, well-formed token that is not the confirmation's (43 base64url characters). */
+export const wrongToken = (): string => randomBytes(32).toString('base64url');
+
+export interface ReauthInput {
+  password: string;
+  totpCode?: string;
+}
+
+export interface ConfirmOverrides {
+  token?: string;
+  actionDigest?: string;
+  reauth?: ReauthInput;
+}
+
+/** `POST /assistant/confirmations/{id}/confirm` with the proposal's token and digest. */
+export function confirm(
+  ctx: IntegrationApp,
+  who: Member | Record<string, string>,
+  pending: Pending,
+  overrides: ConfirmOverrides = {},
+) {
+  const headers = 'headers' in who ? (who.headers as Record<string, string>) : who;
+  return call(ctx, headers, 'post', `${A}/confirmations/${pending.confirmation.id}/confirm`, {
+    token: overrides.token ?? pending.token,
+    actionDigest: overrides.actionDigest ?? pending.confirmation.actionDigest,
+    ...(overrides.reauth && { reauth: overrides.reauth }),
+  });
+}
+
+/** `POST /assistant/confirmations/{id}/cancel`. */
+export function cancelConfirmation(
+  ctx: IntegrationApp,
+  who: Member | Record<string, string>,
+  confirmationId: string,
+) {
+  const headers = 'headers' in who ? (who.headers as Record<string, string>) : who;
+  return call(ctx, headers, 'post', `${A}/confirmations/${confirmationId}/cancel`);
+}
+
+/** `GET /assistant/confirmations/{id}`. */
+export function getConfirmation(
+  ctx: IntegrationApp,
+  who: Member | Record<string, string>,
+  confirmationId: string,
+) {
+  const headers = 'headers' in who ? (who.headers as Record<string, string>) : who;
+  return call(ctx, headers, 'get', `${A}/confirmations/${confirmationId}`);
+}
+
+/** The re-authentication of a high-risk confirm: the password and, with MFA, a fresh code. */
+export async function reauthOf(fx: Fixtures, who: Member): Promise<ReauthInput> {
+  return {
+    password: who.user.password,
+    ...(who.user.totpSecret !== undefined && { totpCode: await fx.totpNow(who.user) }),
+  };
+}
+
+/**
+ * A user of `org` holding exactly `permissions` (a custom role; `assistant:use` is added) or the
+ * given system roles, signed in (with MFA unless `mfa: false`).
+ */
+export async function memberWith(
+  ctx: IntegrationApp,
+  fx: Fixtures,
+  org: FixtureOrganization,
+  grant: { permissions?: readonly string[]; roles?: readonly string[] },
+  options: { mfa?: boolean; email?: string; displayName?: string } = {},
+): Promise<Member> {
+  const roles = [...(grant.roles ?? [])];
+  if (grant.permissions) {
+    roles.push(
+      await fx.createCustomRole(org, [...new Set(['assistant:use', ...grant.permissions])]),
+    );
+  }
+  const user = await fx.createUser(org, {
+    roles,
+    mfa: options.mfa ?? true,
+    ...(options.email && { email: options.email }),
+    ...(options.displayName && { displayName: options.displayName }),
+  });
+  const session = await loginWithMfa(ctx, fx, user);
+  return { user, token: session.accessToken, headers: bearer(session.accessToken) };
+}
+
+/** A second sign-in of the same user: a new session family (`principal.sessionId`). */
+export async function secondSession(
+  ctx: IntegrationApp,
+  fx: Fixtures,
+  who: Member,
+): Promise<Member> {
+  const session = await loginWithMfa(ctx, fx, who.user);
+  return { user: who.user, token: session.accessToken, headers: bearer(session.accessToken) };
+}
+
+/**
+ * Moves the clock of the confirm route and of the confirmation views to `at` (both services
+ * expose `now()`); returns the function that restores the real clock.
+ */
+export function confirmationClock(ctx: IntegrationApp, at: Date): () => void {
+  const service = ctx.get(ConfirmationService);
+  const views = ctx.get(ConfirmationViewsService);
+  const original = { service: service.now, views: views.now };
+  service.now = () => new Date(at);
+  views.now = () => new Date(at);
+  return () => {
+    service.now = original.service;
+    views.now = original.views;
+  };
+}
+
+/** The stored confirmation row. */
+export function confirmationRow(
+  ctx: IntegrationApp,
+  publicId: string,
+): Promise<AiChatActionConfirmation> {
+  return ctx.prisma.aiChatActionConfirmation.findUniqueOrThrow({ where: { publicId } });
+}
+
+/** Audit rows of an organization with this correlation id, oldest first. */
+export function auditByCorrelation(
+  ctx: IntegrationApp,
+  organizationId: bigint,
+  correlationId: string,
+): Promise<AuditLog[]> {
+  return ctx.prisma.auditLog.findMany({
+    where: { organizationId, correlationId },
+    orderBy: { id: 'asc' },
+  });
+}
+
+/** Audit rows of a confirmation (resource id = its public id), oldest first. */
+export function confirmationAudit(
+  ctx: IntegrationApp,
+  organizationId: bigint,
+  publicId: string,
+): Promise<AuditLog[]> {
+  return ctx.prisma.auditLog.findMany({
+    where: { organizationId, resourceType: 'assistant_action_confirmation', resourceId: publicId },
+    orderBy: { id: 'asc' },
+  });
+}
+
+/** The execution row (writer) of a public id. */
+export function executionRow(ctx: IntegrationApp, publicId: string): Promise<AiChatToolExecution> {
+  return ctx.prisma.aiChatToolExecution.findUniqueOrThrow({ where: { publicId } });
+}
+
+const jsonOf = (value: unknown): string =>
+  JSON.stringify(value, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+
+/**
+ * Everything stored for a conversation and an organization that must never carry a token:
+ * native transcripts, message contents, execution rows (cards, refs), confirmation rows and the
+ * organization's audit rows (metadata included), as one string.
+ */
+export async function storedTraces(
+  ctx: IntegrationApp,
+  organizationId: bigint,
+  conversationPublicId: string,
+): Promise<string> {
+  const conversation = { publicId: conversationPublicId };
+  const [turns, messages, executions, confirmations, audit] = await Promise.all([
+    ctx.prisma.aiChatTurn.findMany({ where: { conversation } }),
+    ctx.prisma.aiChatMessage.findMany({ where: { conversation } }),
+    ctx.prisma.aiChatToolExecution.findMany({ where: { conversation } }),
+    ctx.prisma.aiChatActionConfirmation.findMany({ where: { conversation } }),
+    ctx.prisma.auditLog.findMany({ where: { organizationId } }),
+  ]);
+  return jsonOf({ turns, messages, executions, confirmations, audit });
+}
+
+/**
+ * Polls a GET of `who` until it answers 200 and `accept` holds (the precondition reads of
+ * policies, quarantine entries, messages and suppressions are served by the replica).
+ */
+export async function waitForRead(
+  ctx: IntegrationApp,
+  who: Member,
+  path: string,
+  accept: (body: Record<string, unknown>) => boolean = () => true,
+): Promise<Record<string, unknown>> {
+  const res = await waitFor(
+    () => call(ctx, who.headers, 'get', path),
+    (r) => r.status === 200 && accept(r.body as Record<string, unknown>),
+  );
+  return res.body as Record<string, unknown>;
+}
+
+/** Writes without the assistant (`assistant.*`) audit actions among audit rows. */
+export const operationAudit = (rows: ReadonlyArray<{ action: string }>): string[] =>
+  rows.map((r) => r.action).filter((action) => !action.startsWith('assistant.'));

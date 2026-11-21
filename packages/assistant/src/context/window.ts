@@ -1,3 +1,4 @@
+import { composeUserEntryText } from '../confirmations/updates';
 import { sanitizeText } from '../results/sanitize';
 import type { ToolResultEnvelope } from '../results/types';
 
@@ -46,6 +47,8 @@ export interface RecapInput {
 export function summarizeEnvelope(envelope: ToolResultEnvelope): string {
   if (envelope.status === 'error') return `error ${envelope.code} (HTTP ${envelope.httpStatus})`;
   if (envelope.status === 'denied') return `denied ${envelope.decision}`;
+  if (envelope.status === 'pending_confirmation')
+    return `proposed, waiting for the user's confirmation (${envelope.risk} risk)`;
   if (Array.isArray(envelope.data)) {
     const rows = `${envelope.returned} row${envelope.returned === 1 ? '' : 's'}`;
     return `ok, ${rows}${envelope.hasMore ? ', more available' : ''}${envelope.truncated ? ', truncated' : ''}`;
@@ -97,6 +100,11 @@ export interface WindowInput {
   userEntry: (text: string) => unknown[];
   /** Recap data, used only when a new segment starts. */
   recap: RecapInput;
+  /**
+   * The action-updates block of this turn (`buildActionUpdates`, step AI-2 D6), prefixed to the
+   * user entry before the `Current user message:` marker (after the recap of a new segment).
+   */
+  actionUpdates?: string | null;
 }
 
 export interface WindowPlan {
@@ -111,7 +119,9 @@ export interface WindowPlan {
 
 /** Plans the transcript of a turn: append to the segment, or open a new one with a recap. */
 export function planWindow(input: WindowInput): WindowPlan {
-  const userEntries = input.userEntry(input.userMessage);
+  const userEntries = input.userEntry(
+    composeUserEntryText({ message: input.userMessage, actionUpdates: input.actionUpdates }),
+  );
   const continued = [...input.segmentTranscript, ...userEntries];
   const estimate = estimateTokens(input.system) + estimateTranscriptTokens(continued);
   if (estimate <= input.maxTokens || input.segmentTranscript.length === 0) {
@@ -123,7 +133,11 @@ export function planWindow(input: WindowInput): WindowPlan {
     };
   }
   const opening = input.userEntry(
-    `${buildRecap(input.recap)}\n\nCurrent user message:\n${input.userMessage}`,
+    composeUserEntryText({
+      message: input.userMessage,
+      recap: buildRecap(input.recap),
+      actionUpdates: input.actionUpdates,
+    }),
   );
   return {
     newSegment: true,

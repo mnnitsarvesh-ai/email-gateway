@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 418 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 418;
+/** Snapshot facts: 421 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 421;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -417,6 +417,54 @@ export const operations = {
     idempotency: 'required',
     cursor: null,
     rateClass: 'sensitive',
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  AssistantConfirmationsController_cancel_v1: {
+    operationId: 'AssistantConfirmationsController_cancel_v1',
+    method: 'POST',
+    path: '/api/v1/assistant/confirmations/{confirmationId}/cancel',
+    tag: 'assistant',
+    permissions: [{ mode: 'all', permissions: ['assistant:use'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: 'sensitive',
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  AssistantConfirmationsController_confirm_v1: {
+    operationId: 'AssistantConfirmationsController_confirm_v1',
+    method: 'POST',
+    path: '/api/v1/assistant/confirmations/{confirmationId}/confirm',
+    tag: 'assistant',
+    permissions: [{ mode: 'all', permissions: ['assistant:use'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: 'sensitive',
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  AssistantConfirmationsController_get_v1: {
+    operationId: 'AssistantConfirmationsController_get_v1',
+    method: 'GET',
+    path: '/api/v1/assistant/confirmations/{confirmationId}',
+    tag: 'assistant',
+    permissions: [{ mode: 'all', permissions: ['assistant:use'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
     returnsSecret: false,
     secretReplay: null,
     listKey: null,
@@ -6844,6 +6892,21 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'GET',
     segments: ['archive', 'status'],
     operationId: 'ArchiveAdminController_status_v1',
+  },
+  {
+    method: 'POST',
+    segments: ['assistant', 'confirmations', { param: 'confirmationId' }, 'cancel'],
+    operationId: 'AssistantConfirmationsController_cancel_v1',
+  },
+  {
+    method: 'POST',
+    segments: ['assistant', 'confirmations', { param: 'confirmationId' }, 'confirm'],
+    operationId: 'AssistantConfirmationsController_confirm_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['assistant', 'confirmations', { param: 'confirmationId' }],
+    operationId: 'AssistantConfirmationsController_get_v1',
   },
   {
     method: 'GET',

@@ -5,23 +5,33 @@ import {
   BotIcon,
   CheckCircle2Icon,
   CircleSlashIcon,
+  ClockIcon,
+  HourglassIcon,
   Loader2Icon,
   RotateCcwIcon,
   SparklesIcon,
   XCircleIcon,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useAssistant } from './assistant-context';
+import { ConfirmationCard } from './confirmation-card';
 import { useAssistantTools, useConversationMessages } from './hooks';
 import { AssistantMarkdown } from './markdown';
 import { suggestedPrompts, turnErrorText } from './model';
 import { DeniedCard, ResultCard } from './result-card';
-import { cardSchema } from './stream';
-import type { ToolChipState, ToolEntry } from './turn-state';
+import { cardSchema, parseConfirmationView } from './stream';
+import {
+  chipState,
+  confirmationChipState,
+  withLiveConfirmations,
+  type ToolChipState,
+  type ToolEntry,
+} from './turn-state';
 import type { AssistantCard, StoredMessage } from './types';
 
 /**
@@ -55,12 +65,22 @@ const CHIP: Record<ToolChipState, { label: string; icon: typeof CheckCircle2Icon
       icon: XCircleIcon,
       tone: 'bg-tone-danger text-tone-danger-foreground',
     },
+    pending: {
+      label: 'awaiting your confirmation',
+      icon: HourglassIcon,
+      tone: 'bg-tone-warning text-tone-warning-foreground',
+    },
+    cancelled: {
+      label: 'cancelled',
+      icon: CircleSlashIcon,
+      tone: 'bg-tone-neutral text-tone-neutral-foreground',
+    },
+    expired: {
+      label: 'expired',
+      icon: ClockIcon,
+      tone: 'bg-tone-neutral text-tone-neutral-foreground',
+    },
   };
-
-function chipStateOf(execution: StoredExecution): ToolChipState {
-  if (execution.decision !== 'allowed' || execution.status === 'refused') return 'denied';
-  return execution.status === 'succeeded' ? 'succeeded' : 'failed';
-}
 
 function parseCard(value: unknown): AssistantCard | null {
   const parsed = cardSchema.safeParse(value);
@@ -69,14 +89,22 @@ function parseCard(value: unknown): AssistantCard | null {
 
 function toEntry(execution: StoredExecution): ToolEntry {
   const card = execution.card ? parseCard(execution.card) : null;
+  const confirmation =
+    execution.status === 'pending_confirmation' && execution.confirmation
+      ? parseConfirmationView(execution.confirmation)
+      : null;
   return {
     executionId: execution.id,
     tool: execution.tool,
-    title: card?.title ?? execution.tool,
-    state: chipStateOf(execution),
+    title: confirmation?.summary?.title ?? card?.title ?? execution.tool,
+    state: confirmation
+      ? confirmationChipState(confirmation.status)
+      : chipState(execution.status, execution.decision),
     decision: execution.decision,
     card,
     message: card?.message ?? card?.error?.message ?? execution.errorCode,
+    confirmation,
+    resultCard: null,
   };
 }
 
@@ -108,21 +136,74 @@ export function ToolChips({ tools }: { tools: readonly ToolEntry[] }) {
   );
 }
 
+/** A proposal's confirmation card wired to the tab's confirmation store (step AI-2 D10). */
+function ConfirmationSlot({
+  tool,
+  onNavigate,
+  onAnnounce,
+}: {
+  tool: ToolEntry;
+  onNavigate?: () => void;
+  onAnnounce?: (text: string) => void;
+}) {
+  const { confirmations, updateConfirmation, running, pending } = useAssistant();
+  const queryClient = useQueryClient();
+  const view = tool.confirmation;
+  const live = confirmations.get(tool.executionId);
+  const isPending = view?.status === 'pending';
+  const hasToken = Boolean(live?.token);
+  // A view from elsewhere (history) says it is decided: the token is useless.
+  useEffect(() => {
+    if (!isPending && hasToken)
+      updateConfirmation({ type: 'drop_token', executionId: tool.executionId });
+  }, [hasToken, isPending, tool.executionId, updateConfirmation]);
+  const conversationId = view?.conversationId;
+  const onChanged = useCallback(() => {
+    void queryClient.invalidateQueries({
+      queryKey: ['AssistantMessagesController_list_v1', conversationId],
+    });
+  }, [conversationId, queryClient]);
+  if (!view) return null;
+  return (
+    <ConfirmationCard
+      view={view}
+      token={isPending ? (live?.token ?? null) : null}
+      phase={live?.phase ?? (isPending ? 'idle' : 'decided')}
+      resultCard={tool.resultCard}
+      focusPending={live?.focusPending ?? false}
+      streaming={running && pending?.conversationId === view.conversationId}
+      dispatch={updateConfirmation}
+      onChanged={onChanged}
+      onAnnounce={onAnnounce}
+      onNavigate={onNavigate}
+    />
+  );
+}
+
 function ToolResults({
   tools,
   hasMore,
   onNavigate,
+  onAnnounce,
 }: {
   tools: readonly ToolEntry[];
   hasMore?: ReadonlyMap<string, boolean>;
   onNavigate?: () => void;
+  onAnnounce?: (text: string) => void;
 }) {
-  const shown = tools.filter((tool) => tool.card || tool.state === 'denied');
+  const shown = tools.filter((tool) => tool.card || tool.confirmation || tool.state === 'denied');
   if (shown.length === 0) return null;
   return (
     <div className="grid gap-2">
       {shown.map((tool) =>
-        tool.state === 'denied' && tool.decision && tool.decision !== 'allowed' ? (
+        tool.confirmation ? (
+          <ConfirmationSlot
+            key={tool.executionId}
+            tool={tool}
+            onNavigate={onNavigate}
+            onAnnounce={onAnnounce}
+          />
+        ) : tool.state === 'denied' && tool.decision && tool.decision !== 'allowed' ? (
           <DeniedCard
             key={tool.executionId}
             title={tool.title}
@@ -205,6 +286,48 @@ function FailedNote({
   );
 }
 
+/**
+ * One question and its answer. Stored and running turns render through this one component so
+ * the tool chips and cards sit at the same place in the tree for both.
+ */
+function ExchangeArticle({
+  label,
+  user,
+  tools,
+  hasMore,
+  showAssistant,
+  onNavigate,
+  onAnnounce,
+  children,
+}: {
+  label: string;
+  user: string | null;
+  tools: readonly ToolEntry[];
+  hasMore?: ReadonlyMap<string, boolean>;
+  showAssistant: boolean;
+  onNavigate?: () => void;
+  onAnnounce?: (text: string) => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <article className="grid gap-2" aria-label={label}>
+      {user !== null ? <UserBubble text={user} /> : null}
+      {showAssistant ? (
+        <AssistantBlock>
+          <ToolChips tools={tools} />
+          <ToolResults
+            tools={tools}
+            hasMore={hasMore}
+            onNavigate={onNavigate}
+            onAnnounce={onAnnounce}
+          />
+          {children}
+        </AssistantBlock>
+      ) : null}
+    </article>
+  );
+}
+
 interface Exchange {
   readonly key: string;
   readonly turnId: string;
@@ -216,10 +339,14 @@ interface Exchange {
   readonly hasMore: Map<string, boolean>;
 }
 
-/** Groups stored messages by turn (user question, tools, answer); executions deduplicated. */
+/**
+ * Groups stored messages by turn (user question, tools, answer); executions deduplicated. A
+ * confirmed write's execution (child of its proposal) supplies the proposal's result card.
+ */
 export function exchangesOf(messages: readonly StoredMessage[]): Exchange[] {
   const byTurn = new Map<string, Exchange>();
   const seen = new Set<string>();
+  const children = new Map<string, StoredExecution>();
   for (const message of messages) {
     let exchange = byTurn.get(message.turnId);
     if (!exchange) {
@@ -245,7 +372,8 @@ export function exchangesOf(messages: readonly StoredMessage[]): Exchange[] {
       hasMore: target.hasMore,
     };
     for (const execution of message.executions) {
-      // "More" pages are follow-ups of a card already shown; never a separate result.
+      // "More" pages and confirmed writes are follow-ups of a card already shown.
+      if (execution.parentExecutionId) children.set(execution.id, execution);
       if (seen.has(execution.id) || execution.parentExecutionId) continue;
       seen.add(execution.id);
       next.tools.push(toEntry(execution));
@@ -253,7 +381,14 @@ export function exchangesOf(messages: readonly StoredMessage[]): Exchange[] {
     }
     byTurn.set(message.turnId, next);
   }
-  return [...byTurn.values()];
+  return [...byTurn.values()].map((exchange) => ({
+    ...exchange,
+    tools: exchange.tools.map((tool) => {
+      const resultId = tool.confirmation?.resultExecutionId;
+      const result = resultId ? children.get(resultId) : undefined;
+      return result?.card ? { ...tool, resultCard: parseCard(result.card) } : tool;
+    }),
+  }));
 }
 
 function SuggestedPrompts({
@@ -276,8 +411,8 @@ function SuggestedPrompts({
       <div className="grid gap-1">
         <p className="text-base font-semibold">Ask about your email security</p>
         <p className="max-w-md text-sm text-muted-foreground">
-          The assistant reads data with your own permissions and links to the portal pages. It
-          cannot change settings yet.
+          The assistant reads data with your own permissions and links to the portal pages. Changes
+          it proposes run only after you review and confirm them.
         </p>
       </div>
       {tools.isLoading ? (
@@ -313,16 +448,26 @@ export function ConversationView({
   onNavigate?: () => void;
   className?: string;
 }) {
-  const { conversationId, pending, running, send, retry } = useAssistant();
+  const { conversationId, pending, running, send, retry, confirmations } = useAssistant();
   const messages = useConversationMessages(conversationId);
   const endRef = useRef<HTMLDivElement>(null);
+  // Confirmation status changes (D10): one polite status region for the conversation.
+  const [announcement, setAnnouncement] = useState('');
+  const announce = useCallback((text: string) => setAnnouncement(text), []);
 
   const exchanges = useMemo(
     () =>
-      exchangesOf(messages.data?.messages ?? []).filter(
-        (exchange) => !pending || exchange.turnId !== pending.turnId,
-      ),
-    [messages.data, pending],
+      exchangesOf(messages.data?.messages ?? [])
+        .filter((exchange) => !pending || exchange.turnId !== pending.turnId)
+        .map((exchange) => ({
+          ...exchange,
+          tools: withLiveConfirmations(exchange.tools, confirmations),
+        })),
+    [confirmations, messages.data, pending],
+  );
+  const pendingTools = useMemo(
+    () => (pending ? withLiveConfirmations(pending.tools, confirmations) : []),
+    [confirmations, pending],
   );
   const showPending = pending && (pending.conversationId === conversationId || !conversationId);
   const lastExchange = exchanges[exchanges.length - 1];
@@ -349,55 +494,66 @@ export function ConversationView({
       {empty ? (
         <SuggestedPrompts onPick={(prompt) => void send(prompt)} disabled={running} />
       ) : null}
+      <p className="sr-only" role="status" aria-live="polite">
+        {announcement}
+      </p>
       {messages.data && !messages.data.complete ? (
         <p className="text-center text-xs text-muted-foreground">
           Only the first {messages.data.messages.length} messages of this long conversation are
           shown. Start a new conversation for new questions.
         </p>
       ) : null}
-      {exchanges.map((exchange) => {
-        const failed = exchange.status === 'failed';
-        const isLast = exchange === lastExchange && !showPending;
-        return (
-          <article key={exchange.key} className="grid gap-2" aria-label="Question and answer">
-            {exchange.user !== null ? <UserBubble text={exchange.user} /> : null}
-            {exchange.tools.length > 0 ||
-            exchange.assistant ||
-            failed ||
-            exchange.status === 'cancelled' ? (
-              <AssistantBlock>
-                <ToolChips tools={exchange.tools} />
-                <ToolResults
-                  tools={exchange.tools}
-                  hasMore={exchange.hasMore}
-                  onNavigate={onNavigate}
+      {[
+        ...exchanges.map((exchange) => {
+          const failed = exchange.status === 'failed';
+          const isLast = exchange === lastExchange && !showPending;
+          return (
+            <ExchangeArticle
+              key={exchange.key}
+              label="Question and answer"
+              user={exchange.user}
+              tools={exchange.tools}
+              hasMore={exchange.hasMore}
+              showAssistant={
+                exchange.tools.length > 0 ||
+                Boolean(exchange.assistant) ||
+                failed ||
+                exchange.status === 'cancelled'
+              }
+              onNavigate={onNavigate}
+              onAnnounce={announce}
+            >
+              {exchange.assistant ? (
+                <AssistantMarkdown source={exchange.assistant} onNavigate={onNavigate} />
+              ) : null}
+              {exchange.status === 'cancelled' ? (
+                <p className="text-xs text-muted-foreground">Stopped.</p>
+              ) : null}
+              {failed ? (
+                <FailedNote
+                  message={turnErrorText(exchange.errorCode ?? 'assistant_provider_error')}
+                  onRetry={
+                    isLast && exchange.user ? () => void retry(exchange.user ?? '') : undefined
+                  }
+                  disabled={running}
                 />
-                {exchange.assistant ? (
-                  <AssistantMarkdown source={exchange.assistant} onNavigate={onNavigate} />
-                ) : null}
-                {exchange.status === 'cancelled' ? (
-                  <p className="text-xs text-muted-foreground">Stopped.</p>
-                ) : null}
-                {failed ? (
-                  <FailedNote
-                    message={turnErrorText(exchange.errorCode ?? 'assistant_provider_error')}
-                    onRetry={
-                      isLast && exchange.user ? () => void retry(exchange.user ?? '') : undefined
-                    }
-                    disabled={running}
-                  />
-                ) : null}
-              </AssistantBlock>
-            ) : null}
-          </article>
-        );
-      })}
-      {showPending && pending ? (
-        <article className="grid gap-2" aria-label="Current question and answer">
-          <UserBubble text={pending.message} />
-          <AssistantBlock>
-            <ToolChips tools={pending.tools} />
-            <ToolResults tools={pending.tools} onNavigate={onNavigate} />
+              ) : null}
+            </ExchangeArticle>
+          );
+        }),
+        // The running turn shares the stored turn's key (its turn id) and element structure, so
+        // when the stored messages replace it the same card instances stay mounted: a focused
+        // confirmation card keeps the focus instead of being remounted (step AI-2 D10).
+        showPending && pending ? (
+          <ExchangeArticle
+            key={pending.turnId ?? pending.clientTurnId}
+            label="Current question and answer"
+            user={pending.message}
+            tools={pendingTools}
+            showAssistant
+            onNavigate={onNavigate}
+            onAnnounce={announce}
+          >
             <div aria-live="polite" aria-busy={pending.status === 'running'}>
               {pending.text ? (
                 <AssistantMarkdown source={pending.text} onNavigate={onNavigate} />
@@ -420,9 +576,9 @@ export function ConversationView({
                 onRetry={() => void retry(pending.message)}
               />
             ) : null}
-          </AssistantBlock>
-        </article>
-      ) : null}
+          </ExchangeArticle>
+        ) : null,
+      ]}
       <div ref={endRef} />
     </div>
   );

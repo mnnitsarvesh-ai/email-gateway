@@ -49,6 +49,7 @@ import {
   createAssistantApp,
   DAY_MS,
   directive,
+  ENABLED_WRITES,
   enableAssistant,
   executionsOf,
   member,
@@ -941,6 +942,8 @@ describe('retention and organization purge (D7, D12, ADR-0094)', () => {
     const repo = ctx.get(AssistantTenantDataRepository);
     const counts = await repo.purgeOrganization(systemScope(org.id), 1);
     expect(counts).toEqual({
+      // Step AI-2: confirmations go first (none here: both tools are reads).
+      ai_chat_action_confirmations: 0,
       ai_chat_tool_executions: 2,
       ai_chat_messages: 4,
       ai_chat_turns: 2,
@@ -978,9 +981,17 @@ describe('tools catalogue (D3, D5)', () => {
     const adminNames = (admin.body.tools as Array<{ name: string }>).map((t) => t.name);
     expect(adminNames).toContain('policy_management_list');
     expect(adminNames).not.toContain('dead_letters_stats');
-    expect((admin.body.tools as Array<{ access: string }>).every((t) => t.access === 'read')).toBe(
-      true,
+    // Step AI-2: the confirmable writes are offered too (each runs only after a confirmation).
+    const writes = (admin.body.tools as Array<{ name: string; access: string }>).filter(
+      (t) => t.access === 'write',
     );
+    expect(writes.map((t) => t.name)).toContain('policy_management_create');
+    expect(writes.length).toBe(ENABLED_WRITES.length);
+    expect(
+      (admin.body.tools as Array<{ access: string }>).every(
+        (t) => t.access === 'read' || t.access === 'write',
+      ),
+    ).toBe(true);
     const reader = await call(ctx, readerA.headers, 'get', `${A}/tools`);
     const readerNames = (reader.body.tools as Array<{ name: string }>).map((t) => t.name);
     expect(readerNames.length).toBeLessThan(adminNames.length);

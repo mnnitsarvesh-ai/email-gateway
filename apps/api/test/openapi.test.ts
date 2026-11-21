@@ -216,9 +216,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // mailbox state operations of step 8.5 (docs/plan/steps/26-ato-provider-adapters.md §6): 391;
     // plus the 12 journaling operations of step 8.6
     // (docs/plan/steps/27-journal-intake-and-archive-split.md D11): 403; plus the 15 assistant
-    // operations of step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1): 418, all under
-    // /api/v1.
-    expect(count).toBe(418);
+    // operations of step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1): 418; plus the 3
+    // confirmation operations of step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md
+    // §4.1): 421, all under /api/v1.
+    expect(count).toBe(421);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1454,7 +1455,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     ).toContain('Step 8.5');
   });
 
-  it('documents the 15 step AI-1 assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
+  it('documents the 15 step AI-1 and 3 step AI-2 assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
     const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/assistant'));
     const expected: Record<string, [string, string, string | null, 'v1' | null]> = {
       'GET /api/v1/assistant/status': [
@@ -1547,6 +1548,25 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         'expensive',
         null,
       ],
+      // Step AI-2 §4.1.
+      'GET /api/v1/assistant/confirmations/{confirmationId}': [
+        'AssistantConfirmationsController_get_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'POST /api/v1/assistant/confirmations/{confirmationId}/confirm': [
+        'AssistantConfirmationsController_confirm_v1',
+        'assistant:use',
+        'sensitive',
+        null,
+      ],
+      'POST /api/v1/assistant/confirmations/{confirmationId}/cancel': [
+        'AssistantConfirmationsController_cancel_v1',
+        'assistant:use',
+        'sensitive',
+        null,
+      ],
     };
     expect(ops.map((op) => op.key).sort()).toEqual(Object.keys(expected).sort());
     for (const [key, [operationId, permission, rateClass, cursor]] of Object.entries(expected)) {
@@ -1584,6 +1604,20 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'assistant_settings_conflict',
       'text/event-stream',
       'turn.completed',
+      // Step AI-2 §4.1, §4.2.
+      'assistant_confirmation_not_found',
+      'assistant_confirmation_session_mismatch',
+      'assistant_confirmation_not_pending',
+      'assistant_confirmation_expired',
+      'assistant_confirmation_token_invalid',
+      'assistant_confirmation_digest_mismatch',
+      'assistant_confirmation_tool_changed',
+      'assistant_confirmation_state_changed',
+      'assistant_reauth_required',
+      'assistant_reauth_failed',
+      'confirmation.required',
+      'pending_confirmation',
+      'assistant-confirmation/1',
     ]) {
       expect(docs, code).toContain(code);
     }

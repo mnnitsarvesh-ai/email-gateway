@@ -14,7 +14,30 @@ import { AuditService } from '../../src/audit/audit.service';
 import type { UserPrincipal } from '../../src/auth-contracts/principal';
 import { systemScope, type TenantScope } from '../../src/auth-contracts/tenant-scope';
 import { TransactionRunner } from '../../src/database/transaction-runner';
+import {
+  type ReauthenticationResult,
+  ReauthenticationService,
+} from '../../src/modules/auth/services/reauthentication.service';
 import { AssistantSettingsRepository } from '../../src/modules/assistant/repositories/assistant-settings.repository';
+import {
+  type ConfirmationCreate,
+  type ConfirmationFinish,
+  type ConfirmationRow,
+  ConfirmationsRepository,
+  type ConfirmationWithRefs,
+  type StaleExecutingCutoff,
+  type SweptConfirmation,
+  type UnreportedConfirmation,
+} from '../../src/modules/assistant/repositories/confirmations.repository';
+
+/** The repository's stale-`executing` predicate (outcome-unknown sweep). */
+function staleExecuting(k: ConfirmationRow, cutoff: StaleExecutingCutoff): boolean {
+  if (k.status !== 'executing') return false;
+  if (k.executionStartedAt === null) {
+    return k.decidedAt !== null && k.decidedAt < cutoff.decidedBefore;
+  }
+  return k.executionStartedAt < cutoff.startedBefore;
+}
 import type {
   SettingsRow,
   SettingsWrite,
@@ -60,6 +83,7 @@ export type StoredTurn = TurnRow & {
   registryVersion: string;
 };
 export type StoredExecution = ExecutionRow;
+export type StoredConfirmation = ConfirmationRow;
 
 /** A synthetic customer user (never a real account). */
 export function testUser(overrides: Partial<UserPrincipal> = {}): UserPrincipal {
@@ -85,6 +109,7 @@ export class AssistantWorld {
   turns: StoredTurn[] = [];
   messages: MessageRow[] = [];
   executions: StoredExecution[] = [];
+  confirmations: StoredConfirmation[] = [];
   usage: Array<UsageDayRow & { organizationId: bigint }> = [];
   /** Feature `ai_assistant` per organization. */
   features = new Map<bigint, boolean>();
@@ -104,6 +129,7 @@ export class AssistantWorld {
     this.turns = [];
     this.messages = [];
     this.executions = [];
+    this.confirmations = [];
     this.usage = [];
     this.features.clear();
     this.users.clear();
@@ -226,6 +252,12 @@ export class AssistantWorld {
           e.resultCard = null;
           e.resultRefs = null;
           e.nextCursor = null;
+        }
+      for (const k of world.confirmations)
+        if (k.organizationId === organizationId && ids.includes(k.conversationId)) {
+          k.request = null;
+          k.preconditions = null;
+          k.summary = null;
         }
       for (const c of world.conversations)
         if (c.organizationId === organizationId && ids.includes(c.id)) {
@@ -695,11 +727,283 @@ export class AssistantWorld {
         Promise.resolve(
           world.executions.find((e) => e.id === id && world.owns(owner, e))?.publicId ?? null,
         ),
-      deleteBefore: (before: Date, batch: number) =>
-        Promise.resolve(
-          world.deleteWhere('executions', (e: StoredExecution) => e.createdAt < before, batch),
-        ),
+      deleteBefore: (before: Date, batch: number) => {
+        const deleted = world.deleteWhere(
+          'executions',
+          (e: StoredExecution) => e.createdAt < before,
+          batch,
+        );
+        // FK cascade: a confirmation goes with its proposal execution.
+        world.confirmations = world.confirmations.filter((k) =>
+          world.executions.some((e) => e.id === k.executionId),
+        );
+        return Promise.resolve(deleted);
+      },
     } as unknown as ExecutionsRepository;
+  }
+
+  // ---- confirmations (step AI-2) -------------------------------------------------------------
+
+  confirmationWithRefs(row: StoredConfirmation): ConfirmationWithRefs {
+    const execution = this.executions.find((e) => e.id === row.executionId)!;
+    return {
+      ...clone(row),
+      conversationPublicId: this.conversations.find((c) => c.id === row.conversationId)!.publicId,
+      executionPublicId: execution.publicId,
+      executionSeq: execution.seq,
+      resultExecutionPublicId:
+        row.resultExecutionId === null
+          ? null
+          : (this.executions.find((e) => e.id === row.resultExecutionId)?.publicId ?? null),
+    };
+  }
+
+  private swept(row: StoredConfirmation): SweptConfirmation {
+    const refs = this.confirmationWithRefs(row);
+    return {
+      id: row.id,
+      publicId: row.publicId,
+      organizationId: row.organizationId,
+      conversationPublicId: refs.conversationPublicId,
+      executionPublicId: refs.executionPublicId,
+      toolName: row.toolName,
+      operationId: row.operationId,
+      risk: row.risk,
+      requiresReauth: row.requiresReauth,
+      createdAt: row.createdAt,
+    };
+  }
+
+  confirmationsDouble(): ConfirmationsRepository {
+    const world = this;
+    const owned = (owner: Owner, id: bigint) =>
+      world.confirmations.find((k) => k.id === id && world.owns(owner, k));
+    const move = (
+      row: StoredConfirmation | undefined,
+      when: (k: StoredConfirmation) => boolean,
+      data: Partial<StoredConfirmation>,
+    ): number => {
+      if (!row || !when(row)) return 0;
+      Object.assign(row, data, { updatedAt: new Date() });
+      return 1;
+    };
+    return {
+      create: (owner: Owner, data: ConfirmationCreate) => {
+        world.log.push('confirmation');
+        if (world.confirmations.some((k) => k.executionId === data.executionId)) {
+          throw new Error('duplicate (execution_id)');
+        }
+        const id = world.id();
+        world.confirmations.push({
+          id,
+          ...clone(data),
+          organizationId: owner.scope.organizationId,
+          userId: owner.userId,
+          resultExecutionId: null,
+          status: 'pending',
+          failedAttempts: 0,
+          reauthUsed: false,
+          decidedAt: null,
+          executionStartedAt: null,
+          executedAt: null,
+          reportedAt: null,
+          resultHttpStatus: null,
+          errorCode: null,
+          updatedAt: data.createdAt,
+        } as StoredConfirmation);
+        return Promise.resolve(id);
+      },
+      findOwned: (owner: Owner, overrideId: string | null, publicId: string) => {
+        const row = world.confirmations.find(
+          (k) =>
+            k.publicId === publicId &&
+            world.owns(owner, k) &&
+            k.platformOverrideId === overrideId &&
+            world.conversations.some((c) => c.id === k.conversationId && world.live(c)),
+        );
+        return Promise.resolve(row ? world.confirmationWithRefs(row) : null);
+      },
+      reload: (owner: Owner, id: bigint) => {
+        const row = owned(owner, id);
+        return Promise.resolve(row ? world.confirmationWithRefs(row) : null);
+      },
+      forExecutions: (owner: Owner, executionIds: readonly bigint[]) =>
+        Promise.resolve(
+          world.confirmations
+            .filter((k) => world.owns(owner, k) && executionIds.includes(k.executionId))
+            .map((k) => world.confirmationWithRefs(k)),
+        ),
+      countLivePending: (owner: Owner, conversationId: bigint, now: Date) =>
+        Promise.resolve(
+          world.confirmations.filter(
+            (k) =>
+              k.organizationId === owner.scope.organizationId &&
+              k.conversationId === conversationId &&
+              k.status === 'pending' &&
+              k.expiresAt > now,
+          ).length,
+        ),
+      beginExecuting: (owner: Owner, id: bigint, now: Date, reauthUsed: boolean) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'pending' && k.expiresAt > now, {
+            status: 'executing',
+            decidedAt: now,
+            ...(reauthUsed && { reauthUsed: true }),
+          }),
+        ),
+      claimExecution: (owner: Owner, id: bigint, now: Date) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'executing' && k.executionStartedAt === null, {
+            executionStartedAt: now,
+          }),
+        ),
+      reconcileOutcomeUnknown: (owner: Owner, id: bigint, code: string, data: ConfirmationFinish) =>
+        Promise.resolve(
+          move(
+            owned(owner, id),
+            (k) =>
+              k.status === 'failed' &&
+              k.errorCode === code &&
+              k.resultExecutionId === null &&
+              k.executionStartedAt !== null,
+            {
+              status: data.status,
+              resultExecutionId: data.resultExecutionId,
+              resultHttpStatus: data.resultHttpStatus,
+              errorCode: data.errorCode,
+              executedAt: data.executedAt,
+              reportedAt: null,
+            },
+          ),
+        ),
+      finish: (owner: Owner, id: bigint, data: ConfirmationFinish) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'executing', {
+            status: data.status,
+            resultExecutionId: data.resultExecutionId,
+            resultHttpStatus: data.resultHttpStatus,
+            errorCode: data.errorCode,
+            executedAt: data.executedAt,
+          }),
+        ),
+      fail: (owner: Owner, id: bigint, errorCode: string, now: Date) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'pending' || k.status === 'executing', {
+            status: 'failed',
+            errorCode,
+            decidedAt: now,
+          }),
+        ),
+      cancel: (
+        owner: Owner,
+        id: bigint,
+        now: Date,
+        _tx: unknown,
+        errorCode: string | null = null,
+      ) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'pending', {
+            status: 'cancelled',
+            decidedAt: now,
+            errorCode,
+          }),
+        ),
+      expire: (owner: Owner, id: bigint, now: Date) =>
+        Promise.resolve(
+          move(owned(owner, id), (k) => k.status === 'pending' && k.expiresAt <= now, {
+            status: 'expired',
+            decidedAt: now,
+          }),
+        ),
+      incrementFailedAttempts: (owner: Owner, id: bigint) => {
+        const row = owned(owner, id);
+        if (!row || row.status !== 'pending') return Promise.resolve(0);
+        row.failedAttempts += 1;
+        return Promise.resolve(row.failedAttempts);
+      },
+      unreported: (owner: Owner, conversationId: bigint, take: number) => {
+        const rows = world.confirmations
+          .filter(
+            (k) =>
+              world.owns(owner, k) &&
+              k.conversationId === conversationId &&
+              ['executed', 'failed', 'cancelled', 'expired'].includes(k.status) &&
+              k.reportedAt === null,
+          )
+          .sort(
+            (a, b) =>
+              (a.decidedAt?.getTime() ?? 0) - (b.decidedAt?.getTime() ?? 0) ||
+              (a.id < b.id ? -1 : 1),
+          )
+          .slice(0, take);
+        return Promise.resolve(
+          rows.map((k): UnreportedConfirmation => {
+            const result =
+              k.resultExecutionId === null
+                ? undefined
+                : world.executions.find((e) => e.id === k.resultExecutionId);
+            const refs = result?.resultRefs as Record<string, unknown> | null | undefined;
+            return {
+              id: k.id,
+              toolName: k.toolName,
+              status: k.status,
+              callSeq: world.executions.find((e) => e.id === k.executionId)!.seq,
+              resultHttpStatus: k.resultHttpStatus,
+              errorCode: k.errorCode,
+              resultSeq: result?.seq ?? null,
+              resultRowRef: result !== undefined && refs != null && `r${result.seq}.1` in refs,
+            };
+          }),
+        );
+      },
+      markReported: (owner: Owner, ids: readonly bigint[], now: Date) => {
+        world.log.push('markReported');
+        for (const k of world.confirmations)
+          if (world.owns(owner, k) && ids.includes(k.id) && k.reportedAt === null)
+            k.reportedAt = now;
+        return Promise.resolve();
+      },
+      cancelPendingOfConversation: (organizationId: bigint, conversationId: bigint, now: Date) => {
+        const rows = world.confirmations.filter(
+          (k) =>
+            k.organizationId === organizationId &&
+            k.conversationId === conversationId &&
+            k.status === 'pending',
+        );
+        for (const k of rows) Object.assign(k, { status: 'cancelled', decidedAt: now });
+        return Promise.resolve(rows.map((k) => world.swept(k)));
+      },
+      dueToExpire: (now: Date, take: number) =>
+        Promise.resolve(
+          world.confirmations
+            .filter((k) => k.status === 'pending' && k.expiresAt <= now)
+            .slice(0, take)
+            .map((k) => world.swept(k)),
+        ),
+      expireById: (id: bigint, now: Date) =>
+        Promise.resolve(
+          move(
+            world.confirmations.find((k) => k.id === id),
+            (k) => k.status === 'pending' && k.expiresAt <= now,
+            { status: 'expired', decidedAt: now },
+          ) === 1,
+        ),
+      staleExecuting: (cutoff: StaleExecutingCutoff, take: number) =>
+        Promise.resolve(
+          world.confirmations
+            .filter((k) => staleExecuting(k, cutoff))
+            .slice(0, take)
+            .map((k) => world.swept(k)),
+        ),
+      failStaleById: (id: bigint, cutoff: StaleExecutingCutoff, errorCode: string) =>
+        Promise.resolve(
+          move(
+            world.confirmations.find((k) => k.id === id),
+            (k) => staleExecuting(k, cutoff),
+            { status: 'failed', errorCode },
+          ) === 1,
+        ),
+    } as unknown as ConfirmationsRepository;
   }
 
   // ---- usage ---------------------------------------------------------------------------------
@@ -778,6 +1082,41 @@ export class RecordingAssistantAudit extends AuditService {
   override record(entry: AuditEntry): Promise<void> {
     this.entries.push(structuredClone(entry));
     return Promise.resolve();
+  }
+}
+
+/** The synthetic password the fake re-authentication accepts (never a real credential). */
+export const REAUTH_PASSWORD = 'it-reauth-password';
+/** The synthetic TOTP code the fake re-authentication accepts. */
+export const REAUTH_TOTP = '123456';
+
+/**
+ * A ReauthenticationService double: `REAUTH_PASSWORD` (+ `REAUTH_TOTP` when `mfa`) succeeds;
+ * `next` forces one result. Records the calls' outcomes only (never the inputs).
+ */
+export class FakeReauthentication extends ReauthenticationService {
+  mfaEnrolled = true;
+  next: ReauthenticationResult | null = null;
+  readonly outcomes: ReauthenticationResult[] = [];
+  constructor() {
+    super({} as never, {} as never, {} as never, {} as never);
+  }
+  override verify(
+    _principal: UserPrincipal,
+    input: { password: string; totpCode?: string },
+  ): Promise<ReauthenticationResult> {
+    let result: ReauthenticationResult;
+    if (this.next) {
+      result = this.next;
+      this.next = null;
+    } else if (input.password !== REAUTH_PASSWORD) result = { ok: false, reason: 'password' };
+    else if (this.mfaEnrolled && input.totpCode === undefined) {
+      result = { ok: false, reason: 'totp_required' };
+    } else if (this.mfaEnrolled && input.totpCode !== REAUTH_TOTP)
+      result = { ok: false, reason: 'totp' };
+    else result = { ok: true };
+    this.outcomes.push(result);
+    return Promise.resolve(result);
   }
 }
 
@@ -878,14 +1217,19 @@ export function overrideAssistant(
   world: AssistantWorld,
   audit: RecordingAssistantAudit,
   loopback: FakeLoopback,
+  reauth: ReauthenticationService = new FakeReauthentication(),
 ): TestingModuleBuilder {
   return builder
+    .overrideProvider(ReauthenticationService)
+    .useValue(reauth)
     .overrideProvider(AssistantSettingsRepository)
     .useValue(world.settingsDouble())
     .overrideProvider(ConversationsRepository)
     .useValue(world.conversationsDouble())
     .overrideProvider(ExecutionsRepository)
     .useValue(world.executionsDouble())
+    .overrideProvider(ConfirmationsRepository)
+    .useValue(world.confirmationsDouble())
     .overrideProvider(UsageRepository)
     .useValue(world.usageDouble())
     .overrideProvider(OrganizationFeaturesService)

@@ -63,14 +63,24 @@ export function extractNextCursor(body: unknown): string | null {
 /** Public ids and keys only: no spaces, no markup, bounded. */
 export const PUBLIC_ID = /^[A-Za-z0-9._:@-]{1,128}$/;
 
+/** The value at a dotted field path (`policy.id`), or undefined. */
+function fieldAt(row: Record<string, unknown>, path: string): unknown {
+  let node: unknown = row;
+  for (const segment of path.split('.')) {
+    if (!isPlainObject(node)) return undefined;
+    node = node[segment];
+  }
+  return node;
+}
+
 /**
- * The public id of a row: the manifest's `refField`, else `id`, `publicId`, else the first
- * `<x>Id` field holding an id-shaped string.
+ * The public id of a row: the manifest's `refField` (a field or a dotted path such as
+ * `policy.id`), else `id`, `publicId`, else the first `<x>Id` field holding an id-shaped string.
  */
 export function detectRowId(row: unknown, hints: DisplayHints | undefined): string | null {
   if (!isPlainObject(row)) return null;
   const candidates: unknown[] = [];
-  if (hints?.refField) candidates.push(row[hints.refField]);
+  if (hints?.refField) candidates.push(fieldAt(row, hints.refField));
   else {
     candidates.push(row.id, row.publicId);
     for (const [key, value] of Object.entries(row))

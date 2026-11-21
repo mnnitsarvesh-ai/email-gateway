@@ -20,14 +20,64 @@ import type {
  * and runs `pnpm --filter @email-gateway/assistant registry:generate`.
  */
 
-/** Phase the program has reached: tools of this phase and earlier are enabled (reads only in AI-1). */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-1';
+/**
+ * Phase the program has reached: tools of this phase and earlier are enabled (reads; writes with
+ * a `testedBy` suite and a confirmation spec, step AI-2).
+ */
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-2';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';
 
 /** The AI-1 tool sweep suite that covers every enabled read (design §9 item 4). */
 export const READ_TOOLS_TESTED_BY = 'apps/api/integration/assistant-tools.test.ts';
+
+/** Integration suites of the AI-2 writes (design 29 §4.3, §9 item 4). */
+export const POLICY_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-policies.test.ts';
+export const MAIL_OPS_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-mail-ops.test.ts';
+
+/** The 31 write operations of step AI-2 and the suite that covers each (`testedBy`). */
+export const AI2_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    [
+      'PolicyManagementController_create_v1',
+      'PolicyManagementController_update_v1',
+      'PolicyManagementController_enable_v1',
+      'PolicyManagementController_disable_v1',
+      'PolicyManagementController_remove_v1',
+      'PolicyManagementController_createDraft_v1',
+      'PolicyManagementController_updateDraft_v1',
+      'PolicyManagementController_deleteDraft_v1',
+      'PolicyManagementController_publish_v1',
+      'PolicyManagementController_activate_v1',
+      'PolicySettingsController_put_v1',
+    ].map((id) => [id, POLICY_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'QuarantineEntriesController_release_v1',
+      'QuarantineEntriesController_reject_v1',
+      'QuarantineEntriesController_delete_v1',
+      'QuarantineEntriesController_requestRelease_v1',
+      'QuarantineEntriesController_manual_v1',
+      'QuarantineSelfController_release_v1',
+      'QuarantineSelfController_requestRelease_v1',
+      'QuarantineSelfController_putPreferences_v1',
+      'QuarantineToolsController_putSettings_v1',
+      'QuarantineToolsController_bulk_v1',
+      'QuarantineApprovalsController_approve_v1',
+      'QuarantineApprovalsController_deny_v1',
+      'QuarantineApprovalsController_cancel_v1',
+      'MessageLifecycleController_release_v1',
+      'MessageLifecycleController_rescan_v1',
+      'RecipientSuppressionsController_create_v1',
+      'RecipientSuppressionsController_delete_v1',
+      'SavedViewsController_create_v1',
+      'SavedViewsController_update_v1',
+      'SavedViewsController_remove_v1',
+    ].map((id) => [id, MAIL_OPS_WRITES_TESTED_BY]),
+  ),
+};
 
 export const NOT_APPLICABLE_REASONS = {
   ceremony: 'credential/session ceremony (portal only)',
@@ -518,7 +568,7 @@ const columns = (...names: string[]): DisplayHints => ({ columns: names });
  * metadata, criteria, params) that the list does not cover (`freeFormResponsePaths`), so only
  * typed strings need listing here.
  */
-export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
+const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   // --- messages and their evidence (mail-derived strings) ---
   MessagesController_list_v1: {
     display: columns('receivedAt', 'direction', 'subject', 'headerFrom', 'status', 'finalVerdict'),
@@ -711,6 +761,9 @@ export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = 
     untrustedFields: ['data[].email', 'data[].userAgent'],
   },
 
+  // --- policy writes (step AI-2): the created policy is row ref r<seq>.1 ("publish it") ---
+  PolicyManagementController_create_v1: { display: { refField: 'policy.id' } },
+
   // --- administration lists (display hints) ---
   PolicyManagementController_list_v1: {
     display: columns('name', 'status', 'direction', 'priority', 'activeVersionNo'),
@@ -728,3 +781,11 @@ export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = 
   OrganizationConfigurationController_listLimits_v1: { bind: SELF_ORGANIZATION },
   OrganizationConfigurationController_getSettings_v1: { bind: SELF_ORGANIZATION },
 };
+
+/** The overrides with the AI-2 writes' `testedBy` merged in. */
+export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = (() => {
+  const out: Record<string, OperationOverride> = { ...BASE_OVERRIDES };
+  for (const [operationId, testedBy] of Object.entries(AI2_WRITES_TESTED_BY))
+    out[operationId] = { ...out[operationId], testedBy };
+  return out;
+})();

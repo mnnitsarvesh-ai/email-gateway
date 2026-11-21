@@ -24,6 +24,8 @@
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@email-gateway/policy-dsl": "workspace:*",
+    "fast-check": "3.23.2",
     "tsx": "4.23.15",
     "prettier": "^3.6.2"
   }

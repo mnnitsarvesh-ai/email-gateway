@@ -31,7 +31,10 @@ export interface DisplayHints {
   title?: string;
   /** Table / key-value columns in order (default: the first scalar fields). */
   columns?: string[];
-  /** Field holding the row's public id for refs and links (default: `id`, `publicId`, `<x>Id`). */
+  /**
+   * Field (or dotted path, e.g. `policy.id`) holding the row's public id for refs and links
+   * (default: `id`, `publicId`, `<x>Id`).
+   */
   refField?: string;
   /** Row field that fills the portal route of a table row (default: the ref id). */
   linkField?: string;

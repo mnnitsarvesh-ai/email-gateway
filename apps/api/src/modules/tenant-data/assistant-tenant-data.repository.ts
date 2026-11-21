@@ -4,14 +4,16 @@ import type { TenantScope } from '../../auth-contracts/tenant-scope';
 
 /**
  * The organization's AI assistant tables in the order the organization purge deletes them (step
- * AI-1 §3, D12, ADR-0094; docs/runbooks/organization-deletion.md): tool executions and messages
- * (they reference turns and conversations), turns, conversations, the daily usage rows and
- * finally the settings row. Every table references `organizations` with RESTRICT, so the
+ * AI-1 §3, D12, ADR-0094; step AI-2 §3, D7; docs/runbooks/organization-deletion.md): action
+ * confirmations (they reference executions, turns and conversations), tool executions and
+ * messages (they reference turns and conversations), turns, conversations, the daily usage rows
+ * and finally the settings row. Every table references `organizations` with RESTRICT, so the
  * organization row cannot go while any of them holds a row; the conversation children also
  * cascade from their conversation (a backstop only: the explicit order keeps every statement
  * short). Independent of the other purge repositories (no foreign key to or from another area).
  */
 export const ASSISTANT_PURGE_ORDER = [
+  'ai_chat_action_confirmations',
   'ai_chat_tool_executions',
   'ai_chat_messages',
   'ai_chat_turns',
@@ -32,8 +34,9 @@ export type AssistantPurgeCounts = Record<AssistantPurgeTable, number>;
  * ORDER BY … LIMIT n` on an index whose leading column is `organization_id`, repeated until fewer
  * than n rows go, so a crash leaves a resumable, consistent state and a re-run continues where it
  * stopped (0 everywhere once done). Never touches another organization's rows. The rows hold
- * conversation text, masked metadata cards and execution metadata (no email body, no attachment,
- * no credential, no S3 object); the `audit_logs` rows of the tool executions stay (append-only,
+ * conversation text, masked metadata cards, execution metadata and the stored requests, snapshots
+ * and impact summaries of action confirmations (no email body, no attachment, no credential, no
+ * confirmation token: only its hash; no S3 object); the `audit_logs` rows of the tool executions stay (append-only,
  * own retention).
  */
 @Injectable()
@@ -65,6 +68,13 @@ export class AssistantTenantDataRepository {
     batch: number,
   ): Promise<number> {
     switch (table) {
+      case 'ai_chat_action_confirmations':
+        // Index (organization_id, user_id, status, expires_at). Deleted before the executions
+        // (the proposal execution cascades to its confirmation, but organization_id is RESTRICT
+        // and the explicit statement keeps every batch short).
+        return this.prisma.$executeRaw`DELETE FROM ai_chat_action_confirmations
+          WHERE organization_id = ${organizationId}
+          ORDER BY user_id, status, expires_at, id LIMIT ${batch}`;
       case 'ai_chat_tool_executions':
         // Index (organization_id, created_at).
         return this.prisma.$executeRaw`DELETE FROM ai_chat_tool_executions

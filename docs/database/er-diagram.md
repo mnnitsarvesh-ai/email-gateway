@@ -97,7 +97,7 @@ flowchart LR
   end
   subgraph assistant[AI assistant]
     ai_chat_settings
-    ai_chat_conversations[ai_chat_conversations, ai_chat_turns, ai_chat_messages, ai_chat_tool_executions]
+    ai_chat_conversations[ai_chat_conversations, ai_chat_turns, ai_chat_messages, ai_chat_tool_executions, ai_chat_action_confirmations]
     ai_chat_usage_daily
   end
   subgraph ops[Platform operations]
@@ -1582,7 +1582,7 @@ erDiagram
 
 ## AI assistant
 
-Step AI-1 ([design §3](../plan/steps/28-ai-chat-management.md#3-data-model-migration-ai_assistant-ai-1-wp1), ADR-0094). Not partitioned. Every table references `organizations` (RESTRICT; the organization purge deletes them explicitly); a conversation belongs to one user (CASCADE, private data) and its turns, messages and tool executions cascade from it. Dotted lines are logical references (no FK). No email body or attachment is stored.
+Step AI-1 ([design §3](../plan/steps/28-ai-chat-management.md#3-data-model-migration-ai_assistant-ai-1-wp1), ADR-0094). Not partitioned. Every table references `organizations` (RESTRICT; the organization purge deletes them explicitly); a conversation belongs to one user (CASCADE, private data) and its turns, messages and tool executions cascade from it. Step AI-2 ([design §3](../plan/steps/29-ai-chat-confirmations-mail-writes.md#3-data-model-migration-ai_assistant_confirmations-wp1)) added `ai_chat_action_confirmations`: one per write proposal execution, cascading from its execution, turn and conversation. Dotted lines are logical references (no FK). No email body or attachment is stored.
 
 ```mermaid
 erDiagram
@@ -1597,6 +1597,11 @@ erDiagram
   ai_chat_tool_executions |o..o{ ai_chat_tool_executions : "parent_execution_id, no FK"
   ai_chat_tool_executions ||..o{ audit_logs : "correlation_id, resource id"
   organizations ||--o{ ai_chat_usage_daily : "RESTRICT"
+  organizations ||--o{ ai_chat_action_confirmations : "RESTRICT"
+  ai_chat_conversations ||--o{ ai_chat_action_confirmations : "CASCADE"
+  ai_chat_turns |o--o{ ai_chat_action_confirmations : "CASCADE"
+  ai_chat_tool_executions ||--o| ai_chat_action_confirmations : "CASCADE (the proposal)"
+  ai_chat_action_confirmations |o..o| ai_chat_tool_executions : "result_execution_id, no FK"
   ai_chat_settings {
     bigint organization_id PK
     bool enabled
@@ -1643,7 +1648,7 @@ erDiagram
     bigint organization_id FK
     bigint parent_execution_id "no FK"
     enum decision "allowed, denied_*"
-    enum status "succeeded, failed, refused, timeout"
+    enum status "succeeded, failed, refused, timeout, pending_confirmation"
     varchar correlation_id
     json result_card "content, purged"
   }
@@ -1652,6 +1657,24 @@ erDiagram
     date day PK
     varchar provider PK
     varchar model PK
+  }
+  ai_chat_action_confirmations {
+    bigint id PK
+    char public_id UK "Idempotency-Key of the confirmed write"
+    bigint organization_id FK
+    bigint user_id "no FK"
+    char session_family_id
+    bigint conversation_id FK
+    bigint turn_id FK
+    bigint execution_id FK,UK "the proposal"
+    bigint result_execution_id "no FK"
+    enum risk "low, medium, high"
+    json request "content, purged"
+    json summary "content, purged"
+    char action_digest
+    char token_hash "SHA-256; token never stored"
+    enum status "pending, executing, executed, failed, expired, cancelled"
+    datetime expires_at
   }
 ```
 

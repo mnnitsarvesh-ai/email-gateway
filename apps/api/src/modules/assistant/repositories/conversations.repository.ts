@@ -258,7 +258,8 @@ export class ConversationsRepository {
 
   /**
    * Clears the content columns of the given conversations (title, message content, transcripts,
-   * execution cards, refs and cursors) and stamps `content_purged_at`. Metadata stays.
+   * execution cards, refs and cursors, confirmation requests, preconditions and summaries) and
+   * stamps `content_purged_at`. Metadata stays.
    */
   async purgeContent(
     organizationId: bigint,
@@ -279,6 +280,11 @@ export class ConversationsRepository {
     await tx.aiChatToolExecution.updateMany({
       where: { organizationId, conversationId: { in: ids } },
       data: { resultCard: Prisma.DbNull, resultRefs: Prisma.DbNull, nextCursor: null },
+    });
+    // Step AI-2 D7: the stored request, preconditions and summary of their confirmations.
+    await tx.aiChatActionConfirmation.updateMany({
+      where: { organizationId, conversationId: { in: ids } },
+      data: { request: Prisma.DbNull, preconditions: Prisma.DbNull, summary: Prisma.DbNull },
     });
     await tx.aiChatConversation.updateMany({
       where: { organizationId, id: { in: ids } },

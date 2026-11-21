@@ -69,13 +69,15 @@ const STREAM_DESCRIPTION =
   '`event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started ' +
   '{ turnId, conversationId, seq }` (flushed before the first model call), then any ' +
   'interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, ' +
-  '`tool.completed { executionId, status, decision, card }` and `tool.denied { executionId, ' +
-  'tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { ' +
+  '`tool.completed { executionId, status, decision, card }` (status `pending_confirmation` for ' +
+  'a write proposal, immediately followed by `confirmation.required { confirmation, token }`: ' +
+  'the confirmation card and its single-use token, keep it in memory only) and `tool.denied { ' +
+  'executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { ' +
   'inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes ' +
   '`assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, ' +
   '`assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` ' +
-  'and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions }` after the ' +
-  'turn ended.';
+  'and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions, ' +
+  'confirmations }` after the turn ended (`confirmations[].token` is null on a replay).';
 
 /** Turns: ask, stream the answer, cancel (step AI-1 D7, §4.1, §4.2). */
 @ApiTags('assistant')
@@ -97,8 +99,11 @@ export class AssistantTurnsController {
       'payload_too_large` beyond) goes to the configured AI provider with the catalogue of the ' +
       'tools you may use; the model may call tools, each one existing `/api/v1` operation ' +
       'executed with YOUR credential through the api’s own pipeline (same permissions, tenant, ' +
-      'MFA, rate limits and audit as the portal; only reads in AI-1), recorded and audited ' +
-      '(`assistant.tool_executed` / `assistant.tool_denied`). Limits per turn: ' +
+      'MFA, rate limits and audit as the portal), recorded and audited ' +
+      '(`assistant.tool_executed` / `assistant.tool_denied`). A write call never runs inside a ' +
+      'turn: it becomes a confirmation (`pending_confirmation`) that runs only through `POST ' +
+      '/assistant/confirmations/{id}/confirm`; outcomes of earlier confirmations are told to the ' +
+      'model at the start of the next turn. Limits per turn: ' +
       'ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ' +
       'ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before ' +
       'the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 ' +

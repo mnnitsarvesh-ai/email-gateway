@@ -4,14 +4,16 @@ import { join } from 'node:path';
 import { sanitizeText } from '../results/sanitize';
 
 /**
- * The versioned system prompt `assistant-system/1` (design D7, D10). Layout, stable first for
+ * The versioned system prompt `assistant-system/2` (design 28 D7, D10; step AI-2 D9: writes are
+ * proposals confirmed in a card). `prompts/assistant-system-1.md` stays in the package because
+ * stored turns reference their `prompt_version`. Layout, stable first for
  * prompt caching: the prompt text, then the catalogue index (stable per permission set and
  * registry version), then the volatile context block (organization, user, roles, current time,
  * time zone, registry version).
  */
 
-export const PROMPT_VERSION = 'assistant-system/1';
-export const PROMPT_FILE = 'assistant-system-1.md';
+export const PROMPT_VERSION = 'assistant-system/2';
+export const PROMPT_FILE = 'assistant-system-2.md';
 const PACKAGE_DIR = join(__dirname, '..', '..');
 
 export interface PromptTemplate {

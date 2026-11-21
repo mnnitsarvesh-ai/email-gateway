@@ -1,6 +1,6 @@
 # Chat audit design
 
-Every tool the assistant runs, or refuses to run, leaves two records: an execution row in `ai_chat_tool_executions` (conversation context, kept with the conversation) and an `audit_logs` row (the organization's audit trail, append-only). The operation itself writes its own audit rows exactly as it does for the portal, and they share a correlation id with the execution. Normative sources: [design D12](../plan/steps/28-ai-chat-management.md#d12-storage-retention-and-audit-adr-0094), [ADR-0094](../architecture/adr/0094-assistant-conversation-storage-retention-audit.md), [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) (Audit).
+Every tool the assistant runs, or refuses to run, leaves two records: an execution row in `ai_chat_tool_executions` (conversation context, kept with the conversation) and an `audit_logs` row (the organization's audit trail, append-only). The operation itself writes its own audit rows exactly as it does for the portal, and they share a correlation id with the execution. Normative sources: [design D12](../plan/steps/28-ai-chat-management.md#d12-storage-retention-and-audit-adr-0094), [ADR-0094](../architecture/adr/0094-assistant-conversation-storage-retention-audit.md), [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) (Audit); confirmations (step AI-2): [design note 29 D11](../plan/steps/29-ai-chat-confirmations-mail-writes.md#d11-metrics-logs-audit), [contracts §35.1](../architecture/contracts.md#351-confirmations-step-ai-2).
 
 ## Execution rows (`ai_chat_tool_executions`)
 
@@ -10,12 +10,12 @@ One row per `call_tool` and per "Load more", allowed or denied (I6), written in 
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `public_id`                                         | Execution id (UUIDv7); the audit row's resource id                                                                                                |
 | `organization_id`, `user_id`                        | Owner, from the principal (the override's target organization under a platform override)                                                          |
-| `conversation_id`, `turn_id`, `parent_execution_id` | Context; `turn_id` is NULL and `parent_execution_id` set for a "more" page                                                                        |
+| `conversation_id`, `turn_id`, `parent_execution_id` | Context; `turn_id` is NULL and `parent_execution_id` set for a "more" page and for a confirmed write (the parent is the proposal)                 |
 | `seq`                                               | Conversation-wide sequence (`r<seq>` refs)                                                                                                        |
 | `tool_name`, `operation_id`, `http_method`          | What was asked                                                                                                                                    |
 | `access`, `risk`                                    | Registry classification at execution time                                                                                                         |
 | `decision`                                          | `allowed`, `denied_permission`, `denied_unknown_tool`, `denied_disabled`, `denied_not_applicable`, `denied_schema`, `denied_ref`, `denied_budget` |
-| `status`                                            | `succeeded`, `failed` (coded API error), `refused` (any denial), `timeout`                                                                        |
+| `status`                                            | `succeeded`, `failed` (coded API error), `refused` (any denial), `timeout`, `pending_confirmation` (a write proposal, AI-2)                       |
 | `http_status`, `error_code`                         | Result of the loopback call (NULL when refused before it)                                                                                         |
 | `correlation_id`                                    | `<turn correlation id>.<seq>`, sent as `x-correlation-id` on the loopback call                                                                    |
 | `params_redacted`                                   | Validated arguments with credential-like keys removed (≤ 4 KiB)                                                                                   |
@@ -25,12 +25,18 @@ One row per `call_tool` and per "Load more", allowed or denied (I6), written in 
 
 ## Audit rows (`audit_logs`)
 
-| Action                           | Resource type              | Resource id            | Written when                                                                                                |
-| -------------------------------- | -------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `assistant.tool_executed`        | `assistant_tool_execution` | execution public id    | A tool call passed the executor's checks (any HTTP outcome)                                                 |
-| `assistant.tool_denied`          | `assistant_tool_execution` | execution public id    | The executor refused the call (any `denied_*` decision)                                                     |
-| `assistant.conversation_deleted` | `assistant_conversation`   | conversation public id | The user cleared a conversation (content purged at once)                                                    |
-| `assistant.settings_updated`     | `assistant_settings`       | organization public id | An `assistant:configure` holder changed the tenant settings (incl. the external-processing acknowledgement) |
+| Action                             | Resource type                   | Resource id            | Written when                                                                                                                                                                      |
+| ---------------------------------- | ------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `assistant.tool_executed`          | `assistant_tool_execution`      | execution public id    | A tool call passed the executor's checks (any HTTP outcome)                                                                                                                       |
+| `assistant.tool_denied`            | `assistant_tool_execution`      | execution public id    | The executor refused the call (any `denied_*` decision)                                                                                                                           |
+| `assistant.conversation_deleted`   | `assistant_conversation`        | conversation public id | The user cleared a conversation (content purged at once)                                                                                                                          |
+| `assistant.settings_updated`       | `assistant_settings`            | organization public id | An `assistant:configure` holder changed the tenant settings (incl. the external-processing acknowledgement)                                                                       |
+| `assistant.confirmation_requested` | `assistant_action_confirmation` | confirmation public id | A write was proposed (with `assistant.tool_executed`, status `pending_confirmation`) (AI-2)                                                                                       |
+| `assistant.confirmation_executed`  | `assistant_action_confirmation` | confirmation public id | The user confirmed and the operation answered 2xx (including `202` approval pending)                                                                                              |
+| `assistant.confirmation_failed`    | `assistant_action_confirmation` | confirmation public id | The confirmed operation refused (non-2xx), the state changed at confirm, a tampered row, the tool changed, or the sweeper found it stuck in `executing` (`outcome_unknown`)       |
+| `assistant.confirmation_cancelled` | `assistant_action_confirmation` | confirmation public id | The user cancelled, the conversation was deleted, or the fifth wrong token cancelled it                                                                                           |
+| `assistant.confirmation_expired`   | `assistant_action_confirmation` | confirmation public id | A confirm after the expiry, or the sweeper expired a pending row                                                                                                                  |
+| `assistant.confirmation_refused`   | `assistant_action_confirmation` | confirmation public id | A confirm or cancel was refused (metadata `reason`: session mismatch, not pending, token, digest, re-auth required or failed, turn in progress, …); `404` answers are not audited |
 
 Tool-execution metadata (scrubbed by `AuditService` like every audit row):
 
@@ -54,25 +60,49 @@ Tool-execution metadata (scrubbed by `AuditService` like every audit row):
 
 `params` is the redacted argument object capped at 2 KiB. The error code is stored under `error` (not `errorCode`): the audit scrubber drops keys ending in `code` as credential-like, so the design's `errorCode` key would have been removed (deviation recorded in the design note §12). The actor, source IP (the end user's address forwarded by the BFF) and correlation id columns are filled as for any audited request.
 
-Mapping to the brief's audit fields: user → actor; tenant → `organization_id`; conversation → `conversationId`; tool → `tool`; API operation → `operationId`; validated parameters (redacted) → `params`; permission decision → `decision`; confirmation → AI-2 (ADR-0093); execution status → `status`, `httpStatus`, `error`; resource → `resourceRef`; timestamp → `created_at`.
+Confirmation metadata (AI-2; keys chosen to survive the credential-key scrub, so never ending in `code`, `token` or `key`):
+
+```json
+{
+  "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+  "executionId": "0193a1c2-7d50-7a6c-8e95-6d4f0a5b8c05",
+  "resultExecutionId": "0193a1c2-7e70-7c8e-90b7-8f6b2c7d0e07",
+  "tool": "policy_management_remove",
+  "operationId": "PolicyManagementController_remove_v1",
+  "risk": "high",
+  "requiresReauth": true,
+  "reauthUsed": true,
+  "status": "executed",
+  "httpStatus": 200,
+  "error": null,
+  "correlationId": "7c1d0e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f.4"
+}
+```
+
+`reconciledFrom: "assistant_confirmation_outcome_unknown"` is added to the `assistant.confirmation_executed` / `_failed` row of a write that outlived the outcome-unknown sweep (step AI-2 review): the sweep's `assistant.confirmation_failed` (system actor) stays, and the real outcome replaces the row's `outcome_unknown`.
+
+`assistant.confirmation_refused` adds `reason`. Neither the token, its hash, the digest input, the request body nor the password or code is ever written to an audit row or a log.
+
+Mapping to the brief's audit fields: user → actor; tenant → `organization_id`; conversation → `conversationId`; tool → `tool`; API operation → `operationId`; validated parameters (redacted) → `params`; permission decision → `decision`; confirmation → the `assistant.confirmation_*` rows (AI-2, ADR-0093); execution status → `status`, `httpStatus`, `error`; resource → `resourceRef`; timestamp → `created_at`.
 
 ## Correlation with the operation's own audit rows
 
-The loopback request carries `x-correlation-id: <turn correlation id>.<execution seq>`. The api's correlation middleware accepts it, so every audit row the operation writes itself (audited reads such as archive record reads and audit searches; from AI-2 every write) carries the same `correlation_id` as the `assistant.tool_executed` row. To answer "what did the assistant do, and what did it cause":
+The loopback request carries `x-correlation-id: <turn correlation id>.<execution seq>`. The api's correlation middleware accepts it, so every audit row the operation writes itself (audited reads such as archive record reads and audit searches, and every confirmed write since AI-2) carries the same `correlation_id` as the `assistant.tool_executed` row. To answer "what did the assistant do, and what did it cause":
 
 1. Search the audit log for `assistant.tool_executed` / `assistant.tool_denied` (audit page or `GET /audit/logs`, `audit:read`), optionally by user or time range.
 2. Take the row's `correlationId` and search by correlation id: the operation's own rows appear next to it.
 3. With the execution id, the owner can open the execution (`GET /assistant/executions/{id}`); administrators cannot read conversations (PO Q9).
 
-Proven by `apps/api/integration/assistant.test.ts` ("records the execution correlation id on the audited operation's own audit row"). Denied calls produce no request and so no operation audit row (`assistant-tools.test.ts`).
+Proven by `apps/api/integration/assistant.test.ts` ("records the execution correlation id on the audited operation's own audit row") and, for writes, `assistant-confirmations.test.ts` (the confirmed create's `policy.created` row carries the result execution's correlation id). The confirmed write's correlation id is `<confirm request correlation id>.<seq>`; the confirmation's own audit rows link the proposal (`executionId`) and the write (`resultExecutionId`). Denied calls produce no request and so no operation audit row (`assistant-tools.test.ts`).
 
 ## Retention
 
-| Record                                                          | Retention                                                                                                                                                                                                            |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `audit_logs` rows (`assistant.*`)                               | Audit retention: kept until an operator exports and drops old partitions deliberately ([retention.md](../database/retention.md)); never deleted by the assistant, not by conversation deletion or organization purge |
-| Execution metadata (`ai_chat_tool_executions` row fields)       | Hard-deleted with the conversation after `ASSISTANT_EXECUTION_RETENTION_DAYS` (default 400 days)                                                                                                                     |
-| Execution content (`result_card`, `result_refs`, `next_cursor`) | Set to NULL at the conversation's `purge_after` (tenant retention, default 30 days after the last turn) and when the user clears the conversation                                                                    |
-| Organization deletion                                           | `AssistantTenantDataRepository` removes all `ai_chat_*` rows; audit rows stay                                                                                                                                        |
+| Record                                                                                                                           | Retention                                                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `audit_logs` rows (`assistant.*`)                                                                                                | Audit retention: kept until an operator exports and drops old partitions deliberately ([retention.md](../database/retention.md)); never deleted by the assistant, not by conversation deletion or organization purge |
+| Execution metadata (`ai_chat_tool_executions` row fields)                                                                        | Hard-deleted with the conversation after `ASSISTANT_EXECUTION_RETENTION_DAYS` (default 400 days)                                                                                                                     |
+| Execution content (`result_card`, `result_refs`, `next_cursor`) and confirmation content (`request`, `preconditions`, `summary`) | Set to NULL at the conversation's `purge_after` (tenant retention, default 30 days after the last turn) and when the user clears the conversation                                                                    |
+| Confirmation rows                                                                                                                | Hard-deleted with their proposal execution (FK cascade); pending rows expire after `ASSISTANT_CONFIRMATION_TTL_SECONDS`                                                                                              |
+| Organization deletion                                                                                                            | `AssistantTenantDataRepository` removes all `ai_chat_*` rows (confirmations first); audit rows stay                                                                                                                  |
 
 Logs and metrics are not an audit channel: logs carry ids and codes only (never prompts, responses, arguments or results); metrics have no organization or user labels.

@@ -9,6 +9,7 @@ import type { SuccessBody } from '@/lib/api/types';
 
 export const STREAM_VERSION = 'assistant-stream/1';
 export const CARD_VERSION = 'assistant-card/1';
+export const CONFIRMATION_SUMMARY_VERSION = 'assistant-confirmation/1';
 
 export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error';
 export type CardValue = string | number | boolean | null;
@@ -67,7 +68,92 @@ export type ExecutionDecision =
   | 'denied_ref'
   | 'denied_budget';
 
-export type ExecutionStatus = 'succeeded' | 'failed' | 'refused' | 'timeout';
+export type ExecutionStatus =
+  | 'succeeded'
+  | 'failed'
+  | 'refused'
+  | 'timeout'
+  /** A write proposal waiting for the user's confirmation (step AI-2). */
+  | 'pending_confirmation';
+
+export type ConfirmationStatus =
+  'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+
+/** Risk of a confirmable write (`critical` actions are portal only, never a tool). */
+export type ConfirmationRisk = 'low' | 'medium' | 'high';
+
+/** One "what it applies to" line; `untrusted` marks values that come from mail. */
+export interface ConfirmationTarget {
+  readonly label: string;
+  readonly value: string;
+  readonly untrusted?: boolean;
+}
+
+export interface ConfirmationChange {
+  readonly label: string;
+  readonly before?: string | null;
+  readonly after: string;
+}
+
+/**
+ * `assistant-confirmation/1` (step AI-2 D5): the impact summary the confirmation card renders.
+ * Server-authored from the stored request and the target's current state, never model text.
+ */
+export interface ConfirmationSummary {
+  readonly version: typeof CONFIRMATION_SUMMARY_VERSION;
+  readonly title: string;
+  /** One sentence: what will happen. */
+  readonly action: string;
+  readonly target: readonly ConfirmationTarget[];
+  readonly changes: readonly ConfirmationChange[];
+  /** Policy definitions, rule by rule. */
+  readonly definition?: {
+    readonly direction: string;
+    readonly priority: number;
+    readonly rules: ReadonlyArray<{
+      readonly id: string;
+      readonly when: string;
+      readonly actions: string;
+    }>;
+  };
+  readonly impact: readonly string[];
+  readonly warnings: readonly string[];
+  readonly reversible: boolean;
+  /** The portal page that shows the target. */
+  readonly portalRoute: string | null;
+  /** Shown in a "Technical details" disclosure. */
+  readonly request: { readonly method: string; readonly path: string };
+}
+
+/**
+ * A write the assistant proposed (contracts §35.1, step AI-2 §4.2). Never contains the token:
+ * the single-use token arrives once, in `confirmation.required`, and lives only in the memory of
+ * the browser tab that received it.
+ */
+export interface ConfirmationView {
+  readonly id: string;
+  /** The proposal execution (status `pending_confirmation`). */
+  readonly executionId: string;
+  /** The confirmed write's execution (after confirm). */
+  readonly resultExecutionId: string | null;
+  readonly conversationId: string;
+  readonly tool: string;
+  readonly operationId: string;
+  readonly risk: ConfirmationRisk;
+  readonly requiresReauth: boolean;
+  /** The session re-authenticated within the window: no password fields. */
+  readonly reauthFresh: boolean;
+  readonly status: ConfirmationStatus;
+  /** Null once the conversation's content was purged. */
+  readonly summary: ConfirmationSummary | null;
+  /** Sent back unchanged by the confirm request. */
+  readonly actionDigest: string;
+  readonly expiresAt: string;
+  readonly createdAt: string;
+  readonly decidedAt: string | null;
+  readonly executedAt: string | null;
+  readonly result: { readonly httpStatus: number | null; readonly error: string | null } | null;
+}
 
 /** `assistant-stream/1` events (contracts §35): `event: <type>` + `data: <JSON of the rest>`. */
 export type AssistantStreamEvent =
@@ -95,6 +181,15 @@ export type AssistantStreamEvent =
       usage: { inputTokens: number; outputTokens: number };
       messageId: string;
     }
+  | {
+      /**
+       * Right after the `tool.completed` (status `pending_confirmation`) of a write proposal.
+       * `token` is null only for a JSON replay of a stored turn (the api never repeats a token).
+       */
+      type: 'confirmation.required';
+      confirmation: ConfirmationView;
+      token: string | null;
+    }
   | { type: 'turn.failed'; turnId: string; code: string; message: string };
 
 export type AssistantStreamEventType = AssistantStreamEvent['type'];
@@ -109,3 +204,5 @@ export type Conversation = SuccessBody<'AssistantConversationsController_get_v1'
 export type StoredMessage = SuccessBody<'AssistantMessagesController_list_v1'>['data'][number];
 export type Execution = SuccessBody<'AssistantExecutionsController_get_v1'>;
 export type TurnResult = SuccessBody<'AssistantTurnsController_create_v1'>;
+export type ConfirmResult = SuccessBody<'AssistantConfirmationsController_confirm_v1'>;
+export type CancelResult = SuccessBody<'AssistantConfirmationsController_cancel_v1'>;

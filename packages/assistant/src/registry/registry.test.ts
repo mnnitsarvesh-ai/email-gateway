@@ -12,9 +12,14 @@ import {
   untrustedFieldsOf,
   type OpenApiDocument,
 } from './build';
+import { confirmationSpecOf } from '../confirmations/specs';
+import { registryConsistencyIssues } from './consistency';
 import {
+  AI2_WRITES_TESTED_BY,
   ASSISTANT_PROGRAM_PHASE,
   CONTROLLER_HINTS,
+  MAIL_OPS_WRITES_TESTED_BY,
+  POLICY_WRITES_TESTED_BY,
   NOT_APPLICABLE_TAGS,
   OPERATION_OVERRIDES,
   READ_TOOLS_TESTED_BY,
@@ -91,19 +96,50 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('no write is enabled in AI-1; enabled tools are within the program phase; writes need testedBy', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-1');
+  it('AI-2: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-2');
+    expect(registryConsistencyIssues(OPERATION_TOOLS)).toEqual([]);
     for (const tool of OPERATION_TOOLS) {
       if (tool.enabled) {
         expect(phase(tool.phase), tool.name).toBeLessThanOrEqual(phase(ASSISTANT_PROGRAM_PHASE));
-        expect(tool.access, tool.name).toBe('read');
         expect(tool.status, tool.name).toBe('IMPLEMENTED');
-        expect(tool.testedBy, tool.name).toBe(READ_TOOLS_TESTED_BY);
+        if (tool.access === 'read') expect(tool.testedBy, tool.name).toBe(READ_TOOLS_TESTED_BY);
+        else {
+          expect(tool.testedBy, tool.name).toBe(AI2_WRITES_TESTED_BY[tool.operationId]);
+          expect(confirmationSpecOf(tool.operationId), tool.name).toBeDefined();
+          expect(['low', 'medium', 'high'], tool.name).toContain(tool.risk);
+        }
       } else {
         expect(tool.status, tool.name).toBe('MISSING');
+        expect(phase(tool.phase), tool.name).toBeGreaterThan(phase(ASSISTANT_PROGRAM_PHASE));
       }
-      if (tool.access === 'write' && tool.enabled) expect(tool.testedBy).toBeTruthy();
     }
+    const policyWrites = Object.values(AI2_WRITES_TESTED_BY).filter(
+      (suite) => suite === POLICY_WRITES_TESTED_BY,
+    );
+    const mailOps = Object.values(AI2_WRITES_TESTED_BY).filter(
+      (suite) => suite === MAIL_OPS_WRITES_TESTED_BY,
+    );
+    expect([policyWrites.length, mailOps.length]).toEqual([11, 20]);
+    expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
+    for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
+      expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
+  });
+
+  it('AI-2 totals: 348 tools, 209 enabled (174 AI-1 + 35 AI-2), 139 missing', () => {
+    if (OPERATION_TOOLS.length !== 348) return; // later steps add tools; the rules above still hold
+    const count = (pred: (t: (typeof OPERATION_TOOLS)[number]) => boolean) =>
+      OPERATION_TOOLS.filter(pred).length;
+    expect(count((t) => t.enabled)).toBe(209);
+    expect(count((t) => t.status === 'IMPLEMENTED')).toBe(209);
+    expect(count((t) => t.status === 'MISSING')).toBe(139);
+    expect(count((t) => t.enabled && t.phase === 'AI-2')).toBe(35);
+    expect(count((t) => t.enabled && t.phase === 'AI-2' && t.access === 'write')).toBe(31);
+    expect(count((t) => t.enabled && t.phase !== 'AI-1' && t.phase !== 'AI-2')).toBe(0);
+  });
+
+  it('the created policy is row ref r<seq>.1 (refField policy.id)', () => {
+    expect(findTool('policy_management_create')!.display.refField).toBe('policy.id');
   });
 
   it('tool names match ^[a-z0-9_]{1,64}$, are unique and derive from the operation id', () => {
@@ -437,6 +473,11 @@ describe('permission pre-filter, catalogue index, describe', () => {
       access: 'write',
       risk: 'high',
       confirm: 'confirm+impact+reauth',
+      available: true,
+      unavailableReason: null,
+    });
+    expect(describeTool(findTool('users_invite')!)).toMatchObject({
+      access: 'write',
       available: false,
       unavailableReason: 'disabled',
     });

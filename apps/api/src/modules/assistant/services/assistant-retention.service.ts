@@ -5,20 +5,31 @@ import {
   type OnApplicationBootstrap,
   type OnModuleDestroy,
 } from '@nestjs/common';
+import { PRECONDITION_MAX_READS } from '@email-gateway/assistant';
+import type { Prisma } from '@email-gateway/database';
 import { API_CONFIG } from '../../../api-config.token';
+import { AuditService, SYSTEM_ACTOR } from '../../../audit/audit.service';
 import { TransactionRunner } from '../../../database/transaction-runner';
 import { KeyValueStore } from '../../../kv/key-value-store';
 import { purgeInBatches } from '../../auth/services/session-purge.service';
 import {
+  ASSISTANT_AUDIT,
+  AUDIT_RESOURCE,
   type AssistantConfig,
   assistantKeys,
+  CONFIRMATION_EXECUTING_GRACE_MS,
   RETENTION_CONVERSATION_BATCH,
   RETENTION_DELETE_BATCH,
   RETENTION_INTERVAL_MS,
   RETENTION_LOCK_SECONDS,
   TURN_ABANDON_GRACE_MS,
 } from '../assistant.constants';
-import { TURN_FAILURE_CODES } from '../assistant.errors';
+import { CONFIRMATION_ROW_CODES, TURN_FAILURE_CODES } from '../assistant.errors';
+import {
+  ConfirmationsRepository,
+  type StaleExecutingCutoff,
+  type SweptConfirmation,
+} from '../repositories/confirmations.repository';
 import { ConversationsRepository } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
 import { UsageRepository } from '../repositories/usage.repository';
@@ -35,6 +46,10 @@ export interface RetentionResult {
   usage: number;
   /** Running turns past their deadline marked `failed` (`assistant_turn_abandoned`). */
   abandoned: number;
+  /** Pending confirmations past `expires_at` marked `expired` (step AI-2 D7). */
+  confirmationsExpired: number;
+  /** Stale `executing` confirmations marked `failed` (outcome unknown, D7). */
+  confirmationsOutcomeUnknown: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -49,7 +64,15 @@ const DAY_MS = 86_400_000;
  * - hard delete of executions, messages, turns, conversations and usage rows older than
  *   ASSISTANT_EXECUTION_RETENTION_DAYS, in batches;
  * - stale-turn sweeper: a turn still `running` past its deadline (a crashed api) becomes
- *   `failed` with `assistant_turn_abandoned` and its conversation lock is released.
+ *   `failed` with `assistant_turn_abandoned` and its conversation lock is released;
+ * - confirmations (step AI-2 D7): `pending` past `expires_at` → `expired`; `executing` whose
+ *   write started longer ago than ASSISTANT_TOOL_TIMEOUT_MS + 60 s, or (no write started) whose
+ *   precondition re-read began longer ago than (25 reads + 1) × ASSISTANT_TOOL_TIMEOUT_MS + 60 s
+ *   (a crashed api) → `failed` with `assistant_confirmation_outcome_unknown`, never re-executed;
+ *   each audited (system actor). A confirm request still running loses its write claim (nothing
+ *   is sent) or, if its write was already sent, replaces the outcome with the real one.
+ *   Their content is purged with the conversation's; hard deletes follow the executions (FK
+ *   cascade).
  *
  * Organization deletion purges everything separately (`AssistantTenantDataRepository`).
  */
@@ -67,6 +90,8 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
     private readonly usage: UsageRepository,
     private readonly runner: TransactionRunner,
     private readonly metrics: AssistantMetrics,
+    private readonly confirmations: ConfirmationsRepository,
+    private readonly audit: AuditService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -108,8 +133,12 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
       conversations: 0,
       usage: 0,
       abandoned: 0,
+      confirmationsExpired: 0,
+      confirmationsOutcomeUnknown: 0,
     };
     result.abandoned = await this.sweepStaleTurns(now);
+    result.confirmationsExpired = await this.expireConfirmations(now);
+    result.confirmationsOutcomeUnknown = await this.failStaleConfirmations(now);
     result.contentPurged = await this.purgeContent(now);
     const before = new Date(
       now.getTime() - this.config.ASSISTANT_EXECUTION_RETENTION_DAYS * DAY_MS,
@@ -168,6 +197,90 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
       if (due.length < batch) break;
     }
     return total;
+  }
+
+  /** Pending confirmations past `expires_at` → `expired` (one batch per run, audited). */
+  async expireConfirmations(now: Date, batch = RETENTION_DELETE_BATCH): Promise<number> {
+    let total = 0;
+    for (const row of await this.confirmations.dueToExpire(now, batch)) {
+      const moved = await this.runner.run(async (tx) => {
+        if (!(await this.confirmations.expireById(row.id, now, tx))) return false;
+        await this.auditSwept(row, ASSISTANT_AUDIT.confirmationExpired, 'expired', null, tx);
+        return true;
+      });
+      if (moved) {
+        total += 1;
+        this.metrics.confirmations.inc({ risk: row.risk, outcome: 'expired' });
+      }
+    }
+    return total;
+  }
+
+  /** The cutoffs of the outcome-unknown sweep at `now` (D7, step AI-2 review). */
+  staleExecutingCutoff(now: Date): StaleExecutingCutoff {
+    const timeout = this.config.ASSISTANT_TOOL_TIMEOUT_MS;
+    return {
+      decidedBefore: new Date(
+        now.getTime() - (PRECONDITION_MAX_READS + 1) * timeout - CONFIRMATION_EXECUTING_GRACE_MS,
+      ),
+      startedBefore: new Date(now.getTime() - timeout - CONFIRMATION_EXECUTING_GRACE_MS),
+    };
+  }
+
+  /**
+   * `executing` confirmations of a crashed api (`staleExecutingCutoff`): `failed` with
+   * `assistant_confirmation_outcome_unknown`, never re-executed.
+   */
+  async failStaleConfirmations(now: Date, batch = RETENTION_DELETE_BATCH): Promise<number> {
+    const cutoff = this.staleExecutingCutoff(now);
+    const code = CONFIRMATION_ROW_CODES.outcomeUnknown;
+    let total = 0;
+    for (const row of await this.confirmations.staleExecuting(cutoff, batch)) {
+      const moved = await this.runner.run(async (tx) => {
+        if (!(await this.confirmations.failStaleById(row.id, cutoff, code, tx))) return false;
+        await this.auditSwept(row, ASSISTANT_AUDIT.confirmationFailed, 'failed', code, tx);
+        return true;
+      });
+      if (moved) {
+        total += 1;
+        this.metrics.confirmations.inc({ risk: row.risk, outcome: 'outcome_unknown' });
+        this.logger.warn({
+          message: 'Assistant confirmation outcome unknown',
+          confirmationId: row.publicId,
+          code,
+        });
+      }
+    }
+    return total;
+  }
+
+  private auditSwept(
+    row: SweptConfirmation,
+    action: string,
+    status: string,
+    error: string | null,
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    return this.audit.record(
+      {
+        organizationId: row.organizationId,
+        actor: SYSTEM_ACTOR,
+        action,
+        resourceType: AUDIT_RESOURCE.confirmation,
+        resourceId: row.publicId,
+        metadata: {
+          conversationId: row.conversationPublicId,
+          executionId: row.executionPublicId,
+          tool: row.toolName,
+          operationId: row.operationId,
+          risk: row.risk,
+          requiresReauth: row.requiresReauth,
+          status,
+          error,
+        },
+      },
+      tx,
+    );
   }
 
   /** Abandoned turns (D7): `running` past the deadline plus a grace. */

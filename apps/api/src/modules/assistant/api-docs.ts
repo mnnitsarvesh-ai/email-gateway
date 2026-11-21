@@ -70,6 +70,21 @@ export const ApiConversationIdParam = (): MethodDecorator =>
 export const ApiExecutionIdParam = (): MethodDecorator =>
   ApiParam({ name: 'executionId', description: 'Tool execution public id (UUID)', format: 'uuid' });
 
+export const ApiConfirmationIdParam = (): MethodDecorator =>
+  ApiParam({
+    name: 'confirmationId',
+    description: 'Confirmation public id (UUID)',
+    format: 'uuid',
+  });
+
+export const ApiConfirmationNotFound = (): MethodDecorator =>
+  ApiCodedError(
+    404,
+    'Unknown confirmation, one of another user, organization or platform override, or one of a ' +
+      'deleted conversation',
+    [C.confirmationNotFound],
+  );
+
 export const ApiTurnIdParam = (): MethodDecorator =>
   ApiParam({ name: 'turnId', description: 'Turn public id (UUID)', format: 'uuid' });
 

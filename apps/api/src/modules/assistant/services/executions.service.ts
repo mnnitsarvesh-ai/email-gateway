@@ -17,6 +17,7 @@ import {
 } from '../repositories/executions.repository';
 import { AssistantAvailabilityService } from './assistant-availability.service';
 import { AssistantLimitsService } from './assistant-limits.service';
+import { ConfirmationViewsService } from './confirmation-views.service';
 import { ownerOf } from './conversation.service';
 import { ToolExecutorService } from './tool-executor.service';
 import type { TurnRequest } from './turn-engine.service';
@@ -35,6 +36,7 @@ export class ExecutionsService {
     private readonly executor: ToolExecutorService,
     private readonly availability: AssistantAvailabilityService,
     private readonly limits: AssistantLimitsService,
+    private readonly confirmationViews: ConfirmationViewsService,
   ) {}
 
   now(): Date {
@@ -60,7 +62,14 @@ export class ExecutionsService {
     scope: TenantScope,
     publicId: string,
   ): Promise<ExecutionView> {
-    return executionView(await this.load(principal, scope, publicId));
+    const row = await this.load(principal, scope, publicId);
+    if (row.status !== 'pending_confirmation') return executionView(row);
+    const confirmations = await this.confirmationViews.forExecutions(
+      principal,
+      ownerOf(principal, scope),
+      [row.id],
+    );
+    return executionView(row, confirmations.get(row.id) ?? null);
   }
 
   async more(

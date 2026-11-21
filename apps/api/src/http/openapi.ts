@@ -561,8 +561,11 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'and messages, turns answered as JSON or as the `assistant-stream/1` event stream, ' +
       'cancellation, stored tool executions and their next pages. Every tool is an existing ' +
       '`/api/v1` operation executed with your own credential through this API (same ' +
-      'permissions, tenant, MFA, rate limits and audit as the portal); AI-1 tools are reads ' +
-      'only. Users only; these routes are never tools themselves.',
+      'permissions, tenant, MFA, rate limits and audit as the portal). Step AI-2 ' +
+      '(docs/plan/steps/29-ai-chat-confirmations-mail-writes.md, ADR-0093): the assistant only ' +
+      'PROPOSES writes; a write runs when you confirm its confirmation card (`POST ' +
+      '/assistant/confirmations/{id}/confirm` with the single-use token, the card’s digest and, ' +
+      'for high risk, re-authentication). Users only; these routes are never tools themselves.',
   },
   {
     name: 'platform',

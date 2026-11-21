@@ -11,6 +11,7 @@ import {
   LOOPBACK_BODY_MAX_BYTES,
   LOOPBACK_USER_AGENT,
 } from '../assistant.constants';
+import { READ_PRIMARY_HEADER, readPrimaryToken } from './read-primary';
 
 /**
  * The loopback client of the assistant (step AI-1 D2, ADR-0091): a tool is executed by sending the
@@ -21,8 +22,12 @@ import {
  * Headers are exactly: `authorization` (the incoming request's, verbatim), `x-correlation-id`
  * (`<turn correlation>.<seq>`), `x-eg-client-ip` + `x-eg-forwarder-token` (only when
  * API_TRUSTED_FORWARDER_TOKEN is set and the client IP is known), `accept: application/json`,
- * `user-agent: eg-assistant/1`, `x-eg-assistant-execution` (informational) and, for a request with
- * a JSON body only, `content-type: application/json` (+ the transport's `content-length`, `host`
+ * `user-agent: eg-assistant/1`, `x-eg-assistant-execution` (informational), for a confirmed
+ * write of an operation with `required`/`legacy` idempotency `idempotency-key` (the confirmation
+ * public id, step AI-2 D2 step 13), for a precondition read of a confirmation (GET only)
+ * `x-eg-assistant-read-primary` (a server token derived from AUTH_TOKEN_PEPPER; the route then
+ * reads the MySQL writer, never a lagging replica: step AI-2 review) and, for a request with a
+ * JSON body only, `content-type: application/json` (+ the transport's `content-length`, `host`
  * and `connection`). No header value ever comes from model output.
  */
 
@@ -43,7 +48,20 @@ export interface LoopbackCall {
   executionId: string | null;
   /** Aborts the call (turn cancellation or deadline). */
   signal: AbortSignal;
+  /**
+   * `Idempotency-Key` of a confirmed write (the confirmation public id; a server value, never
+   * model output). Set by the executor only for `required`/`legacy` operations.
+   */
+  idempotencyKey?: string;
+  /**
+   * A precondition read of a confirmation (GET only, never set from model output): the route
+   * reads the writer (`x-eg-assistant-read-primary`), so replica lag cannot hide a change.
+   */
+  readPrimary?: boolean;
 }
+
+/** The api's `Idempotency-Key` format (`apps/api/src/http/idempotency/idempotency-key.ts`). */
+export const LOOPBACK_IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export type LoopbackResult =
   | { kind: 'response'; status: number; body: unknown }
@@ -59,9 +77,18 @@ export abstract class LoopbackDispatcher {
 
 /** The exact header set of a loopback request (D2). */
 export function buildLoopbackHeaders(
-  call: Pick<LoopbackCall, 'authorization' | 'correlationId' | 'clientIp' | 'executionId'>,
+  call: Pick<
+    LoopbackCall,
+    | 'authorization'
+    | 'correlationId'
+    | 'clientIp'
+    | 'executionId'
+    | 'idempotencyKey'
+    | 'readPrimary'
+  > & { method?: HttpMethod },
   forwarderToken: string | undefined,
   bodyBytes: number | null,
+  readPrimary?: string,
 ): Record<string, string> {
   const headers: Record<string, string> = {
     authorization: call.authorization,
@@ -74,6 +101,18 @@ export function buildLoopbackHeaders(
     headers['x-eg-forwarder-token'] = forwarderToken;
   }
   if (call.executionId) headers[EXECUTION_HEADER] = call.executionId;
+  if (call.idempotencyKey !== undefined) {
+    if (!LOOPBACK_IDEMPOTENCY_KEY.test(call.idempotencyKey)) {
+      throw new Error('loopback: the idempotency key is not a valid Idempotency-Key value');
+    }
+    headers['idempotency-key'] = call.idempotencyKey;
+  }
+  if (call.readPrimary === true) {
+    if (call.method !== 'GET' || !readPrimary) {
+      throw new Error('loopback: a read-primary call must be a GET with the server token');
+    }
+    headers[READ_PRIMARY_HEADER] = readPrimary;
+  }
   if (bodyBytes !== null) {
     headers['content-type'] = 'application/json';
     headers['content-length'] = String(bodyBytes);
@@ -182,6 +221,8 @@ export class LoopbackClient extends LoopbackDispatcher implements OnModuleDestro
   private readonly logger = new Logger(LoopbackClient.name);
   private readonly httpAgent: http.Agent;
   private readonly httpsAgent: https.Agent;
+  /** Value of `x-eg-assistant-read-primary` (precondition reads of confirmations). */
+  private readonly readPrimary: string | undefined;
 
   constructor(
     @Inject(API_CONFIG) private readonly config: AssistantConfig,
@@ -191,6 +232,9 @@ export class LoopbackClient extends LoopbackDispatcher implements OnModuleDestro
     const maxSockets = Math.max(2, config.ASSISTANT_MAX_CONCURRENT_TURNS * 2);
     this.httpAgent = new http.Agent({ keepAlive: true, maxSockets, maxFreeSockets: maxSockets });
     this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets, maxFreeSockets: maxSockets });
+    this.readPrimary = config.AUTH_TOKEN_PEPPER
+      ? readPrimaryToken(config.AUTH_TOKEN_PEPPER)
+      : undefined;
   }
 
   onModuleDestroy(): void {
@@ -219,6 +263,7 @@ export class LoopbackClient extends LoopbackDispatcher implements OnModuleDestro
       call,
       this.config.API_TRUSTED_FORWARDER_TOKEN,
       payload === null ? null : payload.byteLength,
+      this.readPrimary,
     );
     const secure = url.protocol === 'https:';
     const transport = secure ? https : http;

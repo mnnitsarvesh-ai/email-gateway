@@ -17,6 +17,7 @@ import {
   pathMatchesTemplate,
   unsafePathParams,
 } from './loopback-client';
+import { READ_PRIMARY_HEADER, readPrimaryToken } from './read-primary';
 
 /** An in-process HTTP stub that records the request and answers with `respond`. */
 async function stub(respond: (res: ServerResponse) => void): Promise<{
@@ -114,6 +115,38 @@ describe('LoopbackClient (D2): the exact request against an in-process HTTP stub
     });
     expect(s.seen[1]!.headers['x-eg-client-ip']).toBeUndefined();
     expect(s.seen[1]!.headers['x-eg-forwarder-token']).toBeUndefined();
+  });
+
+  it('sends idempotency-key on the wire exactly when the call carries one', async () => {
+    const s = await stub((res) => res.writeHead(200).end('{}'));
+    servers.push(s.server);
+    const client = new LoopbackClient(config({ ASSISTANT_LOOPBACK_URL: s.url }));
+    const key = '0193d000-0000-7000-8000-0000000000c1';
+    await client.send({
+      ...call(),
+      method: 'POST',
+      path: '/api/v1/messages/x/rescan',
+      body: {},
+      idempotencyKey: key,
+    });
+    await client.send(call());
+    client.onModuleDestroy();
+    expect(s.seen[0]!.headers['idempotency-key']).toBe(key);
+    expect(Object.keys(s.seen[0]!.headers).sort()).toEqual(
+      [
+        'accept',
+        'authorization',
+        'connection',
+        'content-length',
+        'content-type',
+        'host',
+        'idempotency-key',
+        'user-agent',
+        'x-correlation-id',
+        'x-eg-assistant-execution',
+      ].sort(),
+    );
+    expect(s.seen[1]!.headers['idempotency-key']).toBeUndefined();
   });
 
   it('sends a JSON body with content-type only when the operation takes one', async () => {
@@ -247,5 +280,91 @@ describe('buildLoopbackRequest / buildLoopbackHeaders (D2)', () => {
       accept: 'application/json',
       'user-agent': 'eg-assistant/1',
     });
+  });
+  it('adds idempotency-key only from the server value, validated (step AI-2 D2 step 13)', () => {
+    const key = '0193d000-0000-7000-8000-0000000000c1';
+    const headers = buildLoopbackHeaders(
+      {
+        authorization: 'Bearer real',
+        correlationId: 'c-123456',
+        clientIp: null,
+        executionId: '0193d000-0000-7000-8000-0000000000e1',
+        idempotencyKey: key,
+      },
+      undefined,
+      2,
+    );
+    expect(headers).toEqual({
+      authorization: 'Bearer real',
+      'x-correlation-id': 'c-123456',
+      accept: 'application/json',
+      'user-agent': 'eg-assistant/1',
+      'x-eg-assistant-execution': '0193d000-0000-7000-8000-0000000000e1',
+      'idempotency-key': key,
+      'content-type': 'application/json',
+      'content-length': '2',
+    });
+    for (const bad of ['', 'a b', 'x'.repeat(129), 'k\r\nx-evil: 1']) {
+      expect(() =>
+        buildLoopbackHeaders(
+          {
+            authorization: 'Bearer real',
+            correlationId: 'c-123456',
+            clientIp: null,
+            executionId: null,
+            idempotencyKey: bad,
+          },
+          undefined,
+          null,
+        ),
+      ).toThrow(/idempotency key/);
+    }
+  });
+  it('adds x-eg-assistant-read-primary only to a read-primary GET, with the server token (AI-2 review)', () => {
+    const base = {
+      authorization: 'Bearer real',
+      correlationId: 'c-123456',
+      clientIp: null,
+      executionId: null,
+    };
+    const token = readPrimaryToken('a'.repeat(64));
+    expect(
+      buildLoopbackHeaders({ ...base, method: 'GET', readPrimary: true }, undefined, null, token),
+    ).toEqual({
+      authorization: 'Bearer real',
+      'x-correlation-id': 'c-123456',
+      accept: 'application/json',
+      'user-agent': 'eg-assistant/1',
+      [READ_PRIMARY_HEADER]: token,
+    });
+    expect(
+      buildLoopbackHeaders({ ...base, method: 'GET' }, undefined, null, token),
+    ).not.toHaveProperty(READ_PRIMARY_HEADER);
+    expect(() =>
+      buildLoopbackHeaders({ ...base, method: 'POST', readPrimary: true }, undefined, 2, token),
+    ).toThrow(/read-primary/);
+    expect(() =>
+      buildLoopbackHeaders({ ...base, method: 'GET', readPrimary: true }, undefined, null),
+    ).toThrow(/read-primary/);
+  });
+
+  it('LoopbackClient sends the read-primary token derived from AUTH_TOKEN_PEPPER', async () => {
+    const s = await stub((res) =>
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{}'),
+    );
+    servers.push(s.server);
+    const pepper = 'b'.repeat(64);
+    const client = new LoopbackClient(
+      config({ ASSISTANT_LOOPBACK_URL: s.url, AUTH_TOKEN_PEPPER: pepper }),
+    );
+    try {
+      await client.send({ ...call(), readPrimary: true });
+      await client.send(call());
+    } finally {
+      client.onModuleDestroy();
+    }
+    expect(s.seen[0]!.headers[READ_PRIMARY_HEADER]).toBe(readPrimaryToken(pepper));
+    expect(s.seen[0]!.headers[READ_PRIMARY_HEADER]).not.toContain(pepper);
+    expect(s.seen[1]!.headers[READ_PRIMARY_HEADER]).toBeUndefined();
   });
 });

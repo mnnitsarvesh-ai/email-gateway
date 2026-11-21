@@ -1,12 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { findTool } from '../registry/registry';
 import type { OperationTool } from '../registry/types';
-import { CARD_MAX_BYTES, cellValue, fillRoute, labelOf, routePage, toCard } from './card';
+import { summarizeEnvelope } from '../context/window';
+import {
+  CARD_MAX_BYTES,
+  PENDING_CONFIRMATION_CARD_MESSAGE,
+  cellValue,
+  fillRoute,
+  labelOf,
+  routePage,
+  toCard,
+  toPendingCard,
+} from './card';
 import { NESTED_ARRAY_MAX_ITEMS, toErrorEnvelope, toToolResultEnvelope } from './minimize';
 import { SAFE_KEYS, SENSITIVE_KEY, isCredentialKey, sanitizeText, scrubValue } from './sanitize';
 import { detectRowId, detectShape, extractNextCursor } from './shape';
 import { STREAM_HEARTBEAT, serializeStreamEvent } from './stream';
-import { ENVELOPE_NOTE, type ToolResultOk } from './types';
+import {
+  ENVELOPE_NOTE,
+  PENDING_CONFIRMATION_NOTE,
+  toPendingEnvelope,
+  type ToolResultOk,
+} from './types';
 
 const cp = (...points: number[]) => String.fromCodePoint(...points);
 const uuid = (n: number) => `0190aaaa-0000-7000-8000-${String(n).padStart(12, '0')}`;
@@ -543,5 +558,94 @@ describe('assistant-stream/1', () => {
       serializeStreamEvent({ type: 'turn.started', turnId: 't', conversationId: 'c', seq: 1 }),
     ).toBe('event: turn.started\ndata: {"turnId":"t","conversationId":"c","seq":1}\n\n');
     expect(STREAM_HEARTBEAT.startsWith(':')).toBe(true);
+  });
+});
+
+describe('step AI-2 results', () => {
+  it('policy_management_create: the created policy is row ref r<seq>.1 and the card links to it', () => {
+    const body = {
+      policy: {
+        id: uuid(42),
+        name: 'Quarantine inbound executables',
+        status: 'draft',
+        rowVersion: 1,
+      },
+      version: { policyId: uuid(42), versionNo: 1, status: 'draft', definition: { rules: [] } },
+    };
+    const create = tool('policy_management_create');
+    const { envelope, refs } = toToolResultEnvelope(create, 201, body, { ...options, refSeq: 9 });
+    expect(refs).toEqual({ 'r9.1': { resourceType: 'policy', publicId: uuid(42) } });
+    expect((envelope as ToolResultOk).data).toMatchObject({ ref: 'r9.1' });
+    const card = toCard({ executionId: 'e', tool: create, httpStatus: 201, body, refs, refSeq: 9 });
+    expect(card.refs).toEqual(['r9.1']);
+    expect(card.portalLinks[0]!.href).toBe(`/policies/${uuid(42)}`);
+    expect(detectRowId({ policy: { id: 'x y' } }, { refField: 'policy.id' })).toBeNull();
+    expect(detectRowId({ policy: null }, { refField: 'policy.id' })).toBeNull();
+    expect(detectRowId({ id: 'a' }, { refField: 'policy.id' })).toBeNull();
+  });
+
+  it('pending-confirmation envelope, card and recap line carry nothing to confirm with', () => {
+    const envelope = toPendingEnvelope('policy_management_create', {
+      id: uuid(1),
+      risk: 'low',
+      requiresReauth: false,
+      expiresAt: '2026-11-21T10:05:00.000Z',
+    });
+    expect(envelope).toEqual({
+      kind: 'tool_result/1',
+      tool: 'policy_management_create',
+      status: 'pending_confirmation',
+      confirmationId: uuid(1),
+      risk: 'low',
+      requiresReauth: false,
+      expiresAt: '2026-11-21T10:05:00.000Z',
+      note: PENDING_CONFIRMATION_NOTE,
+    });
+    expect(PENDING_CONFIRMATION_NOTE).toBe(
+      'Nothing has changed yet. The user sees a confirmation card and the action runs only if they confirm it there. Do not say it was done, and do not ask the user to type a confirmation in chat.',
+    );
+    expect(Object.keys(envelope)).not.toContain('token');
+    expect(summarizeEnvelope(envelope)).toBe(
+      "proposed, waiting for the user's confirmation (low risk)",
+    );
+    expect(toPendingCard('e1', tool('policy_management_create'))).toEqual({
+      version: 'assistant-card/1',
+      executionId: 'e1',
+      tool: 'policy_management_create',
+      title: tool('policy_management_create').summary,
+      status: 'ok',
+      kind: 'message',
+      message: PENDING_CONFIRMATION_CARD_MESSAGE,
+      portalLinks: [],
+      refs: [],
+    });
+  });
+
+  it('serializes the confirmation.required event', () => {
+    const event = serializeStreamEvent({
+      type: 'confirmation.required',
+      confirmation: {
+        id: uuid(1),
+        executionId: uuid(2),
+        resultExecutionId: null,
+        conversationId: uuid(3),
+        tool: 'policy_management_create',
+        operationId: 'PolicyManagementController_create_v1',
+        risk: 'low',
+        requiresReauth: false,
+        reauthFresh: false,
+        status: 'pending',
+        summary: null,
+        actionDigest: 'a'.repeat(64),
+        expiresAt: '2026-11-21T10:05:00.000Z',
+        createdAt: '2026-11-21T10:00:00.000Z',
+        decidedAt: null,
+        executedAt: null,
+        result: null,
+      },
+      token: 'a'.repeat(43),
+    });
+    expect(event.startsWith('event: confirmation.required\ndata: {"confirmation":')).toBe(true);
+    expect(event.endsWith('\n\n')).toBe(true);
   });
 });

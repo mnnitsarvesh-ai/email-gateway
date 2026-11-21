@@ -34,7 +34,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * JournalIntakeTenantDataRepository its journal intake counters, intake messages and sources
  * (before the provider connections, which the sources reference); step AI-1:
  * AssistantTenantDataRepository its AI assistant tool executions, messages, turns,
- * conversations, daily usage and settings.
+ * conversations, daily usage and settings (step AI-2: and its action confirmations, first).
  */
 @Module({
   providers: [

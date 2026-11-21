@@ -34,6 +34,9 @@ export const USER_KEYS = [
   'deltaAdmin',
   'deltaAnalyst',
   'deltaMailbox',
+  // Step AI-2: an organization admin of delta who signs in with MFA (high-risk confirmations ask
+  // for the password and the authenticator code).
+  'deltaMfaAdmin',
   'epsilonAdmin',
   'platformAdmin',
 ] as const;

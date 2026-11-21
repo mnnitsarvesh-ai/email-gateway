@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { REGISTRY_VERSION } from '@email-gateway/assistant';
+import { type ConfirmationView, REGISTRY_VERSION } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
 import { API_CONFIG } from '../../../api-config.token';
 import { AuditService } from '../../../audit/audit.service';
@@ -39,6 +39,7 @@ import type {
   UpdateConversationBody,
 } from '../dto/assistant.schemas';
 import { AssistantSettingsRepository } from '../repositories/assistant-settings.repository';
+import { ConfirmationsRepository } from '../repositories/confirmations.repository';
 import {
   type ConversationRow,
   ConversationsRepository,
@@ -49,6 +50,8 @@ import {
   ExecutionsRepository,
 } from '../repositories/executions.repository';
 import { AssistantAvailabilityService } from './assistant-availability.service';
+import { AssistantMetrics } from './assistant-metrics';
+import { ConfirmationViewsService } from './confirmation-views.service';
 
 const DAY_MS = 86_400_000;
 
@@ -63,7 +66,8 @@ export const ownerOf = (principal: UserPrincipal, scope: TenantScope): Owner => 
  * Q11). Conversations are private to their user (also from admins: another user's or another
  * organization's ids answer `404`); under a platform override they live in the override's target
  * organization with the override id. Deleting is a soft delete with an immediate content purge,
- * audited `assistant.conversation_deleted`.
+ * audited `assistant.conversation_deleted`; its pending confirmations are cancelled (step AI-2
+ * D7, audited `assistant.confirmation_cancelled` each) and their content purged.
  */
 @Injectable()
 export class ConversationService {
@@ -76,6 +80,9 @@ export class ConversationService {
     private readonly codec: CursorCodec,
     private readonly runner: TransactionRunner,
     private readonly audit: AuditService,
+    private readonly confirmations: ConfirmationsRepository,
+    private readonly confirmationViews: ConfirmationViewsService,
+    private readonly metrics: AssistantMetrics,
   ) {}
 
   now(): Date {
@@ -202,9 +209,38 @@ export class ConversationService {
     const owner = ownerOf(principal, scope);
     const row = await this.load(principal, scope, publicId);
     const now = this.now();
-    await this.runner.run(async (tx) => {
+    const cancelled = await this.runner.run(async (tx) => {
+      const pending = await this.confirmations.cancelPendingOfConversation(
+        scope.organizationId,
+        row.id,
+        now,
+        tx,
+      );
       if (!(await this.conversations.deleteAndPurge(owner, row.id, now, tx))) {
         throw assistantConversationNotFound();
+      }
+      for (const confirmation of pending) {
+        await this.audit.record(
+          {
+            organizationId: scope.organizationId,
+            actor: this.audit.actorFrom(principal),
+            action: ASSISTANT_AUDIT.confirmationCancelled,
+            resourceType: AUDIT_RESOURCE.confirmation,
+            resourceId: confirmation.publicId,
+            sourceIp,
+            metadata: {
+              conversationId: row.publicId,
+              executionId: confirmation.executionPublicId,
+              tool: confirmation.toolName,
+              operationId: confirmation.operationId,
+              risk: confirmation.risk,
+              requiresReauth: confirmation.requiresReauth,
+              status: 'cancelled',
+              reason: 'conversation_deleted',
+            },
+          },
+          tx,
+        );
       }
       await this.audit.record(
         {
@@ -218,7 +254,11 @@ export class ConversationService {
         },
         tx,
       );
+      return pending;
     });
+    for (const confirmation of cancelled) {
+      this.metrics.confirmations.inc({ risk: confirmation.risk, outcome: 'cancelled' });
+    }
   }
 
   /** Oldest → newest pages of messages with their turn's executions and cards (v1 cursor). */
@@ -252,7 +292,13 @@ export class ConversationService {
     const page = fetched.slice(0, decision.rows);
     const turnIds = [...new Set(page.map((m) => m.turnId))];
     const executions = await this.executions.forTurns(owner, conversation.id, turnIds, 'replica');
-    const byTurn = groupByTurn(executions);
+    const confirmations = await this.confirmationViews.forExecutions(
+      principal,
+      owner,
+      executions.filter((e) => e.status === 'pending_confirmation').map((e) => e.id),
+      'replica',
+    );
+    const byTurn = groupByTurn(executions, confirmations);
     const hasAssistant = new Set(page.filter((m) => m.role === 'assistant').map((m) => m.turnId));
     const data: MessageListItem[] = page.map((m) => {
       const carries = m.role === 'assistant' || !hasAssistant.has(m.turnId);
@@ -281,7 +327,10 @@ export class ConversationService {
  * Executions per turn: a "more" page (no turn) belongs to the turn of its first ancestor that
  * has one.
  */
-export function groupByTurn(rows: readonly ExecutionWithRefs[]): Map<bigint, ExecutionView[]> {
+export function groupByTurn(
+  rows: readonly ExecutionWithRefs[],
+  confirmations: ReadonlyMap<bigint, ConfirmationView> = new Map(),
+): Map<bigint, ExecutionView[]> {
   const byId = new Map(rows.map((r) => [r.id, r]));
   const turnOf = (row: ExecutionWithRefs): bigint | null => {
     let current: ExecutionWithRefs | undefined = row;
@@ -297,7 +346,7 @@ export function groupByTurn(rows: readonly ExecutionWithRefs[]): Map<bigint, Exe
     const turn = turnOf(row);
     if (turn === null) continue;
     const list = out.get(turn) ?? [];
-    list.push(executionView(row));
+    list.push(executionView(row, confirmations.get(row.id) ?? null));
     out.set(turn, list);
   }
   return out;

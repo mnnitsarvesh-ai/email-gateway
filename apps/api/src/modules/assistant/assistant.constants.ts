@@ -19,6 +19,7 @@ export type AssistantConfig = Pick<
   | 'NODE_ENV'
   | 'HTTP_PORT'
   | 'API_TRUSTED_FORWARDER_TOKEN'
+  | 'AUTH_TOKEN_PEPPER'
   | 'ASSISTANT_ENABLED'
   | 'ASSISTANT_PROVIDER'
   | 'ASSISTANT_MODEL'
@@ -55,6 +56,9 @@ export type AssistantConfig = Pick<
   | 'ASSISTANT_BREAKER_THRESHOLD'
   | 'ASSISTANT_BREAKER_RESET_MS'
   | 'ASSISTANT_MODEL_PRICES'
+  | 'ASSISTANT_CONFIRMATION_TTL_SECONDS'
+  | 'ASSISTANT_REAUTH_WINDOW_SECONDS'
+  | 'ASSISTANT_MAX_PENDING_CONFIRMATIONS'
 >;
 
 /** Redis keys (prefix `as:`, contracts §35). */
@@ -72,6 +76,12 @@ export const assistantKeys = {
   platformTokens: (day: string): string => `as:tok:p:${day}`,
   /** Retention purge and stale-turn sweeper (one api replica at a time). */
   jobsLock: 'as:jobs:lock',
+  /**
+   * The assistant re-authentication window of a session family (step AI-2 D2 step 9; value `1`,
+   * TTL ASSISTANT_REAUTH_WINDOW_SECONDS): set only after a successful re-authentication of an
+   * assistant confirmation, honoured only by assistant confirmations.
+   */
+  reauthWindow: (sessionFamilyId: string): string => `as:reauth:${sessionFamilyId}`,
 } as const;
 
 /** Breaker keys `as:brk:<provider>` (package `ProviderBreaker`). */
@@ -114,18 +124,44 @@ export const USAGE_DEFAULT_RANGE_DAYS = 30;
 export const CONVERSATIONS_CURSOR_RESOURCE = 'assistant_conversations';
 export const MESSAGES_CURSOR_RESOURCE = 'assistant_messages';
 
-/** Audit actions and resource types (D12). */
+/** Audit actions and resource types (D12; step AI-2 D11). */
 export const ASSISTANT_AUDIT = {
   toolExecuted: 'assistant.tool_executed',
   toolDenied: 'assistant.tool_denied',
   conversationDeleted: 'assistant.conversation_deleted',
   settingsUpdated: 'assistant.settings_updated',
+  confirmationRequested: 'assistant.confirmation_requested',
+  confirmationExecuted: 'assistant.confirmation_executed',
+  confirmationFailed: 'assistant.confirmation_failed',
+  confirmationCancelled: 'assistant.confirmation_cancelled',
+  confirmationExpired: 'assistant.confirmation_expired',
+  confirmationRefused: 'assistant.confirmation_refused',
 } as const;
 export const AUDIT_RESOURCE = {
   execution: 'assistant_tool_execution',
   conversation: 'assistant_conversation',
   settings: 'assistant_settings',
+  confirmation: 'assistant_action_confirmation',
 } as const;
+
+/** Confirmations (step AI-2 D1, D2, D6, D7). */
+/** Wrong tokens that cancel a confirmation (the fifth). */
+export const CONFIRMATION_TOKEN_ATTEMPTS = 5;
+/** Terminal confirmations reported to the model per turn (oldest first). */
+export const CONFIRMATION_REPORT_BATCH = 20;
+/** Violations of an invalid policy definition listed in the proposal's error envelope. */
+export const DEFINITION_VIOLATIONS_MAX = 20;
+/**
+ * Grace of the outcome-unknown sweep (D7, step AI-2 review): an `executing` confirmation is
+ * `failed` (outcome unknown) when its write started more than ASSISTANT_TOOL_TIMEOUT_MS plus this
+ * ago, or, before the write started, when its precondition re-read began more than
+ * (PRECONDITION_MAX_READS + 1) × ASSISTANT_TOOL_TIMEOUT_MS plus this ago (sequential reads).
+ */
+export const CONFIRMATION_EXECUTING_GRACE_MS = 60_000;
+/** Stored request `{ method, path, body, params }` (JSON bytes). */
+export const CONFIRMATION_REQUEST_MAX_BYTES = 256 * 1024;
+/** Stored preconditions (JSON bytes). */
+export const CONFIRMATION_PRECONDITIONS_MAX_BYTES = 16 * 1024;
 
 /** UTC day `yyyymmdd` of the Redis keys and `YYYY-MM-DD` of the usage rows. */
 export function utcDayKey(now: Date): string {

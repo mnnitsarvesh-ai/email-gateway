@@ -251,7 +251,98 @@ export const EXECUTION_DECISIONS = [
   'denied_ref',
   'denied_budget',
 ] as const;
-export const EXECUTION_STATUSES = ['succeeded', 'failed', 'refused', 'timeout'] as const;
+export const EXECUTION_STATUSES = [
+  'succeeded',
+  'failed',
+  'refused',
+  'timeout',
+  'pending_confirmation',
+] as const;
+
+// ---- confirmations (step AI-2 §4.2, D5) -----------------------------------------------------
+
+export const CONFIRMATION_STATUSES = [
+  'pending',
+  'executing',
+  'executed',
+  'failed',
+  'expired',
+  'cancelled',
+] as const;
+export const CONFIRMATION_RISKS = ['low', 'medium', 'high'] as const;
+
+/** A confirmation token: 32 random bytes, base64url without padding. */
+export const CONFIRMATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+export const ACTION_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+
+export const ConfirmationSummarySchema = z
+  .object({
+    version: z.literal('assistant-confirmation/1'),
+    title: z.string(),
+    action: z.string().describe('One sentence: what will happen'),
+    target: z.array(
+      z.object({
+        label: z.string(),
+        value: z.string(),
+        untrusted: z
+          .boolean()
+          .optional()
+          .describe('The value comes from a message (subject, sender, file name): plain text'),
+      }),
+    ),
+    changes: z.array(
+      z.object({ label: z.string(), before: z.string().nullable().optional(), after: z.string() }),
+    ),
+    definition: z
+      .object({
+        direction: z.string(),
+        priority: z.number().int(),
+        rules: z.array(z.object({ id: z.string(), when: z.string(), actions: z.string() })),
+      })
+      .optional()
+      .describe('Policy definitions, rule by rule'),
+    impact: z.array(z.string()).describe('Consequences (medium and high risk have at least one)'),
+    warnings: z.array(z.string()),
+    reversible: z.boolean(),
+    portalRoute: z.string().nullable(),
+    request: z
+      .object({ method: z.string(), path: z.string() })
+      .describe('The request that runs on confirm (technical details)'),
+  })
+  .describe('assistant-confirmation/1: server-authored from the stored request, never model text');
+
+export const ConfirmationSchema = z
+  .object({
+    id: z.uuid(),
+    executionId: z.uuid().describe('The proposal execution (status `pending_confirmation`)'),
+    resultExecutionId: z.uuid().nullable().describe('The confirmed write’s execution'),
+    conversationId: z.uuid(),
+    tool: z.string(),
+    operationId: z.string(),
+    risk: z.enum(CONFIRMATION_RISKS),
+    requiresReauth: z
+      .boolean()
+      .describe('High risk: confirm needs `reauth` unless the session re-authenticated recently'),
+    reauthFresh: z
+      .boolean()
+      .describe('This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS'),
+    status: z.enum(CONFIRMATION_STATUSES),
+    summary: ConfirmationSummarySchema.nullable().describe('null after the content purge'),
+    actionDigest: z
+      .string()
+      .regex(ACTION_DIGEST_PATTERN)
+      .describe('SHA-256 of the proposed action; the confirm request sends it back'),
+    expiresAt: isoInstant,
+    createdAt: isoInstant,
+    decidedAt: nullableInstant,
+    executedAt: nullableInstant,
+    result: z
+      .object({ httpStatus: z.number().int().nullable(), error: z.string().nullable() })
+      .nullable()
+      .describe('Outcome of the confirmed write (executed or failed)'),
+  })
+  .describe('An action the assistant proposed; it runs only when you confirm it. Never the token.');
+export type ConfirmationViewDto = z.output<typeof ConfirmationSchema>;
 
 export const ExecutionSchema = z.object({
   id: z.uuid(),
@@ -272,6 +363,9 @@ export const ExecutionSchema = z.object({
   card: CardSchema.nullable().describe('null for refused calls and after the content purge'),
   latencyMs: z.number().int().nullable(),
   createdAt: isoInstant,
+  confirmation: ConfirmationSchema.nullable().describe(
+    'The confirmation of a write proposal (status `pending_confirmation`); null otherwise',
+  ),
 });
 export type ExecutionView = z.output<typeof ExecutionSchema>;
 
@@ -375,10 +469,24 @@ export const CreateTurnBodySchema = z.strictObject({
 });
 export type CreateTurnBody = z.output<typeof CreateTurnBodySchema>;
 
+export const TurnConfirmationSchema = z.object({
+  confirmation: ConfirmationSchema,
+  token: z
+    .string()
+    .nullable()
+    .describe(
+      'Single-use token for `POST /assistant/confirmations/{id}/confirm`; keep it in memory ' +
+        'only (null when the turn is replayed by its clientTurnId)',
+    ),
+});
+
 export const TurnResultSchema = z.object({
   turn: TurnSchema,
   message: MessageSchema.nullable().describe('The assistant message (null when the turn failed)'),
   executions: z.array(ExecutionSchema),
+  confirmations: z
+    .array(TurnConfirmationSchema)
+    .describe('The write proposals of this turn, in call order'),
 });
 export type TurnResultView = z.output<typeof TurnResultSchema>;
 
@@ -387,6 +495,39 @@ export const CancelResultSchema = z.object({
   status: z.enum(TURN_STATUSES),
 });
 export type CancelResultView = z.output<typeof CancelResultSchema>;
+
+/** `POST /assistant/confirmations/{id}/confirm` (step AI-2 D2). */
+export const ConfirmBodySchema = z.strictObject({
+  token: z
+    .string()
+    .regex(CONFIRMATION_TOKEN_PATTERN)
+    .describe('The token of `confirmation.required` (43 base64url characters)'),
+  actionDigest: z
+    .string()
+    .regex(ACTION_DIGEST_PATTERN)
+    .describe('The `actionDigest` the confirmation card showed'),
+  reauth: z
+    .strictObject({
+      password: z.string().min(1).max(1024),
+      totpCode: z
+        .string()
+        .regex(/^[0-9]{6}$/)
+        .optional()
+        .describe('Required when you have MFA enrolled'),
+    })
+    .optional()
+    .describe('High risk only, unless this session re-authenticated within the window'),
+});
+export type ConfirmBody = z.output<typeof ConfirmBodySchema>;
+
+export const ConfirmResultSchema = z.object({
+  confirmation: ConfirmationSchema,
+  execution: ExecutionSchema.describe('The execution of the confirmed write (its result card)'),
+});
+export type ConfirmResultView = z.output<typeof ConfirmResultSchema>;
+
+export const CancelConfirmationResultSchema = z.object({ confirmation: ConfirmationSchema });
+export type CancelConfirmationResultView = z.output<typeof CancelConfirmationResultSchema>;
 
 // ---- examples (synthetic) -------------------------------------------------------------------
 
@@ -399,6 +540,9 @@ const ID = {
   policy: '0193a1c2-7f60-7183-8fa6-7e50b16c9d06',
   acknowledger: '0193a1c2-8070-7294-90b7-8f61c27dae07',
   client: '5f0c2c1e-8b8a-4f7e-9a0e-2d3c4b5a6f70',
+  confirmation: '0193a1c2-8180-73a5-81c8-9072d38ebf08',
+  proposal: '0193a1c2-8290-74b6-92d9-a183e49fc009',
+  result: '0193a1c2-83a0-75c7-83ea-b294f5a0d10a',
 };
 
 const card = {
@@ -440,6 +584,107 @@ const execution: ExecutionView = {
   card,
   latencyMs: 42,
   createdAt: '2026-11-20T10:00:01.000Z',
+  confirmation: null,
+};
+
+/** Obvious placeholders (never token- or key-shaped values). */
+const EXAMPLE_TOKEN = 'example_confirmation_token_placeholder_0000';
+const EXAMPLE_DIGEST = '0123456789abcdef'.repeat(4);
+
+const confirmation: ConfirmationViewDto = {
+  id: ID.confirmation,
+  executionId: ID.proposal,
+  resultExecutionId: null,
+  conversationId: ID.conversation,
+  tool: 'policy_management_disable',
+  operationId: 'PolicyManagementController_disable_v1',
+  risk: 'medium',
+  requiresReauth: false,
+  reauthFresh: false,
+  status: 'pending',
+  summary: {
+    version: 'assistant-confirmation/1',
+    title: 'Disable policy',
+    action: 'Disables the policy "Block executables".',
+    target: [{ label: 'Policy', value: 'Block executables' }],
+    changes: [{ label: 'Status', before: 'active', after: 'disabled' }],
+    impact: ['Stops evaluating this policy for new mail.'],
+    warnings: [],
+    reversible: true,
+    portalRoute: `/policies/${ID.policy}`,
+    request: { method: 'POST', path: `/api/v1/policies/${ID.policy}/disable` },
+  },
+  actionDigest: EXAMPLE_DIGEST,
+  expiresAt: '2026-11-20T10:05:02.000Z',
+  createdAt: '2026-11-20T10:00:02.000Z',
+  decidedAt: null,
+  executedAt: null,
+  result: null,
+};
+
+const proposal: ExecutionView = {
+  ...execution,
+  id: ID.proposal,
+  seq: 2,
+  ref: 'r2',
+  tool: 'policy_management_disable',
+  operationId: 'PolicyManagementController_disable_v1',
+  access: 'write',
+  risk: 'medium',
+  status: 'pending_confirmation',
+  httpStatus: null,
+  card: {
+    version: 'assistant-card/1',
+    executionId: ID.proposal,
+    tool: 'policy_management_disable',
+    title: 'Disable policy',
+    status: 'ok',
+    kind: 'message',
+    message: 'Waiting for your confirmation',
+    portalLinks: [],
+    refs: [],
+  },
+  latencyMs: null,
+  createdAt: '2026-11-20T10:00:02.000Z',
+  confirmation,
+};
+
+const confirmed: ConfirmationViewDto = {
+  ...confirmation,
+  resultExecutionId: ID.result,
+  status: 'executed',
+  decidedAt: '2026-11-20T10:01:00.000Z',
+  executedAt: '2026-11-20T10:01:00.250Z',
+  result: { httpStatus: 200, error: null },
+};
+
+const resultExecution: ExecutionView = {
+  ...execution,
+  id: ID.result,
+  turnId: null,
+  parentExecutionId: ID.proposal,
+  seq: 3,
+  ref: 'r3',
+  tool: 'policy_management_disable',
+  operationId: 'PolicyManagementController_disable_v1',
+  access: 'write',
+  risk: 'medium',
+  card: {
+    version: 'assistant-card/1',
+    executionId: ID.result,
+    tool: 'policy_management_disable',
+    title: 'Disable policy',
+    status: 'ok',
+    kind: 'kv',
+    fields: [
+      { key: 'name', label: 'Name', value: 'Block executables' },
+      { key: 'status', label: 'Status', value: 'disabled' },
+    ],
+    portalLinks: [{ label: 'Block executables', href: `/policies/${ID.policy}` }],
+    refs: ['r3.1'],
+  },
+  latencyMs: 250,
+  createdAt: '2026-11-20T10:01:00.250Z',
 };
 
 const conversation: ConversationView = {
@@ -578,7 +823,41 @@ export const ASSISTANT_EXAMPLES = {
     message: 'Show active policies',
     timeZone: 'Asia/Kolkata',
   },
-  turnResult: { turn, message: assistantMessage, executions: [execution] } satisfies TurnResultView,
+  turnResult: {
+    turn,
+    message: assistantMessage,
+    executions: [execution],
+    confirmations: [],
+  } satisfies TurnResultView,
+  turnResultWithProposal: {
+    turn: { ...turn, toolCalls: 2 },
+    message: {
+      ...assistantMessage,
+      content:
+        'I prepared this change. Review it in the confirmation card; nothing changes until you ' +
+        'confirm it.',
+    },
+    executions: [execution, proposal],
+    confirmations: [{ confirmation, token: EXAMPLE_TOKEN }],
+  } satisfies TurnResultView,
   cancel: { turnId: ID.turn, status: 'running' } satisfies CancelResultView,
   execution,
+  confirmation,
+  confirm: { token: EXAMPLE_TOKEN, actionDigest: EXAMPLE_DIGEST } satisfies ConfirmBody,
+  confirmHighRisk: {
+    token: EXAMPLE_TOKEN,
+    actionDigest: EXAMPLE_DIGEST,
+    reauth: { password: '<your password>', totpCode: '123456' },
+  } satisfies ConfirmBody,
+  confirmResult: {
+    confirmation: { ...confirmed, summary: confirmation.summary },
+    execution: resultExecution,
+  } satisfies ConfirmResultView,
+  cancelConfirmation: {
+    confirmation: {
+      ...confirmation,
+      status: 'cancelled',
+      decidedAt: '2026-11-20T10:01:00.000Z',
+    },
+  } satisfies CancelConfirmationResultView,
 };

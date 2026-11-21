@@ -2,15 +2,21 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   type AssistantCard,
   compileValidator,
+  type ConfirmationSpec,
+  confirmationSpecOf,
+  type ConfirmationView,
   type ExecutionDecision,
   type ExecutionStatus,
   extractNextCursor,
   type OperationTool,
   sanitizeText,
   toCard,
+  toPendingCard,
+  toPendingEnvelope,
   type ToolResultDenied,
   type ToolResultEnvelope,
   toToolResultEnvelope,
+  withCasPlaceholder,
 } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
@@ -26,11 +32,13 @@ import {
   CORRELATION_ID_PATTERN,
   PARAMS_REDACTED_MAX_BYTES,
 } from '../assistant.constants';
+import { sameRequest } from '../domain/confirmation-binding';
 import { lookupTool, scopeOrganizationPublicId, toolAvailability } from '../domain/tool-catalog';
 import type { ExecutionView } from '../dto/assistant.schemas';
 import type { Owner } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
 import { AssistantMetrics } from './assistant-metrics';
+import { ConfirmationProposer, type OwnFailure } from './confirmation-proposer.service';
 import {
   buildLoopbackRequest,
   LoopbackDispatcher,
@@ -44,16 +52,23 @@ import {
  *
  * 1. per-turn cap (`ASSISTANT_MAX_TOOL_CALLS_PER_TURN`) → `denied_budget`;
  * 2. registry lookup → `denied_unknown_tool`; `not_applicable` → `denied_not_applicable` (reason
- *    and portal page); not enabled (every write in AI-1) → `denied_disabled`;
+ *    and portal page); not enabled → `denied_disabled` (also an enabled write without a
+ *    confirmation spec, defence in depth);
  * 3. permission pre-filter (`satisfiesRequirement`, the guard's predicate; `platform:*`-only tools
  *    for platform users only) → `denied_permission`;
  * 4. bindings (`self_organization` = the scope's organization when the model omitted it);
  * 5. refs `@r<seq>.<row>` → the public id stored for that ref in THIS conversation, else
  *    `denied_ref`;
  * 6. Ajv validation of the operation's input schema → `denied_schema` (paths, never values);
- * 7. the loopback call (D2); `401` ends the turn (`assistant_session_expired`);
+ *    for a write, the spec's CAS field is pre-filled with a placeholder when omitted;
+ * 7. a READ: the loopback call (D2); `401` ends the turn (`assistant_session_expired`).
+ *    A WRITE never runs here (step AI-2 D1, ADR-0093): `ConfirmationProposer` reads the target
+ *    and stores a pending confirmation; the execution is `pending_confirmation` and the model
+ *    gets the `pending_confirmation` envelope (never the token). The write runs only through
+ *    `run()` from the confirm route with the stored request and `Idempotency-Key`;
  * 8. card + minimized envelope (D8), the execution row and the audit row
- *    (`assistant.tool_executed` / `assistant.tool_denied`, D12) in one writer transaction.
+ *    (`assistant.tool_executed` / `assistant.tool_denied`, D12) in one writer transaction (with
+ *    the confirmation row and `assistant.confirmation_requested` for a proposal).
  *
  * Logs carry ids and codes only, never arguments or results.
  */
@@ -107,6 +122,52 @@ export interface ExecutionOutcome {
   /** The loopback answered 401: the turn ends with `assistant_session_expired`. */
   sessionExpired: boolean;
   view: ExecutionView;
+  /** A write proposal: its confirmation and the single-use token (browser only, D1 step 10). */
+  confirmation: { view: ConfirmationView; token: string } | null;
+}
+
+/** Options of `run()` (step AI-2: the confirmed write). */
+export interface RunOptions {
+  /**
+   * `Idempotency-Key` of the loopback call (the confirmation public id), sent only when the
+   * operation declares `required` or `legacy` idempotency. Always a server value.
+   */
+  idempotencyKey?: string;
+  /** The stored request: `run` refuses when the arguments would build any other request. */
+  expectedRequest?: { method: string; path: string; body: unknown };
+  /** Never aborted by the client (the confirmed write keeps running until its own timeout). */
+  signal?: AbortSignal;
+  /** Runs inside the transaction of the execution row (the confirmation's outcome + audit). */
+  afterPersist?: (
+    tx: Prisma.TransactionClient,
+    executionRowId: bigint,
+    outcome: ExecutionOutcome,
+  ) => Promise<void>;
+}
+
+/** An answer as the recorder sees it (an API response or an own error). */
+interface Answer {
+  status: ExecutionStatus;
+  httpStatus: number;
+  recordedStatus: number | null;
+  body: unknown;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+type Base = {
+  ctx: ExecutionContext;
+  seq: number;
+  executionId: string;
+  name: string;
+  title: string;
+};
+
+/** The request of a confirmed write differs from the stored one (never sent). */
+export class StoredRequestMismatchError extends Error {
+  constructor() {
+    super('the stored request of the confirmation does not match its arguments');
+  }
 }
 
 /** Arguments of the form `@r<seq>.<row>` (D5 step 5). */
@@ -202,6 +263,7 @@ export class ToolExecutorService {
     private readonly runner: TransactionRunner,
     private readonly audit: AuditService,
     private readonly metrics: AssistantMetrics,
+    private readonly proposer: ConfirmationProposer,
   ) {}
 
   now(): Date {
@@ -273,6 +335,22 @@ export class ToolExecutorService {
     if (!availability.available) {
       return this.deny(base, found, 'denied_permission', DENIAL_MESSAGES.denied_permission, {});
     }
+    // Step AI-2: an enabled write needs its confirmation spec (the registry check forbids one
+    // without; refused like a disabled tool).
+    let spec: ConfirmationSpec | undefined;
+    if (found.access === 'write') {
+      spec = confirmationSpecOf(found.operationId);
+      if (!spec) {
+        return this.deny(
+          base,
+          found,
+          'denied_disabled',
+          DENIAL_MESSAGES.denied_disabled,
+          {},
+          found.portalRoute,
+        );
+      }
+    }
     if (call.arguments === null) {
       return this.deny(
         base,
@@ -318,8 +396,10 @@ export class ToolExecutorService {
       );
     }
 
-    // D5 step 6: the operation's own input schema (Ajv 8 strict).
-    const validation = compileValidator(found)(resolved);
+    // D5 step 6: the operation's own input schema (Ajv 8 strict). A write's CAS field gets a
+    // placeholder when omitted (step AI-2 D1); the proposal injects the read's row version.
+    const checked = spec ? withCasPlaceholder(resolved, spec) : resolved;
+    const validation = compileValidator(found)(checked);
     if (!validation.ok) {
       const issues = validation.issues.map((issue) => `${issue.path} ${issue.message}`).join('; ');
       return this.deny(
@@ -334,7 +414,7 @@ export class ToolExecutorService {
     // of `/organizations/{id}` for customer users) can still be missing (platform users without
     // an override): a schema refusal, never a failed request build.
     const missingPath = found.pathParams.filter(
-      (param) => typeof resolved[param] !== 'string' && typeof resolved[param] !== 'number',
+      (param) => typeof checked[param] !== 'string' && typeof checked[param] !== 'number',
     );
     if (missingPath.length > 0) {
       return this.deny(
@@ -348,7 +428,7 @@ export class ToolExecutorService {
 
     // `.`/`..`/empty path values would be collapsed by URL resolution into another route than
     // the one recorded, audited and (from AI-2) confirmed: refused like a schema violation.
-    const unsafePath = unsafePathParams(found, resolved);
+    const unsafePath = unsafePathParams(found, checked);
     if (unsafePath.length > 0) {
       return this.deny(
         base,
@@ -359,18 +439,128 @@ export class ToolExecutorService {
       );
     }
 
+    if (spec) return this.propose(base, found, spec, checked);
     return this.run(base, found, resolved);
   }
 
-  /** D5 steps 7–8 for validated arguments (also the "more" route). */
-  async run(
-    base: { ctx: ExecutionContext; seq: number; executionId: string; name: string; title: string },
+  /**
+   * Step AI-2 D1: a write call becomes a pending confirmation (or a recorded refusal or failure
+   * of the proposal). No write request is sent.
+   */
+  private async propose(
+    base: Base,
     tool: OperationTool,
+    spec: ConfirmationSpec,
     args: Record<string, unknown>,
   ): Promise<ExecutionOutcome> {
     const { ctx, seq, executionId } = base;
     const correlationId = executionCorrelationId(ctx.correlationBase, seq);
+    const started = Date.now();
+    const prepared = await this.proposer.prepare({
+      ctx,
+      tool,
+      spec,
+      args,
+      executionId,
+      correlationId,
+    });
+    const latencyMs = Date.now() - started;
+    switch (prepared.kind) {
+      case 'denied':
+        return this.deny(base, tool, prepared.decision, prepared.message, args);
+      case 'failed':
+        return this.record(base, tool, args, this.interpret(prepared.result), latencyMs);
+      case 'failed_own':
+        return this.record(base, tool, args, this.ownFailure(prepared.failure), latencyMs);
+      case 'pending':
+        break;
+    }
+    const plan = prepared.plan;
+    const card = toPendingCard(executionId, tool);
+    const envelope = toPendingEnvelope(tool.name, {
+      id: plan.confirmationId,
+      risk: plan.risk,
+      requiresReauth: plan.requiresReauth,
+      expiresAt: plan.expiresAt.toISOString(),
+    });
+    const confirmation = this.proposer.viewOf(ctx, executionId, tool, plan);
+    const outcome: ExecutionOutcome = {
+      executionId,
+      seq,
+      tool: tool.name,
+      title: base.title,
+      decision: 'allowed',
+      status: 'pending_confirmation',
+      httpStatus: null,
+      errorCode: null,
+      envelope,
+      card,
+      denialMessage: null,
+      sessionExpired: false,
+      confirmation: { view: confirmation, token: plan.token },
+      view: this.viewOf(ctx, {
+        executionId,
+        seq,
+        tool,
+        name: tool.name,
+        decision: 'allowed',
+        status: 'pending_confirmation',
+        httpStatus: null,
+        errorCode: null,
+        card,
+        hasMore: false,
+        latencyMs,
+        confirmation,
+      }),
+    };
+    await this.persist(
+      ctx,
+      outcome,
+      tool,
+      {
+        correlationId,
+        params: redactParams(plan.finalArgs, PARAMS_REDACTED_MAX_BYTES).value,
+        args: plan.finalArgs,
+        refs: null,
+        nextCursor: null,
+        latencyMs,
+      },
+      (tx, rowId) => this.proposer.store(tx, ctx, executionId, rowId, tool, plan, correlationId),
+    );
+    this.metrics.toolCalls.inc({
+      module: tool.module,
+      access: tool.access,
+      decision: 'allowed',
+      outcome: 'pending_confirmation',
+    });
+    this.metrics.confirmations.inc({ risk: plan.risk, outcome: 'proposed' });
+    this.logger.log({
+      message: 'Assistant write proposed',
+      executionId,
+      confirmationId: plan.confirmationId,
+      operationId: tool.operationId,
+      risk: plan.risk,
+    });
+    return outcome;
+  }
+
+  /**
+   * D5 steps 7–8 for validated arguments: the loopback call, card, envelope, execution row and
+   * audit. Used by turns (reads), the "more" route and the confirm route (the stored write).
+   */
+  async run(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    options: RunOptions = {},
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const correlationId = executionCorrelationId(ctx.correlationBase, seq);
     const request = buildLoopbackRequest(tool, args);
+    if (options.expectedRequest && !sameRequest(request, options.expectedRequest)) {
+      throw new StoredRequestMismatchError();
+    }
+    const idempotent = tool.idempotency === 'required' || tool.idempotency === 'legacy';
     const started = Date.now();
     const result = await this.loopback.send({
       ...request,
@@ -378,13 +568,28 @@ export class ToolExecutorService {
       correlationId,
       clientIp: ctx.clientIp,
       executionId,
-      signal: ctx.signal,
+      signal: options.signal ?? ctx.signal,
+      ...(idempotent && options.idempotencyKey !== undefined
+        ? { idempotencyKey: options.idempotencyKey }
+        : {}),
     });
     const latencyMs = Date.now() - started;
     this.metrics.toolSeconds.observe({ module: tool.module }, latencyMs / 1000);
+    return this.record(base, tool, args, this.interpret(result), latencyMs, options.afterPersist);
+  }
 
+  /** Card, envelope, execution row and audit of an answer (D5 step 8). */
+  private async record(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    answer: Answer,
+    latencyMs: number,
+    afterPersist?: RunOptions['afterPersist'],
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const correlationId = executionCorrelationId(ctx.correlationBase, seq);
     const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES);
-    const answer = this.interpret(result);
     const { envelope, refs } = toToolResultEnvelope(tool, answer.httpStatus, answer.body, {
       maxRows: this.config.ASSISTANT_TOOL_RESULT_MAX_ROWS,
       maxBytes: this.config.ASSISTANT_TOOL_RESULT_MAX_BYTES,
@@ -423,6 +628,7 @@ export class ToolExecutorService {
       card,
       denialMessage: null,
       sessionExpired: answer.recordedStatus === 401,
+      confirmation: null,
       view: this.viewOf(ctx, {
         executionId,
         seq,
@@ -437,14 +643,20 @@ export class ToolExecutorService {
         latencyMs,
       }),
     };
-    await this.persist(ctx, outcome, tool, {
-      correlationId,
-      params: params.value,
-      args,
-      refs: Object.keys(refs).length > 0 ? (refs as unknown as Prisma.InputJsonValue) : null,
-      nextCursor,
-      latencyMs,
-    });
+    await this.persist(
+      ctx,
+      outcome,
+      tool,
+      {
+        correlationId,
+        params: params.value,
+        args,
+        refs: Object.keys(refs).length > 0 ? (refs as unknown as Prisma.InputJsonValue) : null,
+        nextCursor,
+        latencyMs,
+      },
+      afterPersist ? (tx, rowId) => afterPersist(tx, rowId, outcome) : undefined,
+    );
     this.metrics.toolCalls.inc({
       module: tool.module,
       access: tool.access,
@@ -454,15 +666,19 @@ export class ToolExecutorService {
     return outcome;
   }
 
+  /** A coded failure of a proposal (definition invalid, row version unreadable, too large). */
+  private ownFailure(failure: OwnFailure): Answer {
+    return this.ownError(
+      'failed',
+      failure.httpStatus,
+      failure.httpStatus,
+      failure.code,
+      failure.message,
+    );
+  }
+
   /** Loopback result → recorded status, the body the minimizer sees and an own error code. */
-  private interpret(result: LoopbackResult): {
-    status: ExecutionStatus;
-    httpStatus: number;
-    recordedStatus: number | null;
-    body: unknown;
-    errorCode: string | null;
-    errorMessage: string | null;
-  } {
+  private interpret(result: LoopbackResult): Answer {
     switch (result.kind) {
       case 'response':
         return {
@@ -508,7 +724,7 @@ export class ToolExecutorService {
     recordedStatus: number | null,
     code: string,
     message: string,
-  ) {
+  ): Answer {
     return {
       status,
       httpStatus,
@@ -520,7 +736,7 @@ export class ToolExecutorService {
   }
 
   private async deny(
-    base: { ctx: ExecutionContext; seq: number; executionId: string; name: string; title: string },
+    base: Base,
     tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk' | 'module'> | null,
     decision: Exclude<ExecutionDecision, 'allowed'>,
     message: string,
@@ -550,6 +766,7 @@ export class ToolExecutorService {
       card: null,
       denialMessage: message,
       sessionExpired: false,
+      confirmation: null,
       view: this.viewOf(ctx, {
         executionId,
         seq,
@@ -601,6 +818,7 @@ export class ToolExecutorService {
       card: AssistantCard | null;
       hasMore: boolean;
       latencyMs: number | null;
+      confirmation?: ConfirmationView | null;
     },
   ): ExecutionView {
     return {
@@ -622,6 +840,7 @@ export class ToolExecutorService {
       card: v.card,
       latencyMs: v.latencyMs,
       createdAt: this.now().toISOString(),
+      confirmation: v.confirmation ?? null,
     };
   }
 
@@ -638,11 +857,12 @@ export class ToolExecutorService {
       nextCursor: string | null;
       latencyMs: number | null;
     },
+    also?: (tx: Prisma.TransactionClient, executionRowId: bigint) => Promise<void>,
   ): Promise<void> {
     const resourceRef = resourceRefOf(tool, extra.args);
     const auditParams = redactParams(extra.args, AUDIT_PARAMS_MAX_BYTES).value;
     await this.runner.run(async (tx) => {
-      await this.executions.create(
+      const rowId = await this.executions.create(
         ctx.owner,
         {
           publicId: outcome.executionId,
@@ -700,6 +920,7 @@ export class ToolExecutorService {
         },
         tx,
       );
+      if (also) await also(tx, rowId);
     });
   }
 }

@@ -935,7 +935,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step AI-1 assistant routes: exact permissions, users only, no MFA requirement, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
+  it('the step AI-1 and AI-2 assistant routes: exact permissions, users only, no MFA requirement, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
     type Flags = { cls?: string; cursor?: boolean };
     const USE = 'assistant:use';
     const CONFIGURE = 'assistant:configure';
@@ -955,6 +955,9 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'post /api/v1/assistant/turns/:turnId/cancel': [USE],
       'get /api/v1/assistant/executions/:executionId': [USE],
       'post /api/v1/assistant/executions/:executionId/more': [USE, { cls: 'expensive' }],
+      'get /api/v1/assistant/confirmations/:confirmationId': [USE],
+      'post /api/v1/assistant/confirmations/:confirmationId/confirm': [USE, { cls: 'sensitive' }],
+      'post /api/v1/assistant/confirmations/:confirmationId/cancel': [USE, { cls: 'sensitive' }],
     };
     const assistant = routes.filter((r) => /^\/api\/v1\/assistant(\/|$)/.test(r.path));
     expect(assistant.map((r) => `${r.method} ${r.path}`).sort()).toEqual(

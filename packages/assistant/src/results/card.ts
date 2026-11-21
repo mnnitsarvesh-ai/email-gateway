@@ -348,3 +348,24 @@ export function toCard(input: CardInput): AssistantCard {
     refs: [],
   };
 }
+
+/** The message of a write proposal's card (step AI-2 D1 step 9). */
+export const PENDING_CONFIRMATION_CARD_MESSAGE = 'Waiting for your confirmation';
+
+/**
+ * The card of a write proposal (`pending_confirmation`): a `message` card; the confirmation card
+ * itself is rendered by the portal from the `confirmation.required` event.
+ */
+export function toPendingCard(executionId: string, tool: CardTool): AssistantCard {
+  return {
+    version: CARD_VERSION,
+    executionId,
+    tool: tool.name,
+    title: sanitizeText(tool.display.title ?? tool.summary, 120),
+    status: 'ok',
+    kind: 'message',
+    message: PENDING_CONFIRMATION_CARD_MESSAGE,
+    portalLinks: [],
+    refs: [],
+  };
+}

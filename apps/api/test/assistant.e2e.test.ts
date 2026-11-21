@@ -5,7 +5,9 @@
  * pipeline (the real loopback runs in integration/assistant.test.ts). For every operation:
  * success, 403 without its permission, 403 `user_required` for API keys, coded errors; then a
  * turn as JSON and as `assistant-stream/1`, replay of a `clientTurnId`, cancellation, "more"
- * pages and the availability gates. Synthetic data only.
+ * pages and the availability gates; step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-
+ * writes.md §4.1, §9 item 3): a write proposal in a turn, then get, confirm and cancel of its
+ * confirmation over HTTP. Synthetic data only.
  */
 // @covers get /api/v1/assistant/status
 // @covers get /api/v1/assistant/settings
@@ -22,6 +24,9 @@
 // @covers post /api/v1/assistant/turns/:turnId/cancel
 // @covers get /api/v1/assistant/executions/:executionId
 // @covers post /api/v1/assistant/executions/:executionId/more
+// @covers get /api/v1/assistant/confirmations/:confirmationId
+// @covers post /api/v1/assistant/confirmations/:confirmationId/confirm
+// @covers post /api/v1/assistant/confirmations/:confirmationId/cancel
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ASSISTANT_EXAMPLES } from '../src/modules/assistant/dto/assistant.schemas';
@@ -122,6 +127,14 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
       ['post', `${BASE}/turns/${randomUUID()}/cancel`, USE],
       ['get', `${BASE}/executions/${randomUUID()}`, USE],
       ['post', `${BASE}/executions/${randomUUID()}/more`, USE],
+      ['get', `${BASE}/confirmations/${randomUUID()}`, USE],
+      [
+        'post',
+        `${BASE}/confirmations/${randomUUID()}/confirm`,
+        USE,
+        { token: 'A'.repeat(43), actionDigest: 'a'.repeat(64) },
+      ],
+      ['post', `${BASE}/confirmations/${randomUUID()}/cancel`, USE],
     ];
     for (const [method, path, permission, body] of routes) {
       const key = api.http()[method](path).set(api.principals.apiKeyHeaders);
@@ -346,5 +359,175 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
     expect((await send('get', `${BASE}/executions/${randomUUID()}`)).body.code).toBe(
       'assistant_execution_not_found',
     );
+  });
+
+  describe('confirmations (step AI-2 §4.1)', () => {
+    const POLICY = '0193c000-0000-7000-8000-000000000001';
+    const WRITERS = [...ALL, 'policy:publish'];
+    let policyRowVersion = 3;
+    const writes: string[] = [];
+
+    beforeEach(() => {
+      policyRowVersion = 3;
+      writes.length = 0;
+      loopback.on(`GET /api/v1/policies/${POLICY}`, () => ({
+        kind: 'response',
+        status: 200,
+        body: {
+          id: POLICY,
+          name: 'Block executables',
+          status: 'active',
+          rowVersion: policyRowVersion,
+        },
+      }));
+      loopback.on(`POST /api/v1/policies/${POLICY}/disable`, (call) => {
+        writes.push(`${call.method} ${call.path}`);
+        policyRowVersion += 1;
+        return {
+          kind: 'response',
+          status: 200,
+          body: {
+            id: POLICY,
+            name: 'Block executables',
+            status: 'disabled',
+            rowVersion: policyRowVersion,
+          },
+        };
+      });
+    });
+
+    const propose = async (conversationId: string) => {
+      const res = await send(
+        'post',
+        `${BASE}/conversations/${conversationId}/turns`,
+        {
+          clientTurnId: randomUUID(),
+          message: `/tool policy_management_disable {"policyId":"${POLICY}"}`,
+        },
+        WRITERS,
+      );
+      expect(res.status).toBe(200);
+      return res;
+    };
+
+    it('a turn proposes (pending_confirmation, token in the JSON answer only); GET shows it without the token', async () => {
+      const id = await newConversation();
+      const res = await propose(id);
+      expect(res.body.executions[0]).toMatchObject({
+        tool: 'policy_management_disable',
+        status: 'pending_confirmation',
+        confirmation: { status: 'pending', risk: 'medium' },
+      });
+      expect(res.body.confirmations).toHaveLength(1);
+      const { confirmation, token } = res.body.confirmations[0] as {
+        confirmation: { id: string; actionDigest: string };
+        token: string;
+      };
+      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(writes).toEqual([]);
+      const got = await send('get', `${BASE}/confirmations/${confirmation.id}`, undefined, WRITERS);
+      expect(got.status).toBe(200);
+      expect(got.body).toMatchObject({ id: confirmation.id, status: 'pending' });
+      expect(JSON.stringify(got.body)).not.toContain(token);
+      const unknown = await send(
+        'get',
+        `${BASE}/confirmations/${randomUUID()}`,
+        undefined,
+        WRITERS,
+      );
+      expect(unknown.status).toBe(404);
+      expect(unknown.body.code).toBe('assistant_confirmation_not_found');
+    });
+
+    it('POST confirm: body validation, digest refusal, then 200 executed; a replay is 409', async () => {
+      const id = await newConversation();
+      const res = await propose(id);
+      const { confirmation, token } = res.body.confirmations[0] as {
+        confirmation: { id: string; actionDigest: string };
+        token: string;
+      };
+      const url = `${BASE}/confirmations/${confirmation.id}/confirm`;
+      const invalid = await send('post', url, { token: 'short', actionDigest: 'x' }, WRITERS);
+      expect(invalid.status).toBe(400);
+      const extra = await send(
+        'post',
+        url,
+        { token, actionDigest: confirmation.actionDigest, unexpected: 1 },
+        WRITERS,
+      );
+      expect(extra.status).toBe(400);
+      const digest = await send('post', url, { token, actionDigest: 'f'.repeat(64) }, WRITERS);
+      expect(digest.status).toBe(409);
+      expect(digest.body.code).toBe('assistant_confirmation_digest_mismatch');
+      const ok = await send(
+        'post',
+        url,
+        { token, actionDigest: confirmation.actionDigest },
+        WRITERS,
+      );
+      expect(ok.status).toBe(200);
+      expect(ok.body.confirmation).toMatchObject({
+        status: 'executed',
+        result: { httpStatus: 200 },
+      });
+      expect(ok.body.execution).toMatchObject({ status: 'succeeded', turnId: null });
+      expect(writes).toEqual([`POST /api/v1/policies/${POLICY}/disable`]);
+      const again = await send(
+        'post',
+        url,
+        { token, actionDigest: confirmation.actionDigest },
+        WRITERS,
+      );
+      expect(again.status).toBe(409);
+      expect(again.body).toMatchObject({
+        code: 'assistant_confirmation_not_pending',
+        status: 'executed',
+      });
+      expect(audit.entries.map((e) => e.action)).toContain('assistant.confirmation_executed');
+      // The next turn hears about it (and the stored user message stays the user's text).
+      await send(
+        'post',
+        `${BASE}/conversations/${id}/turns`,
+        { clientTurnId: randomUUID(), message: 'thanks' },
+        WRITERS,
+      );
+      expect(world.confirmations[0]!.reportedAt).not.toBeNull();
+      expect(world.messages.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+        `/tool policy_management_disable {"policyId":"${POLICY}"}`,
+        'thanks',
+      ]);
+    });
+
+    it('POST cancel: 200 cancelled, idempotent; then confirm answers 409', async () => {
+      const id = await newConversation();
+      const res = await propose(id);
+      const { confirmation, token } = res.body.confirmations[0] as {
+        confirmation: { id: string; actionDigest: string };
+        token: string;
+      };
+      const cancel = await send(
+        'post',
+        `${BASE}/confirmations/${confirmation.id}/cancel`,
+        undefined,
+        WRITERS,
+      );
+      expect(cancel.status).toBe(200);
+      expect(cancel.body.confirmation.status).toBe('cancelled');
+      const again = await send(
+        'post',
+        `${BASE}/confirmations/${confirmation.id}/cancel`,
+        undefined,
+        WRITERS,
+      );
+      expect(again.status).toBe(200);
+      const confirm = await send(
+        'post',
+        `${BASE}/confirmations/${confirmation.id}/confirm`,
+        { token, actionDigest: confirmation.actionDigest },
+        WRITERS,
+      );
+      expect(confirm.status).toBe(409);
+      expect(writes).toEqual([]);
+    });
   });
 });

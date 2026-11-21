@@ -22,12 +22,14 @@ function writerDouble(answers: number[]) {
 
 const tableOf = (sql: string) => /^DELETE FROM (\w+)/.exec(sql)![1];
 
-describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12)', () => {
-  it('deletes executions, messages, turns, conversations, usage, then settings, in batches until a short batch', async () => {
-    // executions 2+2+1, messages 0, turns 2+0, conversations 1, usage 2+2+0, settings 1.
-    const { writer, statements } = writerDouble([2, 2, 1, 0, 2, 0, 1, 2, 2, 0, 1]);
+describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, step AI-2 D7)', () => {
+  it('deletes confirmations, executions, messages, turns, conversations, usage, then settings, in batches until a short batch', async () => {
+    // confirmations 2+1, executions 2+2+1, messages 0, turns 2+0, conversations 1, usage 2+2+0,
+    // settings 1.
+    const { writer, statements } = writerDouble([2, 1, 2, 2, 1, 0, 2, 0, 1, 2, 2, 0, 1]);
     const counts = await new AssistantTenantDataRepository(writer).purgeOrganization(SCOPE, 2);
     expect(counts).toEqual({
+      ai_chat_action_confirmations: 3,
       ai_chat_tool_executions: 5,
       ai_chat_messages: 0,
       ai_chat_turns: 2,
@@ -36,6 +38,8 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12)', () =
       ai_chat_settings: 1,
     });
     expect(statements.map((s) => tableOf(s.sql))).toEqual([
+      'ai_chat_action_confirmations',
+      'ai_chat_action_confirmations',
       'ai_chat_tool_executions',
       'ai_chat_tool_executions',
       'ai_chat_tool_executions',
@@ -55,9 +59,14 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12)', () =
     }
   });
 
-  it('deletes children before their parents (FK-safe order) and covers all six tables', () => {
+  it('deletes children before their parents (FK-safe order) and covers all seven tables', () => {
     const at = (t: (typeof ASSISTANT_PURGE_ORDER)[number]) => ASSISTANT_PURGE_ORDER.indexOf(t);
-    expect(new Set(ASSISTANT_PURGE_ORDER).size).toBe(6);
+    expect(new Set(ASSISTANT_PURGE_ORDER).size).toBe(7);
+    // Confirmations reference executions, turns and conversations (step AI-2 §3).
+    expect(ASSISTANT_PURGE_ORDER[0]).toBe('ai_chat_action_confirmations');
+    expect(at('ai_chat_action_confirmations')).toBeLessThan(at('ai_chat_tool_executions'));
+    expect(at('ai_chat_action_confirmations')).toBeLessThan(at('ai_chat_turns'));
+    expect(at('ai_chat_action_confirmations')).toBeLessThan(at('ai_chat_conversations'));
     expect(at('ai_chat_tool_executions')).toBeLessThan(at('ai_chat_turns'));
     expect(at('ai_chat_messages')).toBeLessThan(at('ai_chat_turns'));
     expect(at('ai_chat_turns')).toBeLessThan(at('ai_chat_conversations'));
@@ -69,8 +78,8 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12)', () =
   it('is a no-op (one short statement per table) for an organization without assistant rows', async () => {
     const { writer, statements } = writerDouble([]);
     const counts = await new AssistantTenantDataRepository(writer).purgeOrganization(SCOPE);
-    expect(Object.values(counts)).toEqual([0, 0, 0, 0, 0, 0]);
-    expect(statements).toHaveLength(6);
+    expect(Object.values(counts)).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(statements).toHaveLength(7);
     for (const s of statements) expect(s.values).toEqual([42n, ASSISTANT_PURGE_BATCH]);
   });
 

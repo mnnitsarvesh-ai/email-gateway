@@ -176901,7 +176901,13 @@
                                 },
                                 "status": {
                                   "type": "string",
-                                  "enum": ["succeeded", "failed", "refused", "timeout"]
+                                  "enum": [
+                                    "succeeded",
+                                    "failed",
+                                    "refused",
+                                    "timeout",
+                                    "pending_confirmation"
+                                  ]
                                 },
                                 "httpStatus": {
                                   "nullable": true,
@@ -177060,6 +177066,227 @@
                                   "type": "string",
                                   "format": "date-time",
                                   "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "confirmation": {
+                                  "nullable": true,
+                                  "description": "The confirmation of a write proposal (status `pending_confirmation`); null otherwise",
+                                  "type": "object",
+                                  "properties": {
+                                    "id": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                    },
+                                    "executionId": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                                      "description": "The proposal execution (status `pending_confirmation`)"
+                                    },
+                                    "resultExecutionId": {
+                                      "nullable": true,
+                                      "description": "The confirmed write’s execution",
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                    },
+                                    "conversationId": {
+                                      "type": "string",
+                                      "format": "uuid",
+                                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                    },
+                                    "tool": { "type": "string" },
+                                    "operationId": { "type": "string" },
+                                    "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                                    "requiresReauth": {
+                                      "type": "boolean",
+                                      "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                                    },
+                                    "reauthFresh": {
+                                      "type": "boolean",
+                                      "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                                    },
+                                    "status": {
+                                      "type": "string",
+                                      "enum": [
+                                        "pending",
+                                        "executing",
+                                        "executed",
+                                        "failed",
+                                        "expired",
+                                        "cancelled"
+                                      ]
+                                    },
+                                    "summary": {
+                                      "nullable": true,
+                                      "description": "null after the content purge",
+                                      "type": "object",
+                                      "properties": {
+                                        "version": {
+                                          "type": "string",
+                                          "enum": ["assistant-confirmation/1"]
+                                        },
+                                        "title": { "type": "string" },
+                                        "action": {
+                                          "type": "string",
+                                          "description": "One sentence: what will happen"
+                                        },
+                                        "target": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "properties": {
+                                              "label": { "type": "string" },
+                                              "value": { "type": "string" },
+                                              "untrusted": {
+                                                "description": "The value comes from a message (subject, sender, file name): plain text",
+                                                "type": "boolean"
+                                              }
+                                            },
+                                            "required": ["label", "value"],
+                                            "additionalProperties": false
+                                          }
+                                        },
+                                        "changes": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "properties": {
+                                              "label": { "type": "string" },
+                                              "before": { "nullable": true, "type": "string" },
+                                              "after": { "type": "string" }
+                                            },
+                                            "required": ["label", "after"],
+                                            "additionalProperties": false
+                                          }
+                                        },
+                                        "definition": {
+                                          "description": "Policy definitions, rule by rule",
+                                          "type": "object",
+                                          "properties": {
+                                            "direction": { "type": "string" },
+                                            "priority": {
+                                              "type": "integer",
+                                              "minimum": -9007199254740991,
+                                              "maximum": 9007199254740991
+                                            },
+                                            "rules": {
+                                              "type": "array",
+                                              "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                  "id": { "type": "string" },
+                                                  "when": { "type": "string" },
+                                                  "actions": { "type": "string" }
+                                                },
+                                                "required": ["id", "when", "actions"],
+                                                "additionalProperties": false
+                                              }
+                                            }
+                                          },
+                                          "required": ["direction", "priority", "rules"],
+                                          "additionalProperties": false
+                                        },
+                                        "impact": {
+                                          "type": "array",
+                                          "items": { "type": "string" },
+                                          "description": "Consequences (medium and high risk have at least one)"
+                                        },
+                                        "warnings": {
+                                          "type": "array",
+                                          "items": { "type": "string" }
+                                        },
+                                        "reversible": { "type": "boolean" },
+                                        "portalRoute": { "nullable": true, "type": "string" },
+                                        "request": {
+                                          "type": "object",
+                                          "properties": {
+                                            "method": { "type": "string" },
+                                            "path": { "type": "string" }
+                                          },
+                                          "required": ["method", "path"],
+                                          "additionalProperties": false,
+                                          "description": "The request that runs on confirm (technical details)"
+                                        }
+                                      },
+                                      "required": [
+                                        "version",
+                                        "title",
+                                        "action",
+                                        "target",
+                                        "changes",
+                                        "impact",
+                                        "warnings",
+                                        "reversible",
+                                        "portalRoute",
+                                        "request"
+                                      ],
+                                      "additionalProperties": false
+                                    },
+                                    "actionDigest": {
+                                      "type": "string",
+                                      "pattern": "^[0-9a-f]{64}$",
+                                      "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                                    },
+                                    "expiresAt": {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "createdAt": {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "decidedAt": {
+                                      "nullable": true,
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "executedAt": {
+                                      "nullable": true,
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "result": {
+                                      "nullable": true,
+                                      "description": "Outcome of the confirmed write (executed or failed)",
+                                      "type": "object",
+                                      "properties": {
+                                        "httpStatus": {
+                                          "nullable": true,
+                                          "type": "integer",
+                                          "minimum": -9007199254740991,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "error": { "nullable": true, "type": "string" }
+                                      },
+                                      "required": ["httpStatus", "error"],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "id",
+                                    "executionId",
+                                    "resultExecutionId",
+                                    "conversationId",
+                                    "tool",
+                                    "operationId",
+                                    "risk",
+                                    "requiresReauth",
+                                    "reauthFresh",
+                                    "status",
+                                    "summary",
+                                    "actionDigest",
+                                    "expiresAt",
+                                    "createdAt",
+                                    "decidedAt",
+                                    "executedAt",
+                                    "result"
+                                  ],
+                                  "additionalProperties": false
                                 }
                               },
                               "required": [
@@ -177080,7 +177307,8 @@
                                 "hasMore",
                                 "card",
                                 "latencyMs",
-                                "createdAt"
+                                "createdAt",
+                                "confirmation"
                               ],
                               "additionalProperties": false
                             },
@@ -177175,7 +177403,8 @@
                               "refs": ["r1.1"]
                             },
                             "latencyMs": 42,
-                            "createdAt": "2026-11-20T10:00:01.000Z"
+                            "createdAt": "2026-11-20T10:00:01.000Z",
+                            "confirmation": null
                           }
                         ]
                       }
@@ -177353,7 +177582,7 @@
     },
     "/api/v1/assistant/conversations/{conversationId}/turns": {
       "post": {
-        "description": "Runs one turn: your `message` (1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters, `413 payload_too_large` beyond) goes to the configured AI provider with the catalogue of the tools you may use; the model may call tools, each one existing `/api/v1` operation executed with YOUR credential through the api’s own pipeline (same permissions, tenant, MFA, rate limits and audit as the portal; only reads in AI-1), recorded and audited (`assistant.tool_executed` / `assistant.tool_denied`). Limits per turn: ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`, `503 assistant_provider_unavailable`, `429 assistant_budget_exhausted` with `scope`), ASSISTANT_TURNS_PER_USER_PER_MINUTE (`429 rate_limited`), the per-process concurrency (`503 assistant_busy`) and one running turn per conversation (`409 assistant_turn_in_progress`). The same `clientTurnId` again replays a finished turn (`409` while it runs). Rate class `expensive`. With `accept: text/event-stream` the answer is `assistant-stream/1` (Server-Sent Events: `event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started { turnId, conversationId, seq }` (flushed before the first model call), then any interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, `tool.completed { executionId, status, decision, card }` and `tool.denied { executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes `assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, `assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions }` after the turn ended. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "description": "Runs one turn: your `message` (1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters, `413 payload_too_large` beyond) goes to the configured AI provider with the catalogue of the tools you may use; the model may call tools, each one existing `/api/v1` operation executed with YOUR credential through the api’s own pipeline (same permissions, tenant, MFA, rate limits and audit as the portal), recorded and audited (`assistant.tool_executed` / `assistant.tool_denied`). A write call never runs inside a turn: it becomes a confirmation (`pending_confirmation`) that runs only through `POST /assistant/confirmations/{id}/confirm`; outcomes of earlier confirmations are told to the model at the start of the next turn. Limits per turn: ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`, `503 assistant_provider_unavailable`, `429 assistant_budget_exhausted` with `scope`), ASSISTANT_TURNS_PER_USER_PER_MINUTE (`429 rate_limited`), the per-process concurrency (`503 assistant_busy`) and one running turn per conversation (`409 assistant_turn_in_progress`). The same `clientTurnId` again replays a finished turn (`409` while it runs). Rate class `expensive`. With `accept: text/event-stream` the answer is `assistant-stream/1` (Server-Sent Events: `event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started { turnId, conversationId, seq }` (flushed before the first model call), then any interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, `tool.completed { executionId, status, decision, card }` (status `pending_confirmation` for a write proposal, immediately followed by `confirmation.required { confirmation, token }`: the confirmation card and its single-use token, keep it in memory only) and `tool.denied { executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes `assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, `assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions, confirmations }` after the turn ended (`confirmations[].token` is null on a replay). Users only (API keys `403 user_required`); the tenant always comes from your session.",
         "operationId": "AssistantTurnsController_create_v1",
         "parameters": [
           {
@@ -177621,7 +177850,13 @@
                           },
                           "status": {
                             "type": "string",
-                            "enum": ["succeeded", "failed", "refused", "timeout"]
+                            "enum": [
+                              "succeeded",
+                              "failed",
+                              "refused",
+                              "timeout",
+                              "pending_confirmation"
+                            ]
                           },
                           "httpStatus": {
                             "nullable": true,
@@ -177780,6 +178015,224 @@
                             "type": "string",
                             "format": "date-time",
                             "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "confirmation": {
+                            "nullable": true,
+                            "description": "The confirmation of a write proposal (status `pending_confirmation`); null otherwise",
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "executionId": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                                "description": "The proposal execution (status `pending_confirmation`)"
+                              },
+                              "resultExecutionId": {
+                                "nullable": true,
+                                "description": "The confirmed write’s execution",
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "conversationId": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "tool": { "type": "string" },
+                              "operationId": { "type": "string" },
+                              "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                              "requiresReauth": {
+                                "type": "boolean",
+                                "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                              },
+                              "reauthFresh": {
+                                "type": "boolean",
+                                "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "pending",
+                                  "executing",
+                                  "executed",
+                                  "failed",
+                                  "expired",
+                                  "cancelled"
+                                ]
+                              },
+                              "summary": {
+                                "nullable": true,
+                                "description": "null after the content purge",
+                                "type": "object",
+                                "properties": {
+                                  "version": {
+                                    "type": "string",
+                                    "enum": ["assistant-confirmation/1"]
+                                  },
+                                  "title": { "type": "string" },
+                                  "action": {
+                                    "type": "string",
+                                    "description": "One sentence: what will happen"
+                                  },
+                                  "target": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "label": { "type": "string" },
+                                        "value": { "type": "string" },
+                                        "untrusted": {
+                                          "description": "The value comes from a message (subject, sender, file name): plain text",
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "required": ["label", "value"],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "changes": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "label": { "type": "string" },
+                                        "before": { "nullable": true, "type": "string" },
+                                        "after": { "type": "string" }
+                                      },
+                                      "required": ["label", "after"],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "definition": {
+                                    "description": "Policy definitions, rule by rule",
+                                    "type": "object",
+                                    "properties": {
+                                      "direction": { "type": "string" },
+                                      "priority": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "rules": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "id": { "type": "string" },
+                                            "when": { "type": "string" },
+                                            "actions": { "type": "string" }
+                                          },
+                                          "required": ["id", "when", "actions"],
+                                          "additionalProperties": false
+                                        }
+                                      }
+                                    },
+                                    "required": ["direction", "priority", "rules"],
+                                    "additionalProperties": false
+                                  },
+                                  "impact": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Consequences (medium and high risk have at least one)"
+                                  },
+                                  "warnings": { "type": "array", "items": { "type": "string" } },
+                                  "reversible": { "type": "boolean" },
+                                  "portalRoute": { "nullable": true, "type": "string" },
+                                  "request": {
+                                    "type": "object",
+                                    "properties": {
+                                      "method": { "type": "string" },
+                                      "path": { "type": "string" }
+                                    },
+                                    "required": ["method", "path"],
+                                    "additionalProperties": false,
+                                    "description": "The request that runs on confirm (technical details)"
+                                  }
+                                },
+                                "required": [
+                                  "version",
+                                  "title",
+                                  "action",
+                                  "target",
+                                  "changes",
+                                  "impact",
+                                  "warnings",
+                                  "reversible",
+                                  "portalRoute",
+                                  "request"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "actionDigest": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                                "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                              },
+                              "expiresAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "createdAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "decidedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "executedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "result": {
+                                "nullable": true,
+                                "description": "Outcome of the confirmed write (executed or failed)",
+                                "type": "object",
+                                "properties": {
+                                  "httpStatus": {
+                                    "nullable": true,
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "error": { "nullable": true, "type": "string" }
+                                },
+                                "required": ["httpStatus", "error"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "executionId",
+                              "resultExecutionId",
+                              "conversationId",
+                              "tool",
+                              "operationId",
+                              "risk",
+                              "requiresReauth",
+                              "reauthFresh",
+                              "status",
+                              "summary",
+                              "actionDigest",
+                              "expiresAt",
+                              "createdAt",
+                              "decidedAt",
+                              "executedAt",
+                              "result"
+                            ],
+                            "additionalProperties": false
                           }
                         },
                         "required": [
@@ -177800,13 +178253,247 @@
                           "hasMore",
                           "card",
                           "latencyMs",
-                          "createdAt"
+                          "createdAt",
+                          "confirmation"
                         ],
                         "additionalProperties": false
                       }
+                    },
+                    "confirmations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "confirmation": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "executionId": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                                "description": "The proposal execution (status `pending_confirmation`)"
+                              },
+                              "resultExecutionId": {
+                                "nullable": true,
+                                "description": "The confirmed write’s execution",
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "conversationId": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "tool": { "type": "string" },
+                              "operationId": { "type": "string" },
+                              "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                              "requiresReauth": {
+                                "type": "boolean",
+                                "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                              },
+                              "reauthFresh": {
+                                "type": "boolean",
+                                "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                              },
+                              "status": {
+                                "type": "string",
+                                "enum": [
+                                  "pending",
+                                  "executing",
+                                  "executed",
+                                  "failed",
+                                  "expired",
+                                  "cancelled"
+                                ]
+                              },
+                              "summary": {
+                                "nullable": true,
+                                "description": "null after the content purge",
+                                "type": "object",
+                                "properties": {
+                                  "version": {
+                                    "type": "string",
+                                    "enum": ["assistant-confirmation/1"]
+                                  },
+                                  "title": { "type": "string" },
+                                  "action": {
+                                    "type": "string",
+                                    "description": "One sentence: what will happen"
+                                  },
+                                  "target": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "label": { "type": "string" },
+                                        "value": { "type": "string" },
+                                        "untrusted": {
+                                          "description": "The value comes from a message (subject, sender, file name): plain text",
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "required": ["label", "value"],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "changes": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "label": { "type": "string" },
+                                        "before": { "nullable": true, "type": "string" },
+                                        "after": { "type": "string" }
+                                      },
+                                      "required": ["label", "after"],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "definition": {
+                                    "description": "Policy definitions, rule by rule",
+                                    "type": "object",
+                                    "properties": {
+                                      "direction": { "type": "string" },
+                                      "priority": {
+                                        "type": "integer",
+                                        "minimum": -9007199254740991,
+                                        "maximum": 9007199254740991
+                                      },
+                                      "rules": {
+                                        "type": "array",
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "id": { "type": "string" },
+                                            "when": { "type": "string" },
+                                            "actions": { "type": "string" }
+                                          },
+                                          "required": ["id", "when", "actions"],
+                                          "additionalProperties": false
+                                        }
+                                      }
+                                    },
+                                    "required": ["direction", "priority", "rules"],
+                                    "additionalProperties": false
+                                  },
+                                  "impact": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Consequences (medium and high risk have at least one)"
+                                  },
+                                  "warnings": { "type": "array", "items": { "type": "string" } },
+                                  "reversible": { "type": "boolean" },
+                                  "portalRoute": { "nullable": true, "type": "string" },
+                                  "request": {
+                                    "type": "object",
+                                    "properties": {
+                                      "method": { "type": "string" },
+                                      "path": { "type": "string" }
+                                    },
+                                    "required": ["method", "path"],
+                                    "additionalProperties": false,
+                                    "description": "The request that runs on confirm (technical details)"
+                                  }
+                                },
+                                "required": [
+                                  "version",
+                                  "title",
+                                  "action",
+                                  "target",
+                                  "changes",
+                                  "impact",
+                                  "warnings",
+                                  "reversible",
+                                  "portalRoute",
+                                  "request"
+                                ],
+                                "additionalProperties": false
+                              },
+                              "actionDigest": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                                "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                              },
+                              "expiresAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "createdAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "decidedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "executedAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "result": {
+                                "nullable": true,
+                                "description": "Outcome of the confirmed write (executed or failed)",
+                                "type": "object",
+                                "properties": {
+                                  "httpStatus": {
+                                    "nullable": true,
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "error": { "nullable": true, "type": "string" }
+                                },
+                                "required": ["httpStatus", "error"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "executionId",
+                              "resultExecutionId",
+                              "conversationId",
+                              "tool",
+                              "operationId",
+                              "risk",
+                              "requiresReauth",
+                              "reauthFresh",
+                              "status",
+                              "summary",
+                              "actionDigest",
+                              "expiresAt",
+                              "createdAt",
+                              "decidedAt",
+                              "executedAt",
+                              "result"
+                            ],
+                            "additionalProperties": false,
+                            "description": "An action the assistant proposed; it runs only when you confirm it. Never the token."
+                          },
+                          "token": {
+                            "nullable": true,
+                            "description": "Single-use token for `POST /assistant/confirmations/{id}/confirm`; keep it in memory only (null when the turn is replayed by its clientTurnId)",
+                            "type": "string"
+                          }
+                        },
+                        "required": ["confirmation", "token"],
+                        "additionalProperties": false
+                      },
+                      "description": "The write proposals of this turn, in call order"
                     }
                   },
-                  "required": ["turn", "message", "executions"],
+                  "required": ["turn", "message", "executions", "confirmations"],
                   "additionalProperties": false,
                   "example": {
                     "turn": {
@@ -177881,9 +178568,11 @@
                           "refs": ["r1.1"]
                         },
                         "latencyMs": 42,
-                        "createdAt": "2026-11-20T10:00:01.000Z"
+                        "createdAt": "2026-11-20T10:00:01.000Z",
+                        "confirmation": null
                       }
-                    ]
+                    ],
+                    "confirmations": []
                   }
                 }
               },
@@ -178411,7 +179100,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["succeeded", "failed", "refused", "timeout"]
+                      "enum": ["succeeded", "failed", "refused", "timeout", "pending_confirmation"]
                     },
                     "httpStatus": {
                       "nullable": true,
@@ -178570,6 +179259,221 @@
                       "type": "string",
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "confirmation": {
+                      "nullable": true,
+                      "description": "The confirmation of a write proposal (status `pending_confirmation`); null otherwise",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "executionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "description": "The proposal execution (status `pending_confirmation`)"
+                        },
+                        "resultExecutionId": {
+                          "nullable": true,
+                          "description": "The confirmed write’s execution",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "tool": { "type": "string" },
+                        "operationId": { "type": "string" },
+                        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "requiresReauth": {
+                          "type": "boolean",
+                          "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                        },
+                        "reauthFresh": {
+                          "type": "boolean",
+                          "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "executing",
+                            "executed",
+                            "failed",
+                            "expired",
+                            "cancelled"
+                          ]
+                        },
+                        "summary": {
+                          "nullable": true,
+                          "description": "null after the content purge",
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "string", "enum": ["assistant-confirmation/1"] },
+                            "title": { "type": "string" },
+                            "action": {
+                              "type": "string",
+                              "description": "One sentence: what will happen"
+                            },
+                            "target": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" },
+                                  "untrusted": {
+                                    "description": "The value comes from a message (subject, sender, file name): plain text",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "changes": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "before": { "nullable": true, "type": "string" },
+                                  "after": { "type": "string" }
+                                },
+                                "required": ["label", "after"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "definition": {
+                              "description": "Policy definitions, rule by rule",
+                              "type": "object",
+                              "properties": {
+                                "direction": { "type": "string" },
+                                "priority": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "rules": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": { "type": "string" },
+                                      "when": { "type": "string" },
+                                      "actions": { "type": "string" }
+                                    },
+                                    "required": ["id", "when", "actions"],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["direction", "priority", "rules"],
+                              "additionalProperties": false
+                            },
+                            "impact": {
+                              "type": "array",
+                              "items": { "type": "string" },
+                              "description": "Consequences (medium and high risk have at least one)"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "reversible": { "type": "boolean" },
+                            "portalRoute": { "nullable": true, "type": "string" },
+                            "request": {
+                              "type": "object",
+                              "properties": {
+                                "method": { "type": "string" },
+                                "path": { "type": "string" }
+                              },
+                              "required": ["method", "path"],
+                              "additionalProperties": false,
+                              "description": "The request that runs on confirm (technical details)"
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "title",
+                            "action",
+                            "target",
+                            "changes",
+                            "impact",
+                            "warnings",
+                            "reversible",
+                            "portalRoute",
+                            "request"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "actionDigest": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "decidedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "executedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "result": {
+                          "nullable": true,
+                          "description": "Outcome of the confirmed write (executed or failed)",
+                          "type": "object",
+                          "properties": {
+                            "httpStatus": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "error": { "nullable": true, "type": "string" }
+                          },
+                          "required": ["httpStatus", "error"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "executionId",
+                        "resultExecutionId",
+                        "conversationId",
+                        "tool",
+                        "operationId",
+                        "risk",
+                        "requiresReauth",
+                        "reauthFresh",
+                        "status",
+                        "summary",
+                        "actionDigest",
+                        "expiresAt",
+                        "createdAt",
+                        "decidedAt",
+                        "executedAt",
+                        "result"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -178590,7 +179494,8 @@
                     "hasMore",
                     "card",
                     "latencyMs",
-                    "createdAt"
+                    "createdAt",
+                    "confirmation"
                   ],
                   "additionalProperties": false,
                   "example": {
@@ -178633,7 +179538,8 @@
                       "refs": ["r1.1"]
                     },
                     "latencyMs": 42,
-                    "createdAt": "2026-11-20T10:00:01.000Z"
+                    "createdAt": "2026-11-20T10:00:01.000Z",
+                    "confirmation": null
                   }
                 }
               }
@@ -178873,7 +179779,7 @@
                     },
                     "status": {
                       "type": "string",
-                      "enum": ["succeeded", "failed", "refused", "timeout"]
+                      "enum": ["succeeded", "failed", "refused", "timeout", "pending_confirmation"]
                     },
                     "httpStatus": {
                       "nullable": true,
@@ -179032,6 +179938,221 @@
                       "type": "string",
                       "format": "date-time",
                       "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "confirmation": {
+                      "nullable": true,
+                      "description": "The confirmation of a write proposal (status `pending_confirmation`); null otherwise",
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "executionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "description": "The proposal execution (status `pending_confirmation`)"
+                        },
+                        "resultExecutionId": {
+                          "nullable": true,
+                          "description": "The confirmed write’s execution",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "tool": { "type": "string" },
+                        "operationId": { "type": "string" },
+                        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "requiresReauth": {
+                          "type": "boolean",
+                          "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                        },
+                        "reauthFresh": {
+                          "type": "boolean",
+                          "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "executing",
+                            "executed",
+                            "failed",
+                            "expired",
+                            "cancelled"
+                          ]
+                        },
+                        "summary": {
+                          "nullable": true,
+                          "description": "null after the content purge",
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "string", "enum": ["assistant-confirmation/1"] },
+                            "title": { "type": "string" },
+                            "action": {
+                              "type": "string",
+                              "description": "One sentence: what will happen"
+                            },
+                            "target": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" },
+                                  "untrusted": {
+                                    "description": "The value comes from a message (subject, sender, file name): plain text",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "changes": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "before": { "nullable": true, "type": "string" },
+                                  "after": { "type": "string" }
+                                },
+                                "required": ["label", "after"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "definition": {
+                              "description": "Policy definitions, rule by rule",
+                              "type": "object",
+                              "properties": {
+                                "direction": { "type": "string" },
+                                "priority": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "rules": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": { "type": "string" },
+                                      "when": { "type": "string" },
+                                      "actions": { "type": "string" }
+                                    },
+                                    "required": ["id", "when", "actions"],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["direction", "priority", "rules"],
+                              "additionalProperties": false
+                            },
+                            "impact": {
+                              "type": "array",
+                              "items": { "type": "string" },
+                              "description": "Consequences (medium and high risk have at least one)"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "reversible": { "type": "boolean" },
+                            "portalRoute": { "nullable": true, "type": "string" },
+                            "request": {
+                              "type": "object",
+                              "properties": {
+                                "method": { "type": "string" },
+                                "path": { "type": "string" }
+                              },
+                              "required": ["method", "path"],
+                              "additionalProperties": false,
+                              "description": "The request that runs on confirm (technical details)"
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "title",
+                            "action",
+                            "target",
+                            "changes",
+                            "impact",
+                            "warnings",
+                            "reversible",
+                            "portalRoute",
+                            "request"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "actionDigest": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "decidedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "executedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "result": {
+                          "nullable": true,
+                          "description": "Outcome of the confirmed write (executed or failed)",
+                          "type": "object",
+                          "properties": {
+                            "httpStatus": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "error": { "nullable": true, "type": "string" }
+                          },
+                          "required": ["httpStatus", "error"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "executionId",
+                        "resultExecutionId",
+                        "conversationId",
+                        "tool",
+                        "operationId",
+                        "risk",
+                        "requiresReauth",
+                        "reauthFresh",
+                        "status",
+                        "summary",
+                        "actionDigest",
+                        "expiresAt",
+                        "createdAt",
+                        "decidedAt",
+                        "executedAt",
+                        "result"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [
@@ -179052,7 +180173,8 @@
                     "hasMore",
                     "card",
                     "latencyMs",
-                    "createdAt"
+                    "createdAt",
+                    "confirmation"
                   ],
                   "additionalProperties": false,
                   "example": {
@@ -179095,7 +180217,8 @@
                       "refs": ["r1.1"]
                     },
                     "latencyMs": 42,
-                    "createdAt": "2026-11-20T10:00:01.000Z"
+                    "createdAt": "2026-11-20T10:00:01.000Z",
+                    "confirmation": null
                   }
                 }
               }
@@ -179284,6 +180407,2006 @@
         "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] },
         "x-eg-rate-class": "expensive"
       }
+    },
+    "/api/v1/assistant/confirmations/{confirmationId}": {
+      "get": {
+        "description": "One of your own write proposals: tool, risk, status, the server-authored summary (`assistant-confirmation/1`) the confirmation card shows, `actionDigest`, expiry and, after confirm, the result. Never the token (it exists only in the answer of the turn that proposed it). A `pending` confirmation past `expiresAt` shows as `expired`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "operationId": "AssistantConfirmationsController_get_v1",
+        "parameters": [
+          {
+            "name": "confirmationId",
+            "required": true,
+            "in": "path",
+            "description": "Confirmation public id (UUID)",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The confirmation",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "executionId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                      "description": "The proposal execution (status `pending_confirmation`)"
+                    },
+                    "resultExecutionId": {
+                      "nullable": true,
+                      "description": "The confirmed write’s execution",
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "conversationId": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "tool": { "type": "string" },
+                    "operationId": { "type": "string" },
+                    "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                    "requiresReauth": {
+                      "type": "boolean",
+                      "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                    },
+                    "reauthFresh": {
+                      "type": "boolean",
+                      "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["pending", "executing", "executed", "failed", "expired", "cancelled"]
+                    },
+                    "summary": {
+                      "nullable": true,
+                      "description": "null after the content purge",
+                      "type": "object",
+                      "properties": {
+                        "version": { "type": "string", "enum": ["assistant-confirmation/1"] },
+                        "title": { "type": "string" },
+                        "action": {
+                          "type": "string",
+                          "description": "One sentence: what will happen"
+                        },
+                        "target": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": { "type": "string" },
+                              "value": { "type": "string" },
+                              "untrusted": {
+                                "description": "The value comes from a message (subject, sender, file name): plain text",
+                                "type": "boolean"
+                              }
+                            },
+                            "required": ["label", "value"],
+                            "additionalProperties": false
+                          }
+                        },
+                        "changes": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": { "type": "string" },
+                              "before": { "nullable": true, "type": "string" },
+                              "after": { "type": "string" }
+                            },
+                            "required": ["label", "after"],
+                            "additionalProperties": false
+                          }
+                        },
+                        "definition": {
+                          "description": "Policy definitions, rule by rule",
+                          "type": "object",
+                          "properties": {
+                            "direction": { "type": "string" },
+                            "priority": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "rules": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "id": { "type": "string" },
+                                  "when": { "type": "string" },
+                                  "actions": { "type": "string" }
+                                },
+                                "required": ["id", "when", "actions"],
+                                "additionalProperties": false
+                              }
+                            }
+                          },
+                          "required": ["direction", "priority", "rules"],
+                          "additionalProperties": false
+                        },
+                        "impact": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "description": "Consequences (medium and high risk have at least one)"
+                        },
+                        "warnings": { "type": "array", "items": { "type": "string" } },
+                        "reversible": { "type": "boolean" },
+                        "portalRoute": { "nullable": true, "type": "string" },
+                        "request": {
+                          "type": "object",
+                          "properties": {
+                            "method": { "type": "string" },
+                            "path": { "type": "string" }
+                          },
+                          "required": ["method", "path"],
+                          "additionalProperties": false,
+                          "description": "The request that runs on confirm (technical details)"
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "title",
+                        "action",
+                        "target",
+                        "changes",
+                        "impact",
+                        "warnings",
+                        "reversible",
+                        "portalRoute",
+                        "request"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "actionDigest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "decidedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "executedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "result": {
+                      "nullable": true,
+                      "description": "Outcome of the confirmed write (executed or failed)",
+                      "type": "object",
+                      "properties": {
+                        "httpStatus": {
+                          "nullable": true,
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "error": { "nullable": true, "type": "string" }
+                      },
+                      "required": ["httpStatus", "error"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "executionId",
+                    "resultExecutionId",
+                    "conversationId",
+                    "tool",
+                    "operationId",
+                    "risk",
+                    "requiresReauth",
+                    "reauthFresh",
+                    "status",
+                    "summary",
+                    "actionDigest",
+                    "expiresAt",
+                    "createdAt",
+                    "decidedAt",
+                    "executedAt",
+                    "result"
+                  ],
+                  "additionalProperties": false,
+                  "description": "An action the assistant proposed; it runs only when you confirm it. Never the token.",
+                  "example": {
+                    "id": "0193a1c2-8180-73a5-81c8-9072d38ebf08",
+                    "executionId": "0193a1c2-8290-74b6-92d9-a183e49fc009",
+                    "resultExecutionId": null,
+                    "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+                    "tool": "policy_management_disable",
+                    "operationId": "PolicyManagementController_disable_v1",
+                    "risk": "medium",
+                    "requiresReauth": false,
+                    "reauthFresh": false,
+                    "status": "pending",
+                    "summary": {
+                      "version": "assistant-confirmation/1",
+                      "title": "Disable policy",
+                      "action": "Disables the policy \"Block executables\".",
+                      "target": [{ "label": "Policy", "value": "Block executables" }],
+                      "changes": [{ "label": "Status", "before": "active", "after": "disabled" }],
+                      "impact": ["Stops evaluating this policy for new mail."],
+                      "warnings": [],
+                      "reversible": true,
+                      "portalRoute": "/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06",
+                      "request": {
+                        "method": "POST",
+                        "path": "/api/v1/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06/disable"
+                      }
+                    },
+                    "actionDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "expiresAt": "2026-11-20T10:05:02.000Z",
+                    "createdAt": "2026-11-20T10:00:02.000Z",
+                    "decidedAt": null,
+                    "executedAt": null,
+                    "result": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (validation_failed or a specific code)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials (unauthorized)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "user_required", "mfa_enrollment_required"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_confirmation_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Get an assistant confirmation",
+        "tags": ["assistant"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] }
+      }
+    },
+    "/api/v1/assistant/confirmations/{confirmationId}/confirm": {
+      "post": {
+        "description": "Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`) and permitted (`403 forbidden`), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "operationId": "AssistantConfirmationsController_confirm_v1",
+        "parameters": [
+          {
+            "name": "confirmationId",
+            "required": true,
+            "in": "path",
+            "description": "Confirmation public id (UUID)",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$",
+                    "description": "The token of `confirmation.required` (43 base64url characters)"
+                  },
+                  "actionDigest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "The `actionDigest` the confirmation card showed"
+                  },
+                  "reauth": {
+                    "description": "High risk only, unless this session re-authenticated within the window",
+                    "type": "object",
+                    "properties": {
+                      "password": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                      "totpCode": {
+                        "description": "Required when you have MFA enrolled",
+                        "type": "string",
+                        "pattern": "^[0-9]{6}$"
+                      }
+                    },
+                    "required": ["password"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["token", "actionDigest"],
+                "additionalProperties": false
+              },
+              "examples": {
+                "confirm": {
+                  "value": {
+                    "token": "example_confirmation_token_placeholder_0000",
+                    "actionDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  }
+                },
+                "highRisk": {
+                  "summary": "High risk with re-authentication",
+                  "value": {
+                    "token": "example_confirmation_token_placeholder_0000",
+                    "actionDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "reauth": { "password": "<your password>", "totpCode": "123456" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The confirmation (`executed` or `failed`) and the execution of the write",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "confirmation": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "executionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "description": "The proposal execution (status `pending_confirmation`)"
+                        },
+                        "resultExecutionId": {
+                          "nullable": true,
+                          "description": "The confirmed write’s execution",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "tool": { "type": "string" },
+                        "operationId": { "type": "string" },
+                        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "requiresReauth": {
+                          "type": "boolean",
+                          "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                        },
+                        "reauthFresh": {
+                          "type": "boolean",
+                          "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "executing",
+                            "executed",
+                            "failed",
+                            "expired",
+                            "cancelled"
+                          ]
+                        },
+                        "summary": {
+                          "nullable": true,
+                          "description": "null after the content purge",
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "string", "enum": ["assistant-confirmation/1"] },
+                            "title": { "type": "string" },
+                            "action": {
+                              "type": "string",
+                              "description": "One sentence: what will happen"
+                            },
+                            "target": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" },
+                                  "untrusted": {
+                                    "description": "The value comes from a message (subject, sender, file name): plain text",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "changes": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "before": { "nullable": true, "type": "string" },
+                                  "after": { "type": "string" }
+                                },
+                                "required": ["label", "after"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "definition": {
+                              "description": "Policy definitions, rule by rule",
+                              "type": "object",
+                              "properties": {
+                                "direction": { "type": "string" },
+                                "priority": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "rules": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": { "type": "string" },
+                                      "when": { "type": "string" },
+                                      "actions": { "type": "string" }
+                                    },
+                                    "required": ["id", "when", "actions"],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["direction", "priority", "rules"],
+                              "additionalProperties": false
+                            },
+                            "impact": {
+                              "type": "array",
+                              "items": { "type": "string" },
+                              "description": "Consequences (medium and high risk have at least one)"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "reversible": { "type": "boolean" },
+                            "portalRoute": { "nullable": true, "type": "string" },
+                            "request": {
+                              "type": "object",
+                              "properties": {
+                                "method": { "type": "string" },
+                                "path": { "type": "string" }
+                              },
+                              "required": ["method", "path"],
+                              "additionalProperties": false,
+                              "description": "The request that runs on confirm (technical details)"
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "title",
+                            "action",
+                            "target",
+                            "changes",
+                            "impact",
+                            "warnings",
+                            "reversible",
+                            "portalRoute",
+                            "request"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "actionDigest": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "decidedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "executedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "result": {
+                          "nullable": true,
+                          "description": "Outcome of the confirmed write (executed or failed)",
+                          "type": "object",
+                          "properties": {
+                            "httpStatus": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "error": { "nullable": true, "type": "string" }
+                          },
+                          "required": ["httpStatus", "error"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "executionId",
+                        "resultExecutionId",
+                        "conversationId",
+                        "tool",
+                        "operationId",
+                        "risk",
+                        "requiresReauth",
+                        "reauthFresh",
+                        "status",
+                        "summary",
+                        "actionDigest",
+                        "expiresAt",
+                        "createdAt",
+                        "decidedAt",
+                        "executedAt",
+                        "result"
+                      ],
+                      "additionalProperties": false,
+                      "description": "An action the assistant proposed; it runs only when you confirm it. Never the token."
+                    },
+                    "execution": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "turnId": {
+                          "nullable": true,
+                          "description": "null for a \"more\" page",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "parentExecutionId": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "seq": {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "ref": {
+                          "type": "string",
+                          "description": "`r<seq>`: how the assistant refers to this result"
+                        },
+                        "tool": { "type": "string" },
+                        "operationId": { "type": "string" },
+                        "access": { "type": "string", "enum": ["read", "write"] },
+                        "risk": {
+                          "type": "string",
+                          "enum": ["read", "read_audited", "low", "medium", "high", "critical"]
+                        },
+                        "decision": {
+                          "type": "string",
+                          "enum": [
+                            "allowed",
+                            "denied_permission",
+                            "denied_unknown_tool",
+                            "denied_disabled",
+                            "denied_not_applicable",
+                            "denied_schema",
+                            "denied_ref",
+                            "denied_budget"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "succeeded",
+                            "failed",
+                            "refused",
+                            "timeout",
+                            "pending_confirmation"
+                          ]
+                        },
+                        "httpStatus": {
+                          "nullable": true,
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "errorCode": { "nullable": true, "type": "string" },
+                        "hasMore": { "type": "boolean" },
+                        "card": {
+                          "nullable": true,
+                          "description": "null for refused calls and after the content purge",
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "string", "enum": ["assistant-card/1"] },
+                            "executionId": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "tool": { "type": "string" },
+                            "title": { "type": "string" },
+                            "status": { "type": "string", "enum": ["ok", "error"] },
+                            "kind": {
+                              "type": "string",
+                              "enum": ["table", "kv", "series", "message", "error"]
+                            },
+                            "columns": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": { "type": "string" },
+                                  "label": { "type": "string" }
+                                },
+                                "required": ["key", "label"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "rows": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "anyOf": [
+                                    { "type": "string" },
+                                    { "type": "number" },
+                                    { "type": "boolean" },
+                                    { "type": "string", "nullable": true, "enum": [null] }
+                                  ]
+                                }
+                              }
+                            },
+                            "fields": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "key": { "type": "string" },
+                                  "label": { "type": "string" },
+                                  "value": {
+                                    "anyOf": [
+                                      { "type": "string" },
+                                      { "type": "number" },
+                                      { "type": "boolean" },
+                                      { "type": "string", "nullable": true, "enum": [null] }
+                                    ]
+                                  }
+                                },
+                                "required": ["key", "label", "value"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "series": {
+                              "type": "object",
+                              "properties": {
+                                "x": { "type": "array", "items": { "type": "string" } },
+                                "series": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "name": { "type": "string" },
+                                      "values": {
+                                        "type": "array",
+                                        "items": { "nullable": true, "type": "number" }
+                                      }
+                                    },
+                                    "required": ["name", "values"],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["x", "series"],
+                              "additionalProperties": false
+                            },
+                            "total": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "nextCursor": {
+                              "description": "A next page exists (POST …/more)",
+                              "type": "boolean"
+                            },
+                            "portalLinks": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "href": { "type": "string" },
+                                  "ref": { "type": "string" }
+                                },
+                                "required": ["label", "href"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "refs": { "type": "array", "items": { "type": "string" } },
+                            "truncated": { "type": "boolean" },
+                            "message": { "type": "string" },
+                            "error": {
+                              "type": "object",
+                              "properties": {
+                                "httpStatus": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "code": { "type": "string" },
+                                "message": { "type": "string" }
+                              },
+                              "required": ["httpStatus", "code", "message"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "executionId",
+                            "tool",
+                            "title",
+                            "status",
+                            "kind",
+                            "portalLinks",
+                            "refs"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "latencyMs": {
+                          "nullable": true,
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "confirmation": {
+                          "nullable": true,
+                          "description": "The confirmation of a write proposal (status `pending_confirmation`); null otherwise",
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "executionId": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                              "description": "The proposal execution (status `pending_confirmation`)"
+                            },
+                            "resultExecutionId": {
+                              "nullable": true,
+                              "description": "The confirmed write’s execution",
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "conversationId": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "tool": { "type": "string" },
+                            "operationId": { "type": "string" },
+                            "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                            "requiresReauth": {
+                              "type": "boolean",
+                              "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                            },
+                            "reauthFresh": {
+                              "type": "boolean",
+                              "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "pending",
+                                "executing",
+                                "executed",
+                                "failed",
+                                "expired",
+                                "cancelled"
+                              ]
+                            },
+                            "summary": {
+                              "nullable": true,
+                              "description": "null after the content purge",
+                              "type": "object",
+                              "properties": {
+                                "version": {
+                                  "type": "string",
+                                  "enum": ["assistant-confirmation/1"]
+                                },
+                                "title": { "type": "string" },
+                                "action": {
+                                  "type": "string",
+                                  "description": "One sentence: what will happen"
+                                },
+                                "target": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "label": { "type": "string" },
+                                      "value": { "type": "string" },
+                                      "untrusted": {
+                                        "description": "The value comes from a message (subject, sender, file name): plain text",
+                                        "type": "boolean"
+                                      }
+                                    },
+                                    "required": ["label", "value"],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "changes": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "label": { "type": "string" },
+                                      "before": { "nullable": true, "type": "string" },
+                                      "after": { "type": "string" }
+                                    },
+                                    "required": ["label", "after"],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "definition": {
+                                  "description": "Policy definitions, rule by rule",
+                                  "type": "object",
+                                  "properties": {
+                                    "direction": { "type": "string" },
+                                    "priority": {
+                                      "type": "integer",
+                                      "minimum": -9007199254740991,
+                                      "maximum": 9007199254740991
+                                    },
+                                    "rules": {
+                                      "type": "array",
+                                      "items": {
+                                        "type": "object",
+                                        "properties": {
+                                          "id": { "type": "string" },
+                                          "when": { "type": "string" },
+                                          "actions": { "type": "string" }
+                                        },
+                                        "required": ["id", "when", "actions"],
+                                        "additionalProperties": false
+                                      }
+                                    }
+                                  },
+                                  "required": ["direction", "priority", "rules"],
+                                  "additionalProperties": false
+                                },
+                                "impact": {
+                                  "type": "array",
+                                  "items": { "type": "string" },
+                                  "description": "Consequences (medium and high risk have at least one)"
+                                },
+                                "warnings": { "type": "array", "items": { "type": "string" } },
+                                "reversible": { "type": "boolean" },
+                                "portalRoute": { "nullable": true, "type": "string" },
+                                "request": {
+                                  "type": "object",
+                                  "properties": {
+                                    "method": { "type": "string" },
+                                    "path": { "type": "string" }
+                                  },
+                                  "required": ["method", "path"],
+                                  "additionalProperties": false,
+                                  "description": "The request that runs on confirm (technical details)"
+                                }
+                              },
+                              "required": [
+                                "version",
+                                "title",
+                                "action",
+                                "target",
+                                "changes",
+                                "impact",
+                                "warnings",
+                                "reversible",
+                                "portalRoute",
+                                "request"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "actionDigest": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{64}$",
+                              "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                            },
+                            "expiresAt": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "createdAt": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "decidedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "executedAt": {
+                              "nullable": true,
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "result": {
+                              "nullable": true,
+                              "description": "Outcome of the confirmed write (executed or failed)",
+                              "type": "object",
+                              "properties": {
+                                "httpStatus": {
+                                  "nullable": true,
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "error": { "nullable": true, "type": "string" }
+                              },
+                              "required": ["httpStatus", "error"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "executionId",
+                            "resultExecutionId",
+                            "conversationId",
+                            "tool",
+                            "operationId",
+                            "risk",
+                            "requiresReauth",
+                            "reauthFresh",
+                            "status",
+                            "summary",
+                            "actionDigest",
+                            "expiresAt",
+                            "createdAt",
+                            "decidedAt",
+                            "executedAt",
+                            "result"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "conversationId",
+                        "turnId",
+                        "parentExecutionId",
+                        "seq",
+                        "ref",
+                        "tool",
+                        "operationId",
+                        "access",
+                        "risk",
+                        "decision",
+                        "status",
+                        "httpStatus",
+                        "errorCode",
+                        "hasMore",
+                        "card",
+                        "latencyMs",
+                        "createdAt",
+                        "confirmation"
+                      ],
+                      "additionalProperties": false,
+                      "description": "The execution of the confirmed write (its result card)"
+                    }
+                  },
+                  "required": ["confirmation", "execution"],
+                  "additionalProperties": false,
+                  "example": {
+                    "confirmation": {
+                      "id": "0193a1c2-8180-73a5-81c8-9072d38ebf08",
+                      "executionId": "0193a1c2-8290-74b6-92d9-a183e49fc009",
+                      "resultExecutionId": "0193a1c2-83a0-75c7-83ea-b294f5a0d10a",
+                      "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+                      "tool": "policy_management_disable",
+                      "operationId": "PolicyManagementController_disable_v1",
+                      "risk": "medium",
+                      "requiresReauth": false,
+                      "reauthFresh": false,
+                      "status": "executed",
+                      "summary": {
+                        "version": "assistant-confirmation/1",
+                        "title": "Disable policy",
+                        "action": "Disables the policy \"Block executables\".",
+                        "target": [{ "label": "Policy", "value": "Block executables" }],
+                        "changes": [{ "label": "Status", "before": "active", "after": "disabled" }],
+                        "impact": ["Stops evaluating this policy for new mail."],
+                        "warnings": [],
+                        "reversible": true,
+                        "portalRoute": "/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06",
+                        "request": {
+                          "method": "POST",
+                          "path": "/api/v1/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06/disable"
+                        }
+                      },
+                      "actionDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "expiresAt": "2026-11-20T10:05:02.000Z",
+                      "createdAt": "2026-11-20T10:00:02.000Z",
+                      "decidedAt": "2026-11-20T10:01:00.000Z",
+                      "executedAt": "2026-11-20T10:01:00.250Z",
+                      "result": { "httpStatus": 200, "error": null }
+                    },
+                    "execution": {
+                      "id": "0193a1c2-83a0-75c7-83ea-b294f5a0d10a",
+                      "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+                      "turnId": null,
+                      "parentExecutionId": "0193a1c2-8290-74b6-92d9-a183e49fc009",
+                      "seq": 3,
+                      "ref": "r3",
+                      "tool": "policy_management_disable",
+                      "operationId": "PolicyManagementController_disable_v1",
+                      "access": "write",
+                      "risk": "medium",
+                      "decision": "allowed",
+                      "status": "succeeded",
+                      "httpStatus": 200,
+                      "errorCode": null,
+                      "hasMore": false,
+                      "card": {
+                        "version": "assistant-card/1",
+                        "executionId": "0193a1c2-83a0-75c7-83ea-b294f5a0d10a",
+                        "tool": "policy_management_disable",
+                        "title": "Disable policy",
+                        "status": "ok",
+                        "kind": "kv",
+                        "fields": [
+                          { "key": "name", "label": "Name", "value": "Block executables" },
+                          { "key": "status", "label": "Status", "value": "disabled" }
+                        ],
+                        "portalLinks": [
+                          {
+                            "label": "Block executables",
+                            "href": "/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06"
+                          }
+                        ],
+                        "refs": ["r3.1"]
+                      },
+                      "latencyMs": 250,
+                      "createdAt": "2026-11-20T10:01:00.250Z",
+                      "confirmation": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (validation_failed or a specific code)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Re-authentication needed (`assistant_reauth_required`) or failed (`assistant_reauth_failed`, `reason`: `password`, `totp`, `totp_required`, `locked`, `inactive`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [401] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["assistant_reauth_required", "assistant_reauth_failed"]
+                    },
+                    "message": { "type": "string" },
+                    "reason": {
+                      "type": "string",
+                      "enum": ["password", "totp", "totp_required", "locked", "inactive"]
+                    },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`) or a wrong token (`assistant_confirmation_token_invalid`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden",
+                        "user_required",
+                        "mfa_enrollment_required",
+                        "assistant_not_enabled",
+                        "assistant_tenant_disabled",
+                        "assistant_confirmation_session_mismatch",
+                        "assistant_confirmation_token_invalid"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_confirmation_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "409": {
+            "description": "No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "assistant_confirmation_not_pending",
+                        "assistant_confirmation_digest_mismatch",
+                        "assistant_confirmation_tool_changed",
+                        "assistant_confirmation_state_changed",
+                        "assistant_turn_in_progress"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "status": { "type": "string" },
+                    "httpStatus": { "type": "integer" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "410": {
+            "description": "The confirmation expired (ASSISTANT_CONFIRMATION_TTL_SECONDS)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [410] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_confirmation_expired"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests of the `sensitive` rate class (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [429] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rate_limited"] },
+                    "message": { "type": "string" },
+                    "scope": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`); the assistant is off on this platform (`assistant_disabled`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable", "assistant_disabled"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Confirm an action the assistant proposed",
+        "tags": ["assistant"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] },
+        "x-eg-rate-class": "sensitive"
+      }
+    },
+    "/api/v1/assistant/confirmations/{confirmationId}/cancel": {
+      "post": {
+        "description": "Cancels one of your own pending proposals from the same sign-in session (no token needed, so it also works after a page reload); nothing runs. Idempotent: an already cancelled confirmation answers unchanged; any other state answers `409 assistant_confirmation_not_pending` with `status`. The assistant learns about it at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "operationId": "AssistantConfirmationsController_cancel_v1",
+        "parameters": [
+          {
+            "name": "confirmationId",
+            "required": true,
+            "in": "path",
+            "description": "Confirmation public id (UUID)",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancelled confirmation",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "confirmation": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "executionId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                          "description": "The proposal execution (status `pending_confirmation`)"
+                        },
+                        "resultExecutionId": {
+                          "nullable": true,
+                          "description": "The confirmed write’s execution",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "tool": { "type": "string" },
+                        "operationId": { "type": "string" },
+                        "risk": { "type": "string", "enum": ["low", "medium", "high"] },
+                        "requiresReauth": {
+                          "type": "boolean",
+                          "description": "High risk: confirm needs `reauth` unless the session re-authenticated recently"
+                        },
+                        "reauthFresh": {
+                          "type": "boolean",
+                          "description": "This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "executing",
+                            "executed",
+                            "failed",
+                            "expired",
+                            "cancelled"
+                          ]
+                        },
+                        "summary": {
+                          "nullable": true,
+                          "description": "null after the content purge",
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "string", "enum": ["assistant-confirmation/1"] },
+                            "title": { "type": "string" },
+                            "action": {
+                              "type": "string",
+                              "description": "One sentence: what will happen"
+                            },
+                            "target": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" },
+                                  "untrusted": {
+                                    "description": "The value comes from a message (subject, sender, file name): plain text",
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "changes": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "before": { "nullable": true, "type": "string" },
+                                  "after": { "type": "string" }
+                                },
+                                "required": ["label", "after"],
+                                "additionalProperties": false
+                              }
+                            },
+                            "definition": {
+                              "description": "Policy definitions, rule by rule",
+                              "type": "object",
+                              "properties": {
+                                "direction": { "type": "string" },
+                                "priority": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "rules": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "id": { "type": "string" },
+                                      "when": { "type": "string" },
+                                      "actions": { "type": "string" }
+                                    },
+                                    "required": ["id", "when", "actions"],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["direction", "priority", "rules"],
+                              "additionalProperties": false
+                            },
+                            "impact": {
+                              "type": "array",
+                              "items": { "type": "string" },
+                              "description": "Consequences (medium and high risk have at least one)"
+                            },
+                            "warnings": { "type": "array", "items": { "type": "string" } },
+                            "reversible": { "type": "boolean" },
+                            "portalRoute": { "nullable": true, "type": "string" },
+                            "request": {
+                              "type": "object",
+                              "properties": {
+                                "method": { "type": "string" },
+                                "path": { "type": "string" }
+                              },
+                              "required": ["method", "path"],
+                              "additionalProperties": false,
+                              "description": "The request that runs on confirm (technical details)"
+                            }
+                          },
+                          "required": [
+                            "version",
+                            "title",
+                            "action",
+                            "target",
+                            "changes",
+                            "impact",
+                            "warnings",
+                            "reversible",
+                            "portalRoute",
+                            "request"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "actionDigest": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "description": "SHA-256 of the proposed action; the confirm request sends it back"
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "decidedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "executedAt": {
+                          "nullable": true,
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "result": {
+                          "nullable": true,
+                          "description": "Outcome of the confirmed write (executed or failed)",
+                          "type": "object",
+                          "properties": {
+                            "httpStatus": {
+                              "nullable": true,
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "error": { "nullable": true, "type": "string" }
+                          },
+                          "required": ["httpStatus", "error"],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "executionId",
+                        "resultExecutionId",
+                        "conversationId",
+                        "tool",
+                        "operationId",
+                        "risk",
+                        "requiresReauth",
+                        "reauthFresh",
+                        "status",
+                        "summary",
+                        "actionDigest",
+                        "expiresAt",
+                        "createdAt",
+                        "decidedAt",
+                        "executedAt",
+                        "result"
+                      ],
+                      "additionalProperties": false,
+                      "description": "An action the assistant proposed; it runs only when you confirm it. Never the token."
+                    }
+                  },
+                  "required": ["confirmation"],
+                  "additionalProperties": false,
+                  "example": {
+                    "confirmation": {
+                      "id": "0193a1c2-8180-73a5-81c8-9072d38ebf08",
+                      "executionId": "0193a1c2-8290-74b6-92d9-a183e49fc009",
+                      "resultExecutionId": null,
+                      "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+                      "tool": "policy_management_disable",
+                      "operationId": "PolicyManagementController_disable_v1",
+                      "risk": "medium",
+                      "requiresReauth": false,
+                      "reauthFresh": false,
+                      "status": "cancelled",
+                      "summary": {
+                        "version": "assistant-confirmation/1",
+                        "title": "Disable policy",
+                        "action": "Disables the policy \"Block executables\".",
+                        "target": [{ "label": "Policy", "value": "Block executables" }],
+                        "changes": [{ "label": "Status", "before": "active", "after": "disabled" }],
+                        "impact": ["Stops evaluating this policy for new mail."],
+                        "warnings": [],
+                        "reversible": true,
+                        "portalRoute": "/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06",
+                        "request": {
+                          "method": "POST",
+                          "path": "/api/v1/policies/0193a1c2-7f60-7183-8fa6-7e50b16c9d06/disable"
+                        }
+                      },
+                      "actionDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "expiresAt": "2026-11-20T10:05:02.000Z",
+                      "createdAt": "2026-11-20T10:00:02.000Z",
+                      "decidedAt": "2026-11-20T10:01:00.000Z",
+                      "executedAt": null,
+                      "result": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (validation_failed or a specific code)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials (unauthorized)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), another sign-in session (`assistant_confirmation_session_mismatch`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden",
+                        "user_required",
+                        "mfa_enrollment_required",
+                        "assistant_confirmation_session_mismatch"
+                      ]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_confirmation_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "409": {
+            "description": "Already executed, failed, expired or executing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [409] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_confirmation_not_pending"] },
+                    "message": { "type": "string" },
+                    "status": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests of the `sensitive` rate class (`rate_limited`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [429] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["rate_limited"] },
+                    "message": { "type": "string" },
+                    "scope": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Cancel an action the assistant proposed",
+        "tags": ["assistant"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] },
+        "x-eg-rate-class": "sensitive"
+      }
     }
   },
   "info": {
@@ -179433,7 +182556,7 @@
     },
     {
       "name": "assistant",
-      "description": "Step AI-1: the AI assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091–0094). Status, organization settings (enable with the external-processing acknowledgement, daily token budget, content retention), usage, your tool catalogue, your conversations and messages, turns answered as JSON or as the `assistant-stream/1` event stream, cancellation, stored tool executions and their next pages. Every tool is an existing `/api/v1` operation executed with your own credential through this API (same permissions, tenant, MFA, rate limits and audit as the portal); AI-1 tools are reads only. Users only; these routes are never tools themselves."
+      "description": "Step AI-1: the AI assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091–0094). Status, organization settings (enable with the external-processing acknowledgement, daily token budget, content retention), usage, your tool catalogue, your conversations and messages, turns answered as JSON or as the `assistant-stream/1` event stream, cancellation, stored tool executions and their next pages. Every tool is an existing `/api/v1` operation executed with your own credential through this API (same permissions, tenant, MFA, rate limits and audit as the portal). Step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md, ADR-0093): the assistant only PROPOSES writes; a write runs when you confirm its confirmation card (`POST /assistant/confirmations/{id}/confirm` with the single-use token, the card’s digest and, for high risk, re-authentication). Users only; these routes are never tools themselves."
     },
     {
       "name": "platform",

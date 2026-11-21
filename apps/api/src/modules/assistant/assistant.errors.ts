@@ -21,7 +21,36 @@ export const ASSISTANT_ERROR_CODES = {
   turnNotFound: 'assistant_turn_not_found',
   noMoreResults: 'assistant_no_more_results',
   settingsConflict: 'assistant_settings_conflict',
+  // Confirmations (step AI-2 §4.1).
+  confirmationNotFound: 'assistant_confirmation_not_found',
+  confirmationSessionMismatch: 'assistant_confirmation_session_mismatch',
+  confirmationNotPending: 'assistant_confirmation_not_pending',
+  confirmationExpired: 'assistant_confirmation_expired',
+  confirmationTokenInvalid: 'assistant_confirmation_token_invalid',
+  confirmationDigestMismatch: 'assistant_confirmation_digest_mismatch',
+  confirmationToolChanged: 'assistant_confirmation_tool_changed',
+  confirmationStateChanged: 'assistant_confirmation_state_changed',
+  reauthRequired: 'assistant_reauth_required',
+  reauthFailed: 'assistant_reauth_failed',
 } as const;
+
+/**
+ * Codes that never answer a request (step AI-2 §4.1): the error envelope of a failed proposal
+ * and the `error_code` of confirmation rows.
+ */
+export const CONFIRMATION_ROW_CODES = {
+  /** Proposal envelope: the policy definition failed `POST /policies/validate` (422). */
+  definitionInvalid: 'assistant_definition_invalid',
+  /** Proposal envelope: the precondition read did not return the row version to inject (502). */
+  preconditionUnavailable: 'assistant_precondition_unavailable',
+  /** Row: five wrong tokens cancelled the confirmation. */
+  tokenLocked: 'assistant_confirmation_token_locked',
+  /** Row: `executing` past the tool timeout (a crash); never re-executed. */
+  outcomeUnknown: 'assistant_confirmation_outcome_unknown',
+} as const;
+
+/** `details.reason` of `401 assistant_reauth_failed` (ReauthenticationService reasons). */
+export type ReauthFailureReason = 'password' | 'totp' | 'totp_required' | 'locked' | 'inactive';
 
 /** Turn failure codes (contracts §35). `assistant_internal_error` covers an unexpected fault. */
 export const TURN_FAILURE_CODES = {
@@ -155,4 +184,72 @@ export const assistantUserRateLimited = (retryAfterSeconds: number): CodedHttpEx
     'Too many requests',
     { scope: 'route' },
     retryAfterSeconds,
+  );
+
+// ---- confirmations (step AI-2 D2, §4.1) ----------------------------------------------------------
+
+export const confirmationNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.confirmationNotFound, 'Confirmation not found');
+
+export const confirmationSessionMismatch = (): CodedHttpException =>
+  err(
+    HttpStatus.FORBIDDEN,
+    C.confirmationSessionMismatch,
+    'This confirmation belongs to another sign-in session; ask the assistant again here',
+  );
+
+export const confirmationNotPending = (status: string): CodedHttpException =>
+  err(HttpStatus.CONFLICT, C.confirmationNotPending, 'This confirmation is no longer pending', {
+    status,
+  });
+
+export const confirmationExpired = (): CodedHttpException =>
+  err(
+    HttpStatus.GONE,
+    C.confirmationExpired,
+    'This confirmation expired; ask the assistant again to see the current state',
+  );
+
+export const confirmationTokenInvalid = (): CodedHttpException =>
+  err(
+    HttpStatus.FORBIDDEN,
+    C.confirmationTokenInvalid,
+    'The confirmation token is not valid for this confirmation',
+  );
+
+export const confirmationDigestMismatch = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.confirmationDigestMismatch,
+    'actionDigest does not match the action that was proposed',
+  );
+
+export const confirmationToolChanged = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.confirmationToolChanged,
+    'The operation of this confirmation is no longer available to the assistant',
+  );
+
+export const confirmationStateChanged = (httpStatus: number | null = null): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.confirmationStateChanged,
+    'The record changed since this was proposed; ask again to see the current state',
+    httpStatus === null ? {} : { httpStatus },
+  );
+
+export const assistantReauthRequired = (): CodedHttpException =>
+  err(
+    HttpStatus.UNAUTHORIZED,
+    C.reauthRequired,
+    'This change needs your password (and verification code) again',
+  );
+
+export const assistantReauthFailed = (reason: ReauthFailureReason): CodedHttpException =>
+  err(
+    HttpStatus.UNAUTHORIZED,
+    C.reauthFailed,
+    'Password or verification code is incorrect, or the account cannot re-authenticate',
+    { reason },
   );

@@ -11,6 +11,7 @@ import type { HealthDetails } from '@email-gateway/shared-types';
 import type { HealthIndicator } from '../health/health-indicator';
 import { DATABASE_READ_OPTIONS, type DatabaseReadOptions } from './database.options';
 import { PrismaService, socketTimeoutOf } from './prisma.service';
+import { readsOnWriter } from './read-scope';
 
 /**
  * Optional provider of a `(url) => PrismaClient` factory for the replica client. Tests use it to
@@ -94,8 +95,12 @@ export class PrismaReadService implements OnModuleInit, OnModuleDestroy, HealthI
       : { mode: 'writer-only', lagSeconds: null, maxLagSeconds: options.maxLagSeconds };
   }
 
-  /** The client to read from right now: the replica in mode `reader`, otherwise the writer. */
+  /**
+   * The client to read from right now: the replica in mode `reader`, otherwise the writer; always
+   * the writer inside `runReadsOnWriter` (a request that must read its own writes).
+   */
   get client(): PrismaClient {
+    if (readsOnWriter()) return this.writer;
     return this.current.mode === 'reader' && this.reader ? this.reader : this.writer;
   }
 

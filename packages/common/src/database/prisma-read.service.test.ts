@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DatabaseReadOptions } from './database.options';
 import { PrismaReadService, READER_PROBE_TIMEOUT_MS } from './prisma-read.service';
 import type { PrismaService } from './prisma.service';
+import { readsOnWriter, runReadsOnWriter } from './read-scope';
 
 type Row = Record<string, unknown>;
 
@@ -68,6 +69,19 @@ describe('PrismaReadService', () => {
     expect(service.status().reason).toBeUndefined();
     expect(service.status().checkedAt).toEqual(expect.any(String));
     expect(service.client).toBe(reader.client);
+  });
+
+  it('reads on the writer inside runReadsOnWriter, across awaits, and on the reader after it', async () => {
+    const { service, reader } = await init({}, [row({ Seconds_Behind_Source: 1 })]);
+    expect(readsOnWriter()).toBe(false);
+    const inside = await runReadsOnWriter(async () => {
+      const first = service.client;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      return [first, service.client, readsOnWriter()] as const;
+    });
+    expect(inside).toEqual([writer, writer, true]);
+    expect(service.client).toBe(reader.client);
+    expect(service.status().mode).toBe('reader');
   });
 
   it('builds the replica URL through databaseClientUrl (socket timeout of the options)', () => {

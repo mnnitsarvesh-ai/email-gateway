@@ -34,7 +34,30 @@ describe('dependency boundary', () => {
   });
 
   it('the assistant package depends on no app and no mail-processing package', () => {
-    const self = manifests().find((m) => m.name === PACKAGE)!;
-    expect(self.deps.filter((dep) => dep.startsWith('@email-gateway/'))).toEqual([]);
+    const json = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as Record<
+      string,
+      Record<string, string> | undefined
+    >;
+    const of = (key: string) =>
+      Object.keys(json[key] ?? {}).filter((dep) => dep.startsWith('@email-gateway/'));
+    for (const key of ['dependencies', 'peerDependencies', 'optionalDependencies'])
+      expect(of(key), key).toEqual([]);
+    // Test only: the fake provider's policy definition is checked against the real DSL (AI-2 D8).
+    expect(of('devDependencies')).toEqual(['@email-gateway/policy-dsl']);
+  });
+
+  it('no runtime source file imports another workspace package', () => {
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory()
+          ? files(join(dir, entry.name))
+          : /\.ts$/.test(entry.name) && !/\.test\.ts$/.test(entry.name)
+            ? [join(dir, entry.name)]
+            : [],
+      );
+    const offenders = files(__dirname).filter((file) =>
+      /from '@email-gateway\//.test(readFileSync(file, 'utf8')),
+    );
+    expect(offenders).toEqual([]);
   });
 });

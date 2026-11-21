@@ -439,6 +439,66 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/assistant/confirmations/{confirmationId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an assistant confirmation
+     * @description One of your own write proposals: tool, risk, status, the server-authored summary (`assistant-confirmation/1`) the confirmation card shows, `actionDigest`, expiry and, after confirm, the result. Never the token (it exists only in the answer of the turn that proposed it). A `pending` confirmation past `expiresAt` shows as `expired`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantConfirmationsController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/confirmations/{confirmationId}/cancel': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Cancel an action the assistant proposed
+     * @description Cancels one of your own pending proposals from the same sign-in session (no token needed, so it also works after a page reload); nothing runs. Idempotent: an already cancelled confirmation answers unchanged; any other state answers `409 assistant_confirmation_not_pending` with `status`. The assistant learns about it at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantConfirmationsController_cancel_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/assistant/confirmations/{confirmationId}/confirm': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Confirm an action the assistant proposed
+     * @description Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`) and permitted (`403 forbidden`), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    post: operations['AssistantConfirmationsController_confirm_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/assistant/conversations': {
     parameters: {
       query?: never;
@@ -522,7 +582,7 @@ export interface paths {
     put?: never;
     /**
      * Ask the AI assistant
-     * @description Runs one turn: your `message` (1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters, `413 payload_too_large` beyond) goes to the configured AI provider with the catalogue of the tools you may use; the model may call tools, each one existing `/api/v1` operation executed with YOUR credential through the api’s own pipeline (same permissions, tenant, MFA, rate limits and audit as the portal; only reads in AI-1), recorded and audited (`assistant.tool_executed` / `assistant.tool_denied`). Limits per turn: ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`, `503 assistant_provider_unavailable`, `429 assistant_budget_exhausted` with `scope`), ASSISTANT_TURNS_PER_USER_PER_MINUTE (`429 rate_limited`), the per-process concurrency (`503 assistant_busy`) and one running turn per conversation (`409 assistant_turn_in_progress`). The same `clientTurnId` again replays a finished turn (`409` while it runs). Rate class `expensive`. With `accept: text/event-stream` the answer is `assistant-stream/1` (Server-Sent Events: `event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started { turnId, conversationId, seq }` (flushed before the first model call), then any interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, `tool.completed { executionId, status, decision, card }` and `tool.denied { executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes `assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, `assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions }` after the turn ended. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     * @description Runs one turn: your `message` (1..ASSISTANT_USER_MESSAGE_MAX_CHARS characters, `413 payload_too_large` beyond) goes to the configured AI provider with the catalogue of the tools you may use; the model may call tools, each one existing `/api/v1` operation executed with YOUR credential through the api’s own pipeline (same permissions, tenant, MFA, rate limits and audit as the portal), recorded and audited (`assistant.tool_executed` / `assistant.tool_denied`). A write call never runs inside a turn: it becomes a confirmation (`pending_confirmation`) that runs only through `POST /assistant/confirmations/{id}/confirm`; outcomes of earlier confirmations are told to the model at the start of the next turn. Limits per turn: ASSISTANT_MAX_TOOL_ROUNDS model calls, ASSISTANT_MAX_TOOL_CALLS_PER_TURN tool calls, ASSISTANT_MAX_OUTPUT_TOKENS output tokens, ASSISTANT_TURN_DEADLINE_MS. Refusals before the answer starts are JSON errors: availability (`503 assistant_disabled`, `403 assistant_not_enabled`, `403 assistant_tenant_disabled`, `503 assistant_provider_unavailable`, `429 assistant_budget_exhausted` with `scope`), ASSISTANT_TURNS_PER_USER_PER_MINUTE (`429 rate_limited`), the per-process concurrency (`503 assistant_busy`) and one running turn per conversation (`409 assistant_turn_in_progress`). The same `clientTurnId` again replays a finished turn (`409` while it runs). Rate class `expensive`. With `accept: text/event-stream` the answer is `assistant-stream/1` (Server-Sent Events: `event:` name + one `data:` JSON line; a `: heartbeat` comment every 15 s): `turn.started { turnId, conversationId, seq }` (flushed before the first model call), then any interleaving of `text.delta { text }`, `tool.started { executionId, tool, title }`, `tool.completed { executionId, status, decision, card }` (status `pending_confirmation` for a write proposal, immediately followed by `confirmation.required { confirmation, token }`: the confirmation card and its single-use token, keep it in memory only) and `tool.denied { executionId, tool, decision, message }`, then exactly one of `turn.completed { turnId, status, usage: { inputTokens, outputTokens }, messageId }` or `turn.failed { turnId, code, message }` (codes `assistant_session_expired`, `assistant_turn_limit`, `assistant_refused`, `assistant_provider_error`, `assistant_internal_error`). Headers `cache-control: no-store` and `x-accel-buffering: no`. Otherwise the JSON `{ turn, message, executions, confirmations }` after the turn ended (`confirmations[].token` is null on a replay). Users only (API keys `403 user_required`); the tenant always comes from your session.
      */
     post: operations['AssistantTurnsController_create_v1'];
     delete?: never;
@@ -12347,6 +12407,1036 @@ export interface operations {
       };
     };
   };
+  AssistantConfirmationsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Confirmation public id (UUID) */
+        confirmationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The confirmation */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description SHA-256 of the proposed action; the confirm request sends it back */
+            actionDigest: string;
+            /** Format: uuid */
+            conversationId: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            decidedAt: string | null;
+            /** Format: date-time */
+            executedAt: string | null;
+            /**
+             * Format: uuid
+             * @description The proposal execution (status `pending_confirmation`)
+             */
+            executionId: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** Format: uuid */
+            id: string;
+            operationId: string;
+            /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+            reauthFresh: boolean;
+            /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+            requiresReauth: boolean;
+            /** @description Outcome of the confirmed write (executed or failed) */
+            result: {
+              error: string | null;
+              httpStatus: number | null;
+            } | null;
+            /**
+             * Format: uuid
+             * @description The confirmed write’s execution
+             */
+            resultExecutionId: string | null;
+            /** @enum {string} */
+            risk: 'low' | 'medium' | 'high';
+            /** @enum {string} */
+            status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+            /** @description null after the content purge */
+            summary: {
+              /** @description One sentence: what will happen */
+              action: string;
+              changes: {
+                after: string;
+                before?: string | null;
+                label: string;
+              }[];
+              /** @description Policy definitions, rule by rule */
+              definition?: {
+                direction: string;
+                priority: number;
+                rules: {
+                  actions: string;
+                  id: string;
+                  when: string;
+                }[];
+              };
+              /** @description Consequences (medium and high risk have at least one) */
+              impact: string[];
+              portalRoute: string | null;
+              /** @description The request that runs on confirm (technical details) */
+              request: {
+                method: string;
+                path: string;
+              };
+              reversible: boolean;
+              target: {
+                label: string;
+                /** @description The value comes from a message (subject, sender, file name): plain text */
+                untrusted?: boolean;
+                value: string;
+              }[];
+              title: string;
+              /** @enum {string} */
+              version: 'assistant-confirmation/1';
+              warnings: string[];
+            } | null;
+            tool: string;
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_confirmation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConfirmationsController_cancel_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Confirmation public id (UUID) */
+        confirmationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The cancelled confirmation */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description An action the assistant proposed; it runs only when you confirm it. Never the token. */
+            confirmation: {
+              /** @description SHA-256 of the proposed action; the confirm request sends it back */
+              actionDigest: string;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              executedAt: string | null;
+              /**
+               * Format: uuid
+               * @description The proposal execution (status `pending_confirmation`)
+               */
+              executionId: string;
+              /** Format: date-time */
+              expiresAt: string;
+              /** Format: uuid */
+              id: string;
+              operationId: string;
+              /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+              reauthFresh: boolean;
+              /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+              requiresReauth: boolean;
+              /** @description Outcome of the confirmed write (executed or failed) */
+              result: {
+                error: string | null;
+                httpStatus: number | null;
+              } | null;
+              /**
+               * Format: uuid
+               * @description The confirmed write’s execution
+               */
+              resultExecutionId: string | null;
+              /** @enum {string} */
+              risk: 'low' | 'medium' | 'high';
+              /** @enum {string} */
+              status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+              /** @description null after the content purge */
+              summary: {
+                /** @description One sentence: what will happen */
+                action: string;
+                changes: {
+                  after: string;
+                  before?: string | null;
+                  label: string;
+                }[];
+                /** @description Policy definitions, rule by rule */
+                definition?: {
+                  direction: string;
+                  priority: number;
+                  rules: {
+                    actions: string;
+                    id: string;
+                    when: string;
+                  }[];
+                };
+                /** @description Consequences (medium and high risk have at least one) */
+                impact: string[];
+                portalRoute: string | null;
+                /** @description The request that runs on confirm (technical details) */
+                request: {
+                  method: string;
+                  path: string;
+                };
+                reversible: boolean;
+                target: {
+                  label: string;
+                  /** @description The value comes from a message (subject, sender, file name): plain text */
+                  untrusted?: boolean;
+                  value: string;
+                }[];
+                title: string;
+                /** @enum {string} */
+                version: 'assistant-confirmation/1';
+                warnings: string[];
+              } | null;
+              tool: string;
+            };
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), another sign-in session (`assistant_confirmation_session_mismatch`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'mfa_enrollment_required'
+              | 'assistant_confirmation_session_mismatch';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_confirmation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Already executed, failed, expired or executing */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_confirmation_not_pending';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Too many requests of the `sensitive` rate class (`rate_limited`) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            scope?: string;
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantConfirmationsController_confirm_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Confirmation public id (UUID) */
+        confirmationId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The `actionDigest` the confirmation card showed */
+          actionDigest: string;
+          /** @description High risk only, unless this session re-authenticated within the window */
+          reauth?: {
+            password: string;
+            /** @description Required when you have MFA enrolled */
+            totpCode?: string;
+          };
+          /** @description The token of `confirmation.required` (43 base64url characters) */
+          token: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The confirmation (`executed` or `failed`) and the execution of the write */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description An action the assistant proposed; it runs only when you confirm it. Never the token. */
+            confirmation: {
+              /** @description SHA-256 of the proposed action; the confirm request sends it back */
+              actionDigest: string;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              executedAt: string | null;
+              /**
+               * Format: uuid
+               * @description The proposal execution (status `pending_confirmation`)
+               */
+              executionId: string;
+              /** Format: date-time */
+              expiresAt: string;
+              /** Format: uuid */
+              id: string;
+              operationId: string;
+              /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+              reauthFresh: boolean;
+              /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+              requiresReauth: boolean;
+              /** @description Outcome of the confirmed write (executed or failed) */
+              result: {
+                error: string | null;
+                httpStatus: number | null;
+              } | null;
+              /**
+               * Format: uuid
+               * @description The confirmed write’s execution
+               */
+              resultExecutionId: string | null;
+              /** @enum {string} */
+              risk: 'low' | 'medium' | 'high';
+              /** @enum {string} */
+              status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+              /** @description null after the content purge */
+              summary: {
+                /** @description One sentence: what will happen */
+                action: string;
+                changes: {
+                  after: string;
+                  before?: string | null;
+                  label: string;
+                }[];
+                /** @description Policy definitions, rule by rule */
+                definition?: {
+                  direction: string;
+                  priority: number;
+                  rules: {
+                    actions: string;
+                    id: string;
+                    when: string;
+                  }[];
+                };
+                /** @description Consequences (medium and high risk have at least one) */
+                impact: string[];
+                portalRoute: string | null;
+                /** @description The request that runs on confirm (technical details) */
+                request: {
+                  method: string;
+                  path: string;
+                };
+                reversible: boolean;
+                target: {
+                  label: string;
+                  /** @description The value comes from a message (subject, sender, file name): plain text */
+                  untrusted?: boolean;
+                  value: string;
+                }[];
+                title: string;
+                /** @enum {string} */
+                version: 'assistant-confirmation/1';
+                warnings: string[];
+              } | null;
+              tool: string;
+            };
+            /** @description The execution of the confirmed write (its result card) */
+            execution: {
+              /** @enum {string} */
+              access: 'read' | 'write';
+              /** @description null for refused calls and after the content purge */
+              card: {
+                columns?: {
+                  key: string;
+                  label: string;
+                }[];
+                error?: {
+                  code: string;
+                  httpStatus: number;
+                  message: string;
+                };
+                /** Format: uuid */
+                executionId: string;
+                fields?: {
+                  key: string;
+                  label: string;
+                  value: string | number | boolean | null;
+                }[];
+                /** @enum {string} */
+                kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                message?: string;
+                /** @description A next page exists (POST …/more) */
+                nextCursor?: boolean;
+                portalLinks: {
+                  href: string;
+                  label: string;
+                  ref?: string;
+                }[];
+                refs: string[];
+                rows?: {
+                  [key: string]: string | number | boolean | null;
+                }[];
+                series?: {
+                  series: {
+                    name: string;
+                    values: (number | null)[];
+                  }[];
+                  x: string[];
+                };
+                /** @enum {string} */
+                status: 'ok' | 'error';
+                title: string;
+                tool: string;
+                total?: number;
+                truncated?: boolean;
+                /** @enum {string} */
+                version: 'assistant-card/1';
+              } | null;
+              /** @description The confirmation of a write proposal (status `pending_confirmation`); null otherwise */
+              confirmation: {
+                /** @description SHA-256 of the proposed action; the confirm request sends it back */
+                actionDigest: string;
+                /** Format: uuid */
+                conversationId: string;
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                decidedAt: string | null;
+                /** Format: date-time */
+                executedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The proposal execution (status `pending_confirmation`)
+                 */
+                executionId: string;
+                /** Format: date-time */
+                expiresAt: string;
+                /** Format: uuid */
+                id: string;
+                operationId: string;
+                /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+                reauthFresh: boolean;
+                /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+                requiresReauth: boolean;
+                /** @description Outcome of the confirmed write (executed or failed) */
+                result: {
+                  error: string | null;
+                  httpStatus: number | null;
+                } | null;
+                /**
+                 * Format: uuid
+                 * @description The confirmed write’s execution
+                 */
+                resultExecutionId: string | null;
+                /** @enum {string} */
+                risk: 'low' | 'medium' | 'high';
+                /** @enum {string} */
+                status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+                /** @description null after the content purge */
+                summary: {
+                  /** @description One sentence: what will happen */
+                  action: string;
+                  changes: {
+                    after: string;
+                    before?: string | null;
+                    label: string;
+                  }[];
+                  /** @description Policy definitions, rule by rule */
+                  definition?: {
+                    direction: string;
+                    priority: number;
+                    rules: {
+                      actions: string;
+                      id: string;
+                      when: string;
+                    }[];
+                  };
+                  /** @description Consequences (medium and high risk have at least one) */
+                  impact: string[];
+                  portalRoute: string | null;
+                  /** @description The request that runs on confirm (technical details) */
+                  request: {
+                    method: string;
+                    path: string;
+                  };
+                  reversible: boolean;
+                  target: {
+                    label: string;
+                    /** @description The value comes from a message (subject, sender, file name): plain text */
+                    untrusted?: boolean;
+                    value: string;
+                  }[];
+                  title: string;
+                  /** @enum {string} */
+                  version: 'assistant-confirmation/1';
+                  warnings: string[];
+                } | null;
+                tool: string;
+              } | null;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** @enum {string} */
+              decision:
+                | 'allowed'
+                | 'denied_permission'
+                | 'denied_unknown_tool'
+                | 'denied_disabled'
+                | 'denied_not_applicable'
+                | 'denied_schema'
+                | 'denied_ref'
+                | 'denied_budget';
+              errorCode: string | null;
+              hasMore: boolean;
+              httpStatus: number | null;
+              /** Format: uuid */
+              id: string;
+              latencyMs: number | null;
+              operationId: string;
+              /** Format: uuid */
+              parentExecutionId: string | null;
+              /** @description `r<seq>`: how the assistant refers to this result */
+              ref: string;
+              /** @enum {string} */
+              risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
+              seq: number;
+              /** @enum {string} */
+              status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+              tool: string;
+              /**
+               * Format: uuid
+               * @description null for a "more" page
+               */
+              turnId: string | null;
+            };
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Re-authentication needed (`assistant_reauth_required`) or failed (`assistant_reauth_failed`, `reason`: `password`, `totp`, `totp_required`, `locked`, `inactive`) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_reauth_required' | 'assistant_reauth_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** @enum {string} */
+            reason?: 'password' | 'totp' | 'totp_required' | 'locked' | 'inactive';
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 401;
+          };
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`) or a wrong token (`assistant_confirmation_token_invalid`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'forbidden'
+              | 'user_required'
+              | 'mfa_enrollment_required'
+              | 'assistant_not_enabled'
+              | 'assistant_tenant_disabled'
+              | 'assistant_confirmation_session_mismatch'
+              | 'assistant_confirmation_token_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown confirmation, one of another user, organization or platform override, or one of a deleted conversation */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_confirmation_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`) */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'assistant_confirmation_not_pending'
+              | 'assistant_confirmation_digest_mismatch'
+              | 'assistant_confirmation_tool_changed'
+              | 'assistant_confirmation_state_changed'
+              | 'assistant_turn_in_progress';
+            correlationId?: string;
+            error: string;
+            httpStatus?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The confirmation expired (ASSISTANT_CONFIRMATION_TTL_SECONDS) */
+      410: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_confirmation_expired';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 410;
+          };
+        };
+      };
+      /** @description Too many requests of the `sensitive` rate class (`rate_limited`) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            scope?: string;
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`); the assistant is off on this platform (`assistant_disabled`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable' | 'assistant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   AssistantConversationsController_list_v1: {
     parameters: {
       query?: {
@@ -13326,6 +14416,87 @@ export interface operations {
                   /** @enum {string} */
                   version: 'assistant-card/1';
                 } | null;
+                /** @description The confirmation of a write proposal (status `pending_confirmation`); null otherwise */
+                confirmation: {
+                  /** @description SHA-256 of the proposed action; the confirm request sends it back */
+                  actionDigest: string;
+                  /** Format: uuid */
+                  conversationId: string;
+                  /** Format: date-time */
+                  createdAt: string;
+                  /** Format: date-time */
+                  decidedAt: string | null;
+                  /** Format: date-time */
+                  executedAt: string | null;
+                  /**
+                   * Format: uuid
+                   * @description The proposal execution (status `pending_confirmation`)
+                   */
+                  executionId: string;
+                  /** Format: date-time */
+                  expiresAt: string;
+                  /** Format: uuid */
+                  id: string;
+                  operationId: string;
+                  /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+                  reauthFresh: boolean;
+                  /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+                  requiresReauth: boolean;
+                  /** @description Outcome of the confirmed write (executed or failed) */
+                  result: {
+                    error: string | null;
+                    httpStatus: number | null;
+                  } | null;
+                  /**
+                   * Format: uuid
+                   * @description The confirmed write’s execution
+                   */
+                  resultExecutionId: string | null;
+                  /** @enum {string} */
+                  risk: 'low' | 'medium' | 'high';
+                  /** @enum {string} */
+                  status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+                  /** @description null after the content purge */
+                  summary: {
+                    /** @description One sentence: what will happen */
+                    action: string;
+                    changes: {
+                      after: string;
+                      before?: string | null;
+                      label: string;
+                    }[];
+                    /** @description Policy definitions, rule by rule */
+                    definition?: {
+                      direction: string;
+                      priority: number;
+                      rules: {
+                        actions: string;
+                        id: string;
+                        when: string;
+                      }[];
+                    };
+                    /** @description Consequences (medium and high risk have at least one) */
+                    impact: string[];
+                    portalRoute: string | null;
+                    /** @description The request that runs on confirm (technical details) */
+                    request: {
+                      method: string;
+                      path: string;
+                    };
+                    reversible: boolean;
+                    target: {
+                      label: string;
+                      /** @description The value comes from a message (subject, sender, file name): plain text */
+                      untrusted?: boolean;
+                      value: string;
+                    }[];
+                    title: string;
+                    /** @enum {string} */
+                    version: 'assistant-confirmation/1';
+                    warnings: string[];
+                  } | null;
+                  tool: string;
+                } | null;
                 /** Format: uuid */
                 conversationId: string;
                 /** Format: date-time */
@@ -13355,7 +14526,7 @@ export interface operations {
                 risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
                 seq: number;
                 /** @enum {string} */
-                status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+                status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
                 tool: string;
                 /**
                  * Format: uuid
@@ -13563,6 +14734,92 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @description The write proposals of this turn, in call order */
+            confirmations: {
+              /** @description An action the assistant proposed; it runs only when you confirm it. Never the token. */
+              confirmation: {
+                /** @description SHA-256 of the proposed action; the confirm request sends it back */
+                actionDigest: string;
+                /** Format: uuid */
+                conversationId: string;
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                decidedAt: string | null;
+                /** Format: date-time */
+                executedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The proposal execution (status `pending_confirmation`)
+                 */
+                executionId: string;
+                /** Format: date-time */
+                expiresAt: string;
+                /** Format: uuid */
+                id: string;
+                operationId: string;
+                /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+                reauthFresh: boolean;
+                /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+                requiresReauth: boolean;
+                /** @description Outcome of the confirmed write (executed or failed) */
+                result: {
+                  error: string | null;
+                  httpStatus: number | null;
+                } | null;
+                /**
+                 * Format: uuid
+                 * @description The confirmed write’s execution
+                 */
+                resultExecutionId: string | null;
+                /** @enum {string} */
+                risk: 'low' | 'medium' | 'high';
+                /** @enum {string} */
+                status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+                /** @description null after the content purge */
+                summary: {
+                  /** @description One sentence: what will happen */
+                  action: string;
+                  changes: {
+                    after: string;
+                    before?: string | null;
+                    label: string;
+                  }[];
+                  /** @description Policy definitions, rule by rule */
+                  definition?: {
+                    direction: string;
+                    priority: number;
+                    rules: {
+                      actions: string;
+                      id: string;
+                      when: string;
+                    }[];
+                  };
+                  /** @description Consequences (medium and high risk have at least one) */
+                  impact: string[];
+                  portalRoute: string | null;
+                  /** @description The request that runs on confirm (technical details) */
+                  request: {
+                    method: string;
+                    path: string;
+                  };
+                  reversible: boolean;
+                  target: {
+                    label: string;
+                    /** @description The value comes from a message (subject, sender, file name): plain text */
+                    untrusted?: boolean;
+                    value: string;
+                  }[];
+                  title: string;
+                  /** @enum {string} */
+                  version: 'assistant-confirmation/1';
+                  warnings: string[];
+                } | null;
+                tool: string;
+              };
+              /** @description Single-use token for `POST /assistant/confirmations/{id}/confirm`; keep it in memory only (null when the turn is replayed by its clientTurnId) */
+              token: string | null;
+            }[];
             executions: {
               /** @enum {string} */
               access: 'read' | 'write';
@@ -13614,6 +14871,87 @@ export interface operations {
                 /** @enum {string} */
                 version: 'assistant-card/1';
               } | null;
+              /** @description The confirmation of a write proposal (status `pending_confirmation`); null otherwise */
+              confirmation: {
+                /** @description SHA-256 of the proposed action; the confirm request sends it back */
+                actionDigest: string;
+                /** Format: uuid */
+                conversationId: string;
+                /** Format: date-time */
+                createdAt: string;
+                /** Format: date-time */
+                decidedAt: string | null;
+                /** Format: date-time */
+                executedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The proposal execution (status `pending_confirmation`)
+                 */
+                executionId: string;
+                /** Format: date-time */
+                expiresAt: string;
+                /** Format: uuid */
+                id: string;
+                operationId: string;
+                /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+                reauthFresh: boolean;
+                /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+                requiresReauth: boolean;
+                /** @description Outcome of the confirmed write (executed or failed) */
+                result: {
+                  error: string | null;
+                  httpStatus: number | null;
+                } | null;
+                /**
+                 * Format: uuid
+                 * @description The confirmed write’s execution
+                 */
+                resultExecutionId: string | null;
+                /** @enum {string} */
+                risk: 'low' | 'medium' | 'high';
+                /** @enum {string} */
+                status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+                /** @description null after the content purge */
+                summary: {
+                  /** @description One sentence: what will happen */
+                  action: string;
+                  changes: {
+                    after: string;
+                    before?: string | null;
+                    label: string;
+                  }[];
+                  /** @description Policy definitions, rule by rule */
+                  definition?: {
+                    direction: string;
+                    priority: number;
+                    rules: {
+                      actions: string;
+                      id: string;
+                      when: string;
+                    }[];
+                  };
+                  /** @description Consequences (medium and high risk have at least one) */
+                  impact: string[];
+                  portalRoute: string | null;
+                  /** @description The request that runs on confirm (technical details) */
+                  request: {
+                    method: string;
+                    path: string;
+                  };
+                  reversible: boolean;
+                  target: {
+                    label: string;
+                    /** @description The value comes from a message (subject, sender, file name): plain text */
+                    untrusted?: boolean;
+                    value: string;
+                  }[];
+                  title: string;
+                  /** @enum {string} */
+                  version: 'assistant-confirmation/1';
+                  warnings: string[];
+                } | null;
+                tool: string;
+              } | null;
               /** Format: uuid */
               conversationId: string;
               /** Format: date-time */
@@ -13643,7 +14981,7 @@ export interface operations {
               risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
               seq: number;
               /** @enum {string} */
-              status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+              status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
               tool: string;
               /**
                * Format: uuid
@@ -13972,6 +15310,87 @@ export interface operations {
               /** @enum {string} */
               version: 'assistant-card/1';
             } | null;
+            /** @description The confirmation of a write proposal (status `pending_confirmation`); null otherwise */
+            confirmation: {
+              /** @description SHA-256 of the proposed action; the confirm request sends it back */
+              actionDigest: string;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              executedAt: string | null;
+              /**
+               * Format: uuid
+               * @description The proposal execution (status `pending_confirmation`)
+               */
+              executionId: string;
+              /** Format: date-time */
+              expiresAt: string;
+              /** Format: uuid */
+              id: string;
+              operationId: string;
+              /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+              reauthFresh: boolean;
+              /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+              requiresReauth: boolean;
+              /** @description Outcome of the confirmed write (executed or failed) */
+              result: {
+                error: string | null;
+                httpStatus: number | null;
+              } | null;
+              /**
+               * Format: uuid
+               * @description The confirmed write’s execution
+               */
+              resultExecutionId: string | null;
+              /** @enum {string} */
+              risk: 'low' | 'medium' | 'high';
+              /** @enum {string} */
+              status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+              /** @description null after the content purge */
+              summary: {
+                /** @description One sentence: what will happen */
+                action: string;
+                changes: {
+                  after: string;
+                  before?: string | null;
+                  label: string;
+                }[];
+                /** @description Policy definitions, rule by rule */
+                definition?: {
+                  direction: string;
+                  priority: number;
+                  rules: {
+                    actions: string;
+                    id: string;
+                    when: string;
+                  }[];
+                };
+                /** @description Consequences (medium and high risk have at least one) */
+                impact: string[];
+                portalRoute: string | null;
+                /** @description The request that runs on confirm (technical details) */
+                request: {
+                  method: string;
+                  path: string;
+                };
+                reversible: boolean;
+                target: {
+                  label: string;
+                  /** @description The value comes from a message (subject, sender, file name): plain text */
+                  untrusted?: boolean;
+                  value: string;
+                }[];
+                title: string;
+                /** @enum {string} */
+                version: 'assistant-confirmation/1';
+                warnings: string[];
+              } | null;
+              tool: string;
+            } | null;
             /** Format: uuid */
             conversationId: string;
             /** Format: date-time */
@@ -14001,7 +15420,7 @@ export interface operations {
             risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
             seq: number;
             /** @enum {string} */
-            status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+            status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
             tool: string;
             /**
              * Format: uuid
@@ -14218,6 +15637,87 @@ export interface operations {
               /** @enum {string} */
               version: 'assistant-card/1';
             } | null;
+            /** @description The confirmation of a write proposal (status `pending_confirmation`); null otherwise */
+            confirmation: {
+              /** @description SHA-256 of the proposed action; the confirm request sends it back */
+              actionDigest: string;
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              executedAt: string | null;
+              /**
+               * Format: uuid
+               * @description The proposal execution (status `pending_confirmation`)
+               */
+              executionId: string;
+              /** Format: date-time */
+              expiresAt: string;
+              /** Format: uuid */
+              id: string;
+              operationId: string;
+              /** @description This session re-authenticated within ASSISTANT_REAUTH_WINDOW_SECONDS */
+              reauthFresh: boolean;
+              /** @description High risk: confirm needs `reauth` unless the session re-authenticated recently */
+              requiresReauth: boolean;
+              /** @description Outcome of the confirmed write (executed or failed) */
+              result: {
+                error: string | null;
+                httpStatus: number | null;
+              } | null;
+              /**
+               * Format: uuid
+               * @description The confirmed write’s execution
+               */
+              resultExecutionId: string | null;
+              /** @enum {string} */
+              risk: 'low' | 'medium' | 'high';
+              /** @enum {string} */
+              status: 'pending' | 'executing' | 'executed' | 'failed' | 'expired' | 'cancelled';
+              /** @description null after the content purge */
+              summary: {
+                /** @description One sentence: what will happen */
+                action: string;
+                changes: {
+                  after: string;
+                  before?: string | null;
+                  label: string;
+                }[];
+                /** @description Policy definitions, rule by rule */
+                definition?: {
+                  direction: string;
+                  priority: number;
+                  rules: {
+                    actions: string;
+                    id: string;
+                    when: string;
+                  }[];
+                };
+                /** @description Consequences (medium and high risk have at least one) */
+                impact: string[];
+                portalRoute: string | null;
+                /** @description The request that runs on confirm (technical details) */
+                request: {
+                  method: string;
+                  path: string;
+                };
+                reversible: boolean;
+                target: {
+                  label: string;
+                  /** @description The value comes from a message (subject, sender, file name): plain text */
+                  untrusted?: boolean;
+                  value: string;
+                }[];
+                title: string;
+                /** @enum {string} */
+                version: 'assistant-confirmation/1';
+                warnings: string[];
+              } | null;
+              tool: string;
+            } | null;
             /** Format: uuid */
             conversationId: string;
             /** Format: date-time */
@@ -14247,7 +15747,7 @@ export interface operations {
             risk: 'read' | 'read_audited' | 'low' | 'medium' | 'high' | 'critical';
             seq: number;
             /** @enum {string} */
-            status: 'succeeded' | 'failed' | 'refused' | 'timeout';
+            status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
             tool: string;
             /**
              * Format: uuid

@@ -16,11 +16,23 @@
  * `assistant:use` (no entry, `/assistant` forbidden); an organization admin of a tenant with the
  * setting off (the reason and the settings link); the panel as a full-screen sheet on a phone;
  * axe checks (WCAG 2.2 A/AA, serious and critical).
+ *
+ * Step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md §9 item 7, D10; ADR-0093
+ * amended): writes are proposals shown in a confirmation card rendered from the server-authored
+ * summary. "Create an inbound policy that quarantines executables" (the fake's plan validate →
+ * test → create) shows the rule summary and nothing exists until Confirm; Confirm creates the
+ * draft; "publish it" proposes a medium-risk publish with impact lines whose Confirm activates
+ * it; a high-risk delete asks for the password and the authenticator code (a delta admin with
+ * MFA, support/totp.ts) and runs after re-authentication; a cancelled proposal changes nothing; a
+ * proposal past its expiry is refused by the api (`410`) and the card shows the expired state;
+ * the card on a phone; axe on every card state. The single-use token is checked to stay out of
+ * browser storage and the messages route.
  */
 import type { Page, Response } from '@playwright/test';
-import { signIn } from '../support/auth';
+import { nextTotp, signIn, user } from '../support/auth';
 import { me } from '../support/contract';
 import { expect, test } from '../support/fixtures';
+import { bff, writerDb } from '../support/messages';
 import { expectNoSeriousA11yViolations } from '../support/pages';
 import { readState } from '../support/state';
 
@@ -310,5 +322,416 @@ test.describe('phone viewport', () => {
     );
     expect(overflow).toBeLessThanOrEqual(1);
     await expectNoSeriousA11yViolations(page, 'assistant panel on a phone');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-2: action confirmations (these run after the AI-1 tests above, which count delta's
+// three seeded policies; every proposal below ends executed, cancelled or expired).
+// ---------------------------------------------------------------------------------------------
+
+/** The policy the fake's "quarantines executables" plan creates (packages/assistant fake.ts). */
+const EXECUTABLES_POLICY = 'Quarantine inbound executables';
+
+/** The confirmation card of a proposal (a region named by the summary's title). */
+function confirmationCard(scope: ReturnType<Page['locator']> | Page, title: string) {
+  return scope.getByRole('region', { name: title, exact: true }).last();
+}
+
+async function deltaOrganizationId(): Promise<bigint> {
+  const org = await writerDb().organization.findUniqueOrThrow({
+    where: { publicId: readState().orgs.delta.id },
+    select: { id: true },
+  });
+  return org.id;
+}
+
+/** Delta's policy by name on the writer (archived rows included). */
+async function deltaPolicy(name: string) {
+  return writerDb().emailPolicy.findFirst({
+    where: { organizationId: await deltaOrganizationId(), name },
+    select: { publicId: true, status: true, activeVersionId: true },
+    orderBy: { id: 'desc' },
+  });
+}
+
+/** The newest confirmation of delta (one worker: the proposal this test just made). */
+async function newestConfirmation() {
+  return writerDb().aiChatActionConfirmation.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId() },
+    select: { id: true, publicId: true, status: true, toolName: true, risk: true },
+    orderBy: { id: 'desc' },
+  });
+}
+
+/**
+ * Test instrumentation: keeps a copy of every turn event stream the page receives (a clone of the
+ * response, read alongside the app), so the test can read the single-use token of
+ * `confirmation.required`. It lives in the page's memory only, as the app's own copy does.
+ */
+async function recordTurnStreams(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const streams: string[] = [];
+    (window as unknown as { __egTurnStreams: string[] }).__egTurnStreams = streams;
+    const original = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const response = await original(input, init);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (
+        /\/assistant\/conversations\/[0-9a-f-]{36}\/turns$/.test(
+          new URL(url, location.href).pathname,
+        )
+      ) {
+        void response
+          .clone()
+          .text()
+          .then((text) => streams.push(text))
+          .catch(() => undefined);
+      }
+      return response;
+    };
+  });
+}
+
+/** The token of the newest `confirmation.required` event the page received. */
+async function newestToken(page: Page): Promise<string> {
+  let token = '';
+  await expect
+    .poll(
+      async () => {
+        const streams = await page.evaluate(
+          () => (window as unknown as { __egTurnStreams?: string[] }).__egTurnStreams ?? [],
+        );
+        const events = [
+          ...streams.join('\n').matchAll(/event: confirmation\.required\ndata: (.+)\n/g),
+        ];
+        const last = events.at(-1);
+        const value = last ? (JSON.parse(last[1]!) as { token?: unknown }).token : undefined;
+        token = typeof value === 'string' ? value : '';
+        return token;
+      },
+      { timeout: 15_000 },
+    )
+    .toMatch(/^[A-Za-z0-9_-]{43}$/);
+  return token;
+}
+
+/** Neither browser storage nor the stored messages hold the token. */
+async function expectTokenNowhere(page: Page, token: string): Promise<void> {
+  const storage = await page.evaluate(() =>
+    JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }),
+  );
+  expect(storage.includes(token)).toBe(false);
+  const conversation = /conversation=([0-9a-f-]{36})/.exec(page.url())?.[1];
+  if (!conversation) return;
+  const messages = await page.evaluate(
+    (id) =>
+      fetch(`/bff/api/v1/assistant/conversations/${id}/messages`, {
+        headers: { accept: 'application/json' },
+      }).then((res) => res.text()),
+    conversation,
+  );
+  expect(messages.length).toBeGreaterThan(0);
+  expect(messages.includes(token)).toBe(false);
+}
+
+/** The policies page (in another tab) lists `name` with `status`, or not at all (`null`). */
+async function expectPolicyListed(page: Page, name: string, status: string | null): Promise<void> {
+  const row = page.locator('main').getByRole('row').filter({ hasText: name });
+  // The list reads from the replica: reload until it caught up.
+  await expect(async () => {
+    await page.goto('/policies');
+    await expect(page.getByRole('heading', { level: 1, name: 'Policy management' })).toBeVisible();
+    await expect(page.locator('main').getByText('E2E Assistant inbound guard')).toBeVisible();
+    if (status === null) await expect(row).toHaveCount(0, { timeout: 2_000 });
+    else await expect(row.first()).toContainText(status, { timeout: 2_000 });
+  }).toPass({ timeout: 30_000 });
+}
+
+test('confirmations: create a policy from a plan, publish it, delete it with re-authentication', async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  // A retry in the same seeded run would meet the name of the first attempt (reserved by the
+  // archived policy): the plan's fixed name needs a fresh seed.
+  expect(await deltaPolicy(EXECUTABLES_POLICY), 'a fresh seed (no earlier attempt)').toBeNull();
+
+  await recordTurnStreams(page);
+  await signIn(page, 'deltaMfaAdmin', { next: '/assistant' });
+  await expect(page.getByRole('heading', { level: 1, name: 'AI assistant' })).toBeVisible();
+  const conversation = page.getByRole('region', { name: 'Conversation' });
+  const history = page.getByRole('complementary', { name: 'Conversation history' });
+  await history.getByRole('button', { name: 'New conversation' }).click();
+  const policies = await page.context().newPage();
+
+  // (a) The plan validates, tests, then proposes the create: a low-risk card with the rules.
+  const created = await ask(
+    page,
+    conversation,
+    'Create an inbound policy that quarantines executables',
+  );
+  expect(created.status()).toBe(200);
+  await expectTurnDone(conversation);
+  await expect(
+    conversation.getByText('I prepared this change. Review it in the confirmation card', {
+      exact: false,
+    }),
+  ).toBeVisible();
+  const createCard = confirmationCard(conversation, 'Create policy');
+  await expect(createCard).toBeVisible();
+  await expect(createCard).toBeFocused();
+  await expect(createCard.getByText('Low risk')).toBeVisible();
+  await expect(createCard.getByText('Waiting for your confirmation')).toBeVisible();
+  await expect(createCard.getByRole('table', { name: 'What it applies to' })).toContainText(
+    EXECUTABLES_POLICY,
+  );
+  const rules = createCard.getByRole('list', { name: 'Policy rules' });
+  await expect(rules).toContainText('quarantine-executables');
+  await expect(rules).toContainText(/executable/i);
+  await expect(rules).toContainText(/quarantine/i);
+  await expect(createCard.getByText(/^Expires in \d+:\d{2}$/)).toBeVisible();
+  const token = await newestToken(page);
+  await expectTokenNowhere(page, token);
+  await expectNoSeriousA11yViolations(page, 'confirmation card (low risk, pending)');
+
+  // Nothing exists before the confirm: not in the database, not on the policies page.
+  expect(await deltaPolicy(EXECUTABLES_POLICY)).toBeNull();
+  await expectPolicyListed(policies, EXECUTABLES_POLICY, null);
+
+  await createCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(createCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(createCard.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0);
+  const draft = await deltaPolicy(EXECUTABLES_POLICY);
+  expect(draft).toMatchObject({ status: 'draft', activeVersionId: null });
+  expect((await newestConfirmation()).status).toBe('executed');
+  await expectPolicyListed(policies, EXECUTABLES_POLICY, 'Draft');
+
+  // (b) "publish it": the action update of the confirmed create gives the policy; a medium card
+  // with impact lines; Confirm publishes and activates version 1.
+  await page.bringToFront();
+  await ask(page, conversation, 'publish it');
+  await expectTurnDone(conversation);
+  const publishCard = confirmationCard(conversation, 'Publish and activate policy version');
+  await expect(publishCard).toBeVisible();
+  await expect(publishCard.getByText('Medium risk')).toBeVisible();
+  const impact = publishCard.getByRole('list', { name: 'Impact' });
+  await expect(impact.getByRole('listitem').first()).toBeVisible();
+  await expect(impact).toContainText('Version 1 evaluates new mail from now on');
+  await expect(publishCard.getByRole('table', { name: 'Changes' })).toContainText('v1');
+  expect((await deltaPolicy(EXECUTABLES_POLICY))?.status).toBe('draft');
+  await expectNoSeriousA11yViolations(page, 'confirmation card (medium risk, pending)');
+  await publishCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(publishCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  const active = await deltaPolicy(EXECUTABLES_POLICY);
+  expect(active?.status).toBe('active');
+  expect(active?.activeVersionId).not.toBeNull();
+  await expectPolicyListed(policies, EXECUTABLES_POLICY, 'Active');
+
+  // (d) A high-risk delete asks for the password and the authenticator code.
+  await page.bringToFront();
+  await ask(
+    page,
+    conversation,
+    `/tool policy_management_remove {"policyId":"${active!.publicId}"}`,
+  );
+  await expectTurnDone(conversation);
+  const deleteCard = confirmationCard(conversation, 'Delete policy');
+  await expect(deleteCard).toBeVisible();
+  await expect(deleteCard.getByText('High risk')).toBeVisible();
+  await expect(deleteCard.getByRole('list', { name: 'Warnings' })).toContainText(/cannot/i);
+  await expect(deleteCard.getByText('This cannot be undone.')).toBeVisible();
+  const identity = deleteCard.getByRole('group', { name: 'Confirm your identity' });
+  await expect(identity).toBeVisible();
+  const password = identity.getByLabel('Your password (required)', { exact: true });
+  const code = identity.getByLabel('Authenticator code (required)', { exact: true });
+  await expect(password).toBeVisible();
+  await expect(code).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'confirmation card (high risk, re-authentication)');
+
+  // Empty fields are refused in the card (nothing is sent).
+  await deleteCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(deleteCard.getByText('Enter your password')).toBeVisible();
+  // A wrong password: the api refuses (401 assistant_reauth_failed), the fields are cleared.
+  const self = user('deltaMfaAdmin');
+  await password.fill(`${self.password}-wrong`);
+  await code.fill(await nextTotp('deltaMfaAdmin'));
+  const refused = page.waitForResponse(
+    (res) => /\/confirm$/.test(new URL(res.url()).pathname) && res.request().method() === 'POST',
+  );
+  await deleteCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  expect((await refused).status()).toBe(401);
+  await expect(deleteCard.getByRole('alert')).toContainText('The password is not correct.');
+  await expect(password).toHaveValue('');
+  await expect(code).toHaveValue('');
+  expect((await deltaPolicy(EXECUTABLES_POLICY))?.status).toBe('active');
+  expect((await newestConfirmation()).status).toBe('pending');
+
+  // The right password and a fresh code: the delete runs.
+  await password.fill(self.password);
+  await code.fill(await nextTotp('deltaMfaAdmin'));
+  await deleteCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(deleteCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect((await deltaPolicy(EXECUTABLES_POLICY))?.status).toBe('archived');
+  const deleted = await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+    where: { id: (await newestConfirmation()).id },
+    select: { status: true, reauthUsed: true, toolName: true, risk: true },
+  });
+  expect(deleted).toEqual({
+    status: 'executed',
+    reauthUsed: true,
+    toolName: 'policy_management_remove',
+    risk: 'high',
+  });
+  await expectPolicyListed(policies, EXECUTABLES_POLICY, null);
+  await policies.close();
+});
+
+test('confirmations: a cancelled proposal changes nothing', async ({ page }) => {
+  const inbound = readState().assistant.delta.policies.find(
+    (p) => p.name === 'E2E Assistant inbound guard',
+  )!;
+  await signIn(page, 'deltaAdmin', { next: '/assistant' });
+  const conversation = page.getByRole('region', { name: 'Conversation' });
+  await page
+    .getByRole('complementary', { name: 'Conversation history' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+  await ask(page, conversation, `/tool policy_management_disable {"policyId":"${inbound.id}"}`);
+  await expectTurnDone(conversation);
+  const card = confirmationCard(conversation, 'Disable policy');
+  await expect(card).toBeVisible();
+  await expect(card.getByText('Medium risk')).toBeVisible();
+  await expect(card.getByRole('list', { name: 'Impact' })).toContainText(
+    'Stops evaluating this policy for new mail',
+  );
+  const cancelled = page.waitForResponse(
+    (res) => /\/cancel$/.test(new URL(res.url()).pathname) && res.request().method() === 'POST',
+  );
+  await card.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect((await cancelled).status()).toBe(200);
+  await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0);
+  expect(await newestConfirmation()).toMatchObject({
+    status: 'cancelled',
+    toolName: 'policy_management_disable',
+  });
+  expect((await deltaPolicy(inbound.name))?.status).toBe('active');
+  await expectNoSeriousA11yViolations(page, 'confirmation card (cancelled)');
+
+  // The history (a reload: no token any more) shows the decided card without buttons.
+  await page.reload();
+  const again = confirmationCard(
+    page.getByRole('region', { name: 'Conversation' }),
+    'Disable policy',
+  );
+  await expect(again.getByText('Cancelled. Nothing changed.')).toBeVisible({ timeout: 20_000 });
+  await expect(again.getByRole('button')).toHaveCount(0);
+});
+
+test('confirmations: an expired proposal is refused and shows the expired state', async ({
+  page,
+}) => {
+  const outbound = readState().assistant.delta.policies.find(
+    (p) => p.name === 'E2E Assistant outbound guard',
+  )!;
+  await recordTurnStreams(page);
+  await signIn(page, 'deltaAdmin', { next: '/assistant' });
+  const conversation = page.getByRole('region', { name: 'Conversation' });
+  await page
+    .getByRole('complementary', { name: 'Conversation history' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+  await ask(page, conversation, `/tool policy_management_disable {"policyId":"${outbound.id}"}`);
+  await expectTurnDone(conversation);
+  const card = confirmationCard(conversation, 'Disable policy');
+  await expect(card.getByText('Waiting for your confirmation')).toBeVisible();
+
+  const token = await newestToken(page);
+
+  // Time passes: the stored expiry moves into the past (the TTL is 300 s). A confirm with the
+  // valid token and digest is refused with 410 before any other check and the row becomes
+  // `expired`; the card then shows the expired state (the view's expiry has passed).
+  const pending = await newestConfirmation();
+  expect(pending).toMatchObject({ status: 'pending', toolName: 'policy_management_disable' });
+  const stored = await writerDb().aiChatActionConfirmation.update({
+    where: { id: pending.id },
+    data: { expiresAt: new Date(Date.now() - 1_000) },
+    select: { actionDigest: true },
+  });
+  const refused = await bff(page, 'POST', `/assistant/confirmations/${pending.publicId}/confirm`, {
+    token,
+    actionDigest: stored.actionDigest,
+  });
+  expect(refused.status).toBe(410);
+  expect(refused.body?.code).toBe('assistant_confirmation_expired');
+  expect(
+    (
+      await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+        where: { id: pending.id },
+        select: { status: true },
+      })
+    ).status,
+  ).toBe('expired');
+
+  // The card (history after a reload, the server's view) shows the expired state, no buttons.
+  await page.reload();
+  const expired = confirmationCard(
+    page.getByRole('region', { name: 'Conversation' }),
+    'Disable policy',
+  );
+  await expect(expired.getByText('Expired', { exact: true })).toBeVisible({ timeout: 20_000 });
+  await expect(
+    expired.getByText(/^Expired without confirmation\. Nothing changed\./),
+  ).toBeVisible();
+  await expect(expired.getByRole('button')).toHaveCount(0);
+  expect((await deltaPolicy(outbound.name))?.status).toBe('active');
+  await expectNoSeriousA11yViolations(page, 'confirmation card (expired)');
+});
+
+test.describe('phone viewport (confirmations)', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('the confirmation card fits the full-screen sheet', async ({ page }) => {
+    const draft = readState().assistant.delta.policies.find(
+      (p) => p.name === 'E2E Assistant draft rule',
+    )!;
+    await signIn(page, 'deltaAdmin');
+    await expectLanded(page);
+    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    const sheet = panel(page);
+    await expect(sheet).toBeVisible();
+    await ask(
+      page,
+      sheet,
+      `/tool policy_management_update {"policyId":"${draft.id}","body":{"name":"E2E Assistant draft rule (renamed)"}}`,
+    );
+    await expectTurnDone(sheet);
+    const card = confirmationCard(sheet, 'Update policy');
+    await expect(card).toBeVisible();
+    await expect(card.getByRole('table', { name: 'Changes' })).toContainText(
+      'E2E Assistant draft rule (renamed)',
+    );
+    const confirmButton = card.getByRole('button', { name: 'Confirm', exact: true });
+    const cancelButton = card.getByRole('button', { name: 'Cancel', exact: true });
+    await confirmButton.scrollIntoViewIfNeeded();
+    await expect(confirmButton).toBeInViewport();
+    await expect(cancelButton).toBeInViewport();
+    const box = await card.boundingBox();
+    expect((box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 999) <= 390).toBe(true);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    await expectNoSeriousA11yViolations(page, 'confirmation card on a phone');
+    // Nothing is renamed: the proposal is cancelled.
+    await cancelButton.click();
+    await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
+    expect((await deltaPolicy(draft.name))?.status).toBe('draft');
   });
 });

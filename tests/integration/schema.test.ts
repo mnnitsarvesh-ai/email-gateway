@@ -29,7 +29,8 @@ import { stack } from './support/env';
  * of step 7.2 (21-email-explorer-details.md §3.1) and the journaling and archiving tables and
  * columns of step 8.1 (23-journaling-archiving.md §3) and the security incident and account
  * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3) and the provider
- * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3).
+ * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3) and the AI
+ * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -329,17 +330,19 @@ const TENANT_OWNED = [
   'ai_chat_messages',
   'ai_chat_tool_executions',
   'ai_chat_usage_daily',
+  // Step AI-2 §3: the assistant's action confirmations (organization_id NOT NULL).
+  'ai_chat_action_confirmations',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 175 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 176 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(175);
-    expect(new Set(ALL_TABLES).size).toBe(175);
+    expect(ALL_TABLES).toHaveLength(176);
+    expect(new Set(ALL_TABLES).size).toBe(176);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -6024,6 +6027,193 @@ describe('step 8.1 journaling and archiving schema (23-journaling-archiving.md �
       await prisma.archiveSetting.deleteMany({ where: { organizationId } });
       await prisma.archiveCaptureIntent.deleteMany({ where: { organizationId } });
       await prisma.emailArchive.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step AI-2 assistant action confirmations schema (29-ai-chat-confirmations-mail-writes.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  it('appends pending_confirmation to ai_chat_tool_executions.status (existing values and order kept)', async () => {
+    const cols = await columns(['ai_chat_tool_executions']);
+    expect(cols.get('ai_chat_tool_executions.status')).toMatchObject({
+      columnType: "enum('succeeded','failed','refused','timeout','pending_confirmation')",
+      nullable: 'NO',
+      columnDefault: null,
+    });
+  });
+
+  it('creates ai_chat_action_confirmations (not partitioned) with exactly the §3 columns, keys and foreign keys', async () => {
+    const table = 'ai_chat_action_confirmations';
+    const cols = await columns([table]);
+    const expected: Record<string, [string, string]> = {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      platform_override_id: ['char(36)', 'YES'],
+      session_family_id: ['char(36)', 'NO'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      turn_id: ['bigint unsigned', 'YES'],
+      execution_id: ['bigint unsigned', 'NO'],
+      result_execution_id: ['bigint unsigned', 'YES'],
+      tool_name: ['varchar(96)', 'NO'],
+      operation_id: ['varchar(128)', 'NO'],
+      http_method: ["enum('GET','POST','PUT','PATCH','DELETE')", 'NO'],
+      risk: ["enum('low','medium','high')", 'NO'],
+      requires_reauth: ['tinyint(1)', 'NO'],
+      request: ['json', 'YES'],
+      preconditions: ['json', 'YES'],
+      summary: ['json', 'YES'],
+      state_digest: ['char(64)', 'YES'],
+      action_digest: ['char(64)', 'NO'],
+      token_hash: ['char(64)', 'NO'],
+      status: ["enum('pending','executing','executed','failed','expired','cancelled')", 'NO'],
+      failed_attempts: ['tinyint unsigned', 'NO'],
+      reauth_used: ['tinyint(1)', 'NO'],
+      expires_at: ['datetime(3)', 'NO'],
+      decided_at: ['datetime(3)', 'YES'],
+      // The write claim (AI-2 review migration `…_ai_assistant_confirmation_execution_started`).
+      execution_started_at: ['datetime(3)', 'YES'],
+      executed_at: ['datetime(3)', 'YES'],
+      reported_at: ['datetime(3)', 'YES'],
+      result_http_status: ['smallint unsigned', 'YES'],
+      error_code: ['varchar(64)', 'YES'],
+      correlation_id: ['varchar(128)', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    };
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    // No token column: only its SHA-256 is stored (ADR-0093).
+    expect([...cols.keys()].some((k) => /\.token$/.test(k))).toBe(false);
+    expect(cols.get(`${table}.status`)?.columnDefault).toBe('pending');
+    expect(cols.get(`${table}.failed_attempts`)?.columnDefault).toBe('0');
+    expect(cols.get(`${table}.reauth_used`)?.columnDefault).toBe('0');
+    expect(PARTITIONED).not.toHaveProperty(table);
+
+    const idx = await indexes(table);
+    expect(idx.get('ai_chat_action_confirmations_public_id_key')).toEqual({
+      columns: ['public_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_action_confirmations_execution_id_key')).toEqual({
+      columns: ['execution_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_action_confirmations_organization_id_user_id_status__idx')).toEqual({
+      columns: ['organization_id', 'user_id', 'status', 'expires_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_action_confirmations_conversation_id_status_reported_idx')).toEqual({
+      columns: ['conversation_id', 'status', 'reported_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_action_confirmations_status_expires_at_idx')).toEqual({
+      columns: ['status', 'expires_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_action_confirmations_status_decided_at_idx')).toEqual({
+      columns: ['status', 'decided_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_action_confirmations_turn_id_idx')).toEqual({
+      columns: ['turn_id'],
+      unique: false,
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'conversation_id', referenced: 'ai_chat_conversations', onDelete: 'CASCADE' },
+      { columnName: 'execution_id', referenced: 'ai_chat_tool_executions', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'turn_id', referenced: 'ai_chat_turns', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('keeps one confirmation per proposal, restricts the organization and cascades with the execution', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `ai2-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      const conversation = await prisma.aiChatConversation.create({
+        data: { organizationId, userId: user.id },
+      });
+      const execution = await prisma.aiChatToolExecution.create({
+        data: {
+          organizationId,
+          userId: user.id,
+          conversationId: conversation.id,
+          seq: 1,
+          toolName: 'policy_management_create',
+          operationId: 'PoliciesController_create_v1',
+          httpMethod: 'POST',
+          access: 'write',
+          risk: 'low',
+          decision: 'allowed',
+          status: 'pending_confirmation',
+          correlationId: `it-${suffix}.1`,
+        },
+      });
+      const row = {
+        organizationId,
+        userId: user.id,
+        sessionFamilyId: randomUUID(),
+        conversationId: conversation.id,
+        executionId: execution.id,
+        toolName: 'policy_management_create',
+        operationId: 'PoliciesController_create_v1',
+        httpMethod: 'POST' as const,
+        risk: 'low' as const,
+        requiresReauth: false,
+        request: { method: 'POST', path: '/api/v1/policies', body: { name: 'it' } },
+        actionDigest: 'a'.repeat(64),
+        tokenHash: 'b'.repeat(64),
+        expiresAt: new Date(Date.now() + 300_000),
+        correlationId: `it-${suffix}.1`,
+      };
+      const confirmation = await prisma.aiChatActionConfirmation.create({ data: row });
+      expect(confirmation).toMatchObject({
+        status: 'pending',
+        failedAttempts: 0,
+        reauthUsed: false,
+        turnId: null,
+        resultExecutionId: null,
+      });
+      expect(confirmation.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      // One confirmation per proposal execution.
+      await expect(prisma.aiChatActionConfirmation.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // The organization cannot go while its assistant rows reference it (RESTRICT on every
+      // ai_chat table, asserted per table above; the organization purge deletes them first).
+      await expect(
+        prisma.$executeRaw`DELETE FROM organizations WHERE id = ${organizationId}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // Hard delete of the proposal execution takes its confirmation (retention, FK cascade).
+      await prisma.aiChatToolExecution.delete({ where: { id: execution.id } });
+      expect(await prisma.aiChatActionConfirmation.count({ where: { id: confirmation.id } })).toBe(
+        0,
+      );
+    } finally {
+      await prisma.aiChatActionConfirmation.deleteMany({ where: { organizationId } });
+      await prisma.aiChatToolExecution.deleteMany({ where: { organizationId } });
+      await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
       await prisma.user.deleteMany({ where: { organizationId } });
       await cleanup();
     }

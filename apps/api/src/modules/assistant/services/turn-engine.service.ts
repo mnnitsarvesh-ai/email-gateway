@@ -1,5 +1,7 @@
 import { HttpStatus, Inject, Injectable, Logger } from '@nestjs/common';
 import {
+  type ActionUpdate,
+  buildActionUpdates,
   buildSystemPrompt,
   costMicros,
   describeTool,
@@ -26,6 +28,7 @@ import { CodedHttpException } from '../../../http/coded-exception';
 import {
   ASSISTANT_TEXT_MAX_CHARS,
   type AssistantConfig,
+  CONFIRMATION_REPORT_BATCH,
   DERIVED_TITLE_MAX_CHARS,
   TOOL_CALL_CONCURRENCY,
   TRANSCRIPT_MAX_BYTES,
@@ -43,7 +46,7 @@ import {
   scopeOrganizationPublicId,
   toolAvailability,
 } from '../domain/tool-catalog';
-import { executionView, messageView, turnView } from '../domain/views';
+import { executionViews, messageView, turnView } from '../domain/views';
 import type { CancelResultView, CreateTurnBody, TurnResultView } from '../dto/assistant.schemas';
 import {
   type ConversationRow,
@@ -51,12 +54,17 @@ import {
   type Owner,
   type TurnRow,
 } from '../repositories/conversations.repository';
+import {
+  ConfirmationsRepository,
+  type UnreportedConfirmation,
+} from '../repositories/confirmations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
 import { budgetTokens, UsageRepository } from '../repositories/usage.repository';
 import { AssistantAvailabilityService } from './assistant-availability.service';
 import { AssistantLimitsService } from './assistant-limits.service';
 import { AssistantMetrics } from './assistant-metrics';
 import { AssistantProviderService } from './assistant-provider.service';
+import { ConfirmationViewsService } from './confirmation-views.service';
 import { ConversationService, ownerOf } from './conversation.service';
 import { LoopbackDispatcher } from './loopback-client';
 import type { TurnSink } from './sse-writer';
@@ -85,6 +93,11 @@ export interface PreparedTurn {
   request: TurnRequest;
   correlationId: string;
   release: () => Promise<void>;
+  /**
+   * Tokens of this turn's write proposals by confirmation id (step AI-2 D1 step 10): kept in
+   * memory for the JSON answer only, never stored, logged or given to the model.
+   */
+  confirmationTokens: Map<string, string>;
 }
 
 /** A retried `clientTurnId` of a finished turn: its stored result is replayed. */
@@ -155,6 +168,31 @@ export function executionSummary(row: {
   return card ? 'ok, 1 record' : 'ok, content purged';
 }
 
+/** Unreported terminal confirmations → the lines of the action updates (step AI-2 D6). */
+export function actionUpdatesOf(rows: readonly UnreportedConfirmation[]): ActionUpdate[] {
+  return rows.flatMap((row): ActionUpdate[] => {
+    if (
+      row.status !== 'executed' &&
+      row.status !== 'failed' &&
+      row.status !== 'cancelled' &&
+      row.status !== 'expired'
+    ) {
+      return [];
+    }
+    return [
+      {
+        tool: row.toolName,
+        callSeq: row.callSeq,
+        status: row.status,
+        httpStatus: row.resultHttpStatus,
+        error: row.errorCode,
+        resultSeq: row.resultSeq,
+        resultRowRef: row.resultRowRef,
+      },
+    ];
+  });
+}
+
 /**
  * The turn engine of the assistant (design D7, D4, D11, §4.2; ADR-0092, ADR-0094).
  *
@@ -193,6 +231,8 @@ export class TurnEngineService {
     private readonly loopback: LoopbackDispatcher,
     private readonly runner: TransactionRunner,
     private readonly metrics: AssistantMetrics,
+    private readonly confirmations: ConfirmationsRepository,
+    private readonly confirmationViews: ConfirmationViewsService,
   ) {}
 
   now(): Date {
@@ -222,7 +262,7 @@ export class TurnEngineService {
         { limit: this.config.ASSISTANT_USER_MESSAGE_MAX_CHARS },
       );
     }
-    const replay = await this.replayIfKnown(owner, conversation, body.clientTurnId);
+    const replay = await this.replayIfKnown(principal, owner, conversation, body.clientTurnId);
     if (replay) return replay;
 
     const now = this.now();
@@ -260,7 +300,7 @@ export class TurnEngineService {
       );
       if (!turn) {
         // A racing retry of the same clientTurnId (or a turn of another pod) got there first.
-        const raced = await this.replayIfKnown(owner, conversation, body.clientTurnId);
+        const raced = await this.replayIfKnown(principal, owner, conversation, body.clientTurnId);
         if (raced) {
           await this.limits.releaseLock(conversation.publicId, turnPublicId);
           releaseSlot();
@@ -281,6 +321,7 @@ export class TurnEngineService {
         body,
         request,
         correlationId,
+        confirmationTokens: new Map(),
         release: async () => {
           if (released) return;
           released = true;
@@ -302,6 +343,7 @@ export class TurnEngineService {
   }
 
   private async replayIfKnown(
+    principal: UserPrincipal,
     owner: Owner,
     conversation: ConversationRow,
     clientTurnId: string,
@@ -313,20 +355,42 @@ export class TurnEngineService {
     );
     if (!existing) return null;
     if (existing.status === 'running') throw assistantTurnInProgress();
-    return { kind: 'replay', result: await this.result(owner, conversation.publicId, existing) };
+    return {
+      kind: 'replay',
+      result: await this.result(principal, owner, conversation.publicId, existing),
+    };
   }
 
-  /** The JSON answer `{ turn, message, executions }` of a stored turn. */
-  async result(owner: Owner, conversationPublicId: string, turn: TurnRow): Promise<TurnResultView> {
-    const [messages, executions] = await Promise.all([
+  /**
+   * The JSON answer `{ turn, message, executions, confirmations }` of a stored turn. Tokens come
+   * from `tokens` (the turn that just ran in this request); a replay has none (`token: null`).
+   */
+  async result(
+    principal: UserPrincipal,
+    owner: Owner,
+    conversationPublicId: string,
+    turn: TurnRow,
+    tokens: ReadonlyMap<string, string> = new Map(),
+  ): Promise<TurnResultView> {
+    const [messages, all] = await Promise.all([
       this.conversations.turnMessages(owner, turn.id),
       this.executions.forTurns(owner, turn.conversationId, [turn.id]),
     ]);
+    const executions = all.filter((e) => e.turnId === turn.id);
+    const confirmations = await this.confirmationViews.forExecutions(
+      principal,
+      owner,
+      executions.filter((e) => e.status === 'pending_confirmation').map((e) => e.id),
+    );
     const answer = messages.find((m) => m.role === 'assistant') ?? null;
     return {
       turn: turnView(turn, conversationPublicId),
       message: answer ? messageView(answer, turn.publicId) : null,
-      executions: executions.filter((e) => e.turnId === turn.id).map(executionView),
+      executions: executionViews(executions, confirmations),
+      confirmations: executions.flatMap((e) => {
+        const confirmation = confirmations.get(e.id);
+        return confirmation ? [{ confirmation, token: tokens.get(confirmation.id) ?? null }] : [];
+      }),
     };
   }
 
@@ -446,6 +510,7 @@ export class TurnEngineService {
       segment: conversation.segment,
       newSegment: false,
       separate: false,
+      reported: [] as bigint[],
     };
     let status: 'completed' | 'failed' | 'cancelled' = 'completed';
     let failure: TurnFailure | null = null;
@@ -553,6 +618,7 @@ export class TurnEngineService {
       segment: number;
       newSegment: boolean;
       separate: boolean;
+      reported: bigint[];
     },
   ): Promise<void> {
     const { principal, owner, conversation, turn, body, request, correlationId } = prepared;
@@ -602,10 +668,21 @@ export class TurnEngineService {
     );
     const segmentTranscript = segmentRows.flatMap((row) => parseTranscript(row.providerTranscript));
     const recapNeeded = segmentTranscript.length > 0;
+    // Step AI-2 D6: outcomes of confirmations since the last turn, prefixed to the user entry
+    // (server-authored; `ai_chat_messages.content` keeps the user's text only). They are marked
+    // reported when this turn completes (its transcript is what the model keeps).
+    const unreported = await this.confirmations.unreported(
+      owner,
+      conversation.id,
+      CONFIRMATION_REPORT_BATCH,
+    );
+    state.reported = unreported.map((row) => row.id);
+    const actionUpdates = buildActionUpdates(actionUpdatesOf(unreported));
     const plan = planWindow({
       system: system.text,
       segmentTranscript,
       userMessage: body.message,
+      actionUpdates: actionUpdates || null,
       maxTokens: this.config.ASSISTANT_CONTEXT_MAX_TOKENS,
       userEntry: (text) => provider.userEntry(text),
       recap: recapNeeded
@@ -689,7 +766,13 @@ export class TurnEngineService {
           throw new TurnFailure(TURN_FAILURE_CODES.turnLimit);
         }
         await this.checkCancelled(turn.publicId, signal);
-        const results = await this.runToolCalls(ctx, response.toolCalls, sink, state);
+        const results = await this.runToolCalls(
+          ctx,
+          response.toolCalls,
+          sink,
+          state,
+          prepared.confirmationTokens,
+        );
         if (signal.aborted) throw new TurnFailure(TURN_FAILURE_CODES.turnLimit);
         if (results.sessionExpired) throw new TurnFailure(TURN_FAILURE_CODES.sessionExpired);
         const entries = provider.toolResultEntries(results.results);
@@ -731,12 +814,13 @@ export class TurnEngineService {
     calls: readonly LlmToolCall[],
     sink: TurnSink,
     state: { toolCalls: number },
+    tokens: Map<string, string>,
   ): Promise<{ results: LlmToolResult[]; sessionExpired: boolean }> {
     // Call indexes are assigned in call order before anything runs (the per-turn cap).
     const indexes = calls.map((call) => (call.name === 'call_tool' ? state.toolCalls++ : -1));
     let sessionExpired = false;
     const results = await mapWithConcurrency(calls, TOOL_CALL_CONCURRENCY, async (call, i) => {
-      const content = await this.answerCall(ctx, call, indexes[i]!, sink);
+      const content = await this.answerCall(ctx, call, indexes[i]!, sink, tokens);
       if (content.sessionExpired) sessionExpired = true;
       return { toolCallId: call.id, content: content.content, isError: content.isError };
     });
@@ -748,6 +832,7 @@ export class TurnEngineService {
     call: LlmToolCall,
     callIndex: number,
     sink: TurnSink,
+    tokens: Map<string, string>,
   ): Promise<{ content: string; isError: boolean; sessionExpired: boolean }> {
     const error = (code: string, message: string) => ({
       content: JSON.stringify({ kind: 'tool_result/1', status: 'error', code, message }),
@@ -812,6 +897,16 @@ export class TurnEngineService {
         decision: 'allowed',
         card: outcome.card,
       });
+      // Step AI-2 D1 step 10: the confirmation card's data and token, right after the proposal
+      // (the browser only; the model's envelope has neither the token nor the digest).
+      if (outcome.confirmation) {
+        tokens.set(outcome.confirmation.view.id, outcome.confirmation.token);
+        sink.emit({
+          type: 'confirmation.required',
+          confirmation: outcome.confirmation.view,
+          token: outcome.confirmation.token,
+        });
+      }
     } else if (outcome.decision !== 'allowed') {
       sink.emit({
         type: 'tool.denied',
@@ -843,6 +938,7 @@ export class TurnEngineService {
         responseModel: string | null;
         appended: unknown[];
         segment: number;
+        reported: bigint[];
       };
       finishedAt: Date;
       latencyMs: number;
@@ -892,6 +988,10 @@ export class TurnEngineService {
         tx,
       );
       if (!closed) throw new Error('turn is no longer running');
+      // Step AI-2 D6: the action updates this turn's transcript carries are reported.
+      if (f.status === 'completed' && f.state.reported.length > 0) {
+        await this.confirmations.markReported(owner, f.state.reported, f.finishedAt, tx);
+      }
       await this.usage.add(
         scope,
         {
@@ -917,7 +1017,13 @@ export class TurnEngineService {
   /** The stored turn after `run` (JSON answers). */
   async stored(prepared: PreparedTurn): Promise<TurnResultView> {
     const turn = await this.conversations.findTurn(prepared.owner, prepared.turn.id);
-    return this.result(prepared.owner, prepared.conversation.publicId, turn ?? prepared.turn);
+    return this.result(
+      prepared.principal,
+      prepared.owner,
+      prepared.conversation.publicId,
+      turn ?? prepared.turn,
+      prepared.confirmationTokens,
+    );
   }
 }
 

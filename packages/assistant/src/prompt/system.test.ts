@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OPERATION_TOOLS, REGISTRY_VERSION, renderCatalogueIndex } from '../registry/registry';
 import { PROMPT_VERSION, buildSystemPrompt, loadSystemPromptTemplate } from './system';
@@ -18,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/1', () => {
+describe('assistant-system/2', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/1');
+    expect(PROMPT_VERSION).toBe('assistant-system/2');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -52,12 +54,34 @@ describe('assistant-system/1', () => {
       'Never claim that an action happened unless a tool result',
       'from a tool result',
       'Never output external links or images',
-      'You can only read in this version',
+      'are proposals: calling a write tool shows the user a confirmation card and returns `pending_confirmation`',
+      'Nothing has changed until the user confirms it in the card',
+      'Never say a change was made unless an action update or tool result says it succeeded',
+      "Never ask the user to type 'yes', a password, a code or a token in chat",
+      'Propose one change per request',
+      'call `policy_tools_validate` first',
+      'try it with `policy_tools_test` before proposing',
+      'Some changes need approval by another person',
       'describe_tool',
       '@r3.2',
       'clarifying question',
     ])
       expect(text, phrase).toContain(phrase);
+  });
+
+  it('keeps every other rule of assistant-system/1 unchanged (only rule 5 is replaced)', () => {
+    const rules = (text: string) =>
+      new Map([...text.matchAll(/^(\d+)\. (.*)$/gm)].map((match) => [Number(match[1]), match[2]!]));
+    const v1 = readFileSync(join(__dirname, '../../prompts/assistant-system-1.md'), 'utf8');
+    const v2 = loadSystemPromptTemplate().text;
+    const before = rules(v1);
+    const after = rules(v2);
+    expect([...after.keys()]).toEqual([...before.keys()]);
+    for (const [no, text] of before)
+      if (no === 5) expect(after.get(no)).not.toBe(text);
+      else expect(after.get(no), `rule ${no}`).toBe(text);
+    expect(v2).not.toContain('You can only read in this version');
+    expect(v2.replace(/^5\. .*$/m, '')).toBe(v1.trim().replace(/^5\. .*$/m, ''));
   });
 
   it('sanitizes context values and handles an empty catalogue and unknown time zone', () => {

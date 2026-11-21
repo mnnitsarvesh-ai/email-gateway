@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import { ApiError } from '@/lib/api/errors';
 import { isAbortError, openOperationStream } from '@/lib/api/stream';
-import { CARD_VERSION, type AssistantStreamEvent, type TurnResult } from './types';
+import {
+  CARD_VERSION,
+  CONFIRMATION_SUMMARY_VERSION,
+  type AssistantStreamEvent,
+  type ConfirmationView,
+  type TurnResult,
+} from './types';
 
 /**
  * Client of `assistant-stream/1` (step AI-1 §4.2, D14): an incremental Server-Sent Events parser
@@ -159,15 +165,73 @@ export const cardSchema = z.object({
   error: z.object({ httpStatus: z.number(), code: z.string(), message: z.string() }).optional(),
 });
 
+const confirmationSummarySchema = z.object({
+  version: z.literal(CONFIRMATION_SUMMARY_VERSION),
+  title: z.string(),
+  action: z.string(),
+  target: z.array(
+    z.object({ label: z.string(), value: z.string(), untrusted: z.boolean().optional() }),
+  ),
+  changes: z.array(
+    z.object({ label: z.string(), before: z.string().nullable().optional(), after: z.string() }),
+  ),
+  definition: z
+    .object({
+      direction: z.string(),
+      priority: z.number(),
+      rules: z.array(z.object({ id: z.string(), when: z.string(), actions: z.string() })),
+    })
+    .optional(),
+  impact: z.array(z.string()),
+  warnings: z.array(z.string()),
+  reversible: z.boolean(),
+  portalRoute: z.string().nullable(),
+  request: z.object({ method: z.string(), path: z.string() }),
+});
+
+/** `ConfirmationView` (contracts §35.1); unknown keys are dropped, never the token. */
+export const confirmationViewSchema = z.object({
+  id,
+  executionId: id,
+  resultExecutionId: id.nullable(),
+  conversationId: id,
+  tool: z.string(),
+  operationId: z.string(),
+  risk: z.enum(['low', 'medium', 'high']),
+  requiresReauth: z.boolean(),
+  reauthFresh: z.boolean(),
+  status: z.enum(['pending', 'executing', 'executed', 'failed', 'expired', 'cancelled']),
+  summary: confirmationSummarySchema.nullable(),
+  actionDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  expiresAt: z.string(),
+  createdAt: z.string(),
+  decidedAt: z.string().nullable(),
+  executedAt: z.string().nullable(),
+  result: z.object({ httpStatus: z.number().nullable(), error: z.string().nullable() }).nullable(),
+});
+
+/** The single-use confirmation token: 32 random bytes, base64url (43 characters). */
+export const CONFIRMATION_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+/** A validated confirmation view, or null (malformed views are never rendered). */
+export function parseConfirmationView(value: unknown): ConfirmationView | null {
+  const parsed = confirmationViewSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 const eventSchemas = {
   'turn.started': z.object({ turnId: id, conversationId: id, seq: z.number() }),
   'text.delta': z.object({ text: z.string() }),
   'tool.started': z.object({ executionId: id, tool: z.string(), title: z.string() }),
   'tool.completed': z.object({
     executionId: id,
-    status: z.enum(['succeeded', 'failed', 'refused', 'timeout']),
+    status: z.enum(['succeeded', 'failed', 'refused', 'timeout', 'pending_confirmation']),
     decision,
     card: cardSchema,
+  }),
+  'confirmation.required': z.object({
+    confirmation: confirmationViewSchema,
+    token: z.string().regex(CONFIRMATION_TOKEN),
   }),
   'tool.denied': z.object({
     executionId: id,
@@ -213,9 +277,21 @@ export type TurnOutcome =
       readonly message: string;
     };
 
-/** Events equivalent to the JSON answer of a turn (`{ turn, message, executions }`). */
+/**
+ * Events equivalent to the JSON answer of a turn (`{ turn, message, executions, confirmations }`):
+ * a proposal's `tool.completed` is followed by its `confirmation.required` (token null on a
+ * replay, when the api never repeats it).
+ */
 export function eventsFromTurnResult(result: TurnResult): AssistantStreamEvent[] {
   const { turn, message, executions } = result;
+  const proposals = new Map<string, { confirmation: ConfirmationView; token: string | null }>();
+  for (const entry of Array.isArray(result.confirmations) ? result.confirmations : []) {
+    const confirmation = parseConfirmationView(entry?.confirmation);
+    if (!confirmation) continue;
+    const token =
+      typeof entry.token === 'string' && CONFIRMATION_TOKEN.test(entry.token) ? entry.token : null;
+    proposals.set(confirmation.executionId, { confirmation, token });
+  }
   const events: AssistantStreamEvent[] = [
     { type: 'turn.started', turnId: turn.id, conversationId: turn.conversationId, seq: turn.seq },
   ];
@@ -240,6 +316,20 @@ export function eventsFromTurnResult(result: TurnResult): AssistantStreamEvent[]
         decision: execution.decision,
         card: card.data,
       });
+      const proposal =
+        execution.status === 'pending_confirmation'
+          ? (proposals.get(execution.id) ??
+            (execution.confirmation
+              ? { confirmation: parseConfirmationView(execution.confirmation), token: null }
+              : null))
+          : null;
+      if (proposal?.confirmation) {
+        events.push({
+          type: 'confirmation.required',
+          confirmation: proposal.confirmation,
+          token: proposal.token,
+        });
+      }
     }
   }
   if (message?.content) events.push({ type: 'text.delta', text: message.content });

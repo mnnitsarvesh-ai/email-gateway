@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type ReactNode,
@@ -16,7 +17,16 @@ import { ApiError } from '@/lib/api/errors';
 import { isAbortError } from '@/lib/api/stream';
 import { browserTimeZone, turnErrorText } from './model';
 import { StreamProtocolError, runTurn } from './stream';
-import { endTurn, newPendingTurn, reduceTurn, type PendingTurn } from './turn-state';
+import {
+  EMPTY_CONFIRMATIONS,
+  endTurn,
+  newPendingTurn,
+  reduceConfirmations,
+  reduceTurn,
+  type ConfirmationAction,
+  type ConfirmationStore,
+  type PendingTurn,
+} from './turn-state';
 
 /**
  * Shell-wide assistant state (step AI-1 D14): which conversation is open, whether the panel is
@@ -36,6 +46,12 @@ export interface AssistantContextValue {
   readonly retry: (message: string) => Promise<void>;
   /** Cancels the running turn (`POST /assistant/turns/{id}/cancel` and abort of the stream). */
   readonly cancel: () => Promise<void>;
+  /**
+   * Write proposals of this tab (step AI-2 D10) with their single-use tokens, in memory only:
+   * they survive closing the panel and the end of the turn, never a reload.
+   */
+  readonly confirmations: ConfirmationStore;
+  readonly updateConfirmation: (action: ConfirmationAction) => void;
 }
 
 const AssistantContext = createContext<AssistantContextValue | null>(null);
@@ -77,6 +93,7 @@ export function AssistantProvider({
   const [panelOpen, setPanelOpen] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [pending, setPending] = useState<PendingTurn | null>(null);
+  const [confirmations, updateConfirmation] = useReducer(reduceConfirmations, EMPTY_CONFIRMATIONS);
   const controllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef<PendingTurn | null>(null);
   pendingRef.current = pending;
@@ -152,7 +169,16 @@ export function AssistantProvider({
           },
           {
             signal: controller.signal,
-            onEvent: (event) => update(clientTurnId, (turn) => reduceTurn(turn, event)),
+            onEvent: (event) => {
+              if (event.type === 'confirmation.required') {
+                updateConfirmation({
+                  type: 'proposed',
+                  view: event.confirmation,
+                  token: event.token,
+                });
+              }
+              update(clientTurnId, (turn) => reduceTurn(turn, event));
+            },
           },
         );
         if (outcome.kind === 'failed') {
@@ -229,8 +255,10 @@ export function AssistantProvider({
       send: ask,
       retry: ask,
       cancel,
+      confirmations,
+      updateConfirmation,
     }),
-    [ask, cancel, conversationId, panelOpen, pending, selectConversation],
+    [ask, cancel, confirmations, conversationId, panelOpen, pending, selectConversation],
   );
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;
 }

@@ -5,6 +5,8 @@
  * only.
  */
 
+import type { ConfirmationRisk, ConfirmationView } from '../confirmations/types';
+
 export const TOOL_RESULT_VERSION = 'assistant-tool-result/1';
 export const CARD_VERSION = 'assistant-card/1';
 export const STREAM_VERSION = 'assistant-stream/1';
@@ -67,7 +69,44 @@ export interface ToolResultDenied {
   portalRoute?: string | null;
 }
 
-export type ToolResultEnvelope = ToolResultOk | ToolResultError | ToolResultDenied;
+/** The fixed note of a pending-confirmation envelope (step AI-2 D1 step 11). */
+export const PENDING_CONFIRMATION_NOTE =
+  'Nothing has changed yet. The user sees a confirmation card and the action runs only if they confirm it there. Do not say it was done, and do not ask the user to type a confirmation in chat.';
+
+/**
+ * Envelope of a write call that became a proposal (step AI-2 D1 step 11): the model learns that a
+ * confirmation card was shown and nothing it could use to confirm it (never the token or digest).
+ */
+export interface ToolResultPending {
+  kind: 'tool_result/1';
+  tool: string;
+  status: 'pending_confirmation';
+  confirmationId: string;
+  risk: ConfirmationRisk;
+  requiresReauth: boolean;
+  expiresAt: string;
+  note: typeof PENDING_CONFIRMATION_NOTE;
+}
+
+export type ToolResultEnvelope =
+  ToolResultOk | ToolResultError | ToolResultDenied | ToolResultPending;
+
+/** Builds the pending-confirmation envelope. */
+export function toPendingEnvelope(
+  tool: string,
+  confirmation: { id: string; risk: ConfirmationRisk; requiresReauth: boolean; expiresAt: string },
+): ToolResultPending {
+  return {
+    kind: 'tool_result/1',
+    tool,
+    status: 'pending_confirmation',
+    confirmationId: confirmation.id,
+    risk: confirmation.risk,
+    requiresReauth: confirmation.requiresReauth,
+    expiresAt: confirmation.expiresAt,
+    note: PENDING_CONFIRMATION_NOTE,
+  };
+}
 
 export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error';
 export type CardValue = string | number | boolean | null;
@@ -117,7 +156,13 @@ export type ExecutionDecision =
   | 'denied_ref'
   | 'denied_budget';
 
-export type ExecutionStatus = 'succeeded' | 'failed' | 'refused' | 'timeout';
+export type ExecutionStatus =
+  | 'succeeded'
+  | 'failed'
+  | 'refused'
+  | 'timeout'
+  /** A write proposal waiting for the user's confirmation (step AI-2). */
+  | 'pending_confirmation';
 
 /** SSE events of a turn (§4.2), `event: <type>` + `data: <JSON of the rest>`. */
 export type AssistantStreamEvent =
@@ -131,6 +176,11 @@ export type AssistantStreamEvent =
       decision: ExecutionDecision;
       card: AssistantCard;
     }
+  /**
+   * Right after the `tool.completed` (status `pending_confirmation`) of a write proposal (step
+   * AI-2 D1 step 10). The token goes to the browser only: never to the model, a log or storage.
+   */
+  | { type: 'confirmation.required'; confirmation: ConfirmationView; token: string }
   | {
       type: 'tool.denied';
       executionId: string;

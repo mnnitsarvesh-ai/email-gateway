@@ -12,18 +12,32 @@ import {
   type RawSseEvent,
 } from './stream';
 import {
+  CONFIRMATION_TOKEN,
   CONVERSATION_ID,
   EXECUTION_ID,
   MESSAGE_ID,
+  PROPOSAL_CARD,
+  PROPOSAL_EXECUTION_ID,
+  RESULT_CARD,
   TABLE_CARD,
   TURN_ID,
   completedTurnFrames,
+  confirmationView,
   execution,
+  proposalExecution,
+  proposalTurnFrames,
   sseFrame,
   streamOf,
 } from './test-data';
-import { newPendingTurn, reduceTurn } from './turn-state';
-import type { AssistantStreamEvent, TurnResult } from './types';
+import {
+  EMPTY_CONFIRMATIONS,
+  newPendingTurn,
+  newerView,
+  reduceConfirmations,
+  reduceTurn,
+  withLiveConfirmations,
+} from './turn-state';
+import type { AssistantStreamEvent, ConfirmationView, TurnResult } from './types';
 
 function collect(chunks: readonly string[], max?: number): RawSseEvent[] {
   const events: RawSseEvent[] = [];
@@ -193,6 +207,7 @@ const TURN_RESULT: TurnResult = {
       errorCode: 'forbidden',
     }),
   ],
+  confirmations: [],
 };
 
 describe('runTurn', () => {
@@ -382,5 +397,271 @@ describe('runTurn', () => {
       },
     );
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+/** The generated client's (mutable) view type of a turn result's confirmation. */
+const apiView = (view: ConfirmationView) =>
+  view as TurnResult['confirmations'][number]['confirmation'];
+
+describe('confirmations in the stream (step AI-2)', () => {
+  const raw = (event: string, data: unknown): RawSseEvent => ({
+    event,
+    data: JSON.stringify(data),
+  });
+
+  it('parses confirmation.required and the pending_confirmation status', () => {
+    const view = confirmationView();
+    expect(
+      parseStreamEvent(
+        raw('tool.completed', {
+          executionId: PROPOSAL_EXECUTION_ID,
+          status: 'pending_confirmation',
+          decision: 'allowed',
+          card: PROPOSAL_CARD,
+        }),
+      ),
+    ).toMatchObject({ type: 'tool.completed', status: 'pending_confirmation' });
+    const event = parseStreamEvent(
+      raw('confirmation.required', {
+        confirmation: { ...view, extra: 'dropped' },
+        token: CONFIRMATION_TOKEN,
+      }),
+    );
+    expect(event).toEqual({
+      type: 'confirmation.required',
+      confirmation: view,
+      token: CONFIRMATION_TOKEN,
+    });
+  });
+
+  it('ignores malformed confirmation events like other malformed events', () => {
+    const view = confirmationView();
+    const bad: unknown[] = [
+      { confirmation: view },
+      { confirmation: view, token: 'short' },
+      { confirmation: view, token: `${'a'.repeat(42)}=` },
+      { confirmation: { ...view, risk: 'critical' }, token: CONFIRMATION_TOKEN },
+      { confirmation: { ...view, actionDigest: 'not-a-digest' }, token: CONFIRMATION_TOKEN },
+      { confirmation: { ...view, status: 'done' }, token: CONFIRMATION_TOKEN },
+      {
+        confirmation: {
+          ...view,
+          summary: { ...view.summary, version: 'assistant-confirmation/2' },
+        },
+        token: CONFIRMATION_TOKEN,
+      },
+      {
+        confirmation: { ...view, summary: { ...view.summary, target: 'x' } },
+        token: CONFIRMATION_TOKEN,
+      },
+    ];
+    for (const data of bad) expect(parseStreamEvent(raw('confirmation.required', data))).toBeNull();
+    expect(parseStreamEvent({ event: 'confirmation.required', data: '{not json' })).toBeNull();
+    // A purged summary is valid (null), the card shows that the details are gone.
+    expect(
+      parseStreamEvent(
+        raw('confirmation.required', {
+          confirmation: { ...view, summary: null },
+          token: CONFIRMATION_TOKEN,
+        }),
+      ),
+    ).not.toBeNull();
+  });
+
+  it('streams a proposal: tool.completed then confirmation.required with the token', async () => {
+    mockApi({
+      AssistantTurnsController_create_v1: () =>
+        new HttpResponse(streamOf(proposalTurnFrames()), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const events: AssistantStreamEvent[] = [];
+    await runTurn(
+      { conversationId: CONVERSATION_ID, clientTurnId: crypto.randomUUID(), message: 'q' },
+      { onEvent: (event) => events.push(event) },
+    );
+    expect(events.map((e) => e.type)).toEqual([
+      'turn.started',
+      'tool.started',
+      'tool.completed',
+      'confirmation.required',
+      'text.delta',
+      'turn.completed',
+    ]);
+    expect(events[3]).toMatchObject({ token: CONFIRMATION_TOKEN });
+  });
+
+  it('reads confirmations from the JSON turn result (token, or null on a replay)', () => {
+    const view = confirmationView();
+    const result: TurnResult = {
+      ...TURN_RESULT,
+      executions: [execution(TABLE_CARD), proposalExecution(view)],
+      confirmations: [{ confirmation: apiView(view), token: CONFIRMATION_TOKEN }],
+    };
+    const events = eventsFromTurnResult(result);
+    expect(events.map((e) => e.type)).toEqual([
+      'turn.started',
+      'tool.completed',
+      'tool.completed',
+      'confirmation.required',
+      'text.delta',
+      'turn.completed',
+    ]);
+    expect(events[2]).toMatchObject({ status: 'pending_confirmation' });
+    expect(events[3]).toEqual({
+      type: 'confirmation.required',
+      confirmation: view,
+      token: CONFIRMATION_TOKEN,
+    });
+
+    const replay = eventsFromTurnResult({
+      ...result,
+      confirmations: [{ confirmation: apiView(view), token: null }],
+    });
+    expect(replay[3]).toEqual({ type: 'confirmation.required', confirmation: view, token: null });
+    // Without the confirmations array entry, the execution's own view is used (token null).
+    const fromExecution = eventsFromTurnResult({ ...result, confirmations: [] });
+    expect(fromExecution[3]).toEqual({
+      type: 'confirmation.required',
+      confirmation: view,
+      token: null,
+    });
+    // A malformed view is skipped.
+    const malformed = eventsFromTurnResult({
+      ...result,
+      executions: [proposalExecution({ ...view, actionDigest: 'x' })],
+      confirmations: [
+        { confirmation: apiView({ ...view, actionDigest: 'x' }), token: CONFIRMATION_TOKEN },
+      ],
+    });
+    expect(malformed.map((e) => e.type)).not.toContain('confirmation.required');
+  });
+
+  it('marks the proposal chip as pending and keeps the token out of the turn state', () => {
+    let turn = newPendingTurn({
+      clientTurnId: 'c1',
+      conversationId: CONVERSATION_ID,
+      message: 'q',
+    });
+    const view = confirmationView();
+    const events: AssistantStreamEvent[] = [
+      { type: 'turn.started', turnId: TURN_ID, conversationId: CONVERSATION_ID, seq: 1 },
+      {
+        type: 'tool.started',
+        executionId: PROPOSAL_EXECUTION_ID,
+        tool: view.tool,
+        title: 'Create policy',
+      },
+      {
+        type: 'tool.completed',
+        executionId: PROPOSAL_EXECUTION_ID,
+        status: 'pending_confirmation',
+        decision: 'allowed',
+        card: PROPOSAL_CARD,
+      },
+      { type: 'confirmation.required', confirmation: view, token: CONFIRMATION_TOKEN },
+    ];
+    for (const event of events) turn = reduceTurn(turn, event);
+    expect(turn.tools).toHaveLength(1);
+    expect(turn.tools[0]).toMatchObject({
+      state: 'pending',
+      confirmation: view,
+      card: PROPOSAL_CARD,
+    });
+    expect(JSON.stringify(turn)).not.toContain(CONFIRMATION_TOKEN);
+  });
+});
+
+describe('confirmation store', () => {
+  const view = confirmationView();
+
+  it('holds the token of a live proposal until it is decided', () => {
+    let store = reduceConfirmations(EMPTY_CONFIRMATIONS, {
+      type: 'proposed',
+      view,
+      token: CONFIRMATION_TOKEN,
+    });
+    expect(store.get(PROPOSAL_EXECUTION_ID)).toMatchObject({
+      token: CONFIRMATION_TOKEN,
+      phase: 'idle',
+      focusPending: true,
+    });
+    store = reduceConfirmations(store, { type: 'focused', executionId: PROPOSAL_EXECUTION_ID });
+    expect(store.get(PROPOSAL_EXECUTION_ID)?.focusPending).toBe(false);
+    // A replay without a token keeps the token of the live event.
+    store = reduceConfirmations(store, { type: 'proposed', view, token: null });
+    expect(store.get(PROPOSAL_EXECUTION_ID)?.token).toBe(CONFIRMATION_TOKEN);
+    store = reduceConfirmations(store, {
+      type: 'phase',
+      executionId: PROPOSAL_EXECUTION_ID,
+      phase: 'confirming',
+    });
+    expect(store.get(PROPOSAL_EXECUTION_ID)?.phase).toBe('confirming');
+    store = reduceConfirmations(store, {
+      type: 'settled',
+      view: { ...view, status: 'executed', resultExecutionId: RESULT_CARD.executionId },
+      resultCard: RESULT_CARD,
+    });
+    expect(store.get(PROPOSAL_EXECUTION_ID)).toMatchObject({
+      token: null,
+      phase: 'decided',
+      resultCard: RESULT_CARD,
+    });
+    // An older (pending) view never overrides a decided one.
+    store = reduceConfirmations(store, { type: 'proposed', view, token: CONFIRMATION_TOKEN });
+    expect(store.get(PROPOSAL_EXECUTION_ID)).toMatchObject({
+      token: null,
+      phase: 'decided',
+    });
+    expect(store.get(PROPOSAL_EXECUTION_ID)?.view.status).toBe('executed');
+  });
+
+  it('drops tokens on refusal and on expiry', () => {
+    let store = reduceConfirmations(EMPTY_CONFIRMATIONS, {
+      type: 'proposed',
+      view: { ...view, expiresAt: '2026-11-20T09:05:00.000Z' },
+      token: CONFIRMATION_TOKEN,
+      now: Date.parse('2026-11-20T09:00:00.000Z'),
+    });
+    store = reduceConfirmations(store, {
+      type: 'proposed',
+      view: { ...view, id: 'c2', executionId: 'e2' },
+      token: 'b'.repeat(43),
+      now: Date.parse('2026-11-20T09:06:00.000Z'),
+    });
+    expect(store.get(PROPOSAL_EXECUTION_ID)?.token).toBeNull();
+    expect(store.get('e2')?.token).toBe('b'.repeat(43));
+    store = reduceConfirmations(store, { type: 'drop_token', executionId: 'e2' });
+    expect(store.get('e2')?.token).toBeNull();
+    expect(reduceConfirmations(store, { type: 'drop_token', executionId: 'e2' })).toBe(store);
+  });
+
+  it('merges newer views into tool entries and derives the chip from the confirmation', () => {
+    expect(newerView(view, { ...view, status: 'cancelled' }).status).toBe('cancelled');
+    expect(newerView({ ...view, status: 'failed' }, view).status).toBe('failed');
+    const store = reduceConfirmations(EMPTY_CONFIRMATIONS, {
+      type: 'settled',
+      view: { ...view, status: 'executed' },
+      resultCard: RESULT_CARD,
+    });
+    const tools = withLiveConfirmations(
+      [
+        {
+          executionId: PROPOSAL_EXECUTION_ID,
+          tool: view.tool,
+          title: 'Create policy',
+          state: 'pending',
+          decision: 'allowed',
+          card: PROPOSAL_CARD,
+          message: null,
+          confirmation: view,
+          resultCard: null,
+        },
+      ],
+      store,
+    );
+    expect(tools[0]).toMatchObject({ state: 'succeeded', resultCard: RESULT_CARD });
+    expect(tools[0]?.confirmation?.status).toBe('executed');
   });
 });

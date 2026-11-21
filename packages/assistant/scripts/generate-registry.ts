@@ -14,6 +14,7 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { buildRegistry, type OpenApiDocument, type RegistryBuild } from '../src/registry/build';
+import { registryConsistencyIssues } from '../src/registry/consistency';
 import { renderMatrix, renderOperationsModule } from '../src/registry/render';
 
 export const PACKAGE_DIR = join(__dirname, '..');
@@ -71,6 +72,9 @@ export interface GeneratedOutputs {
 export async function generateOutputs(): Promise<GeneratedOutputs> {
   const document = readOpenApi();
   const build = buildRegistry(document, readPortalUsage());
+  const issues = registryConsistencyIssues(build.tools);
+  if (issues.length > 0)
+    throw new Error(`Assistant registry consistency check failed:\n- ${issues.join('\n- ')}`);
   const idempotency = new Map<string, string>();
   for (const item of Object.values(document.paths))
     for (const op of Object.values(item))

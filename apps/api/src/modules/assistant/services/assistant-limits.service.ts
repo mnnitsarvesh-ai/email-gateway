@@ -144,6 +144,23 @@ export class AssistantLimitsService {
     return this.kv.exists(assistantKeys.turnCancel(turnPublicId));
   }
 
+  /**
+   * The assistant re-authentication window of a session family (step AI-2 D2 step 9): true
+   * when the session re-authenticated an assistant confirmation within
+   * ASSISTANT_REAUTH_WINDOW_SECONDS (0 = never fresh, always ask).
+   */
+  async reauthFresh(sessionFamilyId: string): Promise<boolean> {
+    if (this.config.ASSISTANT_REAUTH_WINDOW_SECONDS <= 0) return false;
+    return this.kv.exists(assistantKeys.reauthWindow(sessionFamilyId));
+  }
+
+  /** Opens (or renews) the window after a successful assistant re-authentication. */
+  async markReauthenticated(sessionFamilyId: string): Promise<void> {
+    const ttl = this.config.ASSISTANT_REAUTH_WINDOW_SECONDS;
+    if (ttl <= 0) return;
+    await this.kv.set(assistantKeys.reauthWindow(sessionFamilyId), '1', ttl);
+  }
+
   private async counter(key: string, seed: () => Promise<number>): Promise<number> {
     const cached = await this.kv.get(key);
     if (cached !== null) {

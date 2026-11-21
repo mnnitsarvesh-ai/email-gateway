@@ -695,6 +695,13 @@ export async function seed(): Promise<SeedSummary> {
         org: 'delta',
         name: 'Delta Mailbox',
       },
+      // Step AI-2: a delta admin with MFA (re-authentication of high-risk confirmations).
+      deltaMfaAdmin: {
+        email: `mfa-admin@${DELTA_DOMAIN}`,
+        roles: ['organization_admin'],
+        org: 'delta',
+        name: 'Delta MFA Admin',
+      },
       epsilonAdmin: {
         email: `admin@${EPSILON_DOMAIN}`,
         roles: ['organization_admin'],
@@ -756,6 +763,14 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(accessSecret, accessId) },
     });
     users.alphaAccessAdmin.totpSecret = accessSecret;
+    // Step AI-2: the delta admin with MFA (password + code for high-risk confirmations).
+    const deltaMfaSecret = base32Encode(randomBytes(20));
+    const deltaMfaId = userIds.get(spec.deltaMfaAdmin.email)!;
+    await p.user.update({
+      where: { id: deltaMfaId },
+      data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(deltaMfaSecret, deltaMfaId) },
+    });
+    users.deltaMfaAdmin.totpSecret = deltaMfaSecret;
 
     const memberHash = await hashPassword(generatePassword());
     const memberIds: string[] = [];

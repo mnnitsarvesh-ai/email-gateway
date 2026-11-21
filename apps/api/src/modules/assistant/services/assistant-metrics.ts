@@ -5,6 +5,23 @@ import { type Counter, type Gauge, type Histogram, MetricsService } from '@email
 const TURN_BUCKETS = [0.5, 1, 2.5, 5, 10, 20, 30, 60, 90, 120, 300];
 /** Seconds; one loopback tool call (≤ ASSISTANT_TOOL_TIMEOUT_MS). */
 const TOOL_BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 60];
+/** Seconds from a proposal to the user's decision (≤ ASSISTANT_CONFIRMATION_TTL_SECONDS). */
+const CONFIRMATION_BUCKETS = [1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600, 900];
+
+/** Outcomes of `assistant_confirmations_total` (step AI-2 D11). */
+export type ConfirmationOutcome =
+  | 'proposed'
+  | 'executed'
+  | 'failed'
+  | 'cancelled'
+  | 'expired'
+  | 'refused_session'
+  | 'refused_token'
+  | 'refused_digest'
+  | 'refused_state'
+  | 'reauth_required'
+  | 'reauth_failed'
+  | 'outcome_unknown';
 
 /**
  * The assistant series of design D11 on the api registry (`GET /metrics`). Labels are provider,
@@ -21,6 +38,8 @@ export class AssistantMetrics {
   readonly toolSeconds: Histogram<'module'>;
   readonly budgetRefusals: Counter<'scope'>;
   readonly activeTurns: Gauge;
+  readonly confirmations: Counter<'risk' | 'outcome'>;
+  readonly confirmationSeconds: Histogram;
 
   constructor(metrics: MetricsService) {
     this.turns = metrics.counter(
@@ -63,6 +82,18 @@ export class AssistantMetrics {
     this.activeTurns = metrics.gauge(
       'assistant_active_turns',
       'Assistant turns running in this api process',
+    );
+    this.confirmations = metrics.counter(
+      'assistant_confirmations_total',
+      'Assistant write confirmations by risk and outcome (proposed, executed, failed, cancelled, ' +
+        'expired, refused_*, reauth_required, reauth_failed, outcome_unknown)',
+      ['risk', 'outcome'],
+    );
+    this.confirmationSeconds = metrics.histogram(
+      'assistant_confirmation_seconds',
+      'Time from an assistant write proposal to the user’s decision',
+      [],
+      CONFIRMATION_BUCKETS,
     );
   }
 }

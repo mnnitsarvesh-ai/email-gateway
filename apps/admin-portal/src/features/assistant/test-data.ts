@@ -3,6 +3,8 @@ import type {
   AssistantSettings,
   AssistantStatus,
   AssistantTools,
+  ConfirmationSummary,
+  ConfirmationView,
   Conversation,
   Execution,
   StoredMessage,
@@ -168,6 +170,7 @@ export function execution(
     card: card as Execution['card'],
     latencyMs: 40,
     createdAt: '2026-11-20T09:00:01.000Z',
+    confirmation: null,
     ...overrides,
   };
 }
@@ -267,6 +270,213 @@ export function completedTurnFrames(text = 'Two policies are **active**.'): stri
     }),
     sseFrame('text.delta', { text: text.slice(0, 10) }),
     sseFrame('text.delta', { text: text.slice(10) }),
+    sseFrame('turn.completed', {
+      turnId: TURN_ID,
+      status: 'completed',
+      usage: { inputTokens: 100, outputTokens: 20 },
+      messageId: MESSAGE_ID,
+    }),
+  ];
+}
+
+/*
+ * Step AI-2 confirmations (synthetic). The operation ids are deliberately not real
+ * `<Name>Controller_<method>_v1` ids: the registry generator attributes real ids found in this
+ * feature's files to the assistant feature (AI-1 §12 #10).
+ */
+
+export const CONFIRMATION_ID = '01930000-0000-7000-8000-00000000c001';
+export const PROPOSAL_EXECUTION_ID = '01930000-0000-7000-8000-00000000e310';
+export const RESULT_EXECUTION_ID = '01930000-0000-7000-8000-00000000e311';
+/** Shape of a real token (43 base64url characters), obviously synthetic. */
+export const CONFIRMATION_TOKEN = 'a'.repeat(43);
+export const ACTION_DIGEST = 'ab'.repeat(32);
+
+export const LOW_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Create policy',
+  action:
+    'Creates the draft policy "Quarantine inbound executables". It does not apply to mail until it is published.',
+  target: [{ label: 'Policy', value: 'Quarantine inbound executables' }],
+  changes: [
+    { label: 'Name', before: null, after: 'Quarantine inbound executables' },
+    { label: 'Status', after: 'draft' },
+  ],
+  definition: {
+    direction: 'inbound',
+    priority: 100,
+    rules: [
+      {
+        id: 'quarantine-executables',
+        when: 'attachment.type_family in [executable] (any)',
+        actions: 'QUARANTINE',
+      },
+    ],
+  },
+  impact: [],
+  warnings: [],
+  reversible: true,
+  portalRoute: `/policies/${POLICY_ID}`,
+  request: { method: 'POST', path: '/api/v1/policies' },
+};
+
+export const MEDIUM_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Publish policy',
+  action: 'Publishes version 1 of "Quarantine inbound executables" and makes it active.',
+  target: [{ label: 'Policy', value: 'Quarantine inbound executables' }],
+  changes: [{ label: 'Status', before: 'draft', after: 'active' }],
+  impact: ['Applies to new inbound mail of the organization within a minute'],
+  warnings: [],
+  reversible: true,
+  portalRoute: `/policies/${POLICY_ID}`,
+  request: { method: 'POST', path: `/api/v1/policies/${POLICY_ID}/versions/1/publish` },
+};
+
+export const HIGH_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Delete quarantined message',
+  action: 'Deletes the quarantined message permanently.',
+  target: [
+    { label: 'Subject', value: 'Invoice 4711 overdue', untrusted: true },
+    { label: 'Sender', value: 'billing@example.net', untrusted: true },
+  ],
+  changes: [{ label: 'Status', before: 'quarantined', after: 'deleted' }],
+  impact: ['The recipient never receives this message'],
+  warnings: ['Deleting cannot be undone'],
+  reversible: false,
+  portalRoute: '/quarantine',
+  request: { method: 'DELETE', path: '/api/v1/quarantine/entries/example-entry' },
+};
+
+export function confirmationView(overrides: Partial<ConfirmationView> = {}): ConfirmationView {
+  return {
+    id: CONFIRMATION_ID,
+    executionId: PROPOSAL_EXECUTION_ID,
+    resultExecutionId: null,
+    conversationId: CONVERSATION_ID,
+    tool: 'policy_management_create',
+    operationId: 'policy-management.create',
+    risk: 'low',
+    requiresReauth: false,
+    reauthFresh: false,
+    status: 'pending',
+    summary: LOW_SUMMARY,
+    actionDigest: ACTION_DIGEST,
+    expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    createdAt: '2026-11-20T09:00:01.000Z',
+    decidedAt: null,
+    executedAt: null,
+    result: null,
+    ...overrides,
+  };
+}
+
+export const HIGH_VIEW_OVERRIDES: Partial<ConfirmationView> = {
+  tool: 'quarantine_entries_remove',
+  operationId: 'quarantine-entries.remove',
+  risk: 'high',
+  requiresReauth: true,
+  summary: HIGH_SUMMARY,
+};
+
+export const PROPOSAL_CARD: AssistantCard = {
+  version: 'assistant-card/1',
+  executionId: PROPOSAL_EXECUTION_ID,
+  tool: 'policy_management_create',
+  title: 'Create policy',
+  status: 'ok',
+  kind: 'message',
+  message: 'Waiting for your confirmation',
+  portalLinks: [],
+  refs: [],
+};
+
+export const RESULT_CARD: AssistantCard = {
+  version: 'assistant-card/1',
+  executionId: RESULT_EXECUTION_ID,
+  tool: 'policy_management_create',
+  title: 'Created policy',
+  status: 'ok',
+  kind: 'kv',
+  fields: [
+    { key: 'name', label: 'Name', value: 'Quarantine inbound executables' },
+    { key: 'status', label: 'Status', value: 'draft' },
+  ],
+  portalLinks: [{ label: 'Quarantine inbound executables', href: `/policies/${POLICY_ID}` }],
+  refs: ['r3'],
+};
+
+export const FAILED_RESULT_CARD: AssistantCard = {
+  version: 'assistant-card/1',
+  executionId: RESULT_EXECUTION_ID,
+  tool: 'policy_management_create',
+  title: 'Create policy',
+  status: 'error',
+  kind: 'error',
+  error: { httpStatus: 409, code: 'policy_conflict', message: 'A policy with this name exists' },
+  portalLinks: [],
+  refs: [],
+};
+
+/** The proposal execution of a write (status `pending_confirmation`). */
+export function proposalExecution(view: ConfirmationView = confirmationView()): Execution {
+  return execution(PROPOSAL_CARD, {
+    id: view.executionId,
+    ref: 'r2',
+    seq: 2,
+    tool: view.tool,
+    operationId: view.operationId,
+    access: 'write',
+    risk: view.risk,
+    status: 'pending_confirmation',
+    httpStatus: null,
+    hasMore: false,
+    confirmation: view as Execution['confirmation'],
+  });
+}
+
+/** The confirmed write's execution (child of the proposal, no turn). */
+export function resultExecution(card: AssistantCard = RESULT_CARD, httpStatus = 201): Execution {
+  return execution(card, {
+    id: RESULT_EXECUTION_ID,
+    turnId: null,
+    parentExecutionId: PROPOSAL_EXECUTION_ID,
+    ref: 'r3',
+    seq: 3,
+    tool: 'policy_management_create',
+    operationId: 'policy-management.create',
+    access: 'write',
+    risk: 'low',
+    status: card.status === 'ok' ? 'succeeded' : 'failed',
+    httpStatus,
+    errorCode: card.error?.code ?? null,
+    hasMore: false,
+  });
+}
+
+/** The frames of a turn that proposes one write. */
+export function proposalTurnFrames(
+  view: ConfirmationView = confirmationView(),
+  token: string = CONFIRMATION_TOKEN,
+): string[] {
+  return [
+    sseFrame('turn.started', { turnId: TURN_ID, conversationId: CONVERSATION_ID, seq: 1 }),
+    sseFrame('tool.started', {
+      executionId: view.executionId,
+      tool: view.tool,
+      title: view.summary?.title ?? view.tool,
+    }),
+    sseFrame('tool.completed', {
+      executionId: view.executionId,
+      status: 'pending_confirmation',
+      decision: 'allowed',
+      card: { ...PROPOSAL_CARD, executionId: view.executionId, tool: view.tool },
+    }),
+    sseFrame('confirmation.required', { confirmation: view, token }),
+    sseFrame('text.delta', {
+      text: 'I prepared this change. Review it in the confirmation card.',
+    }),
     sseFrame('turn.completed', {
       turnId: TURN_ID,
       status: 'completed',
