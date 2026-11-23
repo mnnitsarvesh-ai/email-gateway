@@ -8,6 +8,7 @@ import {
   KV_CARD,
   POLICY_ID,
   POLICY_ID_3,
+  SELF_GUARD_MESSAGE,
   SERIES_CARD,
   TABLE_CARD,
   execution,
@@ -167,5 +168,33 @@ describe('ResultCard (assistant-card/1)', () => {
       />,
     );
     expect(screen.getByText('Not available in chat; use the portal page')).toBeInTheDocument();
+  });
+
+  it('explains a proposal guard refusal with the server message as plain text (step AI-3 D3)', async () => {
+    const { container } = renderWithProviders(
+      <DeniedCard
+        title="Replace user roles"
+        decision="denied_guard"
+        message={SELF_GUARD_MESSAGE}
+      />,
+    );
+    const card = screen.getByRole('region', { name: 'Result: Replace user roles' });
+    expect(within(card).getByText('Not allowed in chat')).toBeInTheDocument();
+    expect(within(card).getByText(SELF_GUARD_MESSAGE)).toBeInTheDocument();
+    expect(within(card).queryByText(/only do what your role allows/)).not.toBeInTheDocument();
+    expect(within(card).queryByRole('link')).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('never turns markup or URLs of a denial message into elements', () => {
+    const message =
+      'See [your account](/settings?tab=security) or https://example.com/help <b>now</b>';
+    renderWithProviders(
+      <DeniedCard title="Revoke sessions" decision="denied_guard" message={message} />,
+    );
+    const card = screen.getByRole('region', { name: 'Result: Revoke sessions' });
+    expect(within(card).getByText(message)).toBeInTheDocument();
+    expect(within(card).queryByRole('link')).not.toBeInTheDocument();
+    expect(card.querySelector('b')).toBeNull();
   });
 });

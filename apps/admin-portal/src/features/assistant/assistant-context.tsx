@@ -15,6 +15,8 @@ import {
 import { callOperation } from '@/lib/api/call';
 import { ApiError } from '@/lib/api/errors';
 import { isAbortError } from '@/lib/api/stream';
+import { useMe } from '@/lib/auth/me';
+import { readPreference, writePreference } from '@/lib/local-preference';
 import { browserTimeZone, turnErrorText } from './model';
 import { StreamProtocolError, runTurn } from './stream';
 import {
@@ -82,6 +84,34 @@ function errorOf(error: unknown): { code: string; message: string; requestId: st
   return { code: 'client_error', message: turnErrorText('client_error'), requestId: null };
 }
 
+/**
+ * Remembered across page reloads (a UI convenience, never message content): the open conversation
+ * per user and organization (localStorage; the server still checks ownership, and a conversation
+ * that no longer exists falls back to a new chat), and whether the panel was open (sessionStorage,
+ * this tab only).
+ */
+const LAST_CONVERSATION_KEY = 'assistant.lastConversation';
+const PANEL_OPEN_KEY = 'eg:assistant.panelOpen';
+const isConversationRef = (value: unknown): value is string | null =>
+  value === null || (typeof value === 'string' && /^[0-9a-f-]{8,64}$/i.test(value));
+
+export function readPanelOpen(): boolean {
+  try {
+    return window.sessionStorage.getItem(PANEL_OPEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writePanelOpen(open: boolean): void {
+  try {
+    if (open) window.sessionStorage.setItem(PANEL_OPEN_KEY, '1');
+    else window.sessionStorage.removeItem(PANEL_OPEN_KEY);
+  } catch {
+    // storage unavailable: the panel simply starts closed after a reload
+  }
+}
+
 export function AssistantProvider({
   children,
   initialConversationId = null,
@@ -97,6 +127,37 @@ export function AssistantProvider({
   const controllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef<PendingTurn | null>(null);
   pendingRef.current = pending;
+
+  // Restore the open conversation and the panel after a reload, per user and organization (an
+  // operator switching tenants gets that tenant's own last conversation).
+  const me = useMe();
+  const scope = me.data ? `${me.data.user.id}:${me.data.organization.id}` : null;
+  const restoredScope = useRef<string | null>(null);
+  const conversationRef = useRef<string | null>(conversationId);
+  conversationRef.current = conversationId;
+  useEffect(() => {
+    if (!scope || restoredScope.current === scope) return;
+    const firstRestore = restoredScope.current === null;
+    restoredScope.current = scope;
+    if (firstRestore && readPanelOpen()) setPanelOpen(true);
+    // A conversation already chosen on arrival (e.g. `/assistant?conversation=…`) wins.
+    if (firstRestore && (initialConversationId || conversationRef.current)) return;
+    const stored = readPreference<string | null>(
+      `${LAST_CONVERSATION_KEY}.${scope}`,
+      null,
+      isConversationRef,
+    );
+    if (pendingRef.current?.status === 'running') return;
+    setPending(null);
+    setConversationId(stored);
+  }, [initialConversationId, scope]);
+  useEffect(() => {
+    if (!scope || restoredScope.current !== scope) return;
+    writePreference(`${LAST_CONVERSATION_KEY}.${scope}`, conversationId);
+  }, [conversationId, scope]);
+  useEffect(() => {
+    if (restoredScope.current) writePanelOpen(panelOpen);
+  }, [panelOpen]);
 
   useEffect(() => () => controllerRef.current?.abort(), []);
 
@@ -240,6 +301,8 @@ export function AssistantProvider({
 
   const selectConversation = useCallback((id: string | null) => {
     if (pendingRef.current?.status === 'running') return;
+    // Visible at once to the reload restore, which may run in the same commit.
+    conversationRef.current = id;
     setPending(null);
     setConversationId(id);
   }, []);

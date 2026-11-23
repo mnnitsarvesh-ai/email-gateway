@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 421 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 421;
+/** Snapshot facts: 422 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 422;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -18,6 +18,22 @@ export const operations = {
     cursor: null,
     rateClass: 'sensitive',
     returnsSecret: true,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  ApiKeysController_get_v1: {
+    operationId: 'ApiKeysController_get_v1',
+    method: 'GET',
+    path: '/api/v1/api-keys/{id}',
+    tag: 'api-keys',
+    permissions: [{ mode: 'all', permissions: ['apikey:read'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
     secretReplay: null,
     listKey: null,
     sort: null,
@@ -6775,6 +6791,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'DELETE',
     segments: ['api-keys', { param: 'id' }],
     operationId: 'ApiKeysController_revoke_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['api-keys', { param: 'id' }],
+    operationId: 'ApiKeysController_get_v1',
   },
   { method: 'GET', segments: ['api-keys'], operationId: 'ApiKeysController_list_v1' },
   { method: 'POST', segments: ['api-keys'], operationId: 'ApiKeysController_create_v1' },

@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
   actionDigest,
+  ESCALATION_WARNINGS,
   findTool,
+  GUARD_MESSAGES,
   hashConfirmationToken,
   PENDING_CONFIRMATION_NOTE,
+  stateDigest,
 } from '@email-gateway/assistant';
 import { Logger } from '@nestjs/common';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1032,5 +1035,405 @@ describe('catalogue and logs', () => {
     ]) {
       expect(logged).not.toContain(secret);
     }
+  });
+});
+
+describe('step AI-3: guards after the read, effective risk, selected items, confirm re-checks', () => {
+  const SELF = defaultUser().userPublicId;
+  const OTHER = '0193b000-0000-7000-8000-000000000502';
+  const ROLE = 'it_custom';
+  const WEBHOOK = '0193c000-0000-7000-8000-0000000000b1';
+  const SESSION = '0193c000-0000-7000-8000-0000000005e1';
+  const ORG = '0193b000-0000-7000-8000-000000007002';
+  const REAUTH = { reauth: { password: REAUTH_PASSWORD, totpCode: REAUTH_TOTP } };
+  const admin = () =>
+    defaultUser({
+      permissions: new Set([
+        ...PERMISSIONS,
+        'user:read',
+        'user:manage',
+        'session:manage',
+        'role:read',
+        'role:manage',
+        'webhook:read',
+        'webhook:manage',
+        'scan:settings_manage',
+      ]),
+    });
+
+  /** `setup` with the identity, role, webhook, session and scan-settings reads and writes. */
+  function identity(env: Record<string, string> = {}, user: UserPrincipal = admin()) {
+    const t = setup(env, user);
+    const role = {
+      key: ROLE,
+      name: 'IT custom',
+      description: null as string | null,
+      permissions: ['policy:read', 'assistant:configure'],
+      system: false,
+    };
+    const webhook = {
+      id: WEBHOOK,
+      name: 'SIEM',
+      url: 'https://hooks.example.test/siem',
+      status: 'active',
+      rowVersion: 2,
+    };
+    const sessions = [
+      {
+        id: SESSION,
+        authenticatedAt: '2026-11-21T08:00:00.000Z',
+        expiresAt: '2026-11-22T08:00:00.000Z',
+        lastUsedAt: '2026-11-21T09:00:00.000Z',
+        ipAddress: '198.51.100.20',
+        userAgent: 'IT browser',
+        mfaAuthenticated: true,
+        // Not a state, row-version or display field: never stored anywhere.
+        internalMarker: 'raw-only-marker-1',
+      },
+    ];
+    const engines = [
+      {
+        engine: 'rspamd',
+        version: 4,
+        override: { spamScore: 8 },
+        required: false,
+        overrideApplied: true,
+        internalMarker: 'raw-only-marker-2',
+      },
+    ];
+    const userBody = (id: string) => ({
+      id,
+      email: `${id === SELF ? 'me' : 'other'}@example.test`,
+      displayName: id === SELF ? 'Me' : 'Other',
+      status: 'active',
+      lockedUntil: null,
+      mfaEnabled: true,
+      roles: [{ key: 'security_analyst' }],
+    });
+    const ok = (body: unknown) => ({ kind: 'response' as const, status: 200, body });
+    for (const id of [SELF, OTHER]) {
+      t.h.loopback.on(`GET /api/v1/users/${id}`, () => ok(userBody(id)));
+      t.h.loopback.on(`PATCH /api/v1/users/${id}`, (call) => {
+        t.writes.push(call);
+        return ok(userBody(id));
+      });
+    }
+    t.h.loopback.on(`GET /api/v1/users/${OTHER}/sessions`, () =>
+      ok({ data: structuredClone(sessions) }),
+    );
+    t.h.loopback.on(`DELETE /api/v1/users/${OTHER}/sessions/${SESSION}`, (call) => {
+      t.writes.push(call);
+      return { kind: 'response', status: 204, body: null };
+    });
+    t.h.loopback.on(`GET /api/v1/roles/${ROLE}`, () => ok(structuredClone(role)));
+    t.h.loopback.on(`PUT /api/v1/roles/${ROLE}`, (call) => {
+      t.writes.push(call);
+      return ok(structuredClone(role));
+    });
+    t.h.loopback.on(`GET /api/v1/webhooks/${WEBHOOK}`, () => ok(structuredClone(webhook)));
+    t.h.loopback.on(`PATCH /api/v1/webhooks/${WEBHOOK}`, (call) => {
+      t.writes.push(call);
+      webhook.rowVersion += 1;
+      return ok(structuredClone(webhook));
+    });
+    t.h.loopback.on('GET /api/v1/scan-settings', () => ok({ data: structuredClone(engines) }));
+    t.h.loopback.on('PUT /api/v1/scan-settings/rspamd', (call) => {
+      t.writes.push(call);
+      return ok(structuredClone(engines[0]));
+    });
+    return { ...t, role, webhook, sessions, engines };
+  }
+
+  /** Re-signs a (tampered) row so that only the AI-3 checks can catch the change. */
+  const resign = (t: ReturnType<typeof identity>, out: ExecutionOutcome): string => {
+    const stored = t.row(out);
+    stored.actionDigest = actionDigest(
+      digestInputOf({
+        confirmationId: stored.publicId,
+        organizationPublicId: t.user.organizationPublicId,
+        userPublicId: t.user.userPublicId,
+        sessionFamilyId: stored.sessionFamilyId,
+        overrideId: null,
+        conversationId: t.conversation.publicId,
+        executionId: out.executionId,
+        tool: stored.toolName,
+        operationId: stored.operationId,
+        risk: stored.risk,
+        requiresReauth: stored.requiresReauth,
+        request: parseStoredRequest(stored.request)!,
+        stateDigest: stored.stateDigest,
+        preconditions: parseStoredPreconditions(stored.preconditions)!,
+        expiresAt: stored.expiresAt,
+      }),
+    );
+    return stored.actionDigest;
+  };
+  const metricOf = async (t: ReturnType<typeof identity>, outcome: string): Promise<number> =>
+    (await t.h.metrics.confirmations.get()).values
+      .filter((v) => v.labels.outcome === outcome)
+      .reduce((sum, v) => sum + v.value, 0);
+  const serialized = (value: unknown) =>
+    JSON.stringify(value, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+
+  it('roles_update: adding or removing assistant:configure → denied_guard after the read (no row)', async () => {
+    for (const [before, after] of [
+      [['policy:read'], ['policy:read', 'assistant:configure']],
+      [['policy:read', 'assistant:configure'], ['policy:read']],
+    ]) {
+      const t = identity();
+      t.role.permissions = before!;
+      const out = await t.propose('roles_update', {
+        key: ROLE,
+        body: { name: 'IT custom', permissions: after },
+      });
+      expect(out).toMatchObject({
+        decision: 'denied_guard',
+        status: 'refused',
+        denialMessage: GUARD_MESSAGES.assistant_configure,
+      });
+      expect(out.envelope).toMatchObject({ status: 'denied', decision: 'denied_guard' });
+      // Only the precondition read reached the api.
+      expect(t.h.loopback.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+        `GET /api/v1/roles/${ROLE}`,
+      ]);
+      expect(t.h.world.confirmations).toHaveLength(0);
+      expect(t.h.audit.entries.map((e) => e.action)).toEqual(['assistant.tool_denied']);
+      expect(t.h.audit.entries[0]!.metadata).toMatchObject({
+        decision: 'denied_guard',
+        guard: 'deny_permission_change',
+      });
+    }
+  });
+
+  it('roles_update keeping assistant:configure is a high-risk proposal that confirms', async () => {
+    const t = identity();
+    const out = await t.propose('roles_update', {
+      key: ROLE,
+      body: {
+        name: 'IT custom',
+        permissions: ['policy:read', 'assistant:configure', 'message:read'],
+      },
+    });
+    expect(out.status).toBe('pending_confirmation');
+    expect(out.confirmation!.view).toMatchObject({ risk: 'high', requiresReauth: true });
+    expect((await t.confirm(out, REAUTH)).confirmation.status).toBe('executed');
+    expect(t.writes.map((w) => `${w.method} ${w.path}`)).toEqual([`PUT /api/v1/roles/${ROLE}`]);
+  });
+
+  it('confirm-time after-read guard (tampered, re-signed request) → 403 action_not_allowed, row failed', async () => {
+    const t = identity();
+    const out = await t.propose('roles_update', {
+      key: ROLE,
+      body: { name: 'IT custom', permissions: ['policy:read', 'assistant:configure'] },
+    });
+    expect(out.status).toBe('pending_confirmation');
+    const stored = t.row(out);
+    (stored.request as { body: { permissions: string[] } }).body.permissions = ['policy:read'];
+    const digest = resign(t, out);
+    expect(await coded(t.confirm(out, { actionDigest: digest, ...REAUTH }))).toMatchObject({
+      status: 403,
+      code: 'assistant_action_not_allowed',
+    });
+    expect(stored).toMatchObject({ status: 'failed', errorCode: 'assistant_action_not_allowed' });
+    expect(t.writes).toHaveLength(0);
+    const refused = t.h.audit.entries.find((e) => e.action === 'assistant.confirmation_refused');
+    expect(refused!.metadata).toMatchObject({ reason: 'guard', guard: 'deny_permission_change' });
+    expect(t.h.audit.entries.some((e) => e.action === 'assistant.confirmation_failed')).toBe(true);
+    expect(await metricOf(t, 'refused_guard')).toBe(1);
+  });
+
+  it('confirm-time before-read guard: a row re-targeted at the caller → 403, row failed, nothing read', async () => {
+    const t = identity();
+    const out = await t.propose('users_update', { id: OTHER, body: { displayName: 'Renamed' } });
+    expect(out.confirmation!.view).toMatchObject({ risk: 'low', requiresReauth: false });
+    const stored = t.row(out);
+    const request = stored.request as { path: string; params: Record<string, unknown> };
+    request.path = `/api/v1/users/${SELF}`;
+    request.params.id = SELF;
+    const digest = resign(t, out);
+    const reads = t.h.loopback.calls.length;
+    expect(await coded(t.confirm(out, { actionDigest: digest }))).toMatchObject({
+      status: 403,
+      code: 'assistant_action_not_allowed',
+    });
+    expect(stored).toMatchObject({ status: 'failed', errorCode: 'assistant_action_not_allowed' });
+    expect(t.h.loopback.calls).toHaveLength(reads);
+    expect(t.writes).toHaveLength(0);
+    expect(
+      t.h.audit.entries.find((e) => e.action === 'assistant.confirmation_refused')!.metadata,
+    ).toMatchObject({ reason: 'guard', guard: 'not_self_user' });
+  });
+
+  it('effective risk: webhooks_update with body.url is high (re-auth, warning); a rename stays low', async () => {
+    const t = identity();
+    const moved = await t.propose('webhooks_update', {
+      webhookId: WEBHOOK,
+      body: { url: 'https://hooks.example.test/new' },
+    });
+    expect(moved.envelope).toMatchObject({ risk: 'high', requiresReauth: true });
+    expect(t.row(moved)).toMatchObject({ risk: 'high', requiresReauth: true });
+    expect(moved.confirmation!.view.summary!.warnings).toContain(ESCALATION_WARNINGS.webhookUrl);
+    // CAS injected from the read; the digest binds the stored (effective) risk.
+    expect((t.row(moved).request as { body: unknown }).body).toEqual({
+      url: 'https://hooks.example.test/new',
+      expectedRowVersion: 2,
+    });
+    const requested = t.h.audit.entries.filter(
+      (e) => e.action === 'assistant.confirmation_requested',
+    );
+    expect(requested[0]!.metadata).toMatchObject({ risk: 'high', baseRisk: 'low' });
+    expect((await coded(t.confirm(moved))).code).toBe('assistant_reauth_required');
+
+    const renamed = await t.propose('webhooks_update', {
+      webhookId: WEBHOOK,
+      body: { name: 'SIEM (EU)' },
+    });
+    expect(t.row(renamed)).toMatchObject({ risk: 'low', requiresReauth: false });
+    expect(renamed.confirmation!.view.summary!.warnings ?? []).not.toContain(
+      ESCALATION_WARNINGS.webhookUrl,
+    );
+    expect(
+      t.h.audit.entries.filter((e) => e.action === 'assistant.confirmation_requested')[1]!.metadata,
+    ).toMatchObject({ risk: 'low', baseRisk: 'low' });
+    expect((await t.confirm(renamed)).confirmation.status).toBe('executed');
+    expect(t.writes).toHaveLength(1);
+  });
+
+  it('a stored risk that differs from the recomputed effective risk → 409 tool_changed, row failed', async () => {
+    const t = identity();
+    const out = await t.propose('webhooks_update', {
+      webhookId: WEBHOOK,
+      body: { url: 'https://hooks.example.test/new' },
+    });
+    const stored = t.row(out);
+    stored.risk = 'low';
+    stored.requiresReauth = false;
+    const digest = resign(t, out);
+    expect(await coded(t.confirm(out, { actionDigest: digest }))).toMatchObject({
+      status: 409,
+      code: 'assistant_confirmation_tool_changed',
+    });
+    expect(stored).toMatchObject({
+      status: 'failed',
+      errorCode: 'assistant_confirmation_tool_changed',
+    });
+    expect(t.writes).toHaveLength(0);
+  });
+
+  it('select: users_revoke_session reads the session list; a missing session fails the proposal 404', async () => {
+    const t = identity();
+    const out = await t.propose('users_revoke_session', { id: OTHER, sessionId: SESSION });
+    expect(out.status).toBe('pending_confirmation');
+    const pre = t.row(out).preconditions as { snapshot: Record<string, unknown> };
+    expect(pre.snapshot).toMatchObject({
+      authenticatedAt: '2026-11-21T08:00:00.000Z',
+      expiresAt: '2026-11-22T08:00:00.000Z',
+      ipAddress: '198.51.100.20',
+      userAgent: 'IT browser',
+    });
+    expect(t.row(out).stateDigest).toBe(
+      stateDigest(t.sessions[0], ['authenticatedAt', 'expiresAt']),
+    );
+    // The raw target stays in memory: never in rows, executions or audit.
+    expect(
+      serialized({ c: t.h.world.confirmations, e: t.h.world.executions, a: t.h.audit.entries }),
+    ).not.toContain('raw-only-marker-1');
+
+    const missing = await t.propose('users_revoke_session', {
+      id: OTHER,
+      sessionId: '0193c000-0000-7000-8000-0000000005e9',
+    });
+    expect(missing).toMatchObject({
+      decision: 'allowed',
+      status: 'failed',
+      httpStatus: 404,
+      errorCode: 'not_found',
+    });
+    expect(t.h.world.confirmations).toHaveLength(1);
+
+    // The session changed (refreshed) before the confirm → 409 state_changed, nothing revoked.
+    t.sessions[0]!.expiresAt = '2026-11-23T08:00:00.000Z';
+    expect(await coded(t.confirm(out, REAUTH))).toMatchObject({
+      status: 409,
+      code: 'assistant_confirmation_state_changed',
+    });
+    expect(t.row(out).status).toBe('failed');
+    // Gone at confirm: the selected item is missing → refused as changed with the 404.
+    const next = await t.propose('users_revoke_session', { id: OTHER, sessionId: SESSION });
+    t.sessions.length = 0;
+    expect(await coded(t.confirm(next))).toMatchObject({
+      code: 'assistant_confirmation_state_changed',
+      details: { httpStatus: 404 },
+    });
+    expect(t.writes).toHaveLength(0);
+  });
+
+  it('select: the unchanged session confirms and revokes', async () => {
+    const t = identity();
+    const out = await t.propose('users_revoke_session', { id: OTHER, sessionId: SESSION });
+    expect((await t.confirm(out, REAUTH)).confirmation.status).toBe('executed');
+    expect(t.writes.map((w) => `${w.method} ${w.path}`)).toEqual([
+      `DELETE /api/v1/users/${OTHER}/sessions/${SESSION}`,
+    ]);
+  });
+
+  it('select (optional): a feature without a stored value has a null snapshot and the digest of {}', async () => {
+    const operator = defaultUser({
+      organizationKind: 'platform',
+      permissions: new Set(['assistant:use', 'platform:organizations']),
+    });
+    const t = setup({}, operator);
+    t.h.loopback.on(`GET /api/v1/organizations/${ORG}/features`, () => ({
+      kind: 'response',
+      status: 200,
+      body: { data: [{ key: 'webhooks', enabled: true, config: null, source: 'plan' }] },
+    }));
+    const out = await t.propose('organization_configuration_override_feature', {
+      id: ORG,
+      featureKey: 'dlp',
+      body: { enabled: true },
+    });
+    expect(out.status).toBe('pending_confirmation');
+    const stored = t.row(out);
+    expect((stored.preconditions as { snapshot: unknown }).snapshot).toEqual({
+      enabled: null,
+      config: null,
+      source: null,
+    });
+    expect(stored.stateDigest).toBe(stateDigest({}, ['enabled', 'config', 'source']));
+    expect(stored).toMatchObject({ risk: 'high', requiresReauth: true });
+  });
+
+  it('select (required) with CAS: the scan engine’s version is injected as expectedVersion', async () => {
+    const t = identity();
+    const replace = await t.propose('scan_settings_replace', {
+      engine: 'rspamd',
+      body: { settings: { spamScore: 9 } },
+    });
+    expect(replace.status).toBe('pending_confirmation');
+    expect(t.row(replace).request).toMatchObject({
+      method: 'PUT',
+      path: '/api/v1/scan-settings/rspamd',
+      body: { settings: { spamScore: 9 }, expectedVersion: 4 },
+    });
+    expect((t.row(replace).preconditions as { rowVersion: number }).rowVersion).toBe(4);
+    const reset = await t.propose('scan_settings_reset', { engine: 'rspamd' });
+    expect(t.row(reset).request).toMatchObject({
+      method: 'DELETE',
+      path: '/api/v1/scan-settings/rspamd?expectedVersion=4',
+    });
+    // An engine the list does not have: 404, no row.
+    const unknown = await t.propose('scan_settings_reset', { engine: 'sandbox' });
+    expect(unknown).toMatchObject({ status: 'failed', httpStatus: 404, errorCode: 'not_found' });
+    expect(serialized({ c: t.h.world.confirmations, a: t.h.audit.entries })).not.toContain(
+      'raw-only-marker-2',
+    );
+    // The engine's version moved before the confirm → 409 state_changed.
+    t.engines[0]!.version = 5;
+    expect(await coded(t.confirm(replace, REAUTH))).toMatchObject({
+      status: 409,
+      code: 'assistant_confirmation_state_changed',
+    });
+    expect(t.writes).toHaveLength(0);
   });
 });

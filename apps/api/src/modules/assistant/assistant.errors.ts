@@ -32,6 +32,8 @@ export const ASSISTANT_ERROR_CODES = {
   confirmationStateChanged: 'assistant_confirmation_state_changed',
   reauthRequired: 'assistant_reauth_required',
   reauthFailed: 'assistant_reauth_failed',
+  // Step AI-3 D3/D10: a proposal guard refused the change at confirm (403).
+  actionNotAllowed: 'assistant_action_not_allowed',
 } as const;
 
 /**
@@ -238,6 +240,10 @@ export const confirmationStateChanged = (httpStatus: number | null = null): Code
     'The record changed since this was proposed; ask again to see the current state',
     httpStatus === null ? {} : { httpStatus },
   );
+
+/** Step AI-3 D10: a proposal guard refused the confirmed change (I12; the row fails). */
+export const assistantActionNotAllowed = (): CodedHttpException =>
+  err(HttpStatus.FORBIDDEN, C.actionNotAllowed, 'This change is not allowed in chat.');
 
 export const assistantReauthRequired = (): CodedHttpException =>
   err(

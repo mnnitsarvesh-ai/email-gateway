@@ -377,9 +377,15 @@ export function buildRegistry(document: OpenApiDocument, usage: PortalUsage): Re
         continue;
       }
 
+      if (override.access !== undefined && (override.access as string) !== 'write')
+        throw new Error(
+          `${operationId}: an access override may only make a read a write, never the reverse`,
+        );
+      const access = override.access ?? classification.access;
+      if (access === 'write' && classification.access === 'read' && override.risk === undefined)
+        throw new Error(`${operationId}: a read reclassified as a write needs a risk override`);
       const risk = override.risk ?? classification.risk;
       const phase = override.phase ?? classification.phase;
-      const access = classification.access;
       const bind = { ...(override.bind ?? {}) };
       const parts = buildInputSchema(op, components, new Set(Object.keys(bind)));
       const enabled =

@@ -1,5 +1,6 @@
 import {
   findTool,
+  sanitizeText,
   NOT_APPLICABLE_OPERATIONS,
   type NotApplicableOperation,
   OPERATION_TOOLS,
@@ -59,6 +60,23 @@ export function lookupTool(name: string): ToolLookup {
   if (tool) return { kind: 'tool', tool };
   const operation = NOT_APPLICABLE_BY_NAME.get(name);
   return operation ? { kind: 'not_applicable', operation } : { kind: 'unknown' };
+}
+
+/**
+ * The display title of a tool call (the stream's `tool.started` title and the execution view's
+ * `title`): the tool's display title or summary, the summary of a not-applicable operation, else
+ * the (sanitised) name.
+ */
+export function toolTitleOf(name: string): string {
+  const lookup = lookupTool(name);
+  return sanitizeText(
+    lookup.kind === 'tool'
+      ? (lookup.tool.display.title ?? lookup.tool.summary)
+      : lookup.kind === 'not_applicable'
+        ? lookup.operation.summary
+        : name,
+    120,
+  );
 }
 
 /** Public id of the scope's organization (the override target under a platform override). */

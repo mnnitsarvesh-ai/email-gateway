@@ -1,0 +1,28 @@
+-- Step AI-3: assistant proposal guard decision
+-- (docs/plan/steps/30-ai-chat-identity-tenant-admin.md §3, D3, D10; ADR-0093 as amended in
+-- AI-3).
+--
+-- Additive only (no table, column, index or data change; 176 tables, 41 partitioned):
+--   * ai_chat_tool_executions.decision gains `denied_guard`: an assistant proposal guard
+--     (separation of duties: no change to one's own account, roles, MFA or sessions through chat;
+--     the assistant cannot change its own enablement or who may configure it) refused the tool
+--     call. The execution row is `refused` and no loopback request was sent. The value is
+--     appended at the end of the list, existing values and their order are unchanged, and the
+--     column stays NOT NULL without a default or comment (as created in 20261120141509_ai_assistant).
+--
+-- Locking: appending an ENUM value is ALGORITHM=INSTANT on MySQL 8.4 (metadata only; the ENUM
+-- keeps its 1-byte storage, no table copy, no row touched). MySQL refuses instead of copying if
+-- it ever could not be INSTANT.
+--
+-- Rollback (never automatic; after rolling the api and the portal back, AI-3 being the only
+-- writer of the value; an older api never writes it):
+--   The `denied_guard` value may stay. To remove it, first delete (or update to another decision)
+--   the rows that carry it:
+--     DELETE FROM ai_chat_tool_executions WHERE decision = 'denied_guard';
+--   then
+--     ALTER TABLE ai_chat_tool_executions MODIFY `decision`
+--       ENUM('allowed', 'denied_permission', 'denied_unknown_tool', 'denied_disabled',
+--            'denied_not_applicable', 'denied_schema', 'denied_ref', 'denied_budget') NOT NULL;
+--   Then delete the migration's `_prisma_migrations` row. See docs/database/README.md.
+
+ALTER TABLE `ai_chat_tool_executions` MODIFY `decision` ENUM('allowed', 'denied_permission', 'denied_unknown_tool', 'denied_disabled', 'denied_not_applicable', 'denied_schema', 'denied_ref', 'denied_budget', 'denied_guard') NOT NULL, ALGORITHM=INSTANT;

@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ErrorState } from '@/components/states/error-state';
 import { LoadingState } from '@/components/states/loading-state';
 import { Button } from '@/components/ui/button';
+import { ApiError } from '@/lib/api/errors';
 import { cn } from '@/lib/utils';
 import { useAssistant } from './assistant-context';
 import { ConfirmationCard } from './confirmation-card';
@@ -82,6 +83,16 @@ const CHIP: Record<ToolChipState, { label: string; icon: typeof CheckCircle2Icon
     },
   };
 
+/** The nearest ancestor that scrolls vertically, never the document itself. */
+export function scrollContainerOf(element: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    if (node === document.body || node === document.documentElement) return null;
+    const { overflowY } = window.getComputedStyle(node);
+    if (overflowY === 'auto' || overflowY === 'scroll') return node;
+  }
+  return null;
+}
+
 function parseCard(value: unknown): AssistantCard | null {
   const parsed = cardSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
@@ -96,13 +107,15 @@ function toEntry(execution: StoredExecution): ToolEntry {
   return {
     executionId: execution.id,
     tool: execution.tool,
-    title: confirmation?.summary?.title ?? card?.title ?? execution.tool,
+    title: confirmation?.summary?.title ?? card?.title ?? execution.title,
     state: confirmation
       ? confirmationChipState(confirmation.status)
       : chipState(execution.status, execution.decision),
     decision: execution.decision,
     card,
-    message: card?.message ?? card?.error?.message ?? execution.errorCode,
+    // A refused call has no card: its message is the api's fixed text (for `denied_guard` the
+    // guard's own message, design 30 D12), as the live `tool.denied` event carried it.
+    message: card?.message ?? card?.error?.message ?? execution.message ?? execution.errorCode,
     confirmation,
     resultCard: null,
   };
@@ -448,8 +461,16 @@ export function ConversationView({
   onNavigate?: () => void;
   className?: string;
 }) {
-  const { conversationId, pending, running, send, retry, confirmations } = useAssistant();
+  const { conversationId, pending, running, send, retry, confirmations, selectConversation } =
+    useAssistant();
   const messages = useConversationMessages(conversationId);
+
+  // A remembered conversation that no longer exists (deleted, purged by retention, or another
+  // user's): start a new chat instead of showing an error.
+  const missing = messages.error instanceof ApiError && messages.error.status === 404;
+  useEffect(() => {
+    if (missing && !running) selectConversation(null);
+  }, [missing, running, selectConversation]);
   const endRef = useRef<HTMLDivElement>(null);
   // Confirmation status changes (D10): one polite status region for the conversation.
   const [announcement, setAnnouncement] = useState('');
@@ -473,7 +494,11 @@ export function ConversationView({
   const lastExchange = exchanges[exchanges.length - 1];
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' });
+    // Scroll only the conversation's own scroll container: `scrollIntoView` would also scroll
+    // the window (and every other scrollable ancestor), dragging the whole console page.
+    const end = endRef.current;
+    const container = end ? scrollContainerOf(end) : null;
+    if (container) container.scrollTop = container.scrollHeight;
   }, [exchanges.length, pending?.text, pending?.tools.length, pending?.status]);
 
   // The running turn stays visible while the stored messages (re)load.

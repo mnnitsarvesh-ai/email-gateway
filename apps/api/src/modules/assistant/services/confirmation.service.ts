@@ -2,9 +2,14 @@ import { timingSafeEqual } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   actionDigest,
+  type ConfirmationRisk,
+  type ConfirmationSpec,
   confirmationSpecOf,
   type ConfirmationView,
+  effectiveRisk,
   findTool,
+  type GuardRefusal,
+  guardRefusal,
   isDigestHex,
   type OperationTool,
   tokenMatches,
@@ -28,6 +33,7 @@ import {
 } from '../assistant.constants';
 import {
   ASSISTANT_ERROR_CODES,
+  assistantActionNotAllowed,
   assistantReauthFailed,
   assistantReauthRequired,
   assistantTurnInProgress,
@@ -86,7 +92,9 @@ type RefusalReason =
   | 'reauth_required'
   | 'reauth_failed'
   | 'turn_in_progress'
-  | 'state_changed';
+  | 'state_changed'
+  /** Step AI-3 D10: a proposal guard refused the change. */
+  | 'guard';
 
 const hexEquals = (a: string, b: string): boolean =>
   isDigestHex(a) && isDigestHex(b) && timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
@@ -113,6 +121,13 @@ interface Stored {
  * in the transaction of the result execution (a sweep's outcome unknown is replaced by the real
  * outcome, audited with `reconciledFrom`). Logs and audit rows carry ids and codes only: never the token, the digest
  * input, request bodies, passwords or codes.
+ *
+ * Step AI-3 (design 30 D10): after the tool check, the effective risk is recomputed from the
+ * stored arguments (a difference from the stored risk fails the row, `409 tool_changed`) and the
+ * before-read proposal guards are evaluated again with the confirming principal; after the
+ * precondition re-read the after-read guards run on the fresh target. A guard refusal fails the
+ * row (`assistant_action_not_allowed`), is audited `assistant.confirmation_refused` (`reason:
+ * guard`) and answers `403 assistant_action_not_allowed`.
  */
 @Injectable()
 export class ConfirmationService {
@@ -312,6 +327,31 @@ export class ConfirmationService {
       this.metrics.confirmations.inc({ risk: row.risk, outcome: 'failed' });
       throw new CodedHttpException(HttpStatus.FORBIDDEN, 'forbidden', 'Forbidden');
     }
+    // 7a. Step AI-3 D4/D10: the effective risk of the stored arguments is the stored risk.
+    const spec = confirmationSpecOf(tool.operationId)!;
+    const args = argsOfStoredRequest(stored.request);
+    if (this.effectiveRiskOf(tool, spec, args) !== row.risk) {
+      await this.failRow(
+        principal,
+        scope,
+        owner,
+        row,
+        ASSISTANT_ERROR_CODES.confirmationToolChanged,
+        sourceIp,
+      );
+      this.metrics.confirmations.inc({ risk: row.risk, outcome: 'failed' });
+      throw confirmationToolChanged();
+    }
+    // 7b. Step AI-3 D3/D10: the before-read proposal guards, with the confirming principal.
+    const beforeRead = guardRefusal(
+      spec,
+      { args, principalUserPublicId: principal.userPublicId, read: null },
+      'before_read',
+    );
+    if (beforeRead) {
+      await this.refuseGuard(principal, scope, owner, row, beforeRead, sourceIp);
+      throw assistantActionNotAllowed();
+    }
     // 8. Availability (platform switch, feature, tenant setting; the budget is not consumed).
     try {
       await this.availability.assertAvailable(scope, now, false);
@@ -358,8 +398,7 @@ export class ConfirmationService {
       this.observeDecision(row, decidedAt);
       const correlationBase = (getCorrelationId() ?? lock).slice(0, 128);
       // 12. The precondition re-read with the confirm request's credential.
-      const spec = confirmationSpecOf(tool.operationId)!;
-      const args = argsOfStoredRequest(stored.request);
+      let target: unknown = null;
       if (spec.precondition !== null) {
         const read = await this.proposer.readPreconditions(
           {
@@ -385,6 +424,17 @@ export class ConfirmationService {
           this.metrics.confirmations.inc({ risk: row.risk, outcome: 'refused_state' });
           throw confirmationStateChanged(read.ok ? null : httpStatus);
         }
+        target = read.state.raw ?? null;
+      }
+      // 12a. Step AI-3 D10: the after-read proposal guards on the fresh target.
+      const afterRead = guardRefusal(
+        spec,
+        { args, principalUserPublicId: principal.userPublicId, read: target },
+        'after_read',
+      );
+      if (afterRead) {
+        await this.refuseGuard(principal, scope, owner, row, afterRead, sourceIp);
+        throw assistantActionNotAllowed();
       }
       // 13. Claim the write (`execution_started_at`), then execute the stored request. A row the
       // outcome-unknown sweep failed while the re-read ran loses the claim: nothing is sent.
@@ -571,6 +621,44 @@ export class ConfirmationService {
       (segment, i) => /^\{[^}]+\}$/.test(segment) || segment === segments[i],
     );
     return matches ? tool : null;
+  }
+
+  /** The effective risk of stored arguments, or null when the tool's risk is not confirmable. */
+  private effectiveRiskOf(
+    tool: OperationTool,
+    spec: ConfirmationSpec,
+    args: Readonly<Record<string, unknown>>,
+  ): ConfirmationRisk | null {
+    try {
+      return effectiveRisk(tool, spec, args).risk;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A proposal guard refused at confirm (step AI-3 D10): the row fails
+   * `assistant_action_not_allowed` and the refusal is audited (`reason: guard`, `guard` kind).
+   */
+  private async refuseGuard(
+    principal: UserPrincipal,
+    scope: TenantScope,
+    owner: Owner,
+    row: ConfirmationWithRefs,
+    refusal: GuardRefusal,
+    sourceIp: string | null,
+  ): Promise<void> {
+    await this.failRow(
+      principal,
+      scope,
+      owner,
+      row,
+      ASSISTANT_ERROR_CODES.actionNotAllowed,
+      sourceIp,
+    );
+    await this.refused(principal, scope, row, 'guard', sourceIp, 'refused_guard', {
+      guard: refusal.guard,
+    });
   }
 
   private sameState(

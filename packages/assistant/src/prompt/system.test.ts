@@ -20,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/2', () => {
+describe('assistant-system/3', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/2');
+    expect(PROMPT_VERSION).toBe('assistant-system/3');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -65,15 +65,39 @@ describe('assistant-system/2', () => {
       'describe_tool',
       '@r3.2',
       'clarifying question',
+      // step AI-3 D11
+      "You cannot change the signed-in user's own account, roles, status, MFA or sessions; say so and point to the portal.",
+      'Never ask for, repeat or invent passwords, API keys, secrets, tokens or one-time codes; creating or rotating credentials happens only in the portal.',
+      'Role, permission, invitation, session and MFA changes need the user to re-authenticate in the confirmation card.',
+      'You cannot turn the assistant on or off or change who may configure it.',
     ])
       expect(text, phrase).toContain(phrase);
   });
 
-  it('keeps every other rule of assistant-system/1 unchanged (only rule 5 is replaced)', () => {
+  it('is assistant-system/2 plus the scope section and rule 12 (step AI-3); earlier versions stay readable', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
+    const v2 = read('assistant-system-2.md');
+    const v3 = loadSystemPromptTemplate().text;
+    expect(v3.replace(/^12\. .*\n/m, '').replace(/# Scope\n\n.*\n\n/, '')).toBe(v2.trim());
+    expect([...v3.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: 12 }, (_, i) => i + 1),
+    );
+    expect(read('assistant-system-1.md').length).toBeGreaterThan(0);
+  });
+
+  it('limits answers to this email security gateway and refuses unrelated topics without tools', () => {
+    const v3 = loadSystemPromptTemplate().text;
+    expect(v3.indexOf('# Scope')).toBeGreaterThan(-1);
+    expect(v3.indexOf('# Scope')).toBeLessThan(v3.indexOf('# Rules'));
+    expect(v3).toMatch(/You answer only about this email security gateway/);
+    expect(v3).toMatch(/do not answer and do not call tools/);
+  });
+
+  it('assistant-system/2 kept every other rule of assistant-system/1 (only rule 5 is replaced)', () => {
     const rules = (text: string) =>
       new Map([...text.matchAll(/^(\d+)\. (.*)$/gm)].map((match) => [Number(match[1]), match[2]!]));
     const v1 = readFileSync(join(__dirname, '../../prompts/assistant-system-1.md'), 'utf8');
-    const v2 = loadSystemPromptTemplate().text;
+    const v2 = readFileSync(join(__dirname, '../../prompts/assistant-system-2.md'), 'utf8').trim();
     const before = rules(v1);
     const after = rules(v2);
     expect([...after.keys()]).toEqual([...before.keys()]);

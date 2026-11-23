@@ -7835,6 +7835,9 @@ enum AiChatToolDecision {
   denied_schema
   denied_ref
   denied_budget
+  /// Step AI-3 D3: an assistant proposal guard refused the call (separation of duties); no
+  /// loopback request was sent.
+  denied_guard
 }
 
 /// Outcome of one tool execution (step AI-1 D5): `refused` = a `denied_*` decision (no loopback).

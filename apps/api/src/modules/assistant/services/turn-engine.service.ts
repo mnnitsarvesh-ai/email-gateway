@@ -407,7 +407,7 @@ export class TurnEngineService {
         type: 'tool.started',
         executionId: execution.id,
         tool: execution.tool,
-        title: execution.card?.title ?? execution.tool,
+        title: execution.card?.title ?? execution.title,
       });
       if (execution.decision !== 'allowed') {
         sink.emit({
@@ -415,7 +415,7 @@ export class TurnEngineService {
           executionId: execution.id,
           tool: execution.tool,
           decision: execution.decision,
-          message: execution.errorCode ?? execution.decision,
+          message: execution.message ?? execution.decision,
         });
       } else if (execution.card) {
         sink.emit({

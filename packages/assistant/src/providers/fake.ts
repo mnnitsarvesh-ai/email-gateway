@@ -21,8 +21,14 @@ import type {
  *   executables": validate → test → create); the next step runs only when the previous result was
  *   ok (and, after `policy_tools_validate`, `valid: true`); steps whose tool is missing from the
  *   catalogue index are skipped.
- * - Follow-ups (D8): "disable/enable the second one" (the newest `policy_management_list` result)
- *   and "publish it" (the newest succeeded `policy_management_create` of the action updates).
+ * - Plans of step AI-3 (design 30 D11): "invite <email> as <role>" (`roles_get` → `users_invite`),
+ *   "disable user <email>" (`users_list` → `users_change_status` only when the list returned
+ *   exactly one row) and "add domain <name>" (`domains_create`). A step's arguments may depend on
+ *   the message and on the previous result; a step without arguments ends the plan with the
+ *   previous result's summary.
+ * - Follow-ups (D8): "disable/enable the second one" (the newest `policy_management_list` result),
+ *   "publish it" (the newest succeeded `policy_management_create` of the action updates) and, step
+ *   AI-3, "verify it" / "verify the domain" (the newest succeeded `domains_create`).
  * - After tool results: a deterministic template ("Found N records." / the coded error / the
  *   pending-confirmation sentence).
  * - `obedient: true` (tests only): follows instruction-shaped text found in tool results
@@ -143,9 +149,18 @@ export const FAKE_EXECUTABLES_FACTS = {
 export const FAKE_EXECUTABLES_POLICY_NAME = 'Quarantine inbound executables';
 const CREATED_WITH_ASSISTANT = 'Created with the AI assistant';
 
+/** What a plan step's arguments may depend on. */
+export interface PlanContext {
+  /** The plan pattern's match on the lower-cased user message. */
+  match: RegExpExecArray;
+  /** The previous tool result's envelope (parsed), or null for the first step. */
+  previous: Record<string, unknown> | null;
+}
+
 interface PlanStep {
   tool: string;
-  args: () => Record<string, unknown>;
+  /** The step's arguments, or null: the plan ends with the previous result's summary. */
+  args: (ctx: PlanContext) => Record<string, unknown> | null;
 }
 
 interface Plan {
@@ -153,7 +168,12 @@ interface Plan {
   steps: readonly PlanStep[];
 }
 
-/** Multi-step demo intents (D8). Tool names are registry names (checked by tests). */
+/** An email address of a message, without trailing sentence punctuation. */
+const emailOf = (value: string | undefined): string => (value ?? '').replace(/[.,;:!?)]+$/, '');
+
+export const FAKE_DISABLED_REASON = 'Disabled with the AI assistant';
+
+/** Multi-step demo intents (D8; step AI-3 D11). Tool names are registry names (checked by tests). */
 export const FAKE_PLANS: readonly Plan[] = [
   {
     pattern:
@@ -184,6 +204,49 @@ export const FAKE_PLANS: readonly Plan[] = [
         }),
       },
     ],
+  },
+  // --- step AI-3 (design 30 D11) ---
+  {
+    pattern: /\binvite\s+(\S+@\S+)\s+as\s+(?:an?\s+)?([a-z][a-z0-9_]{1,63})\b/,
+    steps: [
+      { tool: 'roles_get', args: ({ match }) => ({ key: match[2]! }) },
+      {
+        tool: 'users_invite',
+        args: ({ match }) => {
+          const email = emailOf(match[1]);
+          return {
+            body: {
+              email,
+              displayName: email.slice(0, email.indexOf('@')) || email,
+              roleKeys: [match[2]!],
+            },
+          };
+        },
+      },
+    ],
+  },
+  {
+    pattern: /\b(?:disable|deactivate)\s+(?:the\s+)?user\s+(\S+@\S+)/,
+    steps: [
+      { tool: 'users_list', args: ({ match }) => ({ q: emailOf(match[1]), limit: 1 }) },
+      {
+        tool: 'users_change_status',
+        // Only an unambiguous match: exactly one row and no further page.
+        args: ({ previous }) => {
+          const rows = Array.isArray(previous?.data) ? previous.data : [];
+          const ref = typeof previous?.ref === 'string' ? previous.ref : '';
+          if (rows.length !== 1 || previous?.hasMore === true || !/^r\d+$/.test(ref)) return null;
+          return {
+            id: `@${ref}.1`,
+            body: { status: 'disabled', reason: FAKE_DISABLED_REASON },
+          };
+        },
+      },
+    ],
+  },
+  {
+    pattern: /\badd\s+(?:the\s+)?domain\s+([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/,
+    steps: [{ tool: 'domains_create', args: ({ match }) => ({ body: { name: match[1]! } }) }],
   },
 ];
 
@@ -393,15 +456,20 @@ function newestListRef(transcript: readonly FakeTranscriptEntry[], tool: string)
   return null;
 }
 
-const CREATED_POLICY_LINE =
-  /^- policy_management_create \(call r\d+\): the user confirmed it; it succeeded[^\n]*?Result: ref r\d+, row ref (r\d+\.1)\./gm;
+/** An action-update line of a succeeded create with a row ref (`updates.ts`). */
+const createdLine = (tool: string): RegExp =>
+  new RegExp(
+    `^- ${tool} \\(call r\\d+\\): the user confirmed it; it succeeded[^\\n]*?Result: ref r\\d+, row ref (r\\d+\\.1)\\.`,
+    'gm',
+  );
 
-/** The row ref of the newest succeeded `policy_management_create` in the action updates. */
-function newestCreatedPolicyRef(transcript: readonly FakeTranscriptEntry[]): string | null {
+/** The row ref of the newest succeeded create of the tool (`policy_management_create`, …). */
+function newestCreatedRef(transcript: readonly FakeTranscriptEntry[], tool: string): string | null {
+  const line = createdLine(tool);
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const entry = transcript[i]!;
     if (entry.role !== 'user') continue;
-    const matches = [...entry.text.matchAll(CREATED_POLICY_LINE)];
+    const matches = [...entry.text.matchAll(line)];
     if (matches.length > 0) return matches[matches.length - 1]![1]!;
   }
   return null;
@@ -468,6 +536,7 @@ export class FakeProvider implements LlmProvider {
         onDelta,
       );
     const plan = /^\//.test(message) ? undefined : FAKE_PLANS.find((p) => p.pattern.test(lower));
+    const match = plan ? plan.pattern.exec(lower) : null;
 
     if (tail.length > 0) {
       if (this.obedient) {
@@ -490,9 +559,10 @@ export class FakeProvider implements LlmProvider {
           }
         }
       }
-      if (plan && tail.every((result) => planMayContinue(result.content))) {
+      if (plan && match && tail.every((result) => planMayContinue(result.content))) {
         const next = nextPlanStep(plan, transcript.slice(lastUserIndex + 1), inCatalogue);
-        if (next) return Promise.resolve(call(next.tool, next.args()));
+        const args = next?.args({ match, previous: parseRecord(tail[tail.length - 1]!.content) });
+        if (next && args) return Promise.resolve(call(next.tool, args));
       }
       const text = tail.map((result) => summarizeResult(result.content)).join(' ');
       return Promise.resolve(this.respond(input, text, [], onDelta));
@@ -514,11 +584,12 @@ export class FakeProvider implements LlmProvider {
       );
     }
 
-    if (plan) {
+    if (plan && match) {
       const first = nextPlanStep(plan, [], inCatalogue);
+      const args = first?.args({ match, previous: null });
       return Promise.resolve(
-        first
-          ? call(first.tool, first.args())
+        first && args
+          ? call(first.tool, args)
           : this.respond(input, FAKE_UNAVAILABLE_TEXT, [], onDelta),
       );
     }
@@ -539,7 +610,7 @@ export class FakeProvider implements LlmProvider {
     }
 
     if (/\bpublish (it|the policy)\b/.test(lower)) {
-      const rowRef = newestCreatedPolicyRef(transcript);
+      const rowRef = newestCreatedRef(transcript, 'policy_management_create');
       if (!rowRef) return Promise.resolve(this.respond(input, FAKE_HELP_TEXT, [], onDelta));
       if (!inCatalogue('policy_management_publish'))
         return Promise.resolve(this.respond(input, FAKE_UNAVAILABLE_TEXT, [], onDelta));
@@ -550,6 +621,14 @@ export class FakeProvider implements LlmProvider {
           body: { activate: true },
         }),
       );
+    }
+
+    if (/\bverify (it|the domain)\b/.test(lower)) {
+      const rowRef = newestCreatedRef(transcript, 'domains_create');
+      if (!rowRef) return Promise.resolve(this.respond(input, FAKE_HELP_TEXT, [], onDelta));
+      if (!inCatalogue('domain_dns_verify'))
+        return Promise.resolve(this.respond(input, FAKE_UNAVAILABLE_TEXT, [], onDelta));
+      return Promise.resolve(call('domain_dns_verify', { id: `@${rowRef}` }));
     }
 
     const intent = FAKE_DEMO_INTENTS.find((candidate) => candidate.pattern.test(lower));

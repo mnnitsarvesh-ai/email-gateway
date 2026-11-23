@@ -22,9 +22,10 @@ import type {
 
 /**
  * Phase the program has reached: tools of this phase and earlier are enabled (reads; writes with
- * a `testedBy` suite and a confirmation spec, step AI-2).
+ * a `testedBy` suite and a confirmation spec, step AI-2; identity and tenant administration
+ * writes, step AI-3).
  */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-2';
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-3';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';
@@ -78,6 +79,94 @@ export const AI2_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
     ].map((id) => [id, MAIL_OPS_WRITES_TESTED_BY]),
   ),
 };
+
+/** Integration suites of the AI-3 writes (design 30 §4.3, §9 item 4). */
+export const IDENTITY_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-identity.test.ts';
+export const DOMAIN_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-domains.test.ts';
+export const TENANT_ADMIN_WRITES_TESTED_BY =
+  'apps/api/integration/assistant-writes-tenant-admin.test.ts';
+
+/**
+ * The 47 write operations of step AI-3 and the suite that covers each (`testedBy`).
+ *
+ * Rule for later steps (design 30 R7): when the request body of one of these routes gains a field
+ * that redirects mail, events, sign-in mail or relay rights, or weakens MFA, add a risk
+ * escalation for it to the operation's confirmation spec (`confirmations/specs.ts`).
+ */
+export const AI3_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    [
+      'UsersController_invite_v1',
+      'UsersController_update_v1',
+      'UsersController_changeStatus_v1',
+      'UsersController_replaceRoles_v1',
+      'UsersController_resetMfa_v1',
+      'UsersController_remove_v1',
+      'UsersController_resendInvitation_v1',
+      'UsersController_revokeAllSessions_v1',
+      'UsersController_revokeSession_v1',
+      'RolesController_create_v1',
+      'RolesController_update_v1',
+      'RolesController_remove_v1',
+      'DepartmentsController_create_v1',
+      'DepartmentsController_update_v1',
+      'DepartmentsController_remove_v1',
+      'DepartmentsController_addMember_v1',
+      'DepartmentsController_removeMember_v1',
+      'ApiKeysController_revoke_v1',
+    ].map((id) => [id, IDENTITY_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'DomainsController_create_v1',
+      'DomainsController_remove_v1',
+      'DomainsController_changeStatus_v1',
+      'DomainDnsController_verify_v1',
+      'DomainDnsController_rotate_v1',
+      'DomainDestinationsController_replace_v1',
+      'DomainDestinationsController_remove_v1',
+      'DomainRecipientsController_set_v1',
+      'DomainRecipientsController_add_v1',
+      'DomainRecipientsController_remove_v1',
+    ].map((id) => [id, DOMAIN_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'NotificationsController_putPreferences_v1',
+      'NotificationsController_putSettings_v1',
+      'OrganizationsController_create_v1',
+      'OrganizationsController_update_v1',
+      'OrganizationDeletionController_cancel_v1',
+      'OrganizationConfigurationController_overrideFeature_v1',
+      'OrganizationConfigurationController_resetFeature_v1',
+      'OrganizationConfigurationController_overrideLimit_v1',
+      'OrganizationConfigurationController_resetLimit_v1',
+      'OrganizationConfigurationController_updateSettings_v1',
+      'ScanSettingsController_replace_v1',
+      'ScanSettingsController_reset_v1',
+      'SmtpConnectorsController_update_v1',
+      'SmtpConnectorsController_remove_v1',
+      'WebhooksController_update_v1',
+      'WebhooksController_delete_v1',
+      'WebhooksController_test_v1',
+      'WebhookDeliveriesController_replay_v1',
+      'WebhookDeliveriesController_createReplay_v1',
+    ].map((id) => [id, TENANT_ADMIN_WRITES_TESTED_BY]),
+  ),
+};
+
+/**
+ * Input properties of enabled writes whose key matches the credential-key pattern
+ * (`isCredentialKey`) but which are not credentials (step AI-3 D6, I14). Named per operation and
+ * argument path with the reason; the credential safe list (`SAFE_KEYS`) is never widened for
+ * them. Role keys are identifiers such as `security_analyst` (`^[a-z][a-z0-9_]*$`).
+ */
+export const CREDENTIAL_KEY_EXCEPTIONS: Readonly<Record<string, Readonly<Record<string, string>>>> =
+  {
+    RolesController_create_v1: { 'body.key': 'role key (an identifier, not a credential)' },
+    RolesController_update_v1: { key: 'role key path parameter (an identifier)' },
+    RolesController_remove_v1: { key: 'role key path parameter (an identifier)' },
+  };
 
 export const NOT_APPLICABLE_REASONS = {
   ceremony: 'credential/session ceremony (portal only)',
@@ -218,12 +307,21 @@ const HIGH_PATHS: ReadonlyArray<{ method?: HttpMethod; path: RegExp }> = [
 /** Own preferences are `low` (§4.4). */
 const OWN_PREFERENCES = /^\/(notifications|quarantine\/me)\/preferences$/;
 
-/** Explicit risk overrides named by §4.4. */
+/**
+ * Explicit risk overrides named by §4.4 and by step AI-3 D2 (invitations grant roles, role edits
+ * change every holder's permissions, destination replacement reroutes inbound mail, scan settings
+ * can lower detection, SMTP connector state affects outbound relay, organization creation).
+ */
 export const RISK_OVERRIDES: Readonly<Record<string, ToolRisk>> = {
   SavedViewsController_remove_v1: 'low',
   NotificationsController_putPreferences_v1: 'low',
   QuarantineSelfController_putPreferences_v1: 'low',
-  UsersController_invite_v1: 'medium',
+  UsersController_invite_v1: 'high',
+  RolesController_update_v1: 'high',
+  DomainDestinationsController_replace_v1: 'high',
+  ScanSettingsController_replace_v1: 'high',
+  SmtpConnectorsController_update_v1: 'medium',
+  OrganizationsController_create_v1: 'medium',
   UsersController_resendInvitation_v1: 'medium',
   DepartmentsController_removeMember_v1: 'medium',
   BecFeedbackController_deleteSuppression_v1: 'medium',
@@ -560,6 +658,13 @@ const SELF_ORGANIZATION = { id: 'self_organization' } as const;
 
 const columns = (...names: string[]): DisplayHints => ({ columns: names });
 
+/** DNS data of a domain's check results (`GET /domains/{id}/status`, `POST /domains/{id}/verify`). */
+const DNS_STATUS_UNTRUSTED = [
+  'checks.mx.observed',
+  'checks.mx.propagation',
+  ...['ownership', 'mx', 'spf', 'dkim', 'dmarc'].map((check) => `checks.${check}.warnings`),
+];
+
 /**
  * Per-operation overrides: display hints, mail-derived `untrustedFields` (response paths; `[]`
  * marks array items; every string under a listed path is wrapped as `untrusted_text`), bindings
@@ -768,10 +873,57 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   PolicyManagementController_list_v1: {
     display: columns('name', 'status', 'direction', 'priority', 'activeVersionNo'),
   },
-  UsersController_list_v1: { display: columns('email', 'displayName', 'status', 'roles') },
   DomainsController_list_v1: { display: columns('name', 'status', 'verifiedAt') },
   RolesController_list_v1: { display: { columns: ['key', 'name', 'system'], refField: 'key' } },
   RolesController_get_v1: { display: { refField: 'key' } },
+
+  // --- identity and tenant administration (step AI-3 D9): attacker-influenced strings ---
+  // A user may set their own display name; a session's user agent is sent by the client.
+  UsersController_list_v1: {
+    display: columns('email', 'displayName', 'status', 'roles'),
+    untrustedFields: ['data[].displayName'],
+  },
+  UsersController_get_v1: { untrustedFields: ['displayName'] },
+  UsersController_listSessions_v1: { untrustedFields: ['data[].userAgent'] },
+  // Members have an address (kind `address`) or a user id; the response has no display name.
+  DepartmentsController_listMembers_v1: { untrustedFields: ['data[].address'] },
+  // The remote webhook server's answer.
+  WebhookDeliveriesController_get_v1: {
+    untrustedFields: ['attempts[].responseSnippet', 'attempts[].errorCode', 'lastError'],
+  },
+  WebhookDeliveriesController_list_v1: { untrustedFields: ['data[].lastError'] },
+  // The domain owner's DNS (observed records, resolver warnings that echo record values).
+  DomainDnsController_status_v1: { untrustedFields: DNS_STATUS_UNTRUSTED },
+  DomainDnsController_verify_v1: { untrustedFields: DNS_STATUS_UNTRUSTED },
+  DomainDnsController_dnsRecords_v1: {
+    untrustedFields: ['records[].observedValue', 'records[].lastError', 'records[].warnings'],
+  },
+  DomainsController_get_v1: { untrustedFields: ['verification.lastError'] },
+  DomainsController_create_v1: {
+    untrustedFields: [
+      'verification.lastError',
+      'dnsRecords[].observedValue',
+      'dnsRecords[].lastError',
+      'dnsRecords[].warnings',
+    ],
+  },
+
+  // --- identity and tenant administration writes (step AI-3) ---
+  // Write responses that return the user view carry the same display name.
+  UsersController_invite_v1: { untrustedFields: ['displayName'] },
+  UsersController_update_v1: { untrustedFields: ['displayName'] },
+  UsersController_changeStatus_v1: { untrustedFields: ['displayName'] },
+  UsersController_replaceRoles_v1: { untrustedFields: ['displayName'] },
+  // The created role is row ref r<seq>.1 by its key.
+  RolesController_create_v1: { display: { refField: 'key' } },
+  // Sends an event to the tenant's external URL: a low write with a confirmation (D2, A3-3).
+  WebhooksController_test_v1: { access: 'write', risk: 'low' },
+  // The read a revocation card needs (D8); covered by the read sweep.
+  ApiKeysController_get_v1: { phase: 'AI-3' },
+  // Customer-reachable organization writes bind {id} to the caller's own organization; the
+  // platform-only ones (deletion cancel, feature and limit overrides) always name it.
+  OrganizationsController_update_v1: { bind: SELF_ORGANIZATION },
+  OrganizationConfigurationController_updateSettings_v1: { bind: SELF_ORGANIZATION },
 
   // --- own organization (bind {id}) ---
   OrganizationsController_get_v1: { bind: SELF_ORGANIZATION },
@@ -782,10 +934,13 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   OrganizationConfigurationController_getSettings_v1: { bind: SELF_ORGANIZATION },
 };
 
-/** The overrides with the AI-2 writes' `testedBy` merged in. */
+/** The overrides with the AI-2 and AI-3 writes' `testedBy` merged in. */
 export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = (() => {
   const out: Record<string, OperationOverride> = { ...BASE_OVERRIDES };
-  for (const [operationId, testedBy] of Object.entries(AI2_WRITES_TESTED_BY))
+  for (const [operationId, testedBy] of Object.entries({
+    ...AI2_WRITES_TESTED_BY,
+    ...AI3_WRITES_TESTED_BY,
+  }))
     out[operationId] = { ...out[operationId], testedBy };
   return out;
 })();

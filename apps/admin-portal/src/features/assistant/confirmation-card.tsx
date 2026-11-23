@@ -179,6 +179,13 @@ export function confirmationRefusal(error: unknown): ConfirmationRefusal {
         ends: true,
         refresh: true,
       };
+    case 'assistant_action_not_allowed':
+      return {
+        ...base,
+        message: 'This change is not allowed in chat. Nothing changed.',
+        ends: true,
+        refresh: true,
+      };
     case 'assistant_confirmation_not_found':
       return {
         ...base,
@@ -230,6 +237,8 @@ export function outcomeText(view: ConfirmationView, resultCard: AssistantCard | 
         return 'The outcome is unknown: the action was interrupted. Check the current state in the portal before trying again.';
       if (code === 'assistant_confirmation_state_changed')
         return 'Not run: the record changed since this was proposed. Ask again to see the current state.';
+      if (code === 'assistant_action_not_allowed')
+        return 'Not run: this change is not allowed in chat. Nothing changed.';
       const status = view.result?.httpStatus ?? resultCard?.error?.httpStatus ?? null;
       const detail = [status ? `HTTP ${status}` : null, code].filter(Boolean).join(', ');
       return `The action failed${detail ? ` (${detail})` : ''}.`;

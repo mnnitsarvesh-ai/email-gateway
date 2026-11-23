@@ -117,6 +117,7 @@ function setup(apiAccess = true) {
   const created: NewApiKey[] = [];
   const repo = {
     list: vi.fn(() => Promise.resolve([record()])),
+    get: vi.fn((): Promise<ApiKeyRecord | null> => Promise.resolve(record())),
     findByPublicId: vi.fn(() => Promise.resolve(record())),
     create: vi.fn((_tx: unknown, _s: unknown, data: NewApiKey) => {
       created.push(data);
@@ -217,5 +218,33 @@ describe('ApiKeysService', () => {
     expect(page.data).toHaveLength(1);
     expect(page.nextCursor).not.toBeNull();
     expect(repo.list).toHaveBeenCalledWith(scope, { take: 2 });
+  });
+
+  describe('get (step AI-3 D8)', () => {
+    it('returns the view of one key of the scope, never the key or its hash', async () => {
+      const { service, repo } = setup();
+      const view = await service.get(scope, record().publicId);
+      expect(view).toEqual(toApiKeyView(record()));
+      expect(Object.keys(view)).not.toEqual(
+        expect.arrayContaining([expect.stringMatching(/hash|secret|^key$/i)]),
+      );
+      expect(repo.get).toHaveBeenCalledWith(scope, record().publicId);
+      expect(repo.findByPublicId).not.toHaveBeenCalled();
+    });
+
+    it('includes revoked keys', async () => {
+      const { service, repo } = setup();
+      const revokedAt = new Date('2026-11-03T08:00:00Z');
+      repo.get.mockResolvedValueOnce(record({ revokedAt }));
+      expect((await service.get(scope, record().publicId)).revokedAt).toBe(revokedAt.toISOString());
+    });
+
+    it('answers 404 for an unknown key or one of another organization', async () => {
+      const { service, repo } = setup();
+      repo.get.mockResolvedValueOnce(null);
+      const other = systemScope(8n);
+      await expect(service.get(other, record().publicId)).rejects.toThrow(NotFoundException);
+      expect(repo.get).toHaveBeenCalledWith(other, record().publicId);
+    });
   });
 });

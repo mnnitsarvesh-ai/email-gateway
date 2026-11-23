@@ -78,6 +78,8 @@ export function decisionLabel(decision: ExecutionDecision): string {
       return 'Refers to a result that is not in this conversation';
     case 'denied_budget':
       return 'Too many actions in one answer';
+    case 'denied_guard':
+      return 'Not allowed in chat';
     default:
       return humanize(decision);
   }

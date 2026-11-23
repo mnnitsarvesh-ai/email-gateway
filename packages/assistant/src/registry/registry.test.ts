@@ -16,7 +16,11 @@ import { confirmationSpecOf } from '../confirmations/specs';
 import { registryConsistencyIssues } from './consistency';
 import {
   AI2_WRITES_TESTED_BY,
+  AI3_WRITES_TESTED_BY,
   ASSISTANT_PROGRAM_PHASE,
+  DOMAIN_WRITES_TESTED_BY,
+  IDENTITY_WRITES_TESTED_BY,
+  TENANT_ADMIN_WRITES_TESTED_BY,
   CONTROLLER_HINTS,
   MAIL_OPS_WRITES_TESTED_BY,
   POLICY_WRITES_TESTED_BY,
@@ -38,7 +42,7 @@ import {
   satisfiesRequirement,
   toolSignature,
 } from './registry';
-import { PROGRAM_PHASES } from './types';
+import { PROGRAM_PHASES, type OperationOverride } from './types';
 
 const REPO = join(__dirname, '../../../..');
 const openapi = JSON.parse(
@@ -96,8 +100,8 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('AI-2: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-2');
+  it('AI-3: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-3');
     expect(registryConsistencyIssues(OPERATION_TOOLS)).toEqual([]);
     for (const tool of OPERATION_TOOLS) {
       if (tool.enabled) {
@@ -105,7 +109,9 @@ describe('registry completeness and consistency (D3)', () => {
         expect(tool.status, tool.name).toBe('IMPLEMENTED');
         if (tool.access === 'read') expect(tool.testedBy, tool.name).toBe(READ_TOOLS_TESTED_BY);
         else {
-          expect(tool.testedBy, tool.name).toBe(AI2_WRITES_TESTED_BY[tool.operationId]);
+          expect(tool.testedBy, tool.name).toBe(
+            AI2_WRITES_TESTED_BY[tool.operationId] ?? AI3_WRITES_TESTED_BY[tool.operationId],
+          );
           expect(confirmationSpecOf(tool.operationId), tool.name).toBeDefined();
           expect(['low', 'medium', 'high'], tool.name).toContain(tool.risk);
         }
@@ -121,6 +127,13 @@ describe('registry completeness and consistency (D3)', () => {
       (suite) => suite === MAIL_OPS_WRITES_TESTED_BY,
     );
     expect([policyWrites.length, mailOps.length]).toEqual([11, 20]);
+    const ai3 = (suite: string) =>
+      Object.values(AI3_WRITES_TESTED_BY).filter((value) => value === suite).length;
+    expect([
+      ai3(IDENTITY_WRITES_TESTED_BY),
+      ai3(DOMAIN_WRITES_TESTED_BY),
+      ai3(TENANT_ADMIN_WRITES_TESTED_BY),
+    ]).toEqual([18, 10, 19]);
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
     for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
       expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
@@ -136,6 +149,106 @@ describe('registry completeness and consistency (D3)', () => {
     expect(count((t) => t.enabled && t.phase === 'AI-2')).toBe(35);
     expect(count((t) => t.enabled && t.phase === 'AI-2' && t.access === 'write')).toBe(31);
     expect(count((t) => t.enabled && t.phase !== 'AI-1' && t.phase !== 'AI-2')).toBe(0);
+  });
+
+  it('AI-3 totals (design 30 D1): 422 operations, 349 tools, 257 enabled (179 reads, 78 writes)', () => {
+    if (operations.length !== 422) return; // later steps add operations; the rules above still hold
+    const count = (pred: (t: (typeof OPERATION_TOOLS)[number]) => boolean) =>
+      OPERATION_TOOLS.filter(pred).length;
+    expect(OPERATION_TOOLS).toHaveLength(349);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(73);
+    expect(count((t) => t.enabled)).toBe(257);
+    expect(count((t) => t.enabled && t.access === 'read')).toBe(179);
+    expect(count((t) => t.enabled && t.access === 'write')).toBe(78);
+    expect(count((t) => t.status === 'MISSING')).toBe(92);
+    expect(count((t) => t.status === 'MISSING' && t.access === 'read')).toBe(3);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 48, 'AI-4': 66, 'AI-5': 26, 'AI-6': 0 },
+    );
+    expect(count((t) => t.enabled && phase(t.phase) > phase('AI-3'))).toBe(0);
+    const writesByRisk = Object.fromEntries(
+      ['low', 'medium', 'high'].map((r) => [
+        r,
+        count((t) => t.enabled && t.access === 'write' && t.phase === 'AI-3' && t.risk === r),
+      ]),
+    );
+    expect(writesByRisk).toEqual({ low: 8, medium: 13, high: 26 });
+  });
+
+  it('AI-3 manifest: risks of D2, webhooks_test is a low write, api_keys_get an AI-3 read', () => {
+    const risks = Object.fromEntries(
+      [
+        'users_invite',
+        'roles_update',
+        'domain_destinations_replace',
+        'scan_settings_replace',
+        'smtp_connectors_update',
+        'organizations_create',
+        'webhooks_test',
+      ].map((name) => [name, findTool(name)!.risk]),
+    );
+    expect(risks).toEqual({
+      users_invite: 'high',
+      roles_update: 'high',
+      domain_destinations_replace: 'high',
+      scan_settings_replace: 'high',
+      smtp_connectors_update: 'medium',
+      organizations_create: 'medium',
+      webhooks_test: 'low',
+    });
+    expect(findTool('webhooks_test')).toMatchObject({
+      access: 'write',
+      confirm: 'confirm',
+      phase: 'AI-3',
+      enabled: true,
+      testedBy: TENANT_ADMIN_WRITES_TESTED_BY,
+    });
+    expect(findTool('api_keys_get')).toMatchObject({
+      access: 'read',
+      phase: 'AI-3',
+      enabled: true,
+      testedBy: READ_TOOLS_TESTED_BY,
+    });
+    expect(findTool('roles_create')!.display.refField).toBe('key');
+    expect(findTool('users_list_sessions')!.untrustedFields).toContain('data[].userAgent');
+    expect(findTool('users_list')!.untrustedFields).toContain('data[].displayName');
+    expect(findTool('webhook_deliveries_get')!.untrustedFields).toEqual(
+      expect.arrayContaining(['attempts[].responseSnippet', 'attempts[].errorCode', 'lastError']),
+    );
+  });
+
+  it('an access override may only make a read a write (generator check)', () => {
+    const overrides = OPERATION_OVERRIDES as Record<string, OperationOverride>;
+    const doc: OpenApiDocument = {
+      paths: {
+        '/api/v1/domains/{id}/widgets': {
+          get: { operationId: 'WidgetsController_get_v1', tags: ['domains'] },
+          post: { operationId: 'WidgetsController_create_v1', tags: ['domains'] },
+        },
+        '/api/v1/domains/{id}/widgets/test': {
+          post: { operationId: 'WidgetsController_test_v1', tags: ['domains'] },
+        },
+      },
+    };
+    try {
+      overrides.WidgetsController_create_v1 = { access: 'read' as 'write' };
+      expect(() => buildRegistry(doc, new Map())).toThrow(/only make a read a write/);
+      delete overrides.WidgetsController_create_v1;
+      overrides.WidgetsController_test_v1 = { access: 'write' };
+      expect(() => buildRegistry(doc, new Map())).toThrow(/needs a risk override/);
+      overrides.WidgetsController_test_v1 = { access: 'write', risk: 'low' };
+      const built = buildRegistry(doc, new Map());
+      expect(built.tools.find((t) => t.operationId === 'WidgetsController_test_v1')).toMatchObject({
+        access: 'write',
+        risk: 'low',
+        confirm: 'confirm',
+        phase: 'AI-3',
+        enabled: false,
+      });
+    } finally {
+      delete overrides.WidgetsController_create_v1;
+      delete overrides.WidgetsController_test_v1;
+    }
   });
 
   it('the created policy is row ref r<seq>.1 (refField policy.id)', () => {
@@ -476,7 +589,7 @@ describe('permission pre-filter, catalogue index, describe', () => {
       available: true,
       unavailableReason: null,
     });
-    expect(describeTool(findTool('users_invite')!)).toMatchObject({
+    expect(describeTool(findTool('ato_accounts_update')!)).toMatchObject({
       access: 'write',
       available: false,
       unavailableReason: 'disabled',

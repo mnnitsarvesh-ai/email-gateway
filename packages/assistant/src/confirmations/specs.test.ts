@@ -1,6 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { registryConsistencyIssues } from '../registry/consistency';
-import { AI2_WRITES_TESTED_BY } from '../registry/manifest';
+import { normalizeSchema, successResponseSchema, type OpenApiDocument } from '../registry/build';
+import { credentialKeyPaths, registryConsistencyIssues } from '../registry/consistency';
+import {
+  AI2_WRITES_TESTED_BY,
+  AI3_WRITES_TESTED_BY,
+  CREDENTIAL_KEY_EXCEPTIONS,
+} from '../registry/manifest';
 import { OPERATION_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
 import type { OperationTool } from '../registry/types';
 import { stateDigest } from './digest';
@@ -12,6 +19,10 @@ import {
   eachReads,
   preconditionArgs,
   rowVersionOf,
+  selectTarget,
+  snapshotList,
+  snapshotPathValue,
+  targetOf,
   withCasPlaceholder,
   withInjectedCas,
   type ConfirmationSpec,
@@ -23,10 +34,10 @@ const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(opera
 const POLICY = '0193aaaa-0000-7000-8000-000000000002';
 
 describe('confirmation specs (D4)', () => {
-  it('one spec per AI-2 write, every one an enabled write of the registry', () => {
-    expect(CONFIRMATION_SPECS).toHaveLength(31);
+  it('one spec per AI-2 and AI-3 write, every one an enabled write of the registry', () => {
+    expect(CONFIRMATION_SPECS).toHaveLength(78);
     expect(CONFIRMATION_SPECS.map((s) => s.operationId).sort()).toEqual(
-      Object.keys(AI2_WRITES_TESTED_BY).sort(),
+      [...Object.keys(AI2_WRITES_TESTED_BY), ...Object.keys(AI3_WRITES_TESTED_BY)].sort(),
     );
     const enabledWrites = OPERATION_TOOLS.filter((t) => t.enabled && t.access === 'write');
     expect(enabledWrites.map((t) => t.operationId).sort()).toEqual(
@@ -41,7 +52,7 @@ describe('confirmation specs (D4)', () => {
 
   it('names the design D4 preconditions, state fields and CAS injections', () => {
     const table = Object.fromEntries(
-      CONFIRMATION_SPECS.map((s) => [
+      CONFIRMATION_SPECS.filter((s) => s.operationId in AI2_WRITES_TESTED_BY).map((s) => [
         findOperation(s.operationId) && (findOperation(s.operationId) as OperationTool).name,
         [
           s.precondition?.tool ?? null,
@@ -260,11 +271,11 @@ describe('registry consistency rules (synthetic breaks)', () => {
       'policy_management_disable: enabled write without a confirmation spec',
     ]);
     const extra: ConfirmationSpec = {
-      operationId: 'UsersController_invite_v1',
+      operationId: 'AtoAccountsController_update_v1',
       precondition: null,
     };
     expect(registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, extra] })).toEqual([
-      'UsersController_invite_v1: confirmation spec without an enabled write tool',
+      'AtoAccountsController_update_v1: confirmation spec without an enabled write tool',
     ]);
     expect(
       registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, CONFIRMATION_SPECS[0]!] }),
@@ -272,17 +283,17 @@ describe('registry consistency rules (synthetic breaks)', () => {
   });
 
   it('no tool after the program phase is enabled; no write before the confirmation phase', () => {
-    const invite = findTool('users_invite')!;
+    const invite = findTool('ato_accounts_update')!;
     expect(invite.enabled).toBe(false);
-    expect(invite.phase).toBe('AI-3');
+    expect(invite.phase).toBe('AI-4');
     const issues = registryConsistencyIssues(
-      replace('users_invite', { enabled: true, testedBy: 'x.test.ts' }),
+      replace('ato_accounts_update', { enabled: true, testedBy: 'x.test.ts' }),
     );
     expect(issues).toEqual(
       expect.arrayContaining([
-        'users_invite: enabled although its phase AI-3 is after the program phase',
-        'users_invite: enabled write without a confirmation spec',
-        'users_invite: enabled write without an impact template',
+        'ato_accounts_update: enabled although its phase AI-4 is after the program phase',
+        'ato_accounts_update: enabled write without a confirmation spec',
+        'ato_accounts_update: enabled write without an impact template',
       ]),
     );
     expect(registryConsistencyIssues(tools, { programPhase: 'AI-1' })).toEqual(
@@ -509,5 +520,476 @@ describe('snapshots', () => {
       status: 'pending',
       rowVersion: null,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-3 (design 30 D3–D6)
+// ---------------------------------------------------------------------------------------------
+
+const REPO = join(__dirname, '../../../..');
+const openapi = JSON.parse(
+  readFileSync(join(REPO, 'docs/api/openapi.json'), 'utf8'),
+) as OpenApiDocument;
+const operationOf = (operationId: string) => {
+  for (const item of Object.values(openapi.paths))
+    for (const op of Object.values(item)) if (op?.operationId === operationId) return op;
+  throw new Error(operationId);
+};
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** The schema at a dotted path (`[]` steps into array items), searching anyOf/oneOf variants. */
+function schemaAt(schema: unknown, path: string): Record<string, unknown> | null {
+  let nodes: Record<string, unknown>[] = isObject(schema) ? [schema] : [];
+  const expand = (node: Record<string, unknown>): Record<string, unknown>[] => [
+    node,
+    ...[...((node.anyOf as unknown[]) ?? []), ...((node.oneOf as unknown[]) ?? [])]
+      .filter(isObject)
+      .flatMap(expand),
+  ];
+  for (const raw of path.split('.')) {
+    const array = raw.endsWith('[]');
+    const key = array ? raw.slice(0, -2) : raw;
+    nodes = nodes.flatMap(expand).flatMap((node) => {
+      const sub = (node.properties as Record<string, unknown> | undefined)?.[key];
+      return isObject(sub) ? [sub] : [];
+    });
+    if (array)
+      nodes = nodes.flatMap(expand).flatMap((node) => (isObject(node.items) ? [node.items] : []));
+    if (nodes.length === 0) return null;
+  }
+  return nodes[0] ?? null;
+}
+
+describe('AI-3 specs (design 30 D6)', () => {
+  const AI3 = CONFIRMATION_SPECS.filter((s) => s.operationId in AI3_WRITES_TESTED_BY);
+  const nameOf = (operationId: string) => (findOperation(operationId) as OperationTool).name;
+
+  it('names the design D6 preconditions, selects, state fields and CAS injections', () => {
+    expect(AI3).toHaveLength(47);
+    const table = Object.fromEntries(
+      AI3.map((s) => {
+        const pre = s.precondition as SinglePrecondition | null;
+        return [
+          nameOf(s.operationId),
+          [
+            pre
+              ? `${pre.tool}{${Object.keys(pre.params).join(',')}}${pre.select ? ` ${pre.select.array}[${pre.select.field}=${pre.select.arg}${pre.select.required ? '' : '?'}]` : ''}`
+              : null,
+            pre?.stateFields.join(',') ?? null,
+            s.inject
+              ? `${s.inject.in}.${s.inject.field}>=${s.inject.min} from ${pre?.rowVersionField}`
+              : null,
+          ],
+        ];
+      }),
+    );
+    expect(table).toEqual({
+      users_invite: [null, null, null],
+      users_update: ['users_get{id}', 'email,displayName,status', null],
+      users_change_status: ['users_get{id}', 'status,lockedUntil', null],
+      users_replace_roles: ['users_get{id}', 'roles,status', null],
+      users_reset_mfa: ['users_get{id}', 'mfaEnabled,status', null],
+      users_remove: ['users_get{id}', 'status,roles', null],
+      users_resend_invitation: ['users_get{id}', 'status', null],
+      users_revoke_all_sessions: ['users_get{id}', 'status', null],
+      users_revoke_session: [
+        'users_list_sessions{id} data[id=sessionId]',
+        'authenticatedAt,expiresAt',
+        null,
+      ],
+      roles_create: [null, null, null],
+      roles_update: ['roles_get{key}', 'name,description,permissions,system', null],
+      roles_remove: ['roles_get{key}', 'permissions,system', null],
+      departments_create: [null, null, null],
+      departments_update: [
+        'departments_get{departmentId}',
+        'rowVersion,name,description',
+        'body.expectedRowVersion>=1 from rowVersion',
+      ],
+      departments_remove: [
+        'departments_get{departmentId}',
+        'rowVersion',
+        'query.expectedRowVersion>=1 from rowVersion',
+      ],
+      departments_add_member: ['departments_get{departmentId}', 'rowVersion', null],
+      departments_remove_member: ['departments_get{departmentId}', 'rowVersion', null],
+      api_keys_revoke: ['api_keys_get{id}', 'revokedAt,expiresAt', null],
+      domains_create: [null, null, null],
+      domains_remove: ['domains_get{id}', 'status,inboundEnabled,outboundEnabled', null],
+      domains_change_status: ['domains_get{id}', 'status', null],
+      domain_dns_verify: ['domain_dns_status{id}', 'status', null],
+      domain_dns_rotate: ['domains_get{id}', 'status,dkimKeys', null],
+      domain_destinations_replace: ['domain_destinations_get{id}', 'provider,servers', null],
+      domain_destinations_remove: ['domain_destinations_get{id}', 'provider,servers', null],
+      domain_recipients_set: ['domain_recipients_get{id}', 'mode,enforcement', null],
+      domain_recipients_add: ['domain_recipients_get{id}', 'mode', null],
+      domain_recipients_remove: ['domain_recipients_get{id}', 'mode', null],
+      notifications_put_preferences: [
+        'notifications_preferences{}',
+        'optOut,quarantineDigestOptOut',
+        null,
+      ],
+      notifications_put_settings: [
+        'notifications_settings{}',
+        'rowVersion',
+        'body.expectedRowVersion>=0 from rowVersion',
+      ],
+      organizations_create: [null, null, null],
+      organizations_update: ['organizations_get{id}', 'name,plan.code,status', null],
+      organization_deletion_cancel: [
+        'organization_deletion_get{id}',
+        'state,cancellable,requestedAt',
+        null,
+      ],
+      organization_configuration_override_feature: [
+        'organization_configuration_list_features{id} data[key=featureKey?]',
+        'enabled,config,source',
+        null,
+      ],
+      organization_configuration_reset_feature: [
+        'organization_configuration_list_features{id} data[key=featureKey?]',
+        'enabled,config,source',
+        null,
+      ],
+      organization_configuration_override_limit: [
+        'organization_configuration_list_limits{id} data[key=limitKey?]',
+        'value,source',
+        null,
+      ],
+      organization_configuration_reset_limit: [
+        'organization_configuration_list_limits{id} data[key=limitKey?]',
+        'value,source',
+        null,
+      ],
+      organization_configuration_update_settings: [
+        'organization_configuration_get_settings{id}',
+        'timezone,locale,quarantineRetentionDays,digestEnabled,digestSchedule,notificationEmail,mfaRequired,preferences,updatedAt',
+        null,
+      ],
+      scan_settings_replace: [
+        'scan_settings_list{} data[engine=engine]',
+        'version,override',
+        'body.expectedVersion>=0 from version',
+      ],
+      scan_settings_reset: [
+        'scan_settings_list{} data[engine=engine]',
+        'version,override',
+        'query.expectedVersion>=0 from version',
+      ],
+      smtp_connectors_update: ['smtp_connectors_get{id}', 'name,status,networks,requireTls', null],
+      smtp_connectors_remove: ['smtp_connectors_get{id}', 'name,status', null],
+      webhooks_update: [
+        'webhooks_get{webhookId}',
+        'rowVersion',
+        'body.expectedRowVersion>=1 from rowVersion',
+      ],
+      webhooks_delete: ['webhooks_get{webhookId}', 'rowVersion,status', null],
+      webhooks_test: ['webhooks_get{webhookId}', 'status', null],
+      webhook_deliveries_replay: [
+        'webhook_deliveries_get{webhookId,deliveryId}',
+        'status,attemptCount',
+        null,
+      ],
+      webhook_deliveries_create_replay: ['webhooks_get{webhookId}', 'status', null],
+    });
+  });
+
+  it('every state, row-version, display and select path exists in the read’s OpenAPI response', () => {
+    for (const s of CONFIRMATION_SPECS) {
+      const pre = s.precondition;
+      if (pre?.kind !== 'single') continue;
+      const read = findTool(pre.tool)!;
+      let schema: unknown = normalizeSchema(
+        successResponseSchema(operationOf(read.operationId)),
+        openapi.components?.schemas ?? {},
+      );
+      if (pre.select) {
+        expect(
+          schemaAt(schema, `${pre.select.array}[].${pre.select.field}`),
+          s.operationId,
+        ).not.toBeNull();
+        schema = schemaAt(schema, `${pre.select.array}[]`);
+      }
+      for (const path of [
+        ...pre.stateFields,
+        ...(pre.rowVersionField ? [pre.rowVersionField] : []),
+        ...(pre.displayFields ?? []),
+      ])
+        expect(schemaAt(schema, path), `${s.operationId}: ${path}`).not.toBeNull();
+    }
+  });
+
+  it('organization writes bind {id} only when customer-reachable', () => {
+    expect(findTool('organizations_update')!.bind).toEqual({ id: 'self_organization' });
+    expect(findTool('organization_configuration_update_settings')!.bind).toEqual({
+      id: 'self_organization',
+    });
+    for (const name of [
+      'organization_deletion_cancel',
+      'organization_configuration_override_feature',
+      'organization_configuration_reset_feature',
+      'organization_configuration_override_limit',
+      'organization_configuration_reset_limit',
+      'organizations_create',
+    ]) {
+      expect(findTool(name)!.bind, name).toEqual({});
+      expect(findTool(name)!.platformOnly, name).toBe(true);
+    }
+    expect(
+      compileValidator(findTool('organization_deletion_cancel')!)({ body: { reason: 'r' } }).ok,
+    ).toBe(false);
+  });
+});
+
+describe('selected-item preconditions (D5)', () => {
+  const sessions = spec('UsersController_revokeSession_v1').precondition as SinglePrecondition;
+  const limits = spec('OrganizationConfigurationController_overrideLimit_v1')
+    .precondition as SinglePrecondition;
+  const scan = spec('ScanSettingsController_replace_v1').precondition as SinglePrecondition;
+  const S1 = '0193aaaa-0000-7000-8000-0000000000a1';
+  const S2 = '0193aaaa-0000-7000-8000-0000000000a2';
+  const body = {
+    data: [
+      { id: S1, authenticatedAt: 'a1', expiresAt: 'e1', userAgent: 'x' },
+      { id: S2, authenticatedAt: 'a2', expiresAt: 'e2', userAgent: 'y' },
+    ],
+  };
+
+  it('finds the item whose field equals the argument (string compare)', () => {
+    expect(selectTarget(body, sessions, { id: 'u', sessionId: S2 })).toEqual({
+      found: true,
+      item: body.data[1],
+    });
+    expect(targetOf(body, sessions, { id: 'u', sessionId: S2 })).toBe(body.data[1]);
+    expect(stateDigest(targetOf(body, sessions, { sessionId: S2 }), sessions.stateFields)).toBe(
+      stateDigest({ authenticatedAt: 'a2', expiresAt: 'e2' }, sessions.stateFields),
+    );
+    expect(buildSnapshot(targetOf(body, sessions, { sessionId: S1 }), sessions)).toMatchObject({
+      authenticatedAt: 'a1',
+      userAgent: 'x',
+    });
+    // Numbers compare as strings; other types never match.
+    const numbered = { ...sessions, select: { ...sessions.select!, field: 'n', arg: 'body.n' } };
+    expect(selectTarget({ data: [{ n: 7 }] }, numbered, { body: { n: '7' } }).found).toBe(true);
+    expect(selectTarget({ data: [{ n: true }] }, numbered, { body: { n: 'true' } }).found).toBe(
+      false,
+    );
+  });
+
+  it('not found: required → found false; optional → the empty target (null fields, digest of {})', () => {
+    expect(selectTarget(body, sessions, { sessionId: 'missing' })).toEqual({
+      found: false,
+      item: null,
+    });
+    expect(selectTarget({ data: 'x' }, sessions, { sessionId: S1 }).found).toBe(false);
+    expect(selectTarget(body, sessions, {}).found).toBe(false);
+    const missing = targetOf({ data: [] }, limits, { limitKey: 'max_users' });
+    expect(missing).toEqual({});
+    expect(buildSnapshot(missing, limits)).toEqual({ value: null, source: null });
+    expect(stateDigest(missing, limits.stateFields)).toBe(stateDigest({}, limits.stateFields));
+    expect(rowVersionOf(missing, scan)).toBeNull();
+  });
+
+  it('nested array paths; row version and CAS from the selected item', () => {
+    const nested = { ...scan, select: { ...scan.select!, array: 'result.engines' } };
+    const read = {
+      result: {
+        engines: [
+          { engine: 'url', version: 1 },
+          { engine: 'rspamd', version: 9 },
+        ],
+      },
+    };
+    const item = targetOf(read, nested, { engine: 'rspamd' });
+    expect(rowVersionOf(item, nested)).toBe(9);
+    expect(
+      withInjectedCas(
+        { engine: 'rspamd', body: { settings: {}, expectedVersion: 0 } },
+        spec('ScanSettingsController_replace_v1'),
+        rowVersionOf(item, nested)!,
+      ),
+    ).toEqual({ engine: 'rspamd', body: { settings: {}, expectedVersion: 9 } });
+    // Without select the target is the body itself (AI-2 specs are unchanged).
+    const policy = spec('PolicyManagementController_disable_v1').precondition as SinglePrecondition;
+    const policyRead = { rowVersion: 3 };
+    expect(targetOf(policyRead, policy, {})).toBe(policyRead);
+  });
+
+  it('snapshot projections keep lists as JSON and drop credential keys of objects', () => {
+    const roles = spec('UsersController_replaceRoles_v1').precondition as SinglePrecondition;
+    const snapshot = buildSnapshot(
+      {
+        email: 'a@example.com',
+        displayName: 'A',
+        status: 'active',
+        roles: [
+          { key: 'r1', name: 'One' },
+          { key: 'r2', name: 'Two' },
+        ],
+      },
+      roles,
+    );
+    expect(snapshot['roles[].key']).toBe('["r1","r2"]');
+    expect(snapshotList(snapshot['roles[].key'])).toEqual(['r1', 'r2']);
+    expect(snapshotList('["cut')).toBeNull();
+    expect(snapshotList(3)).toBeNull();
+    expect(snapshotPathValue({ a: [{ b: 1 }, 'x', { c: 2 }] }, 'a[].b')).toEqual([1, null, null]);
+    expect(snapshotPathValue({ a: 1 }, 'a[].b')).toBeUndefined();
+    const long = Array.from({ length: 150 }, (_, i) => `permission:number_${i}`);
+    const kept = buildSnapshot(
+      { permissions: long },
+      {
+        kind: 'single',
+        tool: 'roles_get',
+        params: {},
+        stateFields: ['permissions'],
+      },
+    );
+    expect(snapshotList(kept.permissions)).toEqual(long);
+    const tooLong = buildSnapshot(
+      { permissions: [...long, ...long] },
+      {
+        kind: 'single',
+        tool: 'roles_get',
+        params: {},
+        stateFields: ['permissions'],
+      },
+    );
+    expect(snapshotList(tooLong.permissions)).toBeNull();
+    const scrubbed = buildSnapshot(
+      { config: { a: 1, apiToken: 'x', nested: { secret: 'y' } } },
+      {
+        kind: 'single',
+        tool: 't',
+        params: {},
+        stateFields: ['config'],
+      },
+    );
+    expect(scrubbed.config).toBe('{"a":1,"nested":{}}');
+  });
+});
+
+describe('AI-3 registry consistency rules (synthetic breaks)', () => {
+  const tools = OPERATION_TOOLS;
+  const patch = (operationId: string, change: Partial<ConfirmationSpec>) =>
+    CONFIRMATION_SPECS.map((s) => (s.operationId === operationId ? { ...s, ...change } : s));
+  const issues = (operationId: string, change: Partial<ConfirmationSpec>) =>
+    registryConsistencyIssues(tools, { specs: patch(operationId, change) });
+
+  it('guard and escalation argument paths exist in the write’s input schema', () => {
+    expect(
+      issues('UsersController_update_v1', { guards: [{ kind: 'not_self_user', arg: 'userId' }] }),
+    ).toEqual(['users_update: not_self_user guard reads the missing argument userId']);
+    expect(
+      issues('WebhooksController_update_v1', {
+        escalate: [{ when: { present: 'body.endpoint' }, risk: 'high', warning: 'w' }],
+      }),
+    ).toEqual(['webhooks_update: escalation reads the missing argument body.endpoint']);
+    expect(
+      issues('SmtpConnectorsController_update_v1', {
+        escalate: [
+          { when: { equals: { path: 'body.tls', value: false } }, risk: 'high', warning: 'w' },
+        ],
+      }),
+    ).toEqual(['smtp_connectors_update: escalation reads the missing argument body.tls']);
+  });
+
+  it('deny_permission_change with beforeField needs a single precondition', () => {
+    const update = spec('RolesController_update_v1');
+    expect(issues('RolesController_create_v1', { guards: update.guards })).toEqual([
+      'roles_create: deny_permission_change with beforeField needs a single precondition',
+    ]);
+  });
+
+  it('all guards of a spec share one message (stored denied_guard executions, D12)', () => {
+    const update = spec('UsersController_update_v1');
+    expect(
+      issues('UsersController_update_v1', {
+        guards: [
+          ...update.guards!,
+          {
+            kind: 'deny_values',
+            arg: 'body.displayName',
+            values: ['x'],
+            message: 'assistant_feature',
+          },
+        ],
+      }),
+    ).toEqual(['users_update: all guards of a spec must share one message']);
+  });
+
+  it('select: only on single, non-empty array, an existing argument; CAS needs a row version', () => {
+    const pre = spec('ScanSettingsController_replace_v1').precondition as SinglePrecondition;
+    expect(
+      issues('ScanSettingsController_replace_v1', {
+        precondition: { ...pre, select: { ...pre.select!, arg: 'body.engine' } },
+      }),
+    ).toEqual(['scan_settings_replace: select reads the missing argument body.engine']);
+    expect(
+      issues('ScanSettingsController_replace_v1', {
+        precondition: { ...pre, select: { ...pre.select!, array: '' } },
+      }),
+    ).toEqual(['scan_settings_replace: select needs a non-empty array and field']);
+    expect(
+      issues('ScanSettingsController_replace_v1', {
+        precondition: { ...pre, rowVersionField: undefined },
+      }),
+    ).toEqual(['scan_settings_replace: CAS injection needs a precondition with a rowVersionField']);
+    const bulk = spec('QuarantineToolsController_bulk_v1').precondition as EachPrecondition;
+    expect(
+      issues('QuarantineToolsController_bulk_v1', {
+        precondition: { ...bulk, select: pre.select } as unknown as EachPrecondition,
+      }),
+    ).toEqual(['quarantine_tools_bulk: select is only allowed on a single precondition']);
+  });
+
+  it('no enabled write has a credential-pattern input key (named exceptions only)', () => {
+    const bodyOf = (t: OperationTool) =>
+      (t.inputSchema.properties as Record<string, Record<string, unknown>>).body!;
+    const withSecret = tools.map((t) =>
+      t.name === 'webhooks_update'
+        ? {
+            ...t,
+            inputSchema: {
+              ...t.inputSchema,
+              properties: {
+                ...(t.inputSchema.properties as object),
+                body: {
+                  ...bodyOf(t),
+                  properties: {
+                    ...(bodyOf(t).properties as object),
+                    signingSecret: { type: 'string' },
+                    headers: {
+                      type: 'array',
+                      items: { anyOf: [{ type: 'object', properties: { authToken: {} } }] },
+                    },
+                    extra: { type: 'object', additionalProperties: { properties: { apiKey: {} } } },
+                  },
+                },
+              },
+            },
+          }
+        : t,
+    );
+    expect(registryConsistencyIssues(withSecret)).toEqual([
+      'webhooks_update: input property body.signingSecret matches the credential-key pattern',
+      'webhooks_update: input property body.headers[].authToken matches the credential-key pattern',
+      'webhooks_update: input property body.extra.*.apiKey matches the credential-key pattern',
+    ]);
+    expect(credentialKeyPaths(findTool('roles_create')!.inputSchema)).toEqual(['body.key']);
+    expect(credentialKeyPaths(findTool('roles_update')!.inputSchema)).toEqual(['key']);
+    expect(Object.keys(CREDENTIAL_KEY_EXCEPTIONS).sort()).toEqual([
+      'RolesController_create_v1',
+      'RolesController_remove_v1',
+      'RolesController_update_v1',
+    ]);
+    // A disabled tool's schema is not checked (secret-returning operations are N/A anyway).
+    expect(
+      registryConsistencyIssues(
+        withSecret.map((t) => (t.name === 'webhooks_update' ? { ...t, enabled: false } : t)),
+      ),
+    ).toEqual(['WebhooksController_update_v1: confirmation spec without an enabled write tool']);
   });
 });

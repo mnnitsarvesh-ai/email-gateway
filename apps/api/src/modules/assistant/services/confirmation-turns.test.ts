@@ -1,6 +1,7 @@
 import {
   ACTION_UPDATES_HEADER,
   type AssistantStreamEvent,
+  GUARD_MESSAGES,
   type LlmRequest,
 } from '@email-gateway/assistant';
 import { describe, expect, it } from 'vitest';
@@ -325,5 +326,40 @@ describe('conversation delete and retention (D7)', () => {
     await h.kv.del('as:jobs:lock');
     await h.retention.runOnce(now);
     expect(h.world.confirmations).toHaveLength(0);
+  });
+});
+
+describe('turns with a guarded write (step AI-3 D3, D10)', () => {
+  it('streams tool.denied (denied_guard, the guard message); the model gets the denied envelope', async () => {
+    const admin = testUser({
+      permissions: new Set(['assistant:use', 'user:read', 'user:manage']),
+    });
+    const provider = new ScriptedProvider([
+      () =>
+        reply({
+          toolCalls: [callTool('c1', 'users_reset_mfa', { id: admin.userPublicId })],
+        }),
+      () => reply({ text: 'That is not available in chat.' }),
+    ]);
+    const h = createAssistantHarness({}, provider, admin);
+    h.world.enable(admin.organizationId);
+    const conversation = h.world.addConversation(ownerOf(admin, h.scope));
+    const { sink } = await h.ask(conversation.publicId, 'reset my MFA');
+    expect(without(sink.events, 'text.delta').map((e) => e.type)).toEqual([
+      'turn.started',
+      'tool.started',
+      'tool.denied',
+      'turn.completed',
+    ]);
+    expect(sink.events.find((e) => e.type === 'tool.denied')).toMatchObject({
+      tool: 'users_reset_mfa',
+      decision: 'denied_guard',
+      message: GUARD_MESSAGES.self,
+    });
+    // No tool request and no confirmation; the transcript carries the denied envelope.
+    expect(h.loopback.toolCalls).toHaveLength(0);
+    expect(h.loopback.calls.some((c) => c.path.startsWith('/api/v1/users'))).toBe(false);
+    expect(h.world.confirmations).toHaveLength(0);
+    expect(h.world.turns[0]!.providerTranscript).toContain('denied_guard');
   });
 });

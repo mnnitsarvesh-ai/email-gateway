@@ -986,7 +986,9 @@ describe('tools catalogue (D3, D5)', () => {
       (t) => t.access === 'write',
     );
     expect(writes.map((t) => t.name)).toContain('policy_management_create');
-    expect(writes.length).toBe(ENABLED_WRITES.length);
+    // Step AI-3: the platform-only organization writes are not offered to a customer user.
+    expect(writes.length).toBe(ENABLED_WRITES.filter((t) => !t.platformOnly).length);
+    expect(writes.map((t) => t.name)).not.toContain('organization_configuration_override_feature');
     expect(
       (admin.body.tools as Array<{ access: string }>).every(
         (t) => t.access === 'read' || t.access === 'write',

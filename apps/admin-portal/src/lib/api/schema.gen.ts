@@ -33,7 +33,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get an API key
+     * @description Never returns the key or its hash. Revoked keys are included. Read from the replica.
+     */
+    get: operations['ApiKeysController_get_v1'];
     put?: never;
     post?: never;
     /** Revoke an API key (idempotent) */
@@ -490,7 +494,7 @@ export interface paths {
     put?: never;
     /**
      * Confirm an action the assistant proposed
-     * @description Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`) and permitted (`403 forbidden`), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     * @description Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`; also when the effective risk recomputed from the stored arguments differs from the stored one) and permitted (`403 forbidden`), the proposal guards (`403 assistant_action_not_allowed`: no change to your own account, roles, status, MFA or sessions, nor to the assistant’s own enablement or who may configure it, through chat), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`) and the proposal guards that need the target are evaluated on it again (`403 assistant_action_not_allowed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.
      */
     post: operations['AssistantConfirmationsController_confirm_v1'];
     delete?: never;
@@ -7072,6 +7076,176 @@ export interface operations {
       };
     };
   };
+  ApiKeysController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            createdBy: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+            } | null;
+            /** Format: date-time */
+            expiresAt: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            lastUsedAt: string | null;
+            name: string;
+            /** @description First 16 characters of the key, safe to display */
+            prefix: string;
+            /** Format: date-time */
+            revokedAt: string | null;
+            scopes: string[];
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Not found (also for resources of another tenant) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+    };
+  };
   ApiKeysController_revoke_v1: {
     parameters: {
       query?: never;
@@ -13185,7 +13359,10 @@ export interface operations {
               conversationId: string;
               /** Format: date-time */
               createdAt: string;
-              /** @enum {string} */
+              /**
+               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+               * @enum {string}
+               */
               decision:
                 | 'allowed'
                 | 'denied_permission'
@@ -13194,13 +13371,16 @@ export interface operations {
                 | 'denied_not_applicable'
                 | 'denied_schema'
                 | 'denied_ref'
-                | 'denied_budget';
+                | 'denied_budget'
+                | 'denied_guard';
               errorCode: string | null;
               hasMore: boolean;
               httpStatus: number | null;
               /** Format: uuid */
               id: string;
               latencyMs: number | null;
+              /** @description Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value */
+              message: string | null;
               operationId: string;
               /** Format: uuid */
               parentExecutionId: string | null;
@@ -13211,6 +13391,8 @@ export interface operations {
               seq: number;
               /** @enum {string} */
               status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+              /** @description Display title of the tool (as the stream `tool.started` event carries it) */
+              title: string;
               tool: string;
               /**
                * Format: uuid
@@ -13261,7 +13443,7 @@ export interface operations {
           };
         };
       };
-      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`) or a wrong token (`assistant_confirmation_token_invalid`) */
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`), a wrong token (`assistant_confirmation_token_invalid`) or a proposal guard refused the change (`assistant_action_not_allowed`, the confirmation fails) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -13281,7 +13463,8 @@ export interface operations {
               | 'assistant_not_enabled'
               | 'assistant_tenant_disabled'
               | 'assistant_confirmation_session_mismatch'
-              | 'assistant_confirmation_token_invalid';
+              | 'assistant_confirmation_token_invalid'
+              | 'assistant_action_not_allowed';
             correlationId?: string;
             error: string;
             message: string;
@@ -13316,7 +13499,7 @@ export interface operations {
           };
         };
       };
-      /** @description No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`) */
+      /** @description No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available or its effective risk changed (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`) */
       409: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -14501,7 +14684,10 @@ export interface operations {
                 conversationId: string;
                 /** Format: date-time */
                 createdAt: string;
-                /** @enum {string} */
+                /**
+                 * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+                 * @enum {string}
+                 */
                 decision:
                   | 'allowed'
                   | 'denied_permission'
@@ -14510,13 +14696,16 @@ export interface operations {
                   | 'denied_not_applicable'
                   | 'denied_schema'
                   | 'denied_ref'
-                  | 'denied_budget';
+                  | 'denied_budget'
+                  | 'denied_guard';
                 errorCode: string | null;
                 hasMore: boolean;
                 httpStatus: number | null;
                 /** Format: uuid */
                 id: string;
                 latencyMs: number | null;
+                /** @description Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value */
+                message: string | null;
                 operationId: string;
                 /** Format: uuid */
                 parentExecutionId: string | null;
@@ -14527,6 +14716,8 @@ export interface operations {
                 seq: number;
                 /** @enum {string} */
                 status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+                /** @description Display title of the tool (as the stream `tool.started` event carries it) */
+                title: string;
                 tool: string;
                 /**
                  * Format: uuid
@@ -14956,7 +15147,10 @@ export interface operations {
               conversationId: string;
               /** Format: date-time */
               createdAt: string;
-              /** @enum {string} */
+              /**
+               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+               * @enum {string}
+               */
               decision:
                 | 'allowed'
                 | 'denied_permission'
@@ -14965,13 +15159,16 @@ export interface operations {
                 | 'denied_not_applicable'
                 | 'denied_schema'
                 | 'denied_ref'
-                | 'denied_budget';
+                | 'denied_budget'
+                | 'denied_guard';
               errorCode: string | null;
               hasMore: boolean;
               httpStatus: number | null;
               /** Format: uuid */
               id: string;
               latencyMs: number | null;
+              /** @description Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value */
+              message: string | null;
               operationId: string;
               /** Format: uuid */
               parentExecutionId: string | null;
@@ -14982,6 +15179,8 @@ export interface operations {
               seq: number;
               /** @enum {string} */
               status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+              /** @description Display title of the tool (as the stream `tool.started` event carries it) */
+              title: string;
               tool: string;
               /**
                * Format: uuid
@@ -15395,7 +15594,10 @@ export interface operations {
             conversationId: string;
             /** Format: date-time */
             createdAt: string;
-            /** @enum {string} */
+            /**
+             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+             * @enum {string}
+             */
             decision:
               | 'allowed'
               | 'denied_permission'
@@ -15404,13 +15606,16 @@ export interface operations {
               | 'denied_not_applicable'
               | 'denied_schema'
               | 'denied_ref'
-              | 'denied_budget';
+              | 'denied_budget'
+              | 'denied_guard';
             errorCode: string | null;
             hasMore: boolean;
             httpStatus: number | null;
             /** Format: uuid */
             id: string;
             latencyMs: number | null;
+            /** @description Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value */
+            message: string | null;
             operationId: string;
             /** Format: uuid */
             parentExecutionId: string | null;
@@ -15421,6 +15626,8 @@ export interface operations {
             seq: number;
             /** @enum {string} */
             status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+            /** @description Display title of the tool (as the stream `tool.started` event carries it) */
+            title: string;
             tool: string;
             /**
              * Format: uuid
@@ -15722,7 +15929,10 @@ export interface operations {
             conversationId: string;
             /** Format: date-time */
             createdAt: string;
-            /** @enum {string} */
+            /**
+             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+             * @enum {string}
+             */
             decision:
               | 'allowed'
               | 'denied_permission'
@@ -15731,13 +15941,16 @@ export interface operations {
               | 'denied_not_applicable'
               | 'denied_schema'
               | 'denied_ref'
-              | 'denied_budget';
+              | 'denied_budget'
+              | 'denied_guard';
             errorCode: string | null;
             hasMore: boolean;
             httpStatus: number | null;
             /** Format: uuid */
             id: string;
             latencyMs: number | null;
+            /** @description Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value */
+            message: string | null;
             operationId: string;
             /** Format: uuid */
             parentExecutionId: string | null;
@@ -15748,6 +15961,8 @@ export interface operations {
             seq: number;
             /** @enum {string} */
             status: 'succeeded' | 'failed' | 'refused' | 'timeout' | 'pending_confirmation';
+            /** @description Display title of the tool (as the stream `tool.started` event carries it) */
+            title: string;
             tool: string;
             /**
              * Format: uuid

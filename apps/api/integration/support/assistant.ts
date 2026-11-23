@@ -10,6 +10,7 @@
  * internet.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
+import { HttpException } from '@nestjs/common';
 import {
   FakeProvider,
   type FakeProviderOptions,
@@ -31,9 +32,10 @@ import {
 import type { Response } from 'supertest';
 import type { UserPrincipal } from '../../src/auth-contracts/principal';
 import { systemScope } from '../../src/auth-contracts/tenant-scope';
-import { utcDayKey } from '../../src/modules/assistant/assistant.constants';
+import { assistantKeys, utcDayKey } from '../../src/modules/assistant/assistant.constants';
 import type { Owner } from '../../src/modules/assistant/repositories/conversations.repository';
 import { ConversationsRepository } from '../../src/modules/assistant/repositories/conversations.repository';
+import { ExecutionsRepository } from '../../src/modules/assistant/repositories/executions.repository';
 import {
   AssistantProviderService,
   LLM_PROVIDER_FACTORY,
@@ -544,13 +546,13 @@ export async function clearAssistantCounters(
   for (const id of organizationIds) await ctx.kv.del(`as:tok:o:${id}:${day}`);
 }
 
-/** The enabled tools of the registry (AI-2: the reads and the confirmable writes). */
+/** The enabled tools of the registry (the reads and the confirmable writes; AI-3: 257). */
 export const ENABLED_TOOLS: readonly OperationTool[] = OPERATION_TOOLS.filter((t) => t.enabled);
-/** The enabled read tools (step AI-2: 178). */
+/** The enabled read tools (step AI-2: 178; step AI-3: 179 with `api_keys_get`). */
 export const ENABLED_READS: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'read',
 );
-/** The enabled write tools (step AI-2: 31, each behind a confirmation). */
+/** The enabled write tools (step AI-2: 31; step AI-3: 78), each behind a confirmation. */
 export const ENABLED_WRITES: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'write',
 );
@@ -651,7 +653,6 @@ export async function principalOf(ctx: IntegrationApp, token: string): Promise<U
  * audit row.
  */
 export class DirectExecutor {
-  private seq = 1;
   private conversation: { id: bigint; publicId: string } | null = null;
 
   constructor(
@@ -679,6 +680,9 @@ export class DirectExecutor {
     }
     const conversation = this.conversation;
     const base = `it-direct-${randomUUID()}`;
+    // From the stored sequence: a confirmed proposal (`DirectConfirmer`) adds its result
+    // execution to the same conversation.
+    let seq = await this.ctx.get(ExecutionsRepository).nextSeq(this.owner, conversation.id);
     return this.ctx.get(ToolExecutorService).execute(
       {
         principal: this.principal,
@@ -693,7 +697,7 @@ export class DirectExecutor {
         clientIp: uniqueIp(),
         correlationBase: base,
         signal: new AbortController().signal,
-        allocateSeq: () => this.seq++,
+        allocateSeq: () => seq++,
       },
       { name, arguments: args },
       0,
@@ -997,3 +1001,233 @@ export async function waitForRead(
 /** Writes without the assistant (`assistant.*`) audit actions among audit rows. */
 export const operationAudit = (rows: ReadonlyArray<{ action: string }>): string[] =>
   rows.map((r) => r.action).filter((action) => !action.startsWith('assistant.'));
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-3: identity and tenant administration writes (docs/plan/steps/30-ai-chat-identity-
+// tenant-admin.md D3–D6, D10, §9 item 4; contracts §35.2)
+// ---------------------------------------------------------------------------------------------
+
+/** A proposed and confirmed write (directive turn + confirm route). */
+export interface ChatWrite {
+  proposal: Proposal;
+  res: Response;
+  /** Loopback requests of the confirm (the precondition re-read and the write). */
+  calls: RecordedCall[];
+}
+
+/**
+ * Proposes `tool` through a directive turn of `who` (in `conversation` when given) and confirms
+ * it, re-authenticating (password + TOTP) when the stored risk needs it and the session's window
+ * is closed. `reauth: false` never sends the re-authentication.
+ */
+export async function proposeAndConfirm(
+  ctx: IntegrationApp,
+  fx: Fixtures,
+  who: Member,
+  tool: string,
+  args: Record<string, unknown>,
+  options: { conversation?: string; reauth?: boolean } = {},
+): Promise<ChatWrite> {
+  const proposal = await propose(ctx, who, directive(tool, args), options.conversation);
+  if (proposal.confirmation.tool !== tool) {
+    throw new Error(`proposed ${proposal.confirmation.tool}, expected ${tool}`);
+  }
+  const recorder = recordLoopback(ctx);
+  try {
+    const reauth =
+      options.reauth !== false &&
+      proposal.confirmation.requiresReauth &&
+      !proposal.confirmation.reauthFresh
+        ? await reauthOf(fx, who)
+        : undefined;
+    const res = await confirm(ctx, who, proposal, reauth ? { reauth } : {});
+    return { proposal, res, calls: [...recorder.calls] };
+  } finally {
+    recorder.restore();
+  }
+}
+
+/** A loopback path template (`/api/v1/users/{id}/roles`) as an anchored expression. */
+function templatePattern(template: string): RegExp {
+  const escaped = template
+    .split(/\{[^}]+\}/)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/?]+');
+  return new RegExp(`^${escaped}(\\?.*)?$`);
+}
+
+/** The recorded non-GET requests to a route of this path template (none expected). */
+export function writesTo(recorder: { calls: RecordedCall[] }, template: string): RecordedCall[] {
+  const pattern = templatePattern(template);
+  return recorder.calls.filter((c) => c.method !== 'GET' && pattern.test(c.path));
+}
+
+/** No request of any method reached the route of this path template (I12: not even a read). */
+export function requestsTo(recorder: { calls: RecordedCall[] }, template: string): RecordedCall[] {
+  const pattern = templatePattern(template);
+  return recorder.calls.filter((c) => pattern.test(c.path));
+}
+
+/** Throws when a write request reached the route of this path template. */
+export function expectNoWrite(recorder: { calls: RecordedCall[] }, template: string): void {
+  const sent = writesTo(recorder, template);
+  if (sent.length > 0) {
+    throw new Error(`write request(s) reached ${template}: ${JSON.stringify(sent)}`);
+  }
+}
+
+/** The correlation id of a confirm's result execution (the operation's own audit row has it). */
+export async function resultCorrelationId(
+  ctx: IntegrationApp,
+  confirmed: { body: Record<string, unknown> },
+): Promise<string> {
+  const execution = confirmed.body.execution as { id: string } | undefined;
+  if (!execution) throw new Error(`no result execution: ${JSON.stringify(confirmed.body)}`);
+  return (await executionRow(ctx, execution.id)).correlationId;
+}
+
+/** Audit actions (any organization) carrying this correlation id, oldest first. */
+export async function actionsByCorrelation(
+  ctx: IntegrationApp,
+  correlationId: string,
+): Promise<string[]> {
+  const rows = await ctx.prisma.auditLog.findMany({
+    where: { correlationId },
+    orderBy: { id: 'asc' },
+    select: { action: true },
+  });
+  return rows.map((r) => r.action);
+}
+
+/** Closes the session's assistant re-authentication window (the next high confirm asks again). */
+export async function closeReauthWindow(ctx: IntegrationApp, who: Member): Promise<void> {
+  const principal = await principalOf(ctx, who.token);
+  await ctx.kv.del(assistantKeys.reauthWindow(principal.sessionId));
+}
+
+/** A pending proposal of a direct execution (`DirectExecutor`), as the browser holds it. */
+export function pendingOf(outcome: ExecutionOutcome): Pending {
+  if (!outcome.confirmation) {
+    throw new Error(
+      `expected a proposal: ${outcome.tool} ${outcome.decision} ${outcome.status} ` +
+        `${outcome.httpStatus} ${outcome.errorCode}`,
+    );
+  }
+  return {
+    confirmation: JSON.parse(jsonOf(outcome.confirmation.view)) as ConfirmationJson,
+    token: outcome.confirmation.token,
+  };
+}
+
+/** The answer of a direct confirm: the route's body on success, the coded error otherwise. */
+export interface DirectAnswer {
+  status: number;
+  /** Untyped like a supertest body (tests read the route's documented shape). */
+  body: Response['body'];
+}
+
+/**
+ * The confirm route's service (`ConfirmationService.confirm`, D2) for the proposals of a
+ * `DirectExecutor`: the same platform principal and the storage organization's `systemScope`
+ * as the executor's owner, the user's bearer for the precondition re-read and the write (the
+ * real `/api/v1` pipeline). No production seam: the controller does exactly this with the
+ * principal and scope of the request. The storage organization must have the assistant enabled
+ * (`enableStorage`), because confirm checks the availability of the owner's scope.
+ */
+export class DirectConfirmer {
+  constructor(
+    private readonly ctx: IntegrationApp,
+    private readonly member: Member,
+    private readonly principal: UserPrincipal,
+    private readonly storageOrg: FixtureOrganization,
+  ) {}
+
+  async confirm(pending: Pending, overrides: ConfirmOverrides = {}): Promise<DirectAnswer> {
+    try {
+      const body = await this.ctx.get(ConfirmationService).confirm(
+        this.principal,
+        systemScope(this.storageOrg.id),
+        pending.confirmation.id,
+        {
+          token: overrides.token ?? pending.token,
+          actionDigest: overrides.actionDigest ?? pending.confirmation.actionDigest,
+          ...(overrides.reauth && { reauth: overrides.reauth }),
+        },
+        { authorization: `Bearer ${this.member.token}`, clientIp: uniqueIp() },
+      );
+      return { status: 200, body: JSON.parse(jsonOf(body)) };
+    } catch (error) {
+      if (error instanceof HttpException) {
+        const response = error.getResponse();
+        return {
+          status: error.getStatus(),
+          body:
+            typeof response === 'object' && response !== null ? response : { message: response },
+        };
+      }
+      throw error;
+    }
+  }
+}
+
+/** A platform user's direct executor and confirmer over one storage `it-*` organization. */
+export interface DirectPlatform {
+  member: Member;
+  principal: UserPrincipal;
+  executor: DirectExecutor;
+  confirmer: DirectConfirmer;
+  /** Executes `tool` and returns its pending proposal (throws otherwise). */
+  propose: (tool: string, args: Record<string, unknown>) => Promise<Pending>;
+  /** Confirms a proposal, re-authenticating when it needs it and the window is closed. */
+  confirm: (pending: Pending, options?: { reauth?: boolean }) => Promise<DirectAnswer>;
+}
+
+/**
+ * A platform user (`super_admin` by default) with a `DirectExecutor` and a `DirectConfirmer`
+ * storing under `storageOrg` (a synthetic organization whose assistant `enableStorage` turned
+ * on). Platform writes always name their target organization explicitly (never the
+ * `self_organization` binding of a platform user's own organization).
+ */
+export async function directPlatform(
+  ctx: IntegrationApp,
+  fx: Fixtures,
+  storageOrg: FixtureOrganization,
+  roles: string[] = ['super_admin'],
+): Promise<DirectPlatform> {
+  const who = await platformMember(ctx, fx, roles);
+  const principal = await principalOf(ctx, who.token);
+  const executor = new DirectExecutor(ctx, who, principal, storageOrg);
+  const confirmer = new DirectConfirmer(ctx, who, principal, storageOrg);
+  return {
+    member: who,
+    principal,
+    executor,
+    confirmer,
+    propose: async (tool, args) => pendingOf(await executor.execute(tool, args)),
+    confirm: async (pending, options = {}) => {
+      const reauth =
+        options.reauth !== false &&
+        pending.confirmation.requiresReauth &&
+        !(await ctx.kv.exists(assistantKeys.reauthWindow(principal.sessionId)))
+          ? await reauthOf(fx, who)
+          : undefined;
+      return confirmer.confirm(pending, reauth ? { reauth } : {});
+    },
+  };
+}
+
+/**
+ * Turns the assistant on for a storage organization of `DirectExecutor` proposals (the platform
+ * feature, then the tenant setting by a temporary administrator of that organization).
+ */
+export async function enableStorage(
+  ctx: IntegrationApp,
+  fx: Fixtures,
+  operator: Member,
+  storageOrg: FixtureOrganization,
+): Promise<void> {
+  const admin = await memberWith(ctx, fx, storageOrg, {
+    permissions: ['assistant:configure', 'organization:read'],
+  });
+  await enableAssistant(ctx, operator, storageOrg, admin);
+}

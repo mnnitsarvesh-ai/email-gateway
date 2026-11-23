@@ -154,7 +154,22 @@ export type ExecutionDecision =
   | 'denied_not_applicable'
   | 'denied_schema'
   | 'denied_ref'
-  | 'denied_budget';
+  | 'denied_budget'
+  /** A proposal guard refused the write (step AI-3 D3: e.g. a change to one's own account). */
+  | 'denied_guard';
+
+/** Every executor decision, in the order of the database enum `AiChatToolDecision`. */
+export const EXECUTION_DECISIONS: readonly ExecutionDecision[] = [
+  'allowed',
+  'denied_permission',
+  'denied_unknown_tool',
+  'denied_disabled',
+  'denied_not_applicable',
+  'denied_schema',
+  'denied_ref',
+  'denied_budget',
+  'denied_guard',
+];
 
 export type ExecutionStatus =
   | 'succeeded'

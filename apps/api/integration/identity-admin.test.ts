@@ -11,6 +11,7 @@
 // @covers delete /api/v1/users/:id/sessions
 // @covers delete /api/v1/users/:id/sessions/:sessionId
 // @covers get /api/v1/api-keys
+// @covers get /api/v1/api-keys/:id
 // @covers get /api/v1/audit/login-events
 // @covers get /api/v1/permissions
 // @covers get /api/v1/roles
@@ -812,6 +813,107 @@ describe('API keys', () => {
       .send({ name: 'no access', scopes: ['user:read'] })
       .expect(403);
     expect(refused.body.message).toBe('API access is not enabled for this organization');
+  });
+
+  it('reads one key by id: the list view, revoked keys included, never the key or its hash (step AI-3 D8)', async () => {
+    const { org, admin, token } = await orgWithAdmin();
+    const created = (
+      await ctx.http
+        .post('/api/v1/api-keys')
+        .set(bearer(token))
+        .send({ name: `read-${uniqueSuffix()}`, scopes: ['user:read', 'apikey:read'] })
+        .expect(201)
+    ).body as { key: string; apiKey: { id: string; prefix: string; name: string } };
+    const path = `/api/v1/api-keys/${created.apiKey.id}`;
+
+    // Read from the replica: wait until it has the row.
+    await expect
+      .poll(async () => (await ctx.http.get(path).set(bearer(token))).status, POLL)
+      .toBe(200);
+    const one = await ctx.http.get(path).set(bearer(token)).expect(200);
+    expect(Object.keys(one.body).sort()).toEqual(
+      [
+        'createdAt',
+        'createdBy',
+        'expiresAt',
+        'id',
+        'lastUsedAt',
+        'name',
+        'prefix',
+        'revokedAt',
+        'scopes',
+      ].sort(),
+    );
+    expect(one.body).toMatchObject({
+      id: created.apiKey.id,
+      name: created.apiKey.name,
+      prefix: created.apiKey.prefix,
+      scopes: ['apikey:read', 'user:read'],
+      createdBy: { id: admin.publicId, displayName: admin.displayName },
+      revokedAt: null,
+    });
+    const row = await ctx.prisma.apiKey.findUniqueOrThrow({
+      where: { publicId: created.apiKey.id },
+    });
+    const text = JSON.stringify(one.body);
+    expect(text).not.toContain(created.key);
+    expect(text).not.toContain(created.key.slice(17));
+    expect(text).not.toContain(row.keyHash);
+    // The same view as the list item.
+    const list = await ctx.http.get('/api/v1/api-keys').set(bearer(token)).expect(200);
+    expect(
+      (list.body.data as Array<{ id: string }>).find((k) => k.id === created.apiKey.id),
+    ).toEqual(one.body);
+
+    // An API key holding apikey:read may read it (K route).
+    await expect
+      .poll(async () => (await ctx.http.get(path).set(apiKeyHeader(created.key))).status, POLL)
+      .toBe(200);
+
+    // Revoked keys are included, with revokedAt set.
+    await ctx.http.delete(path).set(bearer(token)).expect(204);
+    await expect
+      .poll(
+        async () =>
+          ((await ctx.http.get(path).set(bearer(token))).body as { revokedAt: string | null })
+            .revokedAt,
+        POLL,
+      )
+      .not.toBeNull();
+    const revoked = await ctx.http.get(path).set(bearer(token)).expect(200);
+    expect(new Date(revoked.body.revokedAt as string).getTime()).toBeLessThanOrEqual(Date.now());
+
+    // An unknown id is 404, a malformed one 400.
+    const missing = await ctx.http
+      .get('/api/v1/api-keys/00000000-0000-4000-8000-000000000000')
+      .set(bearer(token))
+      .expect(404);
+    expect(missing.body.message).toBe('API key not found');
+    await ctx.http.get('/api/v1/api-keys/not-a-uuid').set(bearer(token)).expect(400);
+
+    // Without apikey:read: 403 (a user of a custom role, and an API key without the scope).
+    await ctx.http
+      .post('/api/v1/roles')
+      .set(bearer(token))
+      .send({ key: 'user_reader', name: 'User reader', permissions: ['user:read'] })
+      .expect(201);
+    const reader = await fx.createUser(org, { roles: ['user_reader'] });
+    const readerToken = (await sessionOf(reader)).accessToken;
+    await ctx.http.get(path).set(bearer(readerToken)).expect(403);
+    const narrow = (
+      await ctx.http
+        .post('/api/v1/api-keys')
+        .set(bearer(token))
+        .send({ name: `narrow-${uniqueSuffix()}`, scopes: ['user:read'] })
+        .expect(201)
+    ).body as { key: string };
+    await expect
+      .poll(
+        async () => (await ctx.http.get('/api/v1/users').set(apiKeyHeader(narrow.key))).status,
+        POLL,
+      )
+      .toBe(200);
+    await ctx.http.get(path).set(apiKeyHeader(narrow.key)).expect(403);
   });
 });
 

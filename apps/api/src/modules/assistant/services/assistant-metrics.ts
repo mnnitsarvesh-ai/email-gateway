@@ -19,6 +19,8 @@ export type ConfirmationOutcome =
   | 'refused_token'
   | 'refused_digest'
   | 'refused_state'
+  /** Step AI-3 D10: a proposal guard refused the change at confirm. */
+  | 'refused_guard'
   | 'reauth_required'
   | 'reauth_failed'
   | 'outcome_unknown';
@@ -65,7 +67,8 @@ export class AssistantMetrics {
     );
     this.toolCalls = metrics.counter(
       'assistant_tool_calls_total',
-      'Assistant tool calls by module, access, executor decision and outcome',
+      'Assistant tool calls by module, access, executor decision (allowed, denied_*, incl. ' +
+        'denied_guard) and outcome',
       ['module', 'access', 'decision', 'outcome'],
     );
     this.toolSeconds = metrics.histogram(

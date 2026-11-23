@@ -165,6 +165,10 @@ export interface E2eState {
       policies: Array<{ id: string; name: string; status: 'active' | 'draft' }>;
       /** Subjects of delta's messages held in quarantine today. */
       quarantinedSubjects: string[];
+      /** Step AI-3: the public id of `deltaMfaAdmin` (the self-guard directive targets it). */
+      mfaAdminUserId: string;
+      /** Step AI-3: a seeded read-only delta user that only the assistant spec uses (disabled). */
+      offboardUser: { id: string; email: string };
     };
   };
   archive: {

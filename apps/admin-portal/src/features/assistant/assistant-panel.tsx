@@ -21,6 +21,7 @@ import { ConversationList } from './conversation-list';
 import { ConversationView } from './conversation-view';
 import { useAssistantAccess, type AssistantAccess } from './hooks';
 import { SETTINGS_HREF, unavailableExplanation } from './model';
+import { hasWideContent, PANEL_KEY_STEP, usePanelSize } from './panel-size';
 
 /**
  * The chat panel (step AI-1 D14): a right-side sheet (full screen below `md`) with the open
@@ -64,10 +65,37 @@ export function UnavailableReason({
   );
 }
 
-function PanelBody({ access, onNavigate }: { access: AssistantAccess; onNavigate: () => void }) {
+function PanelBody({
+  access,
+  onNavigate,
+  onWideContent,
+}: {
+  access: AssistantAccess;
+  onNavigate: () => void;
+  /** Called whenever the conversation starts or stops holding wide content. */
+  onWideContent?: (wide: boolean) => void;
+}) {
   const { running, send, cancel, selectConversation } = useAssistant();
   const [history, setHistory] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Grow the panel while the conversation shows tables or other wide results.
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container || !onWideContent) return;
+    const check = () => onWideContent(hasWideContent(container));
+    check();
+    const mutations = new MutationObserver(check);
+    mutations.observe(container, { childList: true, subtree: true });
+    const resize = new ResizeObserver(check);
+    resize.observe(container);
+    return () => {
+      mutations.disconnect();
+      resize.disconnect();
+    };
+  }, [onWideContent, access.available]);
+
   if (access.loading)
     return <LoadingState label="Checking the AI assistant" rows={3} className="p-4" />;
   if (!access.available)
@@ -119,7 +147,7 @@ function PanelBody({ access, onNavigate }: { access: AssistantAccess; onNavigate
           />
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <ConversationView onNavigate={onNavigate} />
       </div>
       <div className="border-t p-3">
@@ -145,11 +173,17 @@ export function AssistantPanel({
 }) {
   const { panelOpen, setPanelOpen } = useAssistant();
   const close = () => setPanelOpen(false);
+  const size = usePanelSize();
+  const [dragging, setDragging] = useState(false);
   return (
     <Sheet open={panelOpen} onOpenChange={setPanelOpen}>
       <SheetContent
         side="right"
-        className="w-full gap-0 p-0 sm:max-w-none md:w-[34rem] md:max-w-[34rem]"
+        className={cn(
+          'w-full gap-0 p-0 sm:max-w-none',
+          !dragging && 'md:transition-[width] md:duration-200',
+        )}
+        style={size.desktop ? { width: size.width, maxWidth: 'none' } : undefined}
         onCloseAutoFocus={(event) => {
           const target = returnFocusTo.current;
           if (target && target.isConnected) {
@@ -158,6 +192,58 @@ export function AssistantPanel({
           }
         }}
       >
+        {size.desktop ? (
+          // A focusable separator is the ARIA window-splitter widget (interactive by definition):
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- window splitter
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize the AI assistant panel"
+            aria-valuemin={size.minWidth}
+            aria-valuemax={size.maxWidth}
+            aria-valuenow={size.width}
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- window splitter
+            tabIndex={0}
+            title="Drag to resize · double-click for automatic size"
+            className={cn(
+              'absolute inset-y-0 left-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize outline-none',
+              'hover:bg-primary/30 focus-visible:bg-primary/40',
+              dragging && 'bg-primary/40',
+            )}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              setDragging(true);
+            }}
+            onPointerMove={(event) => {
+              if (!dragging) return;
+              size.setManualWidth(window.innerWidth - event.clientX);
+            }}
+            onPointerUp={(event) => {
+              if (!dragging) return;
+              event.currentTarget.releasePointerCapture(event.pointerId);
+              setDragging(false);
+              size.setManualWidth(window.innerWidth - event.clientX, true);
+            }}
+            onDoubleClick={() => size.resetWidth()}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                event.preventDefault();
+                const step = event.key === 'ArrowLeft' ? PANEL_KEY_STEP : -PANEL_KEY_STEP;
+                size.setManualWidth(size.width + step, true);
+              } else if (event.key === 'Home') {
+                event.preventDefault();
+                size.setManualWidth(size.minWidth, true);
+              } else if (event.key === 'End') {
+                event.preventDefault();
+                size.setManualWidth(size.maxWidth, true);
+              } else if (event.key === 'Enter') {
+                event.preventDefault();
+                size.resetWidth();
+              }
+            }}
+          />
+        ) : null}
         <div className="flex items-center gap-2 border-b px-4 py-3 pr-12">
           <SparklesIcon className="size-4 text-primary" aria-hidden />
           <SheetTitle className="text-base">AI assistant</SheetTitle>
@@ -167,7 +253,7 @@ export function AssistantPanel({
           permissions.
         </SheetDescription>
         <div className="flex min-h-0 flex-1 flex-col">
-          <PanelBody access={access} onNavigate={close} />
+          <PanelBody access={access} onNavigate={close} onWideContent={size.setWideContent} />
         </div>
       </SheetContent>
     </Sheet>

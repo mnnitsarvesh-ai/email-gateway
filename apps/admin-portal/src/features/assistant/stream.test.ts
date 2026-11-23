@@ -21,8 +21,12 @@ import {
   RESULT_CARD,
   TABLE_CARD,
   TURN_ID,
+  GUARD_EXECUTION_ID,
+  SELF_GUARD_MESSAGE,
   completedTurnFrames,
   confirmationView,
+  deniedGuardExecution,
+  deniedGuardFrame,
   execution,
   proposalExecution,
   proposalTurnFrames,
@@ -663,5 +667,81 @@ describe('confirmation store', () => {
     );
     expect(tools[0]).toMatchObject({ state: 'succeeded', resultCard: RESULT_CARD });
     expect(tools[0]?.confirmation?.status).toBe('executed');
+  });
+});
+
+describe('proposal guard decision (step AI-3 D3)', () => {
+  function rawEvent(frame: string): RawSseEvent {
+    const [event] = collect([frame]);
+    if (!event) throw new Error('no event');
+    return event;
+  }
+
+  it('accepts denied_guard in tool.denied and still rejects an unknown decision', () => {
+    expect(parseStreamEvent(rawEvent(deniedGuardFrame()))).toEqual({
+      type: 'tool.denied',
+      executionId: GUARD_EXECUTION_ID,
+      tool: 'users_replace_roles',
+      decision: 'denied_guard',
+      message: SELF_GUARD_MESSAGE,
+    });
+    const denied = (decision: string) =>
+      parseStreamEvent({
+        event: 'tool.denied',
+        data: JSON.stringify({
+          executionId: GUARD_EXECUTION_ID,
+          tool: 'users_replace_roles',
+          decision,
+          message: 'no',
+        }),
+      });
+    expect(denied('denied_self')).toBeNull();
+    // `allowed` is never a denial.
+    expect(denied('allowed')).toBeNull();
+  });
+
+  it('accepts denied_guard in tool.completed and rejects an unknown one there', () => {
+    const completed = (decision: string) =>
+      parseStreamEvent({
+        event: 'tool.completed',
+        data: JSON.stringify({
+          executionId: GUARD_EXECUTION_ID,
+          status: 'refused',
+          decision,
+          card: { ...TABLE_CARD, executionId: GUARD_EXECUTION_ID },
+        }),
+      });
+    expect(completed('denied_guard')).toMatchObject({
+      type: 'tool.completed',
+      decision: 'denied_guard',
+    });
+    expect(completed('denied_guards')).toBeNull();
+  });
+
+  it('replays a stored denied_guard execution as tool.denied without a confirmation', () => {
+    const events = eventsFromTurnResult({
+      ...TURN_RESULT,
+      executions: [deniedGuardExecution()],
+      confirmations: [],
+    });
+    expect(events.filter((e) => e.type === 'confirmation.required')).toEqual([]);
+    expect(events.find((e) => e.type === 'tool.denied')).toEqual({
+      type: 'tool.denied',
+      executionId: GUARD_EXECUTION_ID,
+      tool: 'users_replace_roles',
+      decision: 'denied_guard',
+      // A stored denial has no card; the view carries the guard's own message (D12).
+      message: SELF_GUARD_MESSAGE,
+    });
+  });
+
+  it('marks the tool chip of a guard refusal as denied', () => {
+    let turn = newPendingTurn({ clientTurnId: 'x', conversationId: CONVERSATION_ID, message: 'q' });
+    const event = parseStreamEvent(rawEvent(deniedGuardFrame()));
+    if (!event) throw new Error('not parsed');
+    turn = reduceTurn(turn, event);
+    expect(turn.tools).toMatchObject([
+      { executionId: GUARD_EXECUTION_ID, state: 'denied', decision: 'denied_guard' },
+    ]);
   });
 });

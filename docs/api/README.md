@@ -112,6 +112,7 @@ Scoped to the caller's organization (or the override target). Rules (no privileg
 | PUT    | `/roles/{key}`                     | `role:manage`, U      | custom roles only (`409` for system roles)                                                    |
 | DELETE | `/roles/{key}`                     | `role:manage`, U      | custom roles only, `409` while assigned                                                       |
 | GET    | `/api-keys`                        | `apikey:read`, K      | never returns secrets                                                                         |
+| GET    | `/api-keys/{id}`                   | `apikey:read`, K      | list item view, revoked included, never key or hash; foreign or unknown id `404`              |
 | POST   | `/api-keys`                        | `apikey:manage`, U    | `{ name, scopes[], expiresAt? }` → `201 { apiKey, key }` (key shown once)                     |
 | DELETE | `/api-keys/{id}`                   | `apikey:manage`, U    | revoke, `204` (idempotent)                                                                    |
 | GET    | `/audit/login-events`              | `audit:read`, K       | reader; `from`, `to` (default 7 days, max 90), `outcome`, `userId`; paginated                 |

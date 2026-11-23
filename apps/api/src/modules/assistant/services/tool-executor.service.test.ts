@@ -1,4 +1,9 @@
-import { NOT_APPLICABLE_OPERATIONS, OPERATION_TOOLS, toolNameOf } from '@email-gateway/assistant';
+import {
+  GUARD_MESSAGES,
+  NOT_APPLICABLE_OPERATIONS,
+  OPERATION_TOOLS,
+  toolNameOf,
+} from '@email-gateway/assistant';
 import { describe, expect, it } from 'vitest';
 import { policyPage, testUser } from '../../../../test/support/assistant-fixtures';
 import { createAssistantHarness } from '../../../../test/support/assistant-harness';
@@ -65,7 +70,7 @@ describe('ToolExecutorService decisions (D5, in order; each recorded and audited
     );
     expect(denied.decision).toBe('denied_not_applicable');
     expect(denied.envelope).toMatchObject({ status: 'denied', portalRoute: na.portalRoute });
-    const write = OPERATION_TOOLS.find((t) => t.access === 'write')!;
+    const write = OPERATION_TOOLS.find((t) => t.access === 'write' && !t.enabled)!;
     expect((await h.executor.execute(ctx(), { name: write.name, arguments: {} }, 0)).decision).toBe(
       'denied_disabled',
     );
@@ -292,6 +297,162 @@ describe('ToolExecutorService decisions (D5, in order; each recorded and audited
       2,
     );
     expect(big).toMatchObject({ status: 'failed', errorCode: 'tool_result_too_large' });
+  });
+});
+
+describe('proposal guards before any loopback call (step AI-3 D3, D10; design §9 item 2)', () => {
+  const SELF = testUser().userPublicId;
+  const OTHER = '0193b000-0000-7000-8000-000000000502';
+  const SESSION = '0193b000-0000-7000-8000-0000000005e1';
+  const ORG = '0193b000-0000-7000-8000-000000007002';
+  const identityUser = testUser({
+    permissions: new Set(['assistant:use', 'user:manage', 'user:read', 'session:manage']),
+  });
+  const SELF_GUARDED: Array<[string, Record<string, unknown>]> = [
+    ['users_update', { body: { displayName: 'Renamed person' } }],
+    ['users_change_status', { body: { status: 'disabled', reason: 'Disabled in a test' } }],
+    ['users_replace_roles', { body: { roleKeys: ['organization_admin'] } }],
+    ['users_reset_mfa', {}],
+    ['users_remove', {}],
+    ['users_revoke_all_sessions', {}],
+    ['users_revoke_session', { sessionId: SESSION }],
+    ['users_resend_invitation', {}],
+  ];
+
+  /** The `assistant_tool_calls_total` value of a decision. */
+  const toolCallsOf = async (h: ReturnType<typeof setup>['h'], decision: string): Promise<number> =>
+    (await h.metrics.toolCalls.get()).values
+      .filter((v) => v.labels.decision === decision)
+      .reduce((sum, v) => sum + v.value, 0);
+
+  it.each(SELF_GUARDED)(
+    '%s with the caller’s own id (any case) → denied_guard, nothing sent or stored',
+    async (name, extra) => {
+      for (const id of [SELF, SELF.toUpperCase()]) {
+        const { h, ctx } = setup(identityUser);
+        const out = await h.executor.execute(ctx(), { name, arguments: { id, ...extra } }, 0);
+        expect(out, `${name} ${id}`).toMatchObject({
+          decision: 'denied_guard',
+          status: 'refused',
+          errorCode: 'denied_guard',
+          card: null,
+          confirmation: null,
+          denialMessage: GUARD_MESSAGES.self,
+        });
+        expect(out.envelope).toEqual({
+          kind: 'tool_result/1',
+          tool: name,
+          status: 'denied',
+          decision: 'denied_guard',
+          code: 'denied_guard',
+          message: GUARD_MESSAGES.self,
+        });
+        // No loopback request at all: not even the precondition read.
+        expect(h.loopback.calls).toHaveLength(0);
+        expect(h.world.confirmations).toHaveLength(0);
+        expect(h.world.executions).toHaveLength(1);
+        expect(h.world.executions[0]).toMatchObject({
+          decision: 'denied_guard',
+          status: 'refused',
+          errorCode: 'denied_guard',
+        });
+        expect(h.audit.entries).toHaveLength(1);
+        expect(h.audit.entries[0]).toMatchObject({
+          action: 'assistant.tool_denied',
+          metadata: { decision: 'denied_guard', guard: 'not_self_user', status: 'refused' },
+        });
+        // The message never echoes an argument value.
+        expect(out.denialMessage!.toLowerCase()).not.toContain(SELF.toLowerCase());
+        expect(await toolCallsOf(h, 'denied_guard')).toBe(1);
+      }
+    },
+  );
+
+  it('another user’s id passes the guard (the proposal reads the target)', async () => {
+    const { h, ctx } = setup(identityUser);
+    h.loopback.on(`GET /api/v1/users/${OTHER}`, () => ({
+      kind: 'response',
+      status: 200,
+      body: {
+        id: OTHER,
+        email: 'other@example.test',
+        displayName: 'Other',
+        status: 'active',
+        mfaEnabled: true,
+        roles: [{ key: 'security_analyst' }],
+      },
+    }));
+    const out = await h.executor.execute(
+      ctx(),
+      { name: 'users_reset_mfa', arguments: { id: OTHER } },
+      0,
+    );
+    expect(out).toMatchObject({ decision: 'allowed', status: 'pending_confirmation' });
+    expect(h.loopback.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      `GET /api/v1/users/${OTHER}`,
+    ]);
+  });
+
+  it('the assistant’s own feature (ai_assistant) cannot be overridden or reset in chat', async () => {
+    const operator = testUser({
+      organizationKind: 'platform',
+      permissions: new Set(['assistant:use', 'platform:organizations']),
+    });
+    for (const [name, extra] of [
+      ['organization_configuration_override_feature', { body: { enabled: false } }],
+      ['organization_configuration_reset_feature', {}],
+    ] as const) {
+      const { h, ctx } = setup(operator);
+      const out = await h.executor.execute(
+        ctx(),
+        { name, arguments: { id: ORG, featureKey: 'ai_assistant', ...extra } },
+        0,
+      );
+      expect(out, name).toMatchObject({
+        decision: 'denied_guard',
+        denialMessage: GUARD_MESSAGES.assistant_feature,
+      });
+      expect(h.loopback.calls).toHaveLength(0);
+      expect(h.audit.entries[0]!.metadata).toMatchObject({ guard: 'deny_values' });
+    }
+  });
+
+  it('roles_create granting assistant:configure → denied_guard before any read; without it a proposal', async () => {
+    const roleAdmin = testUser({ permissions: new Set(['assistant:use', 'role:manage']) });
+    const { h, ctx } = setup(roleAdmin);
+    const denied = await h.executor.execute(
+      ctx(),
+      {
+        name: 'roles_create',
+        arguments: {
+          body: {
+            key: 'it_helpers',
+            name: 'IT helpers',
+            permissions: ['policy:read', 'assistant:configure'],
+          },
+        },
+      },
+      0,
+    );
+    expect(denied).toMatchObject({
+      decision: 'denied_guard',
+      denialMessage: GUARD_MESSAGES.assistant_configure,
+    });
+    expect(h.audit.entries[0]!.metadata).toMatchObject({ guard: 'deny_permission_change' });
+    expect(h.loopback.calls).toHaveLength(0);
+    const allowed = await h.executor.execute(
+      ctx(),
+      {
+        name: 'roles_create',
+        arguments: {
+          body: { key: 'it_helpers', name: 'IT helpers', permissions: ['policy:read'] },
+        },
+      },
+      1,
+    );
+    expect(allowed).toMatchObject({ decision: 'allowed', status: 'pending_confirmation' });
+    expect(allowed.confirmation!.view).toMatchObject({ risk: 'high', requiresReauth: true });
+    expect(h.loopback.calls).toHaveLength(0);
   });
 });
 

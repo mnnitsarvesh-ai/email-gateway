@@ -103,6 +103,12 @@ export interface NotApplicableOperation {
 export interface OperationOverride {
   status?: 'not_applicable';
   reason?: string;
+  /**
+   * Reclassifies a side-effect-free read as a write (step AI-3 D2: `webhooks_test` reaches an
+   * external URL). Only `'write'` is allowed: the generator refuses an override that would turn a
+   * write into a read.
+   */
+  access?: Extract<ToolAccess, 'write'>;
   risk?: ToolRisk;
   phase?: ProgramPhase;
   title?: string;

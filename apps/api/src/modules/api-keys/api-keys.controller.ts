@@ -44,6 +44,7 @@ import {
   type ApiKeyListQuery,
   ApiKeyListQuerySchema,
   ApiKeyListResponseSchema,
+  ApiKeyResponseSchema,
   type ApiKeyView,
   type CreateApiKeyRequest,
   CreateApiKeyRequestSchema,
@@ -80,6 +81,24 @@ export class ApiKeysController {
     @Query(new ZodValidationPipe(ApiKeyListQuerySchema)) query: ApiKeyListQuery,
   ): Promise<Page<ApiKeyView>> {
     return this.keys.list(scope, query);
+  }
+
+  @Get(':id')
+  @RequirePermissions('apikey:read')
+  @ApiSecurity(API_KEY_SCHEME)
+  @ApiOperation({
+    summary: 'Get an API key',
+    description:
+      'Never returns the key or its hash. Revoked keys are included. Read from the replica.',
+  })
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOkResponse({ schema: zodToOpenApi(ApiKeyResponseSchema) })
+  @ApiErrors(400, 401, 403, 404, 503)
+  get(
+    @CurrentScope() scope: TenantScope,
+    @Param('id', new ZodValidationPipe(ApiKeyIdParamSchema)) id: string,
+  ): Promise<ApiKeyView> {
+    return this.keys.get(scope, id);
   }
 
   @Post()

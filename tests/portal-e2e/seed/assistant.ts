@@ -26,6 +26,17 @@ export const DELTA_DOMAIN = 'delta.e2e-portal.test';
 export const EPSILON_DOMAIN = 'epsilon.e2e-portal.test';
 export const ASSISTANT_FEATURE = 'ai_assistant';
 
+/**
+ * Step AI-3 (docs/plan/steps/30-ai-chat-identity-tenant-admin.md §9 item 7): a delta user no other
+ * spec signs in as (read-only role, no password anyone knows), disabled through the assistant by
+ * `assistant.spec.ts` ("disable user …").
+ */
+export const DELTA_OFFBOARD_USER = {
+  email: `leaver@${DELTA_DOMAIN}`,
+  displayName: 'Delta Leaver',
+  roles: ['read_only_user'],
+} as const;
+
 /** Delta's policies in creation order (the list route returns newest first). */
 export const DELTA_POLICIES = [
   { name: 'E2E Assistant inbound guard', direction: 'inbound', activate: true },
@@ -38,6 +49,10 @@ export interface SeededAssistant {
     policies: Array<{ id: string; name: string; status: 'active' | 'draft' }>;
     /** Subjects of delta's messages held in quarantine today. */
     quarantinedSubjects: string[];
+    /** Step AI-3: the public id of `deltaMfaAdmin` (the self-guard directive targets it). */
+    mfaAdminUserId: string;
+    /** Step AI-3: the seeded user the assistant disables (DELTA_OFFBOARD_USER). */
+    offboardUser: { id: string; email: string };
   };
 }
 

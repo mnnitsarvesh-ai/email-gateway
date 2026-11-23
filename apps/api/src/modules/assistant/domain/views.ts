@@ -16,6 +16,8 @@ import type {
   TurnRow,
 } from '../repositories/conversations.repository';
 import type { ExecutionWithRefs } from '../repositories/executions.repository';
+import { refusalMessageOf } from './denials';
+import { toolTitleOf } from './tool-catalog';
 
 /** Row → response view mappers of the assistant routes (public ids only, ISO instants). */
 
@@ -133,6 +135,7 @@ export function executionView(
     seq: row.seq,
     ref: `r${row.seq}`,
     tool: row.toolName,
+    title: toolTitleOf(row.toolName),
     operationId: row.operationId,
     access: row.access,
     risk: row.risk,
@@ -140,6 +143,7 @@ export function executionView(
     status: row.status,
     httpStatus: row.httpStatus,
     errorCode: row.errorCode,
+    message: refusalMessageOf(row.decision, row.operationId),
     hasMore: row.nextCursor !== null,
     card: cardOf(row.resultCard),
     latencyMs: row.latencyMs,

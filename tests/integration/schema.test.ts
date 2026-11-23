@@ -6054,6 +6054,17 @@ describe('step AI-2 assistant action confirmations schema (29-ai-chat-confirmati
     });
   });
 
+  it('appends denied_guard to ai_chat_tool_executions.decision (step AI-3; existing values and order kept)', async () => {
+    const cols = await columns(['ai_chat_tool_executions']);
+    expect(cols.get('ai_chat_tool_executions.decision')).toMatchObject({
+      columnType:
+        "enum('allowed','denied_permission','denied_unknown_tool','denied_disabled'," +
+        "'denied_not_applicable','denied_schema','denied_ref','denied_budget','denied_guard')",
+      nullable: 'NO',
+      columnDefault: null,
+    });
+  });
+
   it('creates ai_chat_action_confirmations (not partitioned) with exactly the §3 columns, keys and foreign keys', async () => {
     const table = 'ai_chat_action_confirmations';
     const cols = await columns([table]);

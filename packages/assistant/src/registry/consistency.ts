@@ -1,7 +1,14 @@
+import { escalationPath } from '../confirmations/escalation';
+import { guardArgumentPaths, guardMessageKey } from '../confirmations/guards';
 import { hasImpactTemplate } from '../confirmations/impact';
 import { CONFIRMATION_SPECS, type ConfirmationSpec } from '../confirmations/specs';
+import { isCredentialKey } from '../results/sanitize';
 import { phaseIndex } from './build';
-import { ASSISTANT_PROGRAM_PHASE, CONFIRMATION_SUPPORT_PHASE } from './manifest';
+import {
+  ASSISTANT_PROGRAM_PHASE,
+  CONFIRMATION_SUPPORT_PHASE,
+  CREDENTIAL_KEY_EXCEPTIONS,
+} from './manifest';
 import type { OperationTool, ProgramPhase } from './types';
 
 /**
@@ -18,6 +25,18 @@ import type { OperationTool, ProgramPhase } from './types';
  *   input schema;
  * - every injected CAS field exists in the write's input schema (body or query) with the spec's
  *   minimum; `validateDefinition` names an existing body field.
+ *
+ * Step AI-3 (design 30 D3–D6, §4.3) adds:
+ *
+ * - every guard and escalation argument path exists in the write's input schema; a
+ *   `deny_permission_change` guard with a `beforeField` needs a single precondition; all
+ *   guards of a spec share one message key (`guardMessageOf`, D12);
+ * - `select` only on single preconditions, with a non-empty `array` and an `arg` that exists in
+ *   the write's input schema (the CAS `rowVersionField` is then item-relative);
+ * - no enabled write's input schema has a property (at any depth of `properties`, `items`,
+ *   `anyOf`/`oneOf`/`allOf`, `additionalProperties`) whose key matches the credential-key pattern
+ *   (`isCredentialKey`, I14), except the named `CREDENTIAL_KEY_EXCEPTIONS`;
+ * - the generator refuses an access override other than `'write'` (`build.ts`).
  */
 
 export interface ConsistencyOptions {
@@ -39,6 +58,29 @@ export function argumentSchema(tool: OperationTool, path: string): Schema | null
     node = properties[segment];
   }
   return isRecord(node) ? node : null;
+}
+
+/** Paths (`body.settings.key`, `body.items[].token`) of credential-pattern keys in a schema. */
+export function credentialKeyPaths(schema: unknown, prefix = '', depth = 0): string[] {
+  if (!isRecord(schema) || depth > 40) return [];
+  const out: string[] = [];
+  const join = (key: string) => (prefix ? `${prefix}.${key}` : key);
+  const properties = schema.properties;
+  if (isRecord(properties))
+    for (const [key, sub] of Object.entries(properties)) {
+      if (isCredentialKey(key)) out.push(join(key));
+      out.push(...credentialKeyPaths(sub, join(key), depth + 1));
+    }
+  if (isRecord(schema.items))
+    out.push(...credentialKeyPaths(schema.items, `${prefix}[]`, depth + 1));
+  for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const variants = schema[key];
+    if (Array.isArray(variants))
+      for (const variant of variants) out.push(...credentialKeyPaths(variant, prefix, depth + 1));
+  }
+  if (isRecord(schema.additionalProperties))
+    out.push(...credentialKeyPaths(schema.additionalProperties, join('*'), depth + 1));
+  return [...new Set(out)];
 }
 
 export function registryConsistencyIssues(
@@ -76,6 +118,10 @@ export function registryConsistencyIssues(
       issues.push(`${tool.name}: enabled write without an impact template`);
     if (!['low', 'medium', 'high'].includes(tool.risk))
       issues.push(`${tool.name}: enabled write with the non-confirmable risk ${tool.risk}`);
+    const allowed = CREDENTIAL_KEY_EXCEPTIONS[tool.operationId] ?? {};
+    for (const path of credentialKeyPaths(tool.inputSchema))
+      if (!Object.prototype.hasOwnProperty.call(allowed, path))
+        issues.push(`${tool.name}: input property ${path} matches the credential-key pattern`);
   }
 
   const enabledRead = (name: string, owner: string): OperationTool | null => {
@@ -95,6 +141,32 @@ export function registryConsistencyIssues(
       continue;
     }
     const pre = spec.precondition;
+    if (pre && pre.kind !== 'single' && 'select' in pre)
+      issues.push(`${owner}: select is only allowed on a single precondition`);
+    if (pre?.kind === 'single' && pre.select) {
+      if (pre.select.array.length === 0 || pre.select.field.length === 0)
+        issues.push(`${owner}: select needs a non-empty array and field`);
+      if (!argumentSchema(write, pre.select.arg))
+        issues.push(`${owner}: select reads the missing argument ${pre.select.arg}`);
+    }
+    for (const guard of spec.guards ?? []) {
+      for (const path of guardArgumentPaths(guard))
+        if (!argumentSchema(write, path))
+          issues.push(`${owner}: ${guard.kind} guard reads the missing argument ${path}`);
+      if (guard.kind === 'deny_permission_change' && guard.beforeField && pre?.kind !== 'single')
+        issues.push(
+          `${owner}: deny_permission_change with beforeField needs a single precondition`,
+        );
+    }
+    // Step AI-3 D12: a stored `denied_guard` execution shows the message derived from its spec
+    // (`guardMessageOf`), which is only exact when all guards of the spec share one message.
+    if (new Set((spec.guards ?? []).map(guardMessageKey)).size > 1)
+      issues.push(`${owner}: all guards of a spec must share one message`);
+    for (const escalation of spec.escalate ?? []) {
+      const path = escalationPath(escalation.when);
+      if (!argumentSchema(write, path))
+        issues.push(`${owner}: escalation reads the missing argument ${path}`);
+    }
     if (pre?.kind === 'single') {
       const read = enabledRead(pre.tool, owner);
       if (read) {

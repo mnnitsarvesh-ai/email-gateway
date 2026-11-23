@@ -30,6 +30,16 @@
  *   /policies/validate` (no request reaches a write route), no audit row of an operation carries
  *   the executions' correlation ids and the organization's mail-operation tables are unchanged.
  *
+ * - Step AI-3 (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D1, §9 item 4): the read sweep
+ *   covers 179 enabled reads (`api_keys_get` added; `webhooks_test` became a write), and the "no
+ *   write without confirmation" sweep covers all 78 enabled writes: the tenant writes through
+ *   turns, the platform-only organization writes (create, deletion cancel, feature and limit
+ *   override/reset) through the executor as a platform `super_admin` with explicit `it-*`
+ *   organization ids. Each ends `pending_confirmation`, a coded proposal failure or
+ *   `denied_guard` (the assistant's own feature), no request reaches a write route, no operation
+ *   audit row carries the executions' correlation ids and the identity and tenant administration
+ *   tables of the organization are unchanged.
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers get /api/v1/assistant/tools
@@ -155,15 +165,17 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
   const swept: SweepResult[] = [];
 
   it('offers exactly the enabled tenant tools to a user with every tenant permission', async () => {
-    // Step AI-2: 209 enabled tools = 178 reads + 31 confirmable writes.
-    expect(ENABLED_READS).toHaveLength(178);
-    expect(ENABLED_WRITES).toHaveLength(31);
-    expect(ENABLED_TOOLS).toHaveLength(209);
+    // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes.
+    expect(ENABLED_READS).toHaveLength(179);
+    expect(ENABLED_WRITES).toHaveLength(78);
+    expect(ENABLED_TOOLS).toHaveLength(257);
+    expect(ENABLED_WRITES.map((t) => t.name)).toContain('webhooks_test');
     for (const name of [
       'policy_tools_validate',
       'policy_tools_test',
       'policy_tools_sample_dry_run',
       'policy_messages_dry_run',
+      'api_keys_get',
     ]) {
       expect(
         ENABLED_READS.map((t) => t.name),
@@ -348,6 +360,106 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
     body: { name: 'it sweep', definition: viewDefinition, expectedRowVersion: 1 },
   }),
   saved_views_remove: () => ({ viewId: unknown() }),
+  // --- step AI-3 (design 30 D1): identity and tenant administration ---
+  users_invite: () => ({
+    body: {
+      email: `sweep-${randomUUID().slice(0, 8)}@example.test`,
+      displayName: 'Sweep invitee',
+      roleKeys: ['read_only_user'],
+    },
+  }),
+  users_update: () => ({ id: unknown(), body: { displayName: 'it sweep' } }),
+  users_change_status: () => ({
+    id: unknown(),
+    body: { status: 'disabled', reason: sweepReason },
+  }),
+  users_replace_roles: () => ({ id: unknown(), body: { roleKeys: ['read_only_user'] } }),
+  users_reset_mfa: () => ({ id: unknown() }),
+  users_remove: () => ({ id: unknown() }),
+  users_resend_invitation: () => ({ id: unknown() }),
+  users_revoke_all_sessions: () => ({ id: unknown() }),
+  users_revoke_session: () => ({ id: unknown(), sessionId: unknown() }),
+  roles_create: () => ({
+    body: {
+      key: `it_sweep_${randomUUID().slice(0, 8)}`,
+      name: 'Sweep role',
+      permissions: ['message:read'],
+    },
+  }),
+  roles_update: () => ({
+    key: 'it_unknown_role',
+    body: { name: 'it sweep', permissions: ['message:read'] },
+  }),
+  roles_remove: () => ({ key: 'it_unknown_role' }),
+  departments_create: () => ({ body: { name: `it sweep ${randomUUID().slice(0, 8)}` } }),
+  departments_update: () => ({
+    departmentId: unknown(),
+    body: { name: 'it sweep', expectedRowVersion: 1 },
+  }),
+  departments_remove: () => ({ departmentId: unknown() }),
+  departments_add_member: () => ({ departmentId: unknown(), body: { userId: unknown() } }),
+  departments_remove_member: () => ({ departmentId: unknown(), memberId: unknown() }),
+  api_keys_revoke: () => ({ id: unknown() }),
+  domains_create: () => ({ body: { name: `sweep-${randomUUID().slice(0, 8)}.domains-it.test` } }),
+  domains_remove: () => ({ id: unknown() }),
+  domains_change_status: () => ({ id: unknown(), body: { status: 'active' } }),
+  domain_dns_verify: () => ({ id: unknown() }),
+  domain_dns_rotate: () => ({ id: unknown() }),
+  domain_destinations_replace: () => ({ id: unknown(), body: { provider: 'google_workspace' } }),
+  domain_destinations_remove: () => ({ id: unknown() }),
+  domain_recipients_set: () => ({ id: unknown(), body: { mode: 'accept_all' } }),
+  domain_recipients_add: () => ({ id: unknown(), body: { localParts: ['sweep'] } }),
+  domain_recipients_remove: () => ({ id: unknown(), body: { localParts: ['sweep'] } }),
+  notifications_put_preferences: () => ({ body: { optOut: [], quarantineDigestOptOut: false } }),
+  notifications_put_settings: () => ({ body: { settings: {}, expectedRowVersion: 0 } }),
+  organizations_update: () => ({ body: { name: 'it sweep organization' } }),
+  organization_configuration_update_settings: () => ({ body: { timezone: 'UTC' } }),
+  scan_settings_replace: () => ({
+    engine: 'rspamd',
+    body: { expectedVersion: 0, settings: { spamScore: 8 } },
+  }),
+  scan_settings_reset: () => ({ engine: 'rspamd' }),
+  smtp_connectors_update: () => ({ id: unknown(), body: { name: 'it sweep' } }),
+  smtp_connectors_remove: () => ({ id: unknown() }),
+  webhooks_update: () => ({
+    webhookId: unknown(),
+    body: { name: 'it sweep', expectedRowVersion: 1 },
+  }),
+  webhooks_delete: () => ({ webhookId: unknown() }),
+  webhooks_test: () => ({ webhookId: unknown() }),
+  webhook_deliveries_replay: () => ({ webhookId: unknown(), deliveryId: unknown() }),
+  webhook_deliveries_create_replay: () => ({
+    webhookId: unknown(),
+    body: { from: new Date(Date.now() - 3_600_000).toISOString(), to: new Date().toISOString() },
+  }),
+  // Platform-only (the executor as a platform super_admin; always an explicit it-* id).
+  organizations_create: () => ({
+    body: {
+      name: 'it sweep organization',
+      slug: `it-sweep-${randomUUID().slice(0, 8)}`,
+      planCode: 'standard',
+      deploymentMode: 'saas',
+      dataRegion: 'ap-south-1',
+    },
+  }),
+  organization_deletion_cancel: () => ({ id: org.publicId, body: { reason: sweepReason } }),
+  organization_configuration_override_feature: () => ({
+    id: org.publicId,
+    featureKey: 'dlp',
+    body: { enabled: false },
+  }),
+  // The assistant's own feature: a proposal guard refuses it (denied_guard).
+  organization_configuration_reset_feature: () => ({
+    id: org.publicId,
+    featureKey: 'ai_assistant',
+  }),
+  organization_configuration_override_limit: () => ({
+    id: org.publicId,
+    limitKey: 'max_users',
+    body: { value: 100 },
+  }),
+  // An organization that does not exist: the selected-item read's 404.
+  organization_configuration_reset_limit: () => ({ id: unknown(), limitKey: 'max_users' }),
 };
 
 /** Checksums of the tables an enabled write could change, for the sweep's organization. */
@@ -370,13 +482,82 @@ async function writeTargets(): Promise<Record<string, string>> {
     suppressions: sha(await p.deliverySuppression.findMany({ where, orderBy })),
     views: sha(await p.savedView.findMany({ where, orderBy })),
     idempotency: sha(await p.apiIdempotencyKey.findMany({ where, orderBy })),
-    outbox: String(await p.messageOutbox.count({ where })),
+    // Sign-in bookkeeping of the suite's own logins (`auth.login.recorded.v1`, and the live
+    // ato-worker's `ato.*` events about them: ato_detection is on) can land at any time; neither
+    // is a write of a tool (the correlation check below covers the tools' own events).
+    outbox: String(
+      await p.messageOutbox.count({
+        where: {
+          ...where,
+          NOT: [{ eventType: { startsWith: 'auth.' } }, { eventType: { startsWith: 'ato.' } }],
+        },
+      }),
+    ),
+    // Step AI-3: identity and tenant administration (stable columns only: sign-ins of the
+    // suite's users update session and last-login bookkeeping).
+    users: sha(
+      await p.user.findMany({
+        where,
+        orderBy,
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          status: true,
+          mfaEnabled: true,
+          deletedAt: true,
+          lockedUntil: true,
+        },
+      }),
+    ),
+    userRoles: sha(await p.userRole.findMany({ where, orderBy: { userId: 'asc' } })),
+    roles: sha(await p.role.findMany({ where, orderBy, include: { permissions: true } })),
+    departments: sha(await p.tenantDepartment.findMany({ where, orderBy })),
+    departmentMembers: sha(await p.tenantDepartmentMember.findMany({ where, orderBy })),
+    apiKeys: sha(await p.apiKey.findMany({ where, orderBy })),
+    domains: sha(await p.domain.findMany({ where, orderBy })),
+    notificationSettings: sha(await p.notificationSettings.findMany({ where })),
+    notificationPreferences: sha(await p.notificationUserPreference.findMany({ where })),
+    organization: sha(
+      await p.organization.findUniqueOrThrow({
+        where: { id: org.id },
+        select: { name: true, status: true, planId: true, deletionRequestedAt: true },
+      }),
+    ),
+    organizationSettings: sha(await p.organizationSetting.findMany({ where })),
+    features: sha(await p.organizationFeature.findMany({ where, orderBy: { featureKey: 'asc' } })),
+    limits: sha(await p.organizationLimit.findMany({ where, orderBy: { limitKey: 'asc' } })),
+    scanSettings: sha(await p.scanEngineSetting.findMany({ where, orderBy })),
+    connectors: sha(await p.smtpConnector.findMany({ where, orderBy })),
+    webhooks: sha(await p.webhookSubscription.findMany({ where, orderBy })),
+    webhookDeliveries: String(await p.webhookDelivery.count({ where })),
+    sweepOrganizations: String(
+      await p.organization.count({ where: { slug: { startsWith: 'it-sweep-' } } }),
+    ),
   };
 }
 
-describe('no write without confirmation: every enabled write through a turn (§9 item 4)', () => {
-  it('ends pending_confirmation or as a coded proposal failure; nothing reaches a write route', async () => {
+describe('no write without confirmation: every enabled write (§9 item 4)', () => {
+  it('ends pending_confirmation, a coded proposal failure or denied_guard; nothing reaches a write route', async () => {
     expect(Object.keys(WRITE_SAMPLES).sort()).toEqual(ENABLED_WRITES.map((t) => t.name).sort());
+    const tenantWrites = ENABLED_WRITES.filter((t) => !t.platformOnly);
+    const platformWrites = ENABLED_WRITES.filter((t) => t.platformOnly);
+    // Step AI-3: the platform-only organization writes (D6).
+    expect(platformWrites.map((t) => t.name).sort()).toEqual([
+      'organization_configuration_override_feature',
+      'organization_configuration_override_limit',
+      'organization_configuration_reset_feature',
+      'organization_configuration_reset_limit',
+      'organization_deletion_cancel',
+      'organizations_create',
+    ]);
+    const platformAdmin = await platformMember(ctx, fx, ['super_admin']);
+    const executor = new DirectExecutor(
+      ctx,
+      platformAdmin,
+      await principalOf(ctx, platformAdmin.token),
+      org,
+    );
     const before = await writeTargets();
     const runner = new TurnRunner(sweepers);
     const recorder = recordLoopback(ctx);
@@ -389,7 +570,7 @@ describe('no write without confirmation: every enabled write through a turn (§9
       correlationId: string;
     }> = [];
     try {
-      for (const tool of ENABLED_WRITES) {
+      for (const tool of tenantWrites) {
         const { res } = await runner.run(directive(tool.name, WRITE_SAMPLES[tool.name]!()));
         expect(res.status, `${tool.name}: turn ${JSON.stringify(res.body)}`).toBe(200);
         expect(res.body.turn.status, tool.name).toBe('completed');
@@ -413,22 +594,43 @@ describe('no write without confirmation: every enabled write through a turn (§9
           execution.status === 'pending_confirmation' ? [execution.id] : [],
         );
       }
+      for (const tool of platformWrites) {
+        const outcome = await executor.execute(tool.name, WRITE_SAMPLES[tool.name]!());
+        const row = await ctx.prisma.aiChatToolExecution.findUniqueOrThrow({
+          where: { publicId: outcome.executionId },
+        });
+        results.push({
+          tool: tool.name,
+          decision: outcome.decision,
+          status: outcome.status,
+          httpStatus: outcome.httpStatus,
+          errorCode: outcome.errorCode,
+          correlationId: row.correlationId,
+        });
+        expect(outcome.confirmation !== null, tool.name).toBe(
+          outcome.status === 'pending_confirmation',
+        );
+      }
     } finally {
       recorder.restore();
     }
     const problems = results.filter(
       (r) =>
-        r.decision !== 'allowed' ||
         !(
-          (r.status === 'pending_confirmation' && r.httpStatus === null) ||
-          (r.status === 'failed' &&
+          (r.decision === 'allowed' &&
+            r.status === 'pending_confirmation' &&
+            r.httpStatus === null) ||
+          (r.decision === 'allowed' &&
+            r.status === 'failed' &&
             r.httpStatus !== null &&
             r.httpStatus >= 400 &&
             r.httpStatus < 500 &&
-            r.errorCode !== null)
+            r.errorCode !== null) ||
+          (r.decision === 'denied_guard' && r.status === 'refused')
         ),
     );
     expect(problems, JSON.stringify(problems, null, 1)).toEqual([]);
+    expect(results).toHaveLength(ENABLED_WRITES.length);
     // Only side-effect-free requests were sent: reads and the definition validation.
     const sent = recorder.calls.filter(
       (c) =>
@@ -439,7 +641,7 @@ describe('no write without confirmation: every enabled write through a turn (§9
     // No operation audited anything under the executions' correlation ids.
     for (const r of results) {
       const audited = await ctx.prisma.auditLog.findMany({
-        where: { organizationId: org.id, correlationId: r.correlationId },
+        where: { correlationId: r.correlationId },
         select: { action: true },
       });
       expect(
@@ -447,6 +649,12 @@ describe('no write without confirmation: every enabled write through a turn (§9
         r.tool,
       ).toEqual([]);
     }
+    // No event of any operation carries the executions' correlation ids either.
+    expect(
+      await ctx.prisma.messageOutbox.count({
+        where: { correlationId: { in: results.map((r) => r.correlationId) } },
+      }),
+    ).toBe(0);
     expect(await writeTargets()).toEqual(before);
     const pending = results.filter((r) => r.status === 'pending_confirmation').map((r) => r.tool);
     expect(pending).toEqual(
@@ -456,8 +664,25 @@ describe('no write without confirmation: every enabled write through a turn (§9
         'quarantine_tools_put_settings',
         'recipient_suppressions_create',
         'saved_views_create',
+        // Step AI-3: writes without a record to read, or whose read is the organization's own.
+        'users_invite',
+        'roles_create',
+        'departments_create',
+        'domains_create',
+        'notifications_put_preferences',
+        'notifications_put_settings',
+        'organizations_update',
+        'organization_configuration_update_settings',
+        'scan_settings_replace',
+        'scan_settings_reset',
+        'organizations_create',
+        'organization_configuration_override_feature',
+        'organization_configuration_override_limit',
       ]),
     );
+    expect(results.filter((r) => r.decision === 'denied_guard').map((r) => r.tool)).toEqual([
+      'organization_configuration_reset_feature',
+    ]);
     expect(
       await ctx.prisma.aiChatActionConfirmation.count({
         where: { organizationId: org.id, status: 'pending' },
@@ -465,11 +690,15 @@ describe('no write without confirmation: every enabled write through a turn (§9
     ).toBe(pending.length);
     // eslint-disable-next-line no-console -- the sweep reports its count and outcomes (§9 item 4)
     console.info(
-      `[assistant-tools] swept ${results.length} enabled writes: ${pending.length} pending ` +
-        `confirmation (${pending.join(', ')}); refused proposals: ` +
+      `[assistant-tools] swept ${results.length} enabled writes ` +
+        `(${tenantWrites.length} tenant, ${platformWrites.length} platform): ${pending.length} ` +
+        `pending confirmation (${pending.join(', ')}); refused proposals: ` +
         results
           .filter((r) => r.status !== 'pending_confirmation')
-          .map((r) => `${r.tool} ${r.httpStatus} ${r.errorCode}`)
+          .map(
+            (r) =>
+              `${r.tool} ${r.decision === 'allowed' ? `${r.httpStatus} ${r.errorCode}` : r.decision}`,
+          )
           .join(', '),
     );
   }, 600_000);
@@ -488,8 +717,11 @@ describe('tools without the permission (D5 step 3)', () => {
     }
     const missing = ENABLED_TOOLS.filter((t) => !offered.has(t.name));
     expect(missing.length).toBeGreaterThan(ENABLED_TOOLS.length - 5);
-    // No write tool is offered without its permission (step AI-2).
-    expect(ENABLED_WRITES.every((t) => !offered.has(t.name))).toBe(true);
+    // No write tool is offered without its permission (step AI-2); step AI-3: the caller's own
+    // notification preferences need no permission (requirement `authenticated`).
+    expect(ENABLED_WRITES.filter((t) => offered.has(t.name)).map((t) => t.name)).toEqual([
+      'notifications_put_preferences',
+    ]);
 
     const runner = new TurnRunner(bare);
     const recorder = recordLoopback(ctx);

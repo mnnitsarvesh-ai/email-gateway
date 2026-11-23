@@ -1,5 +1,7 @@
-import { sanitizeText } from '../results/sanitize';
+import { sanitizeText, scrubValue } from '../results/sanitize';
 import { stateDigest, valueAtPath } from './digest';
+import type { RiskEscalation } from './escalation';
+import type { ProposalGuard } from './guards';
 
 /**
  * Confirmation specs (step AI-2 D4): for every enabled write, how the executor reads the target's
@@ -10,18 +12,44 @@ import { stateDigest, valueAtPath } from './digest';
  *
  * Argument paths address the write tool's input object: path and query parameters at the top
  * level (`policyId`), the JSON body under `body` (`body.messageId`).
+ *
+ * Step AI-3 (design 30 D3–D6) adds proposal guards (`guards`, `guards.ts`), conditional risk
+ * escalation (`escalate`, `escalation.ts`) and selected-item preconditions (`select`).
  */
+
+/**
+ * The target is one item of a list read (step AI-3 D5): the item of the array at `array` (a
+ * dotted path in the read body) whose `field` equals the write argument `arg` (string compare).
+ */
+export interface PreconditionSelect {
+  array: string;
+  field: string;
+  arg: string;
+  /**
+   * `true`: a missing item fails the proposal like a `404` read of the target (`kind: 'response'`,
+   * status 404, code `not_found`, "The target was not found"). `false`: a missing item is a target
+   * without a stored value (a feature or limit at its plan value): the snapshot's fields are null
+   * and the state digest is `stateDigest({}, stateFields)`; the confirm-time re-read must find it
+   * absent again (or its digest differs and the confirm is refused as changed).
+   */
+  required: boolean;
+}
 
 /** A read of one target. `params` maps the read tool's path parameters to argument paths. */
 export interface SinglePrecondition {
   kind: 'single';
   tool: string;
   params: Readonly<Record<string, string>>;
+  /** The target is an item of a list read (D5); the field paths below are then item-relative. */
+  select?: PreconditionSelect;
   /** Fields of the read whose change between proposal and confirm refuses the confirm. */
   stateFields: readonly string[];
   /** Field holding the CAS counter (injected when the spec has `inject`). */
   rowVersionField?: string;
-  /** Further fields the impact template shows (sanitized, ≤ 300 characters). */
+  /**
+   * Further fields the impact template shows (sanitized, ≤ 300 characters). A path with `[]`
+   * projects an array (`roles[].key`: the key of every role, kept as a JSON list).
+   */
   displayFields?: readonly string[];
 }
 
@@ -61,6 +89,10 @@ export interface ConfirmationSpec {
   precondition: ConfirmationPrecondition | null;
   inject?: CasInjection;
   validateDefinition?: 'body.definition';
+  /** Proposal guards (step AI-3 D3), evaluated by `guardRefusal` at proposal and at confirm. */
+  guards?: readonly ProposalGuard[];
+  /** Conditional risk escalation (step AI-3 D4), evaluated by `effectiveRisk`. */
+  escalate?: readonly RiskEscalation[];
 }
 
 const POLICY_GET = 'policy_management_get';
@@ -144,7 +176,139 @@ const approval = (): SinglePrecondition => ({
 const BODY_ROW_VERSION: CasInjection = { in: 'body', field: 'expectedRowVersion', min: 1 };
 const QUERY_ROW_VERSION: CasInjection = { in: 'query', field: 'expectedRowVersion', min: 1 };
 
-/** The 31 writes of step AI-2 (design D4; field names checked against docs/api/openapi.json). */
+// --- step AI-3 (design 30 D3–D6) ---
+
+/** I12: no change of the caller's own account, roles, status, MFA or sessions through chat. */
+const NOT_SELF: readonly ProposalGuard[] = [{ kind: 'not_self_user', arg: 'id' }];
+/** A3-4: the assistant cannot turn itself on or off. */
+const NOT_ASSISTANT_FEATURE: readonly ProposalGuard[] = [
+  {
+    kind: 'deny_values',
+    arg: 'featureKey',
+    values: ['ai_assistant'],
+    message: 'assistant_feature',
+  },
+];
+const ASSISTANT_CONFIGURE = ['assistant:configure'] as const;
+
+const user = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'users_get',
+  params: { id: 'id' },
+  stateFields,
+  displayFields,
+});
+const USER_DISPLAY = ['email', 'displayName'] as const;
+const USER_ROLES_DISPLAY = ['email', 'displayName', 'roles[].key'] as const;
+
+const role = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'roles_get',
+  params: { key: 'key' },
+  stateFields,
+  displayFields,
+});
+
+const department = (stateFields: readonly string[], cas: boolean): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'departments_get',
+  params: { departmentId: 'departmentId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields: ['name', 'memberCount'],
+});
+
+const domain = (
+  tool: string,
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+): SinglePrecondition => ({
+  kind: 'single',
+  tool,
+  params: { id: 'id' },
+  stateFields,
+  displayFields,
+});
+const DESTINATION_DISPLAY = [
+  'provider',
+  'servers[].host',
+  'servers[].port',
+  'servers[].priority',
+] as const;
+
+const feature = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'organization_configuration_list_features',
+  params: { id: 'id' },
+  select: { array: 'data', field: 'key', arg: 'featureKey', required: false },
+  stateFields: ['enabled', 'config', 'source'],
+});
+const limit = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'organization_configuration_list_limits',
+  params: { id: 'id' },
+  select: { array: 'data', field: 'key', arg: 'limitKey', required: false },
+  stateFields: ['value', 'source'],
+});
+const scanEngine = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'scan_settings_list',
+  params: {},
+  select: { array: 'data', field: 'engine', arg: 'engine', required: true },
+  stateFields: ['version', 'override'],
+  rowVersionField: 'version',
+  displayFields: ['required', 'overrideApplied'],
+});
+const connector = (stateFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'smtp_connectors_get',
+  params: { id: 'id' },
+  stateFields,
+  displayFields: ['authType', 'networks[].cidr'],
+});
+const webhook = (stateFields: readonly string[], cas = false): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'webhooks_get',
+  params: { webhookId: 'webhookId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields: ['name', 'url', 'status'],
+});
+const NOTIFICATION_SETTINGS_DISPLAY = [
+  'settings.alerts.threatDetected.enabled',
+  'settings.alerts.threatDetected.minSeverity',
+  'settings.alerts.threatDetected.throttleMinutes',
+  'settings.alerts.domainDnsFailed.enabled',
+  'settings.alerts.domainDnsFailed.throttleMinutes',
+  'settings.alerts.webhookDisabled.enabled',
+  'settings.alerts.webhookDisabled.throttleMinutes',
+  'settings.alerts.includeOrganizationContact',
+] as const;
+
+/** Escalation warnings (design 30 D4; fixed English). */
+export const ESCALATION_WARNINGS = {
+  userEmail:
+    'Changing the email address sends sign-in, invitation and password-reset mail to the new address.',
+  smtpNetworks: 'Changes which networks may relay mail through the gateway.',
+  smtpTls: 'Allows sessions without TLS on this connector.',
+  webhookUrl: "Sends this webhook's event data to a new address.",
+  initialAdmin: 'Invites an administrator with full access to the new organization.',
+  planCode: "Changes the plan, and with it the organization's features and limits.",
+  mfaOff: 'Users of the organization will no longer have to use MFA.',
+  notificationEmail: 'Organization notifications go to a new address.',
+} as const;
+
+/**
+ * The 78 enabled writes: the 31 of step AI-2 (design 29 D4) and the 47 of step AI-3 (design 30
+ * D6). Field names checked against docs/api/openapi.json (request and response schemas; the
+ * package tests resolve every state, row-version, display and select path).
+ */
 export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
   // --- policies (11) ---
   {
@@ -337,6 +501,332 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
       displayFields: ['name', 'kind'],
     },
   },
+
+  // ===== step AI-3 (47) =====
+  // --- users (9) ---
+  { operationId: 'UsersController_invite_v1', precondition: null },
+  {
+    operationId: 'UsersController_update_v1',
+    precondition: user(['email', 'displayName', 'status'], [...USER_DISPLAY, 'roles[].key']),
+    guards: NOT_SELF,
+    escalate: [
+      { when: { present: 'body.email' }, risk: 'high', warning: ESCALATION_WARNINGS.userEmail },
+    ],
+  },
+  {
+    operationId: 'UsersController_changeStatus_v1',
+    precondition: user(['status', 'lockedUntil'], USER_ROLES_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_replaceRoles_v1',
+    precondition: user(['roles', 'status'], USER_ROLES_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_resetMfa_v1',
+    precondition: user(['mfaEnabled', 'status'], USER_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_remove_v1',
+    precondition: user(['status', 'roles'], USER_ROLES_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_resendInvitation_v1',
+    precondition: user(['status'], USER_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_revokeAllSessions_v1',
+    precondition: user(['status'], USER_DISPLAY),
+    guards: NOT_SELF,
+  },
+  {
+    operationId: 'UsersController_revokeSession_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'users_list_sessions',
+      params: { id: 'id' },
+      select: { array: 'data', field: 'id', arg: 'sessionId', required: true },
+      stateFields: ['authenticatedAt', 'expiresAt'],
+      displayFields: ['ipAddress', 'userAgent', 'lastUsedAt', 'mfaAuthenticated'],
+    },
+    guards: NOT_SELF,
+  },
+  // --- roles (3) ---
+  {
+    operationId: 'RolesController_create_v1',
+    precondition: null,
+    guards: [
+      {
+        kind: 'deny_permission_change',
+        arg: 'body.permissions',
+        permissions: ASSISTANT_CONFIGURE,
+        message: 'assistant_configure',
+      },
+    ],
+  },
+  {
+    operationId: 'RolesController_update_v1',
+    precondition: role(['name', 'description', 'permissions', 'system'], ['name', 'system']),
+    guards: [
+      {
+        kind: 'deny_permission_change',
+        arg: 'body.permissions',
+        beforeField: 'permissions',
+        permissions: ASSISTANT_CONFIGURE,
+        message: 'assistant_configure',
+      },
+    ],
+  },
+  {
+    operationId: 'RolesController_remove_v1',
+    precondition: role(['permissions', 'system'], ['name', 'system']),
+  },
+  // --- departments (5) ---
+  { operationId: 'DepartmentsController_create_v1', precondition: null },
+  {
+    operationId: 'DepartmentsController_update_v1',
+    precondition: department(['rowVersion', 'name', 'description'], true),
+    inject: BODY_ROW_VERSION,
+  },
+  {
+    operationId: 'DepartmentsController_remove_v1',
+    precondition: department(['rowVersion'], true),
+    inject: QUERY_ROW_VERSION,
+  },
+  {
+    operationId: 'DepartmentsController_addMember_v1',
+    precondition: department(['rowVersion'], false),
+  },
+  {
+    operationId: 'DepartmentsController_removeMember_v1',
+    precondition: department(['rowVersion'], false),
+  },
+  // --- API keys (1) ---
+  {
+    operationId: 'ApiKeysController_revoke_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_keys_get',
+      params: { id: 'id' },
+      stateFields: ['revokedAt', 'expiresAt'],
+      displayFields: ['name', 'prefix', 'scopes', 'lastUsedAt', 'createdBy.displayName'],
+    },
+  },
+  // --- domains (10) ---
+  { operationId: 'DomainsController_create_v1', precondition: null },
+  {
+    operationId: 'DomainsController_remove_v1',
+    precondition: domain(
+      'domains_get',
+      ['status', 'inboundEnabled', 'outboundEnabled'],
+      ['name', 'unicodeName'],
+    ),
+  },
+  {
+    operationId: 'DomainsController_changeStatus_v1',
+    precondition: domain('domains_get', ['status'], ['name', 'unicodeName', 'statusReason']),
+  },
+  {
+    operationId: 'DomainDnsController_verify_v1',
+    precondition: domain(
+      'domain_dns_status',
+      ['status'],
+      ['name', 'readyForActivation', 'mailFlowReady'],
+    ),
+  },
+  {
+    operationId: 'DomainDnsController_rotate_v1',
+    precondition: domain(
+      'domains_get',
+      ['status', 'dkimKeys'],
+      ['name', 'dkimKeys[].selector', 'dkimKeys[].status'],
+    ),
+  },
+  {
+    operationId: 'DomainDestinationsController_replace_v1',
+    precondition: domain('domain_destinations_get', ['provider', 'servers'], DESTINATION_DISPLAY),
+  },
+  {
+    operationId: 'DomainDestinationsController_remove_v1',
+    precondition: domain('domain_destinations_get', ['provider', 'servers'], DESTINATION_DISPLAY),
+  },
+  {
+    operationId: 'DomainRecipientsController_set_v1',
+    precondition: domain('domain_recipients_get', ['mode', 'enforcement'], ['addressCount']),
+  },
+  {
+    operationId: 'DomainRecipientsController_add_v1',
+    precondition: domain('domain_recipients_get', ['mode'], ['enforcement', 'addressCount']),
+  },
+  {
+    operationId: 'DomainRecipientsController_remove_v1',
+    precondition: domain('domain_recipients_get', ['mode'], ['enforcement', 'addressCount']),
+  },
+  // --- notifications (2) ---
+  {
+    operationId: 'NotificationsController_putPreferences_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'notifications_preferences',
+      params: {},
+      stateFields: ['optOut', 'quarantineDigestOptOut'],
+      displayFields: ['quarantineDigestOptOutAllowed'],
+    },
+  },
+  {
+    operationId: 'NotificationsController_putSettings_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'notifications_settings',
+      params: {},
+      stateFields: ['rowVersion'],
+      rowVersionField: 'rowVersion',
+      displayFields: NOTIFICATION_SETTINGS_DISPLAY,
+    },
+    inject: { in: 'body', field: 'expectedRowVersion', min: 0 },
+  },
+  // --- organizations (8) ---
+  {
+    operationId: 'OrganizationsController_create_v1',
+    precondition: null,
+    escalate: [
+      {
+        when: { present: 'body.initialAdmin' },
+        risk: 'high',
+        warning: ESCALATION_WARNINGS.initialAdmin,
+      },
+    ],
+  },
+  {
+    operationId: 'OrganizationsController_update_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'organizations_get',
+      params: { id: 'id' },
+      stateFields: ['name', 'plan.code', 'status'],
+      displayFields: ['slug', 'kind'],
+    },
+    escalate: [
+      { when: { present: 'body.planCode' }, risk: 'high', warning: ESCALATION_WARNINGS.planCode },
+    ],
+  },
+  {
+    operationId: 'OrganizationDeletionController_cancel_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'organization_deletion_get',
+      params: { id: 'id' },
+      stateFields: ['state', 'cancellable', 'requestedAt'],
+      displayFields: ['status', 'purgeAfter'],
+    },
+  },
+  {
+    operationId: 'OrganizationConfigurationController_overrideFeature_v1',
+    precondition: feature(),
+    guards: NOT_ASSISTANT_FEATURE,
+  },
+  {
+    operationId: 'OrganizationConfigurationController_resetFeature_v1',
+    precondition: feature(),
+    guards: NOT_ASSISTANT_FEATURE,
+  },
+  { operationId: 'OrganizationConfigurationController_overrideLimit_v1', precondition: limit() },
+  { operationId: 'OrganizationConfigurationController_resetLimit_v1', precondition: limit() },
+  {
+    operationId: 'OrganizationConfigurationController_updateSettings_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'organization_configuration_get_settings',
+      params: { id: 'id' },
+      stateFields: [
+        'timezone',
+        'locale',
+        'quarantineRetentionDays',
+        'digestEnabled',
+        'digestSchedule',
+        'notificationEmail',
+        'mfaRequired',
+        'preferences',
+        'updatedAt',
+      ],
+    },
+    escalate: [
+      {
+        when: { equals: { path: 'body.mfaRequired', value: false } },
+        risk: 'high',
+        warning: ESCALATION_WARNINGS.mfaOff,
+      },
+      {
+        when: { present: 'body.notificationEmail' },
+        risk: 'high',
+        warning: ESCALATION_WARNINGS.notificationEmail,
+      },
+    ],
+  },
+  // --- scan settings (2) ---
+  {
+    operationId: 'ScanSettingsController_replace_v1',
+    precondition: scanEngine(),
+    inject: { in: 'body', field: 'expectedVersion', min: 0 },
+  },
+  {
+    operationId: 'ScanSettingsController_reset_v1',
+    precondition: scanEngine(),
+    inject: { in: 'query', field: 'expectedVersion', min: 0 },
+  },
+  // --- SMTP connectors (2) ---
+  {
+    operationId: 'SmtpConnectorsController_update_v1',
+    precondition: connector(['name', 'status', 'networks', 'requireTls']),
+    escalate: [
+      {
+        when: { present: 'body.networks' },
+        risk: 'high',
+        warning: ESCALATION_WARNINGS.smtpNetworks,
+      },
+      {
+        when: { equals: { path: 'body.requireTls', value: false } },
+        risk: 'high',
+        warning: ESCALATION_WARNINGS.smtpTls,
+      },
+    ],
+  },
+  {
+    operationId: 'SmtpConnectorsController_remove_v1',
+    precondition: connector(['name', 'status']),
+  },
+  // --- webhooks (5) ---
+  {
+    operationId: 'WebhooksController_update_v1',
+    precondition: webhook(['rowVersion'], true),
+    inject: BODY_ROW_VERSION,
+    escalate: [
+      { when: { present: 'body.url' }, risk: 'high', warning: ESCALATION_WARNINGS.webhookUrl },
+    ],
+  },
+  {
+    operationId: 'WebhooksController_delete_v1',
+    precondition: webhook(['rowVersion', 'status']),
+  },
+  { operationId: 'WebhooksController_test_v1', precondition: webhook(['status']) },
+  {
+    operationId: 'WebhookDeliveriesController_replay_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'webhook_deliveries_get',
+      params: { webhookId: 'webhookId', deliveryId: 'deliveryId' },
+      stateFields: ['status', 'attemptCount'],
+      displayFields: ['eventType', 'lastResponseCode'],
+    },
+  },
+  {
+    operationId: 'WebhookDeliveriesController_createReplay_v1',
+    precondition: webhook(['status']),
+  },
 ];
 
 const BY_OPERATION: ReadonlyMap<string, ConfirmationSpec> = new Map(
@@ -452,6 +942,15 @@ export type SnapshotValue = string | number | boolean | null;
 export type ConfirmationSnapshot = Record<string, SnapshotValue>;
 
 export const SNAPSHOT_STRING_MAX_CHARS = 300;
+/**
+ * A list of scalars (permissions, scopes, role keys, server hosts) is kept as a JSON array of up
+ * to this many characters, so impact templates can show before → after diffs (step AI-3 D7); a
+ * longer list is cut and no longer parses (`snapshotList` then returns null).
+ */
+export const SNAPSHOT_LIST_MAX_CHARS = 4096;
+
+const isScalar = (value: unknown): value is string | number | boolean | null =>
+  value === null || ['string', 'number', 'boolean'].includes(typeof value);
 
 function snapshotValue(value: unknown): SnapshotValue {
   if (value === undefined || value === null) return null;
@@ -459,13 +958,57 @@ function snapshotValue(value: unknown): SnapshotValue {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value === 'boolean') return value;
   try {
-    return sanitizeText(JSON.stringify(value), SNAPSHOT_STRING_MAX_CHARS);
+    if (Array.isArray(value) && value.every(isScalar)) {
+      const list = JSON.stringify(
+        value.map((item) =>
+          typeof item === 'string' ? sanitizeText(item, SNAPSHOT_STRING_MAX_CHARS) : item,
+        ),
+      );
+      return list.length <= SNAPSHOT_LIST_MAX_CHARS
+        ? list
+        : sanitizeText(list, SNAPSHOT_STRING_MAX_CHARS);
+    }
+    // Objects: credential-pattern keys are dropped before the JSON text is kept (step AI-3 D7).
+    return sanitizeText(JSON.stringify(scrubValue(value)), SNAPSHOT_STRING_MAX_CHARS);
   } catch {
     return null;
   }
 }
 
-/** The fields of a single precondition read kept with the confirmation (state + row version + display). */
+/**
+ * The value at a snapshot path: a dotted path (`valueAtPath`), or a projection over an array
+ * (`servers[].host` → the `host` of every item; non-record items and missing fields are null).
+ */
+export function snapshotPathValue(body: unknown, path: string): unknown {
+  const index = path.indexOf('[]');
+  if (index < 0) return valueAtPath(body, path);
+  const array: unknown = valueAtPath(body, path.slice(0, index));
+  if (!Array.isArray(array)) return undefined;
+  const list: unknown[] = array;
+  const rest = path.slice(index + 2).replace(/^\./, '');
+  return list.map((item) => {
+    const value = rest ? snapshotPathValue(item, rest) : item;
+    return value === undefined ? null : value;
+  });
+}
+
+/** A list kept in a snapshot (`SNAPSHOT_LIST_MAX_CHARS`), or null (absent, not a list, cut). */
+export function snapshotList(
+  value: SnapshotValue | undefined,
+): Array<string | number | boolean | null> | null {
+  if (typeof value !== 'string' || !value.startsWith('[')) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every(isScalar) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The fields of a single precondition read kept with the confirmation (state + row version +
+ * display). With `select` (D5) pass the selected item (`targetOf`), not the list body.
+ */
 export function buildSnapshot(
   body: unknown,
   precondition: SinglePrecondition,
@@ -476,8 +1019,68 @@ export function buildSnapshot(
     ...(precondition.displayFields ?? []),
   ]);
   const out: ConfirmationSnapshot = {};
-  for (const path of paths) out[path] = snapshotValue(valueAtPath(body, path));
+  for (const path of paths) out[path] = snapshotValue(snapshotPathValue(body, path));
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Selected-item preconditions (step AI-3 D5)
+// ---------------------------------------------------------------------------------------------
+
+export interface SelectedTarget {
+  /** True without `select` (the body is the target) and when the item was found. */
+  found: boolean;
+  /** The selected item, the body (no `select`), or null (not found). */
+  item: unknown;
+}
+
+const comparable = (value: unknown): string | null =>
+  typeof value === 'string' ? value : typeof value === 'number' ? String(value) : null;
+
+/**
+ * The target of a single precondition read: without `select` the read body itself; with
+ * `select` the first item of `select.array` whose `select.field` equals the argument at
+ * `select.arg` (string compare; non-string, non-number values never match).
+ *
+ * The api treats a not-found item of a `required` select like a `404` read of the target (the
+ * proposal fails with `kind: 'response'`, status 404, code `not_found`, "The target was not
+ * found"); a not-found item of an optional select is the empty target (`targetOf` → `{}`).
+ */
+export function selectTarget(
+  body: unknown,
+  precondition: SinglePrecondition,
+  args: Readonly<Record<string, unknown>>,
+): SelectedTarget {
+  const select = precondition.select;
+  if (!select) return { found: true, item: body };
+  const wanted = comparable(readArgPath(args, select.arg));
+  const value: unknown = valueAtPath(body, select.array);
+  if (wanted === null || !Array.isArray(value)) return { found: false, item: null };
+  const list: unknown[] = value;
+  const item = list.find(
+    (candidate) =>
+      candidate !== null &&
+      typeof candidate === 'object' &&
+      !Array.isArray(candidate) &&
+      comparable((candidate as Record<string, unknown>)[select.field]) === wanted,
+  );
+  return item === undefined ? { found: false, item: null } : { found: true, item };
+}
+
+/**
+ * The value the state digest, row version, snapshot and after-read guards apply to: the read
+ * body, the selected item, or `{}` for a not-found item (an optional select; for a required one
+ * the caller has already failed the proposal). `stateDigest(targetOf(...), stateFields)`,
+ * `rowVersionOf(targetOf(...), precondition)` and `buildSnapshot(targetOf(...), precondition)`
+ * are then the same calls as for an AI-2 spec (without `select`, `targetOf` returns the body).
+ */
+export function targetOf(
+  body: unknown,
+  precondition: SinglePrecondition,
+  args: Readonly<Record<string, unknown>>,
+): unknown {
+  const selected = selectTarget(body, precondition, args);
+  return selected.found ? selected.item : {};
 }
 
 /** The read's row version (the CAS counter), or null when the field is absent or not an integer. */

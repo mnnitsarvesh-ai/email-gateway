@@ -203,7 +203,38 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
     expect(tools.body.tools.map((t: { name: string }) => t.name)).toContain(
       'policy_management_list',
     );
-    expect(tools.body.tools.every((t: { access: string }) => t.access === 'read')).toBe(true);
+    // Writes need their permissions; the only write without one is the caller's own
+    // notification preferences (step AI-3, `authenticated`).
+    expect(
+      tools.body.tools
+        .filter((t: { access: string }) => t.access === 'write')
+        .map((t: { name: string }) => t.name),
+    ).toEqual(['notifications_put_preferences']);
+  });
+
+  it('a write on the caller’s own account is denied_guard (step AI-3 D3): no request, no confirmation', async () => {
+    const id = await newConversation();
+    const self = api.principals.ids.user;
+    const res = await send(
+      'post',
+      `${BASE}/conversations/${id}/turns`,
+      { clientTurnId: randomUUID(), message: `/tool users_reset_mfa {"id":"${self}"}` },
+      [USE, 'user:manage', 'user:read'],
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.executions[0]).toMatchObject({
+      tool: 'users_reset_mfa',
+      decision: 'denied_guard',
+      status: 'refused',
+      card: null,
+      confirmation: null,
+    });
+    expect(res.body.confirmations).toEqual([]);
+    expect(loopback.calls.some((c) => c.path.startsWith('/api/v1/users'))).toBe(false);
+    expect(world.confirmations).toHaveLength(0);
+    expect(audit.entries.find((e) => e.action === 'assistant.tool_denied')?.metadata).toMatchObject(
+      { decision: 'denied_guard', guard: 'not_self_user' },
+    );
   });
 
   it('conversations: create, list (v1, q), get, patch, delete (purge, audit), 404s, limit', async () => {

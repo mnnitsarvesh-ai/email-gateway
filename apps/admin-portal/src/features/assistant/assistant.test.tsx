@@ -12,6 +12,7 @@ import {
   okJson,
   renderWithProviders,
 } from '@/test';
+import { makeMe } from '@/test/fixtures';
 import { AssistantProvider } from './assistant-context';
 import { isPanelShortcut } from './assistant-panel';
 import { AssistantPage } from './assistant-page';
@@ -23,11 +24,14 @@ import {
   CONVERSATION_ID,
   CONVERSATION_ID_2,
   EXECUTION_ID,
+  GUARD_TOOL_TITLE,
+  SELF_GUARD_MESSAGE,
   STATUS_AVAILABLE,
   TABLE_CARD,
   TOOLS,
   TURN_ID,
   completedTurnFrames,
+  deniedGuardExecution,
   execution,
   sseFrame,
   statusUnavailable,
@@ -106,6 +110,37 @@ describe('"Ask AI" entry points (D14 gating)', () => {
     expect(
       isPanelShortcut(new KeyboardEvent('keydown', { key: 'j', ctrlKey: true, shiftKey: true })),
     ).toBe(false);
+  });
+
+  it('reopens the panel on the same conversation after a reload, and falls back when it is gone', async () => {
+    const me = makeMe({ role: 'security_analyst' });
+    const key = `eg:assistant.lastConversation.${me.user.id}:${me.organization.id}`;
+    window.localStorage.setItem(key, JSON.stringify(CONVERSATION_ID));
+    window.sessionStorage.setItem('eg:assistant.panelOpen', '1');
+    const messages = vi.fn(() => okJson({ data: storedExchange(), nextCursor: null }));
+    mockApi({
+      AssistantStatusController_get_v1: () => okJson(STATUS_AVAILABLE),
+      AssistantToolsController_list_v1: () => okJson(TOOLS),
+      AssistantMessagesController_list_v1: messages,
+    });
+    const first = renderWithProviders(<AppShell>{page}</AppShell>, { me, route: '/dashboard' });
+    expect(await screen.findByRole('dialog', { name: 'AI assistant' })).toBeInTheDocument();
+    await waitFor(() => expect(messages).toHaveBeenCalled());
+    first.unmount();
+
+    // The remembered conversation was deleted meanwhile: a new chat, and the key is cleared.
+    mockApi({
+      AssistantStatusController_get_v1: () => okJson(STATUS_AVAILABLE),
+      AssistantToolsController_list_v1: () => okJson(TOOLS),
+      AssistantMessagesController_list_v1: () =>
+        apiErrorJson(404, 'assistant_conversation_not_found', 'Conversation not found'),
+    });
+    renderWithProviders(<AppShell>{page}</AppShell>, { me, route: '/dashboard' });
+    const dialog = await screen.findByRole('dialog', { name: 'AI assistant' });
+    expect(
+      await within(dialog).findByRole('list', { name: 'Suggested questions' }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(window.localStorage.getItem(key)).toBe('null'));
   });
 
   it('shows administrators why it is unavailable, with a link to Settings', async () => {
@@ -384,6 +419,24 @@ describe('/assistant conversation', () => {
       'true',
     );
     await expectNoAxeViolations(container);
+  });
+
+  it('shows the guard message of a stored denied_guard execution, not its code (D12)', async () => {
+    mockApi({
+      AssistantMessagesController_list_v1: () =>
+        okJson({
+          data: storedExchange({
+            answer: 'I cannot do that here.',
+            executions: [deniedGuardExecution()],
+          }),
+          nextCursor: null,
+        }),
+    });
+    renderPage(`/assistant?conversation=${CONVERSATION_ID}`);
+    expect(await screen.findByText(SELF_GUARD_MESSAGE)).toBeInTheDocument();
+    expect(screen.getAllByText(GUARD_TOOL_TITLE).length).toBeGreaterThan(0);
+    expect(screen.queryByText('denied_guard')).not.toBeInTheDocument();
+    expect(screen.queryByText('users_replace_roles')).not.toBeInTheDocument();
   });
 
   it('shows the unavailable reason on the page', async () => {

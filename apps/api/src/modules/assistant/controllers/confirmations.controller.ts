@@ -105,12 +105,18 @@ export class AssistantConfirmationsController {
       'assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; ' +
       'the fifth wrong token cancels the confirmation), the digest (`409 ' +
       'assistant_confirmation_digest_mismatch`), the tool still enabled (`409 ' +
-      'assistant_confirmation_tool_changed`) and permitted (`403 forbidden`), the assistant ' +
+      'assistant_confirmation_tool_changed`; also when the effective risk recomputed from the ' +
+      'stored arguments differs from the stored one) and permitted (`403 forbidden`), the ' +
+      'proposal guards (`403 assistant_action_not_allowed`: no change to your own account, ' +
+      'roles, status, MFA or sessions, nor to the assistant’s own enablement or who may ' +
+      'configure it, through chat), the assistant ' +
       'available, re-authentication (`401 assistant_reauth_required`, `401 ' +
       'assistant_reauth_failed` with `reason`; failures count toward the login lockout), no ' +
       'turn running in the conversation (`409 assistant_turn_in_progress`), then the target is ' +
       'read again and any change since the proposal refuses (`409 ' +
-      'assistant_confirmation_state_changed`). A write the operation itself refuses is a `200` ' +
+      'assistant_confirmation_state_changed`) and the proposal guards that need the target are ' +
+      'evaluated on it again (`403 assistant_action_not_allowed`). A write the operation itself ' +
+      'refuses is a `200` ' +
       'with `confirmation.status = failed` and the execution’s error card; `202` approval ' +
       'answers are `executed`. The assistant learns the outcome at the start of its next turn. ' +
       'Rate class `sensitive`.' +
@@ -145,17 +151,25 @@ export class AssistantConfirmationsController {
   )
   @ApiConfirmationNotFound()
   @ApiAssistantForbidden(
-    [C.notEnabled, C.tenantDisabled, C.confirmationSessionMismatch, C.confirmationTokenInvalid],
+    [
+      C.notEnabled,
+      C.tenantDisabled,
+      C.confirmationSessionMismatch,
+      C.confirmationTokenInvalid,
+      C.actionNotAllowed,
+    ],
     'the organization feature `ai_assistant` is off (`assistant_not_enabled`), the ' +
       'organization turned the assistant off (`assistant_tenant_disabled`), another sign-in ' +
-      'session (`assistant_confirmation_session_mismatch`) or a wrong token ' +
-      '(`assistant_confirmation_token_invalid`)',
+      'session (`assistant_confirmation_session_mismatch`), a wrong token ' +
+      '(`assistant_confirmation_token_invalid`) or a proposal guard refused the change ' +
+      '(`assistant_action_not_allowed`, the confirmation fails)',
   )
   @ApiCodedError(
     409,
     'No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does ' +
       'not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no ' +
-      'longer available (`assistant_confirmation_tool_changed`), the target changed since the ' +
+      'longer available or its effective risk changed (`assistant_confirmation_tool_changed`), ' +
+      'the target changed since the ' +
       'proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) ' +
       'or a turn runs in the conversation (`assistant_turn_in_progress`)',
     [

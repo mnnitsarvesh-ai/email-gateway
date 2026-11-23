@@ -1305,6 +1305,21 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
+  it('the step AI-3 API key read: apikey:read, API keys may call it, no MFA, no secret, no cursor (D8)', () => {
+    const route = routes.find((r) => `${r.method} ${r.path}` === 'get /api/v1/api-keys/:id');
+    expect(route?.isPublic).toBe(false);
+    expect(route?.requirement).toEqual({ mode: 'all', permissions: ['apikey:read'] });
+    expect(route?.requireMfa).toBe(false);
+    expect(route?.userOnly).toBe(false);
+    expect(route?.returnsSecret).toBe(false);
+    expect(route?.rateClass).toBeNull();
+    expect(route?.cursor ?? null).toBeNull();
+    // The list keeps its pre-6.1 shape (v0 cursor, same permission).
+    const list = routes.find((r) => `${r.method} ${r.path}` === 'get /api/v1/api-keys');
+    expect(list?.requirement).toEqual(route?.requirement);
+    expect(list?.userOnly).toBe(false);
+  });
+
   it('every body and query schema of the legacy routes is strict at every object node (D1)', () => {
     const offenders: string[] = [];
     let checked = 0;

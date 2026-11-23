@@ -250,6 +250,8 @@ export const EXECUTION_DECISIONS = [
   'denied_schema',
   'denied_ref',
   'denied_budget',
+  // Step AI-3 D3: a proposal guard refused the write (e.g. a change to one's own account).
+  'denied_guard',
 ] as const;
 export const EXECUTION_STATUSES = [
   'succeeded',
@@ -352,13 +354,28 @@ export const ExecutionSchema = z.object({
   seq: z.number().int(),
   ref: z.string().describe('`r<seq>`: how the assistant refers to this result'),
   tool: z.string(),
+  title: z
+    .string()
+    .describe('Display title of the tool (as the stream `tool.started` event carries it)'),
   operationId: z.string(),
   access: z.enum(['read', 'write']),
   risk: z.enum(['read', 'read_audited', 'low', 'medium', 'high', 'critical']),
-  decision: z.enum(EXECUTION_DECISIONS),
+  decision: z
+    .enum(EXECUTION_DECISIONS)
+    .describe(
+      'The executor decision; `denied_guard`: a proposal guard refused the write (not allowed ' +
+        'in chat, e.g. a change to your own account)',
+    ),
   status: z.enum(EXECUTION_STATUSES),
   httpStatus: z.number().int().nullable(),
   errorCode: z.string().nullable(),
+  message: z
+    .string()
+    .nullable()
+    .describe(
+      'Fixed server-authored explanation of a refused call (decision other than `allowed`; ' +
+        'for `denied_guard` the guard message); null for an allowed call. Never an argument value',
+    ),
   hasMore: z.boolean(),
   card: CardSchema.nullable().describe('null for refused calls and after the content purge'),
   latencyMs: z.number().int().nullable(),
@@ -573,6 +590,7 @@ const execution: ExecutionView = {
   seq: 1,
   ref: 'r1',
   tool: 'policy_management_list',
+  title: 'List policies',
   operationId: 'PolicyManagementController_list_v1',
   access: 'read',
   risk: 'read',
@@ -580,6 +598,7 @@ const execution: ExecutionView = {
   status: 'succeeded',
   httpStatus: 200,
   errorCode: null,
+  message: null,
   hasMore: false,
   card,
   latencyMs: 42,

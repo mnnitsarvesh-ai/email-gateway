@@ -27,6 +27,18 @@
  * proposal past its expiry is refused by the api (`410`) and the card shows the expired state;
  * the card on a phone; axe on every card state. The single-use token is checked to stay out of
  * browser storage and the messages route.
+ *
+ * Step AI-3 (docs/plan/steps/30-ai-chat-identity-tenant-admin.md §9 item 7, D2–D4, D11, D12;
+ * ADR-0093 amendment AI-3): identity and tenant administration through the fake's plans, as the
+ * delta admin with MFA. "invite <address> as security_analyst" (roles_get → users_invite) is a
+ * high-risk card listing the role and the invitation warning that runs after the password and the
+ * authenticator code, and the Users page then lists the person as invited; "disable user <address>"
+ * (users_list → users_change_status) on the seeded `leaver@` user is high risk too, but inside
+ * the re-authentication window of the same session the card asks for nothing and the user ends
+ * disabled; "add domain <name>" is a medium card with impact lines and the Domains page lists the
+ * domain pending verification; a self-escalation directive (`users_replace_roles` with the signed-in
+ * admin's own id) is refused by the proposal guard before anything is stored: a "Not allowed in
+ * chat" card and no confirmation. An invitation card on a phone; axe on every new state.
  */
 import type { Page, Response } from '@playwright/test';
 import { nextTotp, signIn, user } from '../support/auth';
@@ -733,5 +745,265 @@ test.describe('phone viewport (confirmations)', () => {
     await cancelButton.click();
     await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
     expect((await deltaPolicy(draft.name))?.status).toBe('draft');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-3: identity and tenant administration (design 30 §9 item 7). The delta admin with MFA
+// signs in once, so the confirmations below share one session and its re-authentication window.
+// ---------------------------------------------------------------------------------------------
+
+/** The newest confirmation of delta, or null (the id only). */
+async function newestConfirmationId(): Promise<bigint | null> {
+  const row = await writerDb().aiChatActionConfirmation.findFirst({
+    where: { organizationId: await deltaOrganizationId() },
+    select: { id: true },
+    orderBy: { id: 'desc' },
+  });
+  return row?.id ?? null;
+}
+
+/** A delta user by email on the writer (any status), or null. */
+async function deltaUser(email: string) {
+  return writerDb().user.findFirst({
+    where: { organizationId: await deltaOrganizationId(), email },
+    select: { publicId: true, status: true },
+  });
+}
+
+/** `path` (another tab) lists a row containing `text` and `label`; the lists read the replica. */
+async function expectListed(
+  page: Page,
+  path: string,
+  heading: string,
+  text: string,
+  label: string,
+): Promise<void> {
+  const row = page.locator('main').getByRole('row').filter({ hasText: text });
+  await expect(async () => {
+    await page.goto(path);
+    await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();
+    await expect(row.first()).toContainText(label, { timeout: 3_000 });
+  }).toPass({ timeout: 45_000 });
+}
+
+test('identity and tenant administration: invite with re-authentication, disable in the window, add a domain, self-escalation refused', async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  const state = readState();
+  const tag = Date.now().toString(36);
+  const invitee = `invitee-${tag}@${state.users.deltaAdmin.email.split('@')[1]}`;
+  const domain = `chat-${tag}.${state.users.deltaAdmin.email.split('@')[1]}`;
+  const offboard = state.assistant.delta.offboardUser;
+  expect(await deltaUser(invitee)).toBeNull();
+  expect((await deltaUser(offboard.email))?.status, 'a fresh seed (leaver still active)').toBe(
+    'active',
+  );
+
+  await recordTurnStreams(page);
+  await signIn(page, 'deltaMfaAdmin', { next: '/assistant' });
+  await expect(page.getByRole('heading', { level: 1, name: 'AI assistant' })).toBeVisible();
+  const conversation = page.getByRole('region', { name: 'Conversation' });
+  await page
+    .getByRole('complementary', { name: 'Conversation history' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+  const lists = await page.context().newPage();
+
+  // (a) Invite as security_analyst: roles_get, then a high-risk card with the role and the
+  // invitation warning; it asks for the password and the authenticator code.
+  await ask(page, conversation, `invite ${invitee} as security_analyst`);
+  await expectTurnDone(conversation);
+  const inviteCard = confirmationCard(conversation, 'Invite user');
+  await expect(inviteCard).toBeVisible();
+  await expect(inviteCard.getByText('High risk')).toBeVisible();
+  const applies = inviteCard.getByRole('table', { name: 'What it applies to' });
+  await expect(applies).toContainText(invitee);
+  await expect(applies).toContainText('security_analyst');
+  await expect(inviteCard.getByRole('list', { name: 'Warnings' })).toContainText(
+    'An invitation email is sent; the person gets these roles when they accept.',
+  );
+  const identity = inviteCard.getByRole('group', { name: 'Confirm your identity' });
+  const password = identity.getByLabel('Your password (required)', { exact: true });
+  const code = identity.getByLabel('Authenticator code (required)', { exact: true });
+  await expect(password).toBeVisible();
+  await expect(code).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'invitation card (high risk, re-authentication)');
+  expect(await deltaUser(invitee)).toBeNull();
+
+  await password.fill(user('deltaMfaAdmin').password);
+  await code.fill(await nextTotp('deltaMfaAdmin'));
+  await inviteCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(inviteCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect(await deltaUser(invitee)).toMatchObject({ status: 'invited' });
+  const invited = await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+    where: { id: (await newestConfirmationId())! },
+    select: { status: true, reauthUsed: true, toolName: true, risk: true },
+  });
+  expect(invited).toEqual({
+    status: 'executed',
+    reauthUsed: true,
+    toolName: 'users_invite',
+    risk: 'high',
+  });
+  await expectListed(lists, '/users', 'Users', invitee, 'Invited');
+
+  // (b) Disable a seeded user: users_list finds exactly one row, then a high-risk card. The
+  // session re-authenticated a moment ago, so the card asks for nothing (the window, A2-2).
+  await page.bringToFront();
+  await ask(page, conversation, `disable user ${offboard.email}`);
+  await expectTurnDone(conversation);
+  const disableCard = confirmationCard(conversation, 'Disable user');
+  await expect(disableCard).toBeVisible();
+  await expect(disableCard.getByText('High risk')).toBeVisible();
+  await expect(disableCard.getByRole('table', { name: 'What it applies to' })).toContainText(
+    offboard.email,
+  );
+  await expect(disableCard.getByRole('table', { name: 'Changes' })).toContainText('disabled');
+  await expect(disableCard.getByRole('group', { name: 'Confirm your identity' })).toHaveCount(0);
+  await expectNoSeriousA11yViolations(page, 'disable-user card (high risk, inside the window)');
+  expect((await deltaUser(offboard.email))?.status).toBe('active');
+  await disableCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(disableCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect((await deltaUser(offboard.email))?.status).toBe('disabled');
+  const disabled = await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+    where: { id: (await newestConfirmationId())! },
+    select: { status: true, reauthUsed: true, toolName: true, risk: true },
+  });
+  expect(disabled).toEqual({
+    status: 'executed',
+    reauthUsed: false,
+    toolName: 'users_change_status',
+    risk: 'high',
+  });
+  await expectListed(lists, '/users', 'Users', offboard.email, 'Disabled');
+
+  // (c) Add a domain: a medium-risk card with impact lines; the domain then waits for its DNS.
+  await page.bringToFront();
+  await ask(page, conversation, `add domain ${domain}`);
+  await expectTurnDone(conversation);
+  const domainCard = confirmationCard(conversation, 'Add domain');
+  await expect(domainCard).toBeVisible();
+  await expect(domainCard.getByText('Medium risk')).toBeVisible();
+  await expect(domainCard.getByRole('list', { name: 'Impact' })).toContainText(
+    'Publish the DNS records shown on the domain page, then verify the domain.',
+  );
+  await expect(domainCard.getByRole('group', { name: 'Confirm your identity' })).toHaveCount(0);
+  await expectNoSeriousA11yViolations(page, 'add-domain card (medium risk, pending)');
+  await domainCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(domainCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  const created = await writerDb().domain.findFirst({
+    where: { organizationId: await deltaOrganizationId(), name: domain },
+    select: { status: true },
+  });
+  expect(created).toEqual({ status: 'pending_verification' });
+  await expectListed(lists, '/domains', 'Domains', domain, 'Pending verification');
+  await lists.close();
+
+  // (d) Self-escalation by directive: the proposal guard refuses before anything is stored or
+  // sent (I12): a "Not allowed in chat" card, no confirmation card, the roles unchanged.
+  await page.bringToFront();
+  const before = await newestConfirmationId();
+  const self = state.assistant.delta.mfaAdminUserId;
+  await ask(
+    page,
+    conversation,
+    `/tool users_replace_roles {"id":"${self}","body":{"roleKeys":["organization_admin"]}}`,
+  );
+  await expectTurnDone(conversation);
+  const denied = conversation
+    .getByRole('region', { name: /^Result: / })
+    .filter({ hasText: 'Not allowed in chat' })
+    .last();
+  await expect(denied).toBeVisible();
+  await expect(denied.getByRole('button')).toHaveCount(0);
+  // The live card shows the server's fixed message from `tool.denied`; the stored turn that
+  // replaces the streamed one carries the same message and the tool's title (design note 30 D12,
+  // §11 #11), so the card text holds in both states, never the decision code.
+  await expect(denied).toContainText(
+    'Changes to your own account, roles, status, MFA or sessions are not available in chat.',
+  );
+  await expect(denied).toContainText('Replace the roles of a user');
+  await expect(denied).not.toContainText('denied_guard');
+  await expect
+    .poll(async () => {
+      const streams = await page.evaluate(
+        () => (window as unknown as { __egTurnStreams?: string[] }).__egTurnStreams ?? [],
+      );
+      const events = [...streams.join('\n').matchAll(/event: tool\.denied\ndata: (.+)\n/g)];
+      return events.map((e) => JSON.parse(e[1]!) as { decision?: string; message?: string });
+    })
+    .toContainEqual(
+      expect.objectContaining({
+        decision: 'denied_guard',
+        message: expect.stringContaining(
+          'Changes to your own account, roles, status, MFA or sessions are not available in chat.',
+        ),
+      }),
+    );
+  await expect(confirmationCard(conversation, 'Change user roles')).toHaveCount(0);
+  expect(await newestConfirmationId()).toBe(before);
+  const execution = await writerDb().aiChatToolExecution.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId(), toolName: 'users_replace_roles' },
+    select: { decision: true, httpStatus: true },
+    orderBy: { id: 'desc' },
+  });
+  expect(execution).toEqual({ decision: 'denied_guard', httpStatus: null });
+  const roles = await writerDb().user.findFirstOrThrow({
+    where: { publicId: self },
+    select: { userRoles: { select: { role: { select: { key: true } } } } },
+  });
+  expect(roles.userRoles.map((r) => r.role.key)).toEqual(['organization_admin']);
+  await expectNoSeriousA11yViolations(page, 'proposal guard refusal (not allowed in chat)');
+});
+
+test.describe('phone viewport (identity confirmations)', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('an invitation card with the password field fits the full-screen sheet', async ({
+    page,
+  }) => {
+    const domainName = readState().users.deltaAdmin.email.split('@')[1]!;
+    const email = `phone-${Date.now().toString(36)}@${domainName}`;
+    await signIn(page, 'deltaAdmin');
+    await expectLanded(page);
+    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    const sheet = panel(page);
+    await expect(sheet).toBeVisible();
+    await ask(
+      page,
+      sheet,
+      `/tool users_invite {"body":{"email":"${email}","displayName":"Phone Invitee","roleKeys":["read_only_user"]}}`,
+    );
+    await expectTurnDone(sheet);
+    const card = confirmationCard(sheet, 'Invite user');
+    await expect(card).toBeVisible();
+    await expect(card.getByText('High risk')).toBeVisible();
+    // deltaAdmin has no MFA: the password only.
+    const identity = card.getByRole('group', { name: 'Confirm your identity' });
+    await expect(identity.getByLabel('Your password (required)', { exact: true })).toBeVisible();
+    const confirmButton = card.getByRole('button', { name: 'Confirm', exact: true });
+    const cancelButton = card.getByRole('button', { name: 'Cancel', exact: true });
+    await confirmButton.scrollIntoViewIfNeeded();
+    await expect(confirmButton).toBeInViewport();
+    await expect(cancelButton).toBeInViewport();
+    const box = await card.boundingBox();
+    expect((box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 999) <= 390).toBe(true);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    await expectNoSeriousA11yViolations(page, 'invitation card on a phone');
+    // Nobody is invited: the proposal is cancelled.
+    await cancelButton.click();
+    await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
+    expect(await deltaUser(email)).toBeNull();
   });
 });

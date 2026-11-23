@@ -22,6 +22,8 @@ export * from './confirmations/types';
 export * from './confirmations/canonical';
 export * from './confirmations/digest';
 export * from './confirmations/specs';
+export * from './confirmations/guards';
+export * from './confirmations/escalation';
 export * from './confirmations/impact';
 export * from './confirmations/updates';
 export * from './registry/types';

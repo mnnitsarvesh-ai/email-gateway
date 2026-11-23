@@ -9145,6 +9145,277 @@
       }
     },
     "/api/v1/api-keys/{id}": {
+      "get": {
+        "description": "Never returns the key or its hash. Revoked keys are included. Read from the replica.",
+        "operationId": "ApiKeysController_get_v1",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid",
+                      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                    },
+                    "name": { "type": "string" },
+                    "prefix": {
+                      "type": "string",
+                      "description": "First 16 characters of the key, safe to display"
+                    },
+                    "scopes": { "type": "array", "items": { "type": "string" } },
+                    "createdBy": {
+                      "nullable": true,
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "displayName": { "type": "string" }
+                      },
+                      "required": ["id", "displayName"],
+                      "additionalProperties": false
+                    },
+                    "lastUsedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "expiresAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "revokedAt": {
+                      "nullable": true,
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    "createdAt": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "prefix",
+                    "scopes",
+                    "createdBy",
+                    "lastUsedAt",
+                    "expiresAt",
+                    "revokedAt",
+                    "createdAt"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "400": {
+            "description": "Validation failed (`message` lists `\"<path>: <issue>\"`) or the token is invalid/expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not allowed (permission, MFA, enrollment restriction)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Not found (also for resources of another tenant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "Authentication backend unavailable (fail closed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer" },
+                    "error": { "type": "string" },
+                    "message": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "type": "array", "items": { "type": "string" } }
+                      ]
+                    },
+                    "correlationId": { "type": "string" }
+                  },
+                  "required": ["statusCode", "error", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }, { "api-key": [] }],
+        "summary": "Get an API key",
+        "tags": ["api-keys"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["apikey:read"] }
+      },
       "delete": {
         "operationId": "ApiKeysController_revoke_v1",
         "parameters": [
@@ -176873,6 +177144,10 @@
                                   "description": "`r<seq>`: how the assistant refers to this result"
                                 },
                                 "tool": { "type": "string" },
+                                "title": {
+                                  "type": "string",
+                                  "description": "Display title of the tool (as the stream `tool.started` event carries it)"
+                                },
                                 "operationId": { "type": "string" },
                                 "access": { "type": "string", "enum": ["read", "write"] },
                                 "risk": {
@@ -176896,8 +177171,10 @@
                                     "denied_not_applicable",
                                     "denied_schema",
                                     "denied_ref",
-                                    "denied_budget"
-                                  ]
+                                    "denied_budget",
+                                    "denied_guard"
+                                  ],
+                                  "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
                                 },
                                 "status": {
                                   "type": "string",
@@ -176916,6 +177193,11 @@
                                   "maximum": 9007199254740991
                                 },
                                 "errorCode": { "nullable": true, "type": "string" },
+                                "message": {
+                                  "nullable": true,
+                                  "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
+                                  "type": "string"
+                                },
                                 "hasMore": { "type": "boolean" },
                                 "card": {
                                   "nullable": true,
@@ -177297,6 +177579,7 @@
                                 "seq",
                                 "ref",
                                 "tool",
+                                "title",
                                 "operationId",
                                 "access",
                                 "risk",
@@ -177304,6 +177587,7 @@
                                 "status",
                                 "httpStatus",
                                 "errorCode",
+                                "message",
                                 "hasMore",
                                 "card",
                                 "latencyMs",
@@ -177369,6 +177653,7 @@
                             "seq": 1,
                             "ref": "r1",
                             "tool": "policy_management_list",
+                            "title": "List policies",
                             "operationId": "PolicyManagementController_list_v1",
                             "access": "read",
                             "risk": "read",
@@ -177376,6 +177661,7 @@
                             "status": "succeeded",
                             "httpStatus": 200,
                             "errorCode": null,
+                            "message": null,
                             "hasMore": false,
                             "card": {
                               "version": "assistant-card/1",
@@ -177829,6 +178115,10 @@
                             "description": "`r<seq>`: how the assistant refers to this result"
                           },
                           "tool": { "type": "string" },
+                          "title": {
+                            "type": "string",
+                            "description": "Display title of the tool (as the stream `tool.started` event carries it)"
+                          },
                           "operationId": { "type": "string" },
                           "access": { "type": "string", "enum": ["read", "write"] },
                           "risk": {
@@ -177845,8 +178135,10 @@
                               "denied_not_applicable",
                               "denied_schema",
                               "denied_ref",
-                              "denied_budget"
-                            ]
+                              "denied_budget",
+                              "denied_guard"
+                            ],
+                            "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
                           },
                           "status": {
                             "type": "string",
@@ -177865,6 +178157,11 @@
                             "maximum": 9007199254740991
                           },
                           "errorCode": { "nullable": true, "type": "string" },
+                          "message": {
+                            "nullable": true,
+                            "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
+                            "type": "string"
+                          },
                           "hasMore": { "type": "boolean" },
                           "card": {
                             "nullable": true,
@@ -178243,6 +178540,7 @@
                           "seq",
                           "ref",
                           "tool",
+                          "title",
                           "operationId",
                           "access",
                           "risk",
@@ -178250,6 +178548,7 @@
                           "status",
                           "httpStatus",
                           "errorCode",
+                          "message",
                           "hasMore",
                           "card",
                           "latencyMs",
@@ -178534,6 +178833,7 @@
                         "seq": 1,
                         "ref": "r1",
                         "tool": "policy_management_list",
+                        "title": "List policies",
                         "operationId": "PolicyManagementController_list_v1",
                         "access": "read",
                         "risk": "read",
@@ -178541,6 +178841,7 @@
                         "status": "succeeded",
                         "httpStatus": 200,
                         "errorCode": null,
+                        "message": null,
                         "hasMore": false,
                         "card": {
                           "version": "assistant-card/1",
@@ -179079,6 +179380,10 @@
                       "description": "`r<seq>`: how the assistant refers to this result"
                     },
                     "tool": { "type": "string" },
+                    "title": {
+                      "type": "string",
+                      "description": "Display title of the tool (as the stream `tool.started` event carries it)"
+                    },
                     "operationId": { "type": "string" },
                     "access": { "type": "string", "enum": ["read", "write"] },
                     "risk": {
@@ -179095,8 +179400,10 @@
                         "denied_not_applicable",
                         "denied_schema",
                         "denied_ref",
-                        "denied_budget"
-                      ]
+                        "denied_budget",
+                        "denied_guard"
+                      ],
+                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
                     },
                     "status": {
                       "type": "string",
@@ -179109,6 +179416,11 @@
                       "maximum": 9007199254740991
                     },
                     "errorCode": { "nullable": true, "type": "string" },
+                    "message": {
+                      "nullable": true,
+                      "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
+                      "type": "string"
+                    },
                     "hasMore": { "type": "boolean" },
                     "card": {
                       "nullable": true,
@@ -179484,6 +179796,7 @@
                     "seq",
                     "ref",
                     "tool",
+                    "title",
                     "operationId",
                     "access",
                     "risk",
@@ -179491,6 +179804,7 @@
                     "status",
                     "httpStatus",
                     "errorCode",
+                    "message",
                     "hasMore",
                     "card",
                     "latencyMs",
@@ -179506,6 +179820,7 @@
                     "seq": 1,
                     "ref": "r1",
                     "tool": "policy_management_list",
+                    "title": "List policies",
                     "operationId": "PolicyManagementController_list_v1",
                     "access": "read",
                     "risk": "read",
@@ -179513,6 +179828,7 @@
                     "status": "succeeded",
                     "httpStatus": 200,
                     "errorCode": null,
+                    "message": null,
                     "hasMore": false,
                     "card": {
                       "version": "assistant-card/1",
@@ -179758,6 +180074,10 @@
                       "description": "`r<seq>`: how the assistant refers to this result"
                     },
                     "tool": { "type": "string" },
+                    "title": {
+                      "type": "string",
+                      "description": "Display title of the tool (as the stream `tool.started` event carries it)"
+                    },
                     "operationId": { "type": "string" },
                     "access": { "type": "string", "enum": ["read", "write"] },
                     "risk": {
@@ -179774,8 +180094,10 @@
                         "denied_not_applicable",
                         "denied_schema",
                         "denied_ref",
-                        "denied_budget"
-                      ]
+                        "denied_budget",
+                        "denied_guard"
+                      ],
+                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
                     },
                     "status": {
                       "type": "string",
@@ -179788,6 +180110,11 @@
                       "maximum": 9007199254740991
                     },
                     "errorCode": { "nullable": true, "type": "string" },
+                    "message": {
+                      "nullable": true,
+                      "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
+                      "type": "string"
+                    },
                     "hasMore": { "type": "boolean" },
                     "card": {
                       "nullable": true,
@@ -180163,6 +180490,7 @@
                     "seq",
                     "ref",
                     "tool",
+                    "title",
                     "operationId",
                     "access",
                     "risk",
@@ -180170,6 +180498,7 @@
                     "status",
                     "httpStatus",
                     "errorCode",
+                    "message",
                     "hasMore",
                     "card",
                     "latencyMs",
@@ -180185,6 +180514,7 @@
                     "seq": 1,
                     "ref": "r1",
                     "tool": "policy_management_list",
+                    "title": "List policies",
                     "operationId": "PolicyManagementController_list_v1",
                     "access": "read",
                     "risk": "read",
@@ -180192,6 +180522,7 @@
                     "status": "succeeded",
                     "httpStatus": 200,
                     "errorCode": null,
+                    "message": null,
                     "hasMore": false,
                     "card": {
                       "version": "assistant-card/1",
@@ -180830,7 +181161,7 @@
     },
     "/api/v1/assistant/confirmations/{confirmationId}/confirm": {
       "post": {
-        "description": "Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`) and permitted (`403 forbidden`), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "description": "Runs the stored request of a pending proposal, exactly as the card showed it, through the api’s own pipeline with YOUR credential (permissions, tenant, MFA, rate limits, validation, CAS, approvals and audit apply as in the portal) with `Idempotency-Key` = the confirmation id where the operation takes one. Send the single-use `token` of the `confirmation.required` event (or the turn’s `confirmations[]`) and the `actionDigest` the card showed; high-risk actions also need `reauth` (`password`, and `totpCode` with MFA) unless this session re-authenticated an assistant confirmation within ASSISTANT_REAUTH_WINDOW_SECONDS. Checks in order: own confirmation (`404`), same sign-in session (`403 assistant_confirmation_session_mismatch`), still pending (`409 assistant_confirmation_not_pending` with `status`), not expired (`410 assistant_confirmation_expired`), the token (`403 assistant_confirmation_token_invalid`; the fifth wrong token cancels the confirmation), the digest (`409 assistant_confirmation_digest_mismatch`), the tool still enabled (`409 assistant_confirmation_tool_changed`; also when the effective risk recomputed from the stored arguments differs from the stored one) and permitted (`403 forbidden`), the proposal guards (`403 assistant_action_not_allowed`: no change to your own account, roles, status, MFA or sessions, nor to the assistant’s own enablement or who may configure it, through chat), the assistant available, re-authentication (`401 assistant_reauth_required`, `401 assistant_reauth_failed` with `reason`; failures count toward the login lockout), no turn running in the conversation (`409 assistant_turn_in_progress`), then the target is read again and any change since the proposal refuses (`409 assistant_confirmation_state_changed`) and the proposal guards that need the target are evaluated on it again (`403 assistant_action_not_allowed`). A write the operation itself refuses is a `200` with `confirmation.status = failed` and the execution’s error card; `202` approval answers are `executed`. The assistant learns the outcome at the start of its next turn. Rate class `sensitive`. A confirmation belongs to the user, organization (and platform override) and sign-in session that the assistant proposed it in; another user’s or organization’s answers `404`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
         "operationId": "AssistantConfirmationsController_confirm_v1",
         "parameters": [
           {
@@ -181164,6 +181495,10 @@
                           "description": "`r<seq>`: how the assistant refers to this result"
                         },
                         "tool": { "type": "string" },
+                        "title": {
+                          "type": "string",
+                          "description": "Display title of the tool (as the stream `tool.started` event carries it)"
+                        },
                         "operationId": { "type": "string" },
                         "access": { "type": "string", "enum": ["read", "write"] },
                         "risk": {
@@ -181180,8 +181515,10 @@
                             "denied_not_applicable",
                             "denied_schema",
                             "denied_ref",
-                            "denied_budget"
-                          ]
+                            "denied_budget",
+                            "denied_guard"
+                          ],
+                          "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
                         },
                         "status": {
                           "type": "string",
@@ -181200,6 +181537,11 @@
                           "maximum": 9007199254740991
                         },
                         "errorCode": { "nullable": true, "type": "string" },
+                        "message": {
+                          "nullable": true,
+                          "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
+                          "type": "string"
+                        },
                         "hasMore": { "type": "boolean" },
                         "card": {
                           "nullable": true,
@@ -181578,6 +181920,7 @@
                         "seq",
                         "ref",
                         "tool",
+                        "title",
                         "operationId",
                         "access",
                         "risk",
@@ -181585,6 +181928,7 @@
                         "status",
                         "httpStatus",
                         "errorCode",
+                        "message",
                         "hasMore",
                         "card",
                         "latencyMs",
@@ -181639,6 +181983,7 @@
                       "seq": 3,
                       "ref": "r3",
                       "tool": "policy_management_disable",
+                      "title": "List policies",
                       "operationId": "PolicyManagementController_disable_v1",
                       "access": "write",
                       "risk": "medium",
@@ -181646,6 +181991,7 @@
                       "status": "succeeded",
                       "httpStatus": 200,
                       "errorCode": null,
+                      "message": null,
                       "hasMore": false,
                       "card": {
                         "version": "assistant-card/1",
@@ -181724,7 +182070,7 @@
             }
           },
           "403": {
-            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`) or a wrong token (`assistant_confirmation_token_invalid`)",
+            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`), the organization feature `ai_assistant` is off (`assistant_not_enabled`), the organization turned the assistant off (`assistant_tenant_disabled`), another sign-in session (`assistant_confirmation_session_mismatch`), a wrong token (`assistant_confirmation_token_invalid`) or a proposal guard refused the change (`assistant_action_not_allowed`, the confirmation fails)",
             "content": {
               "application/json": {
                 "schema": {
@@ -181741,7 +182087,8 @@
                         "assistant_not_enabled",
                         "assistant_tenant_disabled",
                         "assistant_confirmation_session_mismatch",
-                        "assistant_confirmation_token_invalid"
+                        "assistant_confirmation_token_invalid",
+                        "assistant_action_not_allowed"
                       ]
                     },
                     "message": { "type": "string" },
@@ -181787,7 +182134,7 @@
             }
           },
           "409": {
-            "description": "No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`)",
+            "description": "No longer pending (`assistant_confirmation_not_pending`, `status`), a digest that does not match the proposal (`assistant_confirmation_digest_mismatch`), the operation is no longer available or its effective risk changed (`assistant_confirmation_tool_changed`), the target changed since the proposal (`assistant_confirmation_state_changed`, `httpStatus` when the re-read failed) or a turn runs in the conversation (`assistant_turn_in_progress`)",
             "content": {
               "application/json": {
                 "schema": {

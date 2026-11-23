@@ -11,6 +11,7 @@
 // @covers delete /api/v1/users/:id/sessions
 // @covers delete /api/v1/users/:id/sessions/:sessionId
 // @covers get /api/v1/api-keys
+// @covers get /api/v1/api-keys/:id
 // @covers get /api/v1/audit/login-events
 // @covers get /api/v1/roles
 // @covers get /api/v1/roles/:key
@@ -134,6 +135,7 @@ describe('identity administration (e2e, services stubbed)', () => {
   };
   const apiKeys = {
     list: vi.fn(() => Promise.resolve({ data: [], nextCursor: null })),
+    get: vi.fn(() => Promise.resolve({})),
     create: vi.fn(() => Promise.resolve({})),
     revoke: vi.fn(() => Promise.resolve()),
   };
@@ -256,6 +258,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       '/api/v1/users?status=deleted',
       '/api/v1/roles/Not-A-Key',
       '/api/v1/api-keys?limit=101',
+      '/api/v1/api-keys/not-a-uuid',
       '/api/v1/audit/login-events?outcome=maybe',
       '/api/v1/audit/login-events?from=yesterday',
       '/api/v1/audit/login-events?userId=42',
@@ -298,6 +301,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       await http().delete(`/api/v1/users/${ID}`).set(headers).expect(403);
       await http().get(`/api/v1/users/${ID}/sessions`).set(headers).expect(403);
       await http().get('/api/v1/api-keys').set(headers).expect(403);
+      await http().get(`/api/v1/api-keys/${ID}`).set(headers).expect(403);
       await http().get('/api/v1/audit/login-events').set(headers).expect(403);
       await http()
         .post('/api/v1/roles')
@@ -329,6 +333,7 @@ describe('identity administration (e2e, services stubbed)', () => {
       await http().get('/api/v1/users').set(key).expect(200);
       await http().get('/api/v1/roles').set(key).expect(200);
       await http().get('/api/v1/audit/login-events').set(key).expect(200);
+      await http().get(`/api/v1/api-keys/${ID}`).set(key).expect(200);
       await http()
         .post('/api/v1/users/invitations')
         .set(idem())
@@ -363,6 +368,17 @@ describe('identity administration (e2e, services stubbed)', () => {
       const [scope, query] = users.list.mock.calls[0] as unknown as [TenantScope, object];
       expect(scope).toMatchObject({ organizationId: 2n, via: 'member' });
       expect(query).toEqual({ limit: 5, status: 'active', q: 'al', role: 'read_only_user' });
+    });
+
+    it("reads one API key in the principal's organization by its id (step AI-3 D8)", async () => {
+      await http()
+        .get(`/api/v1/api-keys/${ID}`)
+        .set(await bearer())
+        .set('X-Organization-Id', '999')
+        .expect(200);
+      const [scope, id] = apiKeys.get.mock.calls[0] as unknown as [TenantScope, string];
+      expect(scope).toMatchObject({ organizationId: 2n, via: 'member' });
+      expect(id).toBe(ID);
     });
 
     it('passes validated, normalized bodies and the client IP to the services', async () => {

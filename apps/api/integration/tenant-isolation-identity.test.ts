@@ -12,6 +12,7 @@
 // @covers delete /api/v1/users/:id/sessions
 // @covers delete /api/v1/users/:id/sessions/:sessionId
 // @covers get /api/v1/api-keys
+// @covers get /api/v1/api-keys/:id
 // @covers get /api/v1/audit/login-events
 // @covers get /api/v1/roles
 // @covers get /api/v1/roles/:key
@@ -258,6 +259,18 @@ describe('tenant A administrator (every tenant permission) versus tenant B', () 
       .send({ name: 'A key', scopes: ['user:read', 'user:manage', 'role:read', 'audit:read'] })
       .expect(201);
     const keyA = apiKeyHeader(created.body.key as string);
+    // Step AI-3 D8: one key by id. A's own (newer) key is visible on the replica, B's (older)
+    // key is a 404 like an unknown id, never a 403 that would confirm it exists.
+    await expect
+      .poll(
+        async () =>
+          (await ctx.http.get(`/api/v1/api-keys/${created.body.apiKey.id}`).set(auth)).status,
+        POLL,
+      )
+      .toBe(200);
+    const foreign = await ctx.http.get(`/api/v1/api-keys/${b.apiKey.id}`).set(auth).expect(404);
+    expect(foreign.body.message).toBe('API key not found');
+    expect(JSON.stringify(foreign.body)).not.toContain('B key');
     await expect
       .poll(async () => ids((await ctx.http.get('/api/v1/users?limit=100').set(keyA)).body), POLL)
       .toContain(adminA.publicId);

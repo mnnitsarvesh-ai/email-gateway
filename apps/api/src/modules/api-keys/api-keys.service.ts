@@ -105,6 +105,16 @@ export class ApiKeysService {
     return toPage(rows, query.limit, toApiKeyView);
   }
 
+  /**
+   * One key of the caller's organization (step AI-3 D8): revoked keys included, never the key
+   * or its hash; an unknown id or another organization's key is `404`. Read from the replica.
+   */
+  async get(scope: TenantScope, publicId: string): Promise<ApiKeyView> {
+    const key = await this.keys.get(scope, publicId);
+    if (!key) throw new NotFoundException('API key not found');
+    return toApiKeyView(key);
+  }
+
   async create(
     principal: UserPrincipal,
     scope: TenantScope,

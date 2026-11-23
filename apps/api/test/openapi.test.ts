@@ -218,8 +218,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/27-journal-intake-and-archive-split.md D11): 403; plus the 15 assistant
     // operations of step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1): 418; plus the 3
     // confirmation operations of step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md
-    // §4.1): 421, all under /api/v1.
-    expect(count).toBe(421);
+    // §4.1): 421; plus the API key read of step AI-3
+    // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422, all under /api/v1.
+    expect(count).toBe(422);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1618,6 +1619,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'confirmation.required',
       'pending_confirmation',
       'assistant-confirmation/1',
+      // Step AI-3 D10, §4.1.
+      'assistant_action_not_allowed',
+      'denied_guard',
     ]) {
       expect(docs, code).toContain(code);
     }

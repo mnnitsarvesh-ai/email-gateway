@@ -334,6 +334,13 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     cursor: 'v0',
   },
   {
+    // Step AI-3 D8: one key by id (the assistant's revocation card names the key).
+    route: 'get /api/v1/api-keys/:id',
+    e2e: `${E2E}/identity-admin.e2e.test.ts`,
+    integration: `${INT}/identity-admin.test.ts`,
+    crossTenant: `${INT}/tenant-isolation-identity.test.ts`,
+  },
+  {
     route: 'post /api/v1/api-keys',
     e2e: `${E2E}/identity-admin.e2e.test.ts`,
     integration: `${INT}/identity-admin.test.ts`,

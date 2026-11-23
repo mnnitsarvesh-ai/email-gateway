@@ -37,6 +37,7 @@ import {
 import {
   DELTA,
   DELTA_DOMAIN,
+  DELTA_OFFBOARD_USER,
   EPSILON,
   EPSILON_DOMAIN,
   planDeltaMessages,
@@ -718,6 +719,7 @@ export async function seed(): Promise<SeedSummary> {
     const orgOf = { alpha, beta, gamma, delta, epsilon, platform } as const;
     const users = {} as Record<UserKey, E2eUser>;
     const userIds = new Map<string, bigint>();
+    const userPublicIds = new Map<string, string>();
     for (const [key, s] of Object.entries(spec) as Array<[UserKey, (typeof spec)[UserKey]]>) {
       const password = generatePassword();
       const user = await createUser(p, orgOf[s.org], {
@@ -727,6 +729,7 @@ export async function seed(): Promise<SeedSummary> {
         passwordHash: await hashPassword(password),
       });
       userIds.set(s.email, user.id);
+      userPublicIds.set(s.email, user.publicId);
       users[key] = { email: s.email, password, roles: s.roles, organization: s.org };
     }
     // The approver signs in with MFA (approvals and downloads need an MFA session).
@@ -771,6 +774,13 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(deltaMfaSecret, deltaMfaId) },
     });
     users.deltaMfaAdmin.totpSecret = deltaMfaSecret;
+    // Step AI-3: the delta user the assistant spec disables (nobody signs in as it).
+    const deltaOffboard = await createUser(p, delta, {
+      email: DELTA_OFFBOARD_USER.email,
+      displayName: DELTA_OFFBOARD_USER.displayName,
+      roles: [...DELTA_OFFBOARD_USER.roles],
+      passwordHash: await hashPassword(generatePassword()),
+    });
 
     const memberHash = await hashPassword(generatePassword());
     const memberIds: string[] = [];
@@ -1225,6 +1235,8 @@ export async function seed(): Promise<SeedSummary> {
         delta: {
           policies: deltaPolicies,
           quarantinedSubjects: deltaPlans.filter((m) => m.quarantine).map((m) => m.subject),
+          mfaAdminUserId: userPublicIds.get(spec.deltaMfaAdmin.email)!,
+          offboardUser: { id: deltaOffboard.publicId, email: DELTA_OFFBOARD_USER.email },
         },
       },
       ato: {

@@ -10,6 +10,7 @@ import {
   okJson,
   renderWithProviders,
 } from '@/test';
+import { ApiError } from '@/lib/api/errors';
 import { ConfirmationCard, confirmationRefusal, formatRemaining } from './confirmation-card';
 import {
   CONFIRMATION_ID,
@@ -20,6 +21,9 @@ import {
   POLICY_ID,
   RESULT_CARD,
   RESULT_EXECUTION_ID,
+  ROLES_VIEW_OVERRIDES,
+  WEBHOOK_ESCALATED_VIEW_OVERRIDES,
+  WEBHOOK_URL_WARNING,
   confirmationView,
   resultExecution,
 } from './test-data';
@@ -368,6 +372,13 @@ describe('ConfirmationCard (step AI-2 D10)', () => {
       true,
     ],
     [
+      403,
+      'assistant_action_not_allowed',
+      {},
+      'This change is not allowed in chat. Nothing changed.',
+      true,
+    ],
+    [
       401,
       'assistant_reauth_failed',
       { reason: 'locked' },
@@ -591,5 +602,124 @@ describe('ConfirmationCard (step AI-2 D10)', () => {
     expect(JSON.stringify({ ...window.localStorage })).not.toContain(CONFIRMATION_TOKEN);
     expect(JSON.stringify({ ...window.sessionStorage })).not.toContain(CONFIRMATION_TOKEN);
     setItem.mockRestore();
+  });
+});
+
+describe('ConfirmationCard (step AI-3 identity and tenant administration)', () => {
+  it('ends in the refused state on 403 assistant_action_not_allowed (confirm-time guard)', async () => {
+    const failed = confirmationView({
+      ...ROLES_VIEW_OVERRIDES,
+      reauthFresh: true,
+      status: 'failed',
+      decidedAt: '2026-11-21T09:01:00.000Z',
+      result: { httpStatus: 403, error: 'assistant_action_not_allowed' },
+    });
+    const confirms: unknown[] = [];
+    mockApi({
+      AssistantConfirmationsController_confirm_v1: ({ body }) => {
+        confirms.push(body);
+        return apiErrorJson(403, 'assistant_action_not_allowed', 'Not allowed in chat');
+      },
+      AssistantConfirmationsController_get_v1: () => okJson(failed),
+    });
+    const announced: string[] = [];
+    const { user } = renderWithProviders(
+      <Harness
+        view={confirmationView({ ...ROLES_VIEW_OVERRIDES, reauthFresh: true })}
+        onAnnounce={(text) => announced.push(text)}
+      />,
+    );
+    const card = region('Replace user roles');
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent(
+      'This change is not allowed in chat. Nothing changed.',
+    );
+    expect(screen.getByTestId('token-held')).toHaveTextContent('no');
+    await waitFor(() =>
+      expect(card).toHaveTextContent(
+        'Not run: this change is not allowed in chat. Nothing changed.',
+      ),
+    );
+    expect(within(card).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    expect(confirms).toHaveLength(1);
+    expect(
+      confirmationRefusal(
+        new ApiError({ status: 403, code: 'assistant_action_not_allowed', message: 'x' }),
+      ),
+    ).toMatchObject({ ends: true, refresh: true });
+  });
+
+  it('keeps the tool-changed message for a recomputed risk difference', () => {
+    expect(
+      confirmationRefusal(
+        new ApiError({ status: 409, code: 'assistant_confirmation_tool_changed', message: 'x' }),
+      ).message,
+    ).toBe('This action is no longer available in chat. Ask again or use the portal page.');
+  });
+
+  it('renders a high card raised by escalation: its warning and the re-authentication fields', async () => {
+    const { container } = renderWithProviders(
+      <Harness view={confirmationView(WEBHOOK_ESCALATED_VIEW_OVERRIDES)} />,
+      { me: makeMe({ role: 'organization_admin', overrides: { mfaEnabled: true } }) },
+    );
+    const card = region('Update webhook');
+    expect(within(card).getByText('High risk')).toBeInTheDocument();
+    const warnings = within(card).getByRole('list', { name: 'Warnings' });
+    expect(
+      within(warnings)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent),
+    ).toEqual([WEBHOOK_URL_WARNING]);
+    const changes = within(card).getByRole('table', { name: 'Changes' });
+    const url = within(changes).getByRole('row', { name: /URL/ });
+    expect(url).toHaveTextContent('https://siem.example.com/hooks/gateway');
+    expect(url).toHaveTextContent('https://collector.example.net/ingest');
+    // Addresses in a summary are values, never links.
+    expect(within(changes).queryByRole('link')).not.toBeInTheDocument();
+    expect(within(card).getByLabelText('Your password (required)')).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(within(card).getByLabelText('Authenticator code (required)')).toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('renders a role replacement as a high card with the roles before and after', async () => {
+    const bodies: unknown[] = [];
+    mockApi({
+      AssistantConfirmationsController_confirm_v1: ({ body }) => {
+        bodies.push(body);
+        return apiErrorJson(401, 'assistant_reauth_required', 'Re-authentication required');
+      },
+    });
+    const { user, container } = renderWithProviders(
+      <Harness view={confirmationView(ROLES_VIEW_OVERRIDES)} />,
+    );
+    const card = region('Replace user roles');
+    expect(within(card).getByText('High risk')).toBeInTheDocument();
+    const roles = within(within(card).getByRole('table', { name: 'Changes' })).getByRole('row', {
+      name: /Roles/,
+    });
+    expect(roles).toHaveTextContent('security_analyst');
+    expect(roles).toHaveTextContent('organization_admin');
+    expect(within(card).getByText('Priya Raman')).toHaveAttribute('data-untrusted');
+    expect(within(card).getByRole('list', { name: 'Warnings' })).toHaveTextContent(
+      'Grants full administrative access to this organization.',
+    );
+    const password = within(card).getByLabelText('Your password (required)');
+    await user.type(password, 'correct-horse-battery');
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    expect(await within(card).findByRole('alert')).toHaveTextContent(
+      'Confirm your identity to run this action.',
+    );
+    expect(bodies).toEqual([
+      {
+        token: CONFIRMATION_TOKEN,
+        actionDigest: confirmationView().actionDigest,
+        reauth: { password: 'correct-horse-battery' },
+      },
+    ]);
+    expectRequestMatchesContract('AssistantConfirmationsController_confirm_v1', bodies[0]);
+    await expectNoAxeViolations(container);
   });
 });

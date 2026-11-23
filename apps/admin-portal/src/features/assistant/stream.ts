@@ -135,6 +135,7 @@ const decision = z.enum([
   'denied_schema',
   'denied_ref',
   'denied_budget',
+  'denied_guard',
 ]);
 const cardValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
@@ -305,6 +306,7 @@ export function eventsFromTurnResult(result: TurnResult): AssistantStreamEvent[]
         decision: execution.decision,
         message:
           (card?.success ? (card.data.message ?? card.data.error?.message) : undefined) ??
+          execution.message ??
           execution.errorCode ??
           'The assistant could not use this tool.',
       });

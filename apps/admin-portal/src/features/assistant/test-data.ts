@@ -159,6 +159,7 @@ export function execution(
     seq: 1,
     ref: 'r1',
     tool: card?.tool ?? 'policy_management_list',
+    title: card?.title ?? 'List policies',
     operationId: 'PolicyManagementController_list_v1',
     access: 'read',
     risk: 'read',
@@ -166,6 +167,7 @@ export function execution(
     status: 'succeeded',
     httpStatus: 200,
     errorCode: null,
+    message: null,
     hasMore: card?.nextCursor === true,
     card: card as Execution['card'],
     latencyMs: 40,
@@ -484,4 +486,110 @@ export function proposalTurnFrames(
       messageId: MESSAGE_ID,
     }),
   ];
+}
+
+/*
+ * Step AI-3 identity and tenant administration (synthetic; operation ids again not real
+ * controller ids).
+ */
+
+export const TARGET_USER_ID = '01930000-0000-7000-8000-00000000a001';
+export const WEBHOOK_ID = '01930000-0000-7000-8000-00000000a101';
+export const GUARD_EXECUTION_ID = '01930000-0000-7000-8000-00000000e320';
+
+/** The server-authored `self` guard message (AI-3 D3); it names a portal location in prose only. */
+export const SELF_GUARD_MESSAGE =
+  'Changes to your own account, roles, status, MFA or sessions are not available in chat. Ask another administrator, or use your account pages in the portal.';
+
+/** A role change: always `high` (AI-3 D2). */
+export const ROLES_HIGH_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Replace user roles',
+  action: 'Replaces the roles of Priya Raman.',
+  target: [
+    { label: 'User', value: 'Priya Raman', untrusted: true },
+    { label: 'Email', value: 'priya.raman@example.com' },
+  ],
+  changes: [{ label: 'Roles', before: 'security_analyst', after: 'organization_admin' }],
+  impact: ['The user gets every permission of the new roles at their next request'],
+  warnings: ['Grants full administrative access to this organization.'],
+  reversible: true,
+  portalRoute: `/users/${TARGET_USER_ID}`,
+  request: { method: 'PUT', path: `/api/v1/users/${TARGET_USER_ID}/roles` },
+};
+
+export const ROLES_VIEW_OVERRIDES: Partial<ConfirmationView> = {
+  tool: 'users_replace_roles',
+  operationId: 'users.replace-roles',
+  risk: 'high',
+  requiresReauth: true,
+  summary: ROLES_HIGH_SUMMARY,
+};
+
+/** The D4 escalation warning of `webhooks_update` with `body.url`. */
+export const WEBHOOK_URL_WARNING = "Sends this webhook's event data to a new address.";
+
+/** A `webhooks_update` raised from `low` to `high` by its URL change (AI-3 D4). */
+export const WEBHOOK_ESCALATED_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Update webhook',
+  action: 'Updates the webhook "SIEM forwarder".',
+  target: [{ label: 'Webhook', value: 'SIEM forwarder' }],
+  changes: [
+    {
+      label: 'URL',
+      before: 'https://siem.example.com/hooks/gateway',
+      after: 'https://collector.example.net/ingest',
+    },
+  ],
+  impact: [],
+  warnings: [WEBHOOK_URL_WARNING],
+  reversible: true,
+  portalRoute: `/webhooks/${WEBHOOK_ID}`,
+  request: { method: 'PATCH', path: `/api/v1/webhooks/${WEBHOOK_ID}` },
+};
+
+export const WEBHOOK_ESCALATED_VIEW_OVERRIDES: Partial<ConfirmationView> = {
+  tool: 'webhooks_update',
+  operationId: 'webhooks.update',
+  risk: 'high',
+  requiresReauth: true,
+  summary: WEBHOOK_ESCALATED_SUMMARY,
+};
+
+/** Display title of `users_replace_roles` (the api's execution view `title`). */
+export const GUARD_TOOL_TITLE = 'Replace the roles of a user';
+
+/**
+ * A stored execution refused by a proposal guard (`denied_guard`): no confirmation, no api call.
+ * The api stores it without a card, its decision as the error code; the view carries the guard
+ * message (derived from the operation's spec) and the tool's display title.
+ */
+export function deniedGuardExecution(): Execution {
+  return execution(null, {
+    id: GUARD_EXECUTION_ID,
+    ref: 'r2',
+    seq: 2,
+    tool: 'users_replace_roles',
+    title: GUARD_TOOL_TITLE,
+    operationId: 'UsersController_replaceRoles_v1',
+    access: 'write',
+    risk: 'high',
+    decision: 'denied_guard',
+    status: 'refused',
+    httpStatus: null,
+    errorCode: 'denied_guard',
+    message: SELF_GUARD_MESSAGE,
+    hasMore: false,
+  });
+}
+
+/** The `tool.denied` frame of a self-guarded call. */
+export function deniedGuardFrame(): string {
+  return sseFrame('tool.denied', {
+    executionId: GUARD_EXECUTION_ID,
+    tool: 'users_replace_roles',
+    decision: 'denied_guard',
+    message: SELF_GUARD_MESSAGE,
+  });
 }

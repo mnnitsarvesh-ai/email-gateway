@@ -42,9 +42,9 @@ export interface NewApiKey {
 }
 
 /**
- * `api_keys` management (D11). Scoped by the tenant scope on every query; the list uses the
- * replica, creation and revocation the writer. Authentication lookups by prefix live in the
- * auth module.
+ * `api_keys` management (D11). Scoped by the tenant scope on every query; the list and the
+ * single-key read (step AI-3 D8) use the replica, creation and revocation the writer.
+ * Authentication lookups by prefix live in the auth module.
  */
 @Injectable()
 export class ApiKeysRepository {
@@ -65,6 +65,14 @@ export class ApiKeysRepository {
       select: apiKeySelect,
       orderBy: { id: 'desc' },
       take: window.take,
+    });
+  }
+
+  /** One key of the scope by public id, revoked and expired included (reader, step AI-3 D8). */
+  async get(scope: TenantScope, publicId: string): Promise<ApiKeyRecord | null> {
+    return this.reader.client.apiKey.findFirst({
+      where: tenantWhere(scope, { publicId }),
+      select: apiKeySelect,
     });
   }
 

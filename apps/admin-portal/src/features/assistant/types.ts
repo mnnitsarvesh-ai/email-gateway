@@ -66,7 +66,9 @@ export type ExecutionDecision =
   | 'denied_not_applicable'
   | 'denied_schema'
   | 'denied_ref'
-  | 'denied_budget';
+  | 'denied_budget'
+  /** A proposal guard refused the call; nothing was sent to the api (step AI-3 D3). */
+  | 'denied_guard';
 
 export type ExecutionStatus =
   | 'succeeded'

@@ -16,7 +16,11 @@
  * - step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md D2, §9 item 4): another
  *   organization's or another user's confirmation answers `404 assistant_confirmation_not_found`
  *   on get, confirm (even with the token) and cancel; a write that names another organization's
- *   record fails at the precondition read (the api's `404`) and stores no confirmation.
+ *   record fails at the precondition read (the api's `404`) and stores no confirmation;
+ * - step AI-3 (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D6, §9 item 4): the identity
+ *   and tenant administration writes naming organization A's user, role key, department,
+ *   domain, webhook, SMTP connector or API key in organization B's turn fail at the precondition
+ *   read with the api's `404` and store no confirmation; `api_keys_get` of A's key answers `404`.
  *
  * Synthetic `it-*` organizations only.
  */
@@ -38,6 +42,14 @@
 // @covers get /api/v1/assistant/confirmations/:confirmationId
 // @covers post /api/v1/assistant/confirmations/:confirmationId/confirm
 // @covers post /api/v1/assistant/confirmations/:confirmationId/cancel
+// @covers get /api/v1/api-keys/:id
+// @covers get /api/v1/users/:id
+// @covers get /api/v1/roles/:key
+// @covers get /api/v1/departments/:departmentId
+// @covers get /api/v1/domains/:id
+// @covers get /api/v1/domains/:id/destinations
+// @covers get /api/v1/webhooks/:webhookId
+// @covers get /api/v1/smtp-connectors/:id
 import { randomUUID } from 'node:crypto';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -66,7 +78,9 @@ import {
   waitForRead,
 } from './support/assistant';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
-import { apiKeyHeader, bearer, uniqueIp } from './support/http';
+import { apiKeyHeader, bearer, idem, uniqueIp } from './support/http';
+import { insertDomain, randomV4Network } from './support/smtp';
+import { createBody, WEBHOOKS } from './support/webhooks';
 
 const POLL = { timeout: 15_000, interval: 200 };
 
@@ -87,7 +101,7 @@ beforeAll(async () => {
   ({ ctx } = await createAssistantApp());
   fx = createFixtures(ctx);
   operator = await platformMember(ctx, fx, ['platform_admin']);
-  orgA = await fx.createOrganization();
+  orgA = await fx.createOrganization({ features: { webhooks: true } });
   orgB = await fx.createOrganization();
   adminA = await member(ctx, fx, orgA, [
     await fx.createCustomRole(orgA, [...ALL_TENANT_PERMISSIONS]),
@@ -482,5 +496,124 @@ describe('step AI-2 confirmations are private to their owner (D2 step 1)', () =>
     const policy = await ctx.prisma.emailPolicy.findFirstOrThrow({ where: { publicId: policyId } });
     expect(policy).toMatchObject({ status: 'draft', deletedAt: null });
     expect(policy.name).not.toBe('taken over');
+  });
+});
+
+describe('step AI-3 writes naming another organization’s records (D6)', () => {
+  it('fail at the precondition read with the api’s 404; nothing stored or changed', async () => {
+    // Organization A's records.
+    const userA = await fx.createUser(orgA, { roles: ['read_only_user'] });
+    const roleA = await fx.createCustomRole(orgA, ['message:read']);
+    const department = await call(ctx, adminA.headers, 'post', '/api/v1/departments', {
+      name: `Isolation ${randomUUID().slice(0, 8)}`,
+    });
+    expect(department.status).toBe(201);
+    const departmentA = department.body.id as string;
+    const domainA = await insertDomain(ctx, orgA, { label: 'iso-chat' });
+    const webhook = await call(ctx, adminA.headers, 'post', WEBHOOKS, createBody()).set(idem());
+    expect(webhook.status).toBe(201);
+    const webhookA = webhook.body.id as string;
+    const connector = await call(ctx, adminA.headers, 'post', '/api/v1/smtp-connectors', {
+      name: `iso ${randomUUID().slice(0, 8)}`,
+      authType: 'source_ip',
+      networks: [randomV4Network()],
+    });
+    expect(connector.status, JSON.stringify(connector.body)).toBe(201);
+    const connectorA = connector.body.id as string;
+    await fx.createApiKey(orgA, ['user:read']);
+    const keyA = (
+      await ctx.prisma.apiKey.findFirstOrThrow({
+        where: { organizationId: orgA.id },
+        orderBy: { id: 'desc' },
+      })
+    ).publicId;
+    const snapshot = async () => ({
+      user: await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: userA.id },
+        select: { status: true, displayName: true, deletedAt: true },
+      }),
+      role: await ctx.prisma.role.findFirstOrThrow({
+        where: { organizationId: orgA.id, key: roleA },
+        include: { permissions: true },
+      }),
+      department: await ctx.prisma.tenantDepartment.findFirstOrThrow({
+        where: { publicId: departmentA },
+      }),
+      domain: await ctx.prisma.domain.findUniqueOrThrow({ where: { id: domainA.id } }),
+      webhook: await ctx.prisma.webhookSubscription.findUniqueOrThrow({
+        where: { publicId: webhookA },
+      }),
+      connector: await ctx.prisma.smtpConnector.findUniqueOrThrow({
+        where: { publicId: connectorA },
+      }),
+      key: await ctx.prisma.apiKey.findUniqueOrThrow({ where: { publicId: keyA } }),
+    });
+    const before = await snapshot();
+
+    const conversationB = await newConversation(ctx, adminB);
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['users_change_status', { id: userA.publicId, body: { status: 'disabled' } }],
+      ['users_replace_roles', { id: userA.publicId, body: { roleKeys: ['read_only_user'] } }],
+      ['users_remove', { id: userA.publicId }],
+      ['roles_update', { key: roleA, body: { name: 'taken over', permissions: ['message:read'] } }],
+      ['roles_remove', { key: roleA }],
+      [
+        'departments_update',
+        { departmentId: departmentA, body: { name: 'taken over', expectedRowVersion: 1 } },
+      ],
+      ['departments_remove', { departmentId: departmentA }],
+      ['domains_remove', { id: domainA.publicId }],
+      [
+        'domain_destinations_replace',
+        { id: domainA.publicId, body: { provider: 'google_workspace' } },
+      ],
+      [
+        'webhooks_update',
+        {
+          webhookId: webhookA,
+          body: { url: 'https://taken-over.webhooks-it.test/in', expectedRowVersion: 1 },
+        },
+      ],
+      ['webhooks_test', { webhookId: webhookA }],
+      ['smtp_connectors_update', { id: connectorA, body: { networks: [randomV4Network()] } }],
+      ['smtp_connectors_remove', { id: connectorA }],
+      ['api_keys_revoke', { id: keyA }],
+    ];
+    let turns = 0;
+    let conversation = conversationB;
+    for (const [tool, args] of cases) {
+      // A fresh conversation every few turns (the pending cap never applies: nothing is pending).
+      if (++turns % 5 === 0) conversation = await newConversation(ctx, adminB);
+      const res = await turn(ctx, adminB.headers, conversation, directive(tool, args));
+      expect(res.status).toBe(200);
+      expect(res.body.executions[0], tool).toMatchObject({
+        tool,
+        decision: 'allowed',
+        status: 'failed',
+        httpStatus: 404,
+      });
+      expect(res.body.confirmations, tool).toEqual([]);
+    }
+    expect(
+      await ctx.prisma.aiChatActionConfirmation.count({ where: { organizationId: orgB.id } }),
+    ).toBe(0);
+
+    // The new read (D8): another organization's API key is a 404 too.
+    const read = await turn(
+      ctx,
+      adminB.headers,
+      await newConversation(ctx, adminB),
+      directive('api_keys_get', { id: keyA }),
+    );
+    expect(read.body.executions[0]).toMatchObject({
+      tool: 'api_keys_get',
+      decision: 'allowed',
+      status: 'failed',
+      httpStatus: 404,
+    });
+    const [envelope] = await envelopesOf(ctx, read.body.turn.id as string);
+    expect(envelope!.parsed).toMatchObject({ status: 'error', httpStatus: 404 });
+    expect(envelope!.raw).not.toContain(before.key.keyPrefix);
+    expect(await snapshot()).toEqual(before);
   });
 });

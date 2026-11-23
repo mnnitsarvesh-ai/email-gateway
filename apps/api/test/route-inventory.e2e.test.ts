@@ -777,8 +777,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // operations of step 8.4, plus the 24 provider-connection operations of step 8.2, plus the 13
     // identity-provider and mailbox state operations of step 8.5, plus the 12 journaling
     // operations of step 8.6, plus the 15 assistant operations of step AI-1, plus the 3
-    // confirmation operations of step AI-2.
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(421);
+    // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(422);
     expect(
       facts
         .filter((f) => isInternal(f.key))

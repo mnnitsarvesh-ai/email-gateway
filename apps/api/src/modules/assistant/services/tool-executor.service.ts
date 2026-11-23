@@ -8,6 +8,8 @@ import {
   type ExecutionDecision,
   type ExecutionStatus,
   extractNextCursor,
+  type GuardKind,
+  guardRefusal,
   type OperationTool,
   sanitizeText,
   toCard,
@@ -33,7 +35,13 @@ import {
   PARAMS_REDACTED_MAX_BYTES,
 } from '../assistant.constants';
 import { sameRequest } from '../domain/confirmation-binding';
-import { lookupTool, scopeOrganizationPublicId, toolAvailability } from '../domain/tool-catalog';
+import { DENIAL_MESSAGES, refusalMessageOf } from '../domain/denials';
+import {
+  lookupTool,
+  scopeOrganizationPublicId,
+  toolAvailability,
+  toolTitleOf,
+} from '../domain/tool-catalog';
 import type { ExecutionView } from '../dto/assistant.schemas';
 import type { Owner } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
@@ -61,6 +69,9 @@ import {
  *    `denied_ref`;
  * 6. Ajv validation of the operation's input schema → `denied_schema` (paths, never values);
  *    for a write, the spec's CAS field is pre-filled with a placeholder when omitted;
+ * 6a. a write's proposal guards that need no read (step AI-3 D3/D10: not the caller's own
+ *    account, not the assistant's own feature, not `assistant:configure`) → `denied_guard`
+ *    with the guard's fixed message, before any loopback call (not even the precondition read);
  * 7. a READ: the loopback call (D2); `401` ends the turn (`assistant_session_expired`).
  *    A WRITE never runs here (step AI-2 D1, ADR-0093): `ConfirmationProposer` reads the target
  *    and stores a pending confirmation; the execution is `pending_confirmation` and the model
@@ -173,16 +184,6 @@ export class StoredRequestMismatchError extends Error {
 /** Arguments of the form `@r<seq>.<row>` (D5 step 5). */
 export const REF_ARGUMENT = /^@r(\d{1,9})\.(\d{1,5})$/;
 
-const DENIAL_MESSAGES: Record<Exclude<ExecutionDecision, 'allowed'>, string> = {
-  denied_budget: 'This turn already used its maximum number of tool calls.',
-  denied_unknown_tool: 'There is no tool with this name. Use a name from the catalogue index.',
-  denied_not_applicable: 'This operation is not available in chat; it stays in the portal.',
-  denied_disabled: 'This tool is not enabled for chat yet; use the portal page.',
-  denied_permission: 'You do not have the permission this tool needs.',
-  denied_schema: 'The arguments do not match the tool’s input schema.',
-  denied_ref: 'A reference (@r<seq>.<row>) does not name a result of this conversation.',
-};
-
 const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 /** The execution's correlation id `<base>.<seq>` within `^[A-Za-z0-9._:-]{8,128}$`. */
@@ -285,14 +286,7 @@ export class ToolExecutorService {
     const name = sanitizeText(call.name, 96);
     const lookup = lookupTool(call.name);
     const tool = lookup.kind === 'tool' ? lookup.tool : null;
-    const title = sanitizeText(
-      tool
-        ? (tool.display.title ?? tool.summary)
-        : lookup.kind === 'not_applicable'
-          ? lookup.operation.summary
-          : name,
-      120,
-    );
+    const title = toolTitleOf(name);
     onStarted({ executionId, tool: name, title });
     const base = { ctx, seq, executionId, name, title };
 
@@ -439,7 +433,20 @@ export class ToolExecutorService {
       );
     }
 
-    if (spec) return this.propose(base, found, spec, checked);
+    if (spec) {
+      // Step AI-3 D10: the before-read proposal guards (I12), before any loopback request.
+      const refusal = guardRefusal(
+        spec,
+        { args: checked, principalUserPublicId: ctx.principal.userPublicId, read: null },
+        'before_read',
+      );
+      if (refusal) {
+        return this.deny(base, found, 'denied_guard', refusal.message, resolved, null, {
+          guard: refusal.guard,
+        });
+      }
+      return this.propose(base, found, spec, checked);
+    }
     return this.run(base, found, resolved);
   }
 
@@ -467,7 +474,15 @@ export class ToolExecutorService {
     const latencyMs = Date.now() - started;
     switch (prepared.kind) {
       case 'denied':
-        return this.deny(base, tool, prepared.decision, prepared.message, args);
+        return this.deny(
+          base,
+          tool,
+          prepared.decision,
+          prepared.message,
+          args,
+          null,
+          prepared.guard ? { guard: prepared.guard } : {},
+        );
       case 'failed':
         return this.record(base, tool, args, this.interpret(prepared.result), latencyMs);
       case 'failed_own':
@@ -742,6 +757,7 @@ export class ToolExecutorService {
     message: string,
     args: Record<string, unknown>,
     portalRoute: string | null = null,
+    auditExtra: { guard?: GuardKind } = {},
   ): Promise<ExecutionOutcome> {
     const { ctx, seq, executionId, name } = base;
     const envelope: ToolResultDenied = {
@@ -788,6 +804,7 @@ export class ToolExecutorService {
       refs: null,
       nextCursor: null,
       latencyMs: null,
+      auditExtra,
     });
     this.metrics.toolCalls.inc({
       module: tool?.module ?? 'unknown',
@@ -829,6 +846,7 @@ export class ToolExecutorService {
       seq: v.seq,
       ref: `r${v.seq}`,
       tool: v.name,
+      title: toolTitleOf(v.name),
       operationId: v.tool?.operationId ?? 'unknown',
       access: v.tool?.access ?? 'read',
       risk: v.tool?.risk ?? 'read',
@@ -836,6 +854,7 @@ export class ToolExecutorService {
       status: v.status,
       httpStatus: v.httpStatus,
       errorCode: v.errorCode,
+      message: refusalMessageOf(v.decision, v.tool?.operationId ?? 'unknown'),
       hasMore: v.hasMore,
       card: v.card,
       latencyMs: v.latencyMs,
@@ -856,6 +875,8 @@ export class ToolExecutorService {
       refs: Prisma.InputJsonValue | null;
       nextCursor: string | null;
       latencyMs: number | null;
+      /** Further audit metadata (`guard` of a `denied_guard`; keys safe from the scrub). */
+      auditExtra?: { guard?: GuardKind };
     },
     also?: (tx: Prisma.TransactionClient, executionRowId: bigint) => Promise<void>,
   ): Promise<void> {
@@ -916,6 +937,7 @@ export class ToolExecutorService {
             resourceRef,
             params: auditParams,
             correlationId: extra.correlationId,
+            ...extra.auditExtra,
           },
         },
         tx,

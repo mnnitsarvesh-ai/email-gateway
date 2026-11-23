@@ -11,7 +11,10 @@ import {
   type ConfirmationView,
   type EachSnapshotItem,
   eachReads,
+  effectiveRisk,
   findTool,
+  type GuardKind,
+  guardRefusal,
   hashConfirmationToken,
   impactOf,
   newConfirmationToken,
@@ -20,6 +23,7 @@ import {
   readArgPath,
   rowVersionOf,
   sanitizeText,
+  selectTarget,
   stateDigest,
   withInjectedCas,
 } from '@email-gateway/assistant';
@@ -64,7 +68,20 @@ export interface PreconditionState {
   items?: EachSnapshotItem[];
   total?: number;
   action?: string | null;
+  /**
+   * The raw target of a single read (the read body, the selected item, or `{}` for an optional
+   * item that is absent; step AI-3 D5) for the after-read guards. In memory only: never stored,
+   * digested, logged or audited.
+   */
+  raw?: unknown;
 }
+
+/** A required selected item that is not in the list read answers like a `404` read (D5). */
+export const TARGET_NOT_FOUND: LoopbackResult = {
+  kind: 'response',
+  status: 404,
+  body: { statusCode: 404, code: 'not_found', message: 'The target was not found' },
+};
 
 export type PreconditionRead =
   { ok: true; state: PreconditionState } | { ok: false; result: LoopbackResult };
@@ -83,7 +100,10 @@ export interface ProposalPlan {
   tokenHash: string;
   actionDigest: string;
   stateDigest: string | null;
+  /** The effective risk (step AI-3 D4): stored, digested, `requiresReauth = risk === 'high'`. */
   risk: ConfirmationRisk;
+  /** The tool's registry risk (audit `baseRisk`). */
+  baseRisk: ConfirmationRisk;
   requiresReauth: boolean;
   reauthFresh: boolean;
   request: StoredRequest;
@@ -97,8 +117,10 @@ export interface ProposalPlan {
 export type ProposalOutcome =
   | {
       kind: 'denied';
-      decision: 'denied_budget' | 'denied_disabled' | 'denied_schema';
+      decision: 'denied_budget' | 'denied_disabled' | 'denied_schema' | 'denied_guard';
       message: string;
+      /** The refusing proposal guard (`denied_guard`, step AI-3 D3). */
+      guard?: GuardKind;
     }
   | { kind: 'failed'; result: LoopbackResult }
   | { kind: 'failed_own'; failure: OwnFailure }
@@ -152,6 +174,11 @@ export function definitionInvalidMessage(violations: readonly Violation[]): stri
  * the executor's transaction that records the proposal execution.
  *
  * The precondition read is also the confirm route's re-read (D2 step 12).
+ *
+ * Step AI-3 (design 30 D3–D5, D10): a single read may select its target from a list (`select`);
+ * the after-read proposal guards run on that target (`denied_guard`); the stored risk is the
+ * effective risk (`effectiveRisk`: registry risk raised by the spec's escalations on the final
+ * arguments), whose warnings the summary appends.
  */
 @Injectable()
 export class ConfirmationProposer {
@@ -177,8 +204,8 @@ export class ConfirmationProposer {
     correlationId: string;
   }): Promise<ProposalOutcome> {
     const { ctx, tool, spec, args } = input;
-    const risk = confirmationRiskOf(tool);
-    if (risk === null) {
+    const baseRisk = confirmationRiskOf(tool);
+    if (baseRisk === null) {
       return {
         kind: 'denied',
         decision: 'denied_disabled',
@@ -219,6 +246,23 @@ export class ConfirmationProposer {
       const read = await this.readPreconditions(call, spec, args);
       if (!read.ok) return { kind: 'failed', result: read.result };
       state = read.state;
+    }
+
+    // 4a. The after-read proposal guards on the target (step AI-3 D3/D10, e.g. a role's
+    // `assistant:configure`). Evaluated even without a precondition (an after-read guard then
+    // fails closed).
+    const refusal = guardRefusal(
+      spec,
+      { args, principalUserPublicId: ctx.principal.userPublicId, read: state.raw ?? null },
+      'after_read',
+    );
+    if (refusal) {
+      return {
+        kind: 'denied',
+        decision: 'denied_guard',
+        message: refusal.message,
+        guard: refusal.guard,
+      };
     }
 
     // 5. CAS injection (server-authoritative) and the schema check of the final arguments.
@@ -293,13 +337,17 @@ export class ConfirmationProposer {
       };
     }
 
-    // 7. The impact summary (server-authored).
+    // 7. The effective risk (step AI-3 D4: the registry risk raised by the spec's escalations on
+    // the final arguments) and the impact summary (server-authored, with the escalation warnings).
+    const effective = effectiveRisk(tool, spec, finalArgs);
+    const risk = effective.risk;
     const summary = impactOf(tool.operationId, {
       args: finalArgs,
       snapshot: state.snapshot,
       items: state.items ?? [],
       validation: definition === undefined ? null : { ruleCount, definitionSha256 },
       request: { method: request.method, path: request.path },
+      escalationWarnings: effective.warnings,
     });
 
     // 8. Token, digest, re-authentication.
@@ -337,6 +385,7 @@ export class ConfirmationProposer {
         actionDigest: digest,
         stateDigest: state.stateDigest,
         risk,
+        baseRisk,
         requiresReauth,
         reauthFresh: requiresReauth && (await this.limits.reauthFresh(ctx.principal.sessionId)),
         request,
@@ -421,12 +470,20 @@ export class ConfirmationProposer {
     if (precondition.kind === 'single') {
       const read = await this.get(call, precondition.tool, preconditionArgs(precondition, args));
       if (!read.ok) return read;
+      // Step AI-3 D5: with `select` the target is the list item the write names; a required
+      // item that is absent is a 404 of the target, an optional one the empty target `{}`.
+      const selected = selectTarget(read.body, precondition, args);
+      if (!selected.found && precondition.select?.required === true) {
+        return { ok: false, result: TARGET_NOT_FOUND };
+      }
+      const target: unknown = selected.found ? selected.item : {};
       return {
         ok: true,
         state: {
-          stateDigest: stateDigest(read.body, precondition.stateFields),
-          rowVersion: rowVersionOf(read.body, precondition),
-          snapshot: buildSnapshot(read.body, precondition),
+          stateDigest: stateDigest(target, precondition.stateFields),
+          rowVersion: rowVersionOf(target, precondition),
+          snapshot: buildSnapshot(target, precondition),
+          raw: target,
         },
       };
     }
@@ -464,14 +521,7 @@ export class ConfirmationProposer {
       request = buildLoopbackRequest(tool, args);
     } catch {
       // A path parameter the write's arguments did not carry: nothing to read.
-      return {
-        ok: false,
-        result: {
-          kind: 'response',
-          status: 404,
-          body: { statusCode: 404, code: 'not_found', message: 'The target was not found' },
-        },
-      };
+      return { ok: false, result: TARGET_NOT_FOUND };
     }
     const result = await this.loopback.send({
       method: 'GET',
@@ -572,6 +622,8 @@ export class ConfirmationProposer {
           tool: tool.name,
           operationId: tool.operationId,
           risk: plan.risk,
+          // Step AI-3 D4: the registry risk (differs from `risk` when an escalation matched).
+          baseRisk: plan.baseRisk,
           requiresReauth: plan.requiresReauth,
           reauthUsed: false,
           status: 'pending',
