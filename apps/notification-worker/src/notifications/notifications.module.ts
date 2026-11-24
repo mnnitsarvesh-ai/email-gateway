@@ -17,9 +17,11 @@ import {
   PrismaService,
   processOnceHandler,
   QueueConsumer,
+  S3Service,
 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import {
+  type AssistantReportEmailRequestedV1,
   type AtoNotificationRequestedV1,
   type EventEnvelope,
   EventTypes,
@@ -31,6 +33,8 @@ import type { Logger } from '@email-gateway/logger';
 import type { WorkerConfig } from '../config';
 import { AlertNotificationHandler } from './alert-notification.handler';
 import { SecurityAlertReads } from './alert-reads';
+import { AssistantReportReads, S3ReportObjectReader } from './assistant-report-reads';
+import { AssistantReportEmailHandler } from './assistant-report.handler';
 import { AtoNotificationHandler } from './ato-notification.handler';
 import { AtoNotificationReads } from './ato-reads';
 import { createNoticeMailer, type NoticeMailer } from './mailer';
@@ -46,13 +50,14 @@ import { QuarantineNotificationReads } from './quarantine-reads';
 
 /**
  * The payloads consumed from `email.notifications` (step 5.2 policy, step 5.3 quarantine, step
- * 6.2 security alerts, step 8.4 account takeover notices).
+ * 6.2 security alerts, step 8.4 account takeover notices, step AI-R assistant report emails).
  */
 export type NotificationPayload =
   | PolicyNotificationRequestedV1
   | QuarantineNotificationRequestedV1
   | NotificationAlertRequestedV1
-  | AtoNotificationRequestedV1;
+  | AtoNotificationRequestedV1
+  | AssistantReportEmailRequestedV1;
 
 /** The event types of `email.notifications`, one handler each (dispatch by event type). */
 export const NOTIFICATION_EVENT_TYPES = [
@@ -60,6 +65,7 @@ export const NOTIFICATION_EVENT_TYPES = [
   EventTypes.QuarantineNotificationRequested,
   EventTypes.NotificationAlertRequested,
   EventTypes.AtoNotificationRequested,
+  EventTypes.AssistantReportEmailRequested,
 ] as const;
 
 /** The handlers `dispatchNotification` routes to. */
@@ -68,6 +74,7 @@ export interface NotificationHandlers {
   quarantine: Pick<QuarantineNotificationHandler, 'handle'>;
   alert: Pick<AlertNotificationHandler, 'handle'>;
   ato: Pick<AtoNotificationHandler, 'handle'>;
+  assistantReport: Pick<AssistantReportEmailHandler, 'handle'>;
 }
 
 /**
@@ -95,12 +102,21 @@ export async function dispatchNotification(
     case EventTypes.AtoNotificationRequested:
       await handlers.ato.handle(event as EventEnvelope<AtoNotificationRequestedV1>, tx);
       return;
+    case EventTypes.AssistantReportEmailRequested:
+      await handlers.assistantReport.handle(
+        event as EventEnvelope<AssistantReportEmailRequestedV1>,
+        tx,
+      );
+      return;
     default:
       throw new NonRetryableError('unexpected_event_type');
   }
 }
 
-/** The queue of the policy, quarantine, security alert and ATO notices (topology v9–v13, P15). */
+/**
+ * The queue of the policy, quarantine, security alert and ATO notices and the assistant report
+ * emails (topology v9–v15, P15).
+ */
 export const NOTIFICATION_QUEUE = 'email.notifications';
 
 const NOTICE_MAILER = Symbol('NOTICE_MAILER');
@@ -143,6 +159,8 @@ export class NotificationRuntime implements OnApplicationBootstrap, OnModuleDest
     private readonly quarantine: QuarantineNotificationHandler,
     @Inject(AlertNotificationHandler) private readonly alert: AlertNotificationHandler,
     @Inject(AtoNotificationHandler) private readonly ato: AtoNotificationHandler,
+    @Inject(AssistantReportEmailHandler)
+    private readonly assistantReport: AssistantReportEmailHandler,
     @Inject(AmqpConnection) private readonly connection: AmqpConnection,
     @Inject(ConfirmPublisher) private readonly publisher: ConfirmPublisher,
     @Inject('NOTIFICATION_TX_TIMEOUT_MS') private readonly txTimeoutMs: number,
@@ -160,6 +178,7 @@ export class NotificationRuntime implements OnApplicationBootstrap, OnModuleDest
               quarantine: this.quarantine,
               alert: this.alert,
               ato: this.ato,
+              assistantReport: this.assistantReport,
             },
             event,
             tx,
@@ -179,10 +198,11 @@ export class NotificationRuntime implements OnApplicationBootstrap, OnModuleDest
 
 /**
  * The policy notices of step 5.2 (P25), the quarantine notices of step 5.3 (Q20), the security
- * alerts of step 6.2 (N4) and the account takeover notices of step 8.4 (D16): the `email.notifications` consumer (ledger
+ * alerts of step 6.2 (N4), the account takeover notices of step 8.4 (D16) and the assistant
+ * report emails of step AI-R (D8): the `email.notifications` consumer (ledger
  * `notification-worker.policy`, retry and dead-letter per topology v11), one handler per event
  * type, the shared opt-out filter (`PreferenceFilter`), the relay mailer and the metrics. Needs
- * the global `AmqpModule`, `MetricsModule` and `DatabaseModule`.
+ * the global `AmqpModule`, `MetricsModule`, `DatabaseModule` and `S3Module`.
  */
 @Module({})
 export class NotificationsModule {
@@ -283,6 +303,22 @@ export class NotificationsModule {
               preferences,
             ),
           inject: [NOTICE_MAILER, NotificationMetrics, PreferenceFilter],
+        },
+        {
+          provide: AssistantReportEmailHandler,
+          useFactory: (mailer: NoticeMailer, metrics: NotificationMetrics, s3: S3Service) =>
+            new AssistantReportEmailHandler(
+              new AssistantReportReads(),
+              new S3ReportObjectReader(s3),
+              mailer,
+              metrics,
+              logger,
+              {
+                portalUrl: config.PORTAL_PUBLIC_URL,
+                maxHtmlBytes: config.NOTIFICATION_REPORT_MAX_HTML_BYTES,
+              },
+            ),
+          inject: [NOTICE_MAILER, NotificationMetrics, S3Service],
         },
         {
           provide: NOTICE_CONSUMER,

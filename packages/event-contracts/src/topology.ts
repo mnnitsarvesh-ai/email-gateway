@@ -7,11 +7,12 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v14 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v15 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
  * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
- * step 8.4 D3, ADR-0070; v14: step 8.2 D12, ADR-0079): exactly six topic exchanges and twenty-four quorum queues in the vhost
+ * step 8.4 D3, ADR-0070; v14: step 8.2 D12, ADR-0079; v15: step AI-R D8, ADR-0095): exactly six
+ * topic exchanges and twenty-four quorum queues in the vhost
  * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
  * (`email.events`) reaches only the `email.analytics` firehose. v3 makes `scan.spam` a work queue
@@ -152,6 +153,12 @@ import {
  * step 8.2's binding: one binding more (seventy-three: 68 queue + 5 exchange); no exchange,
  * queue, policy or broker user is added.
  *
+ * v15 (step AI-R D8, §4.3, ADR-0095) routes confirmed assistant report emails to the
+ * notification-worker: `email.notifications` binds `org.*.assistant.report.email_requested.v1` on
+ * `email.policy` (producer api through the outbox, in the confirm transaction). v15 = v14 + one
+ * binding (seventy-four: 69 queue + 5 exchange); no exchange, queue, policy or broker user is
+ * added.
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -160,7 +167,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 14;
+export const TOPOLOGY_VERSION = 15;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -921,6 +928,8 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.policy', 'notification.alert_requested.v1'),
         // v13 (step 8.4 D16): account takeover alerts, approvals, failures and digests.
         eventBinding('email.security', 'ato.notification.requested.v1'),
+        // v15 (step AI-R D8, ADR-0095): assistant report emails
+        eventBinding('email.policy', 'assistant.report.email_requested.v1'),
         retryBinding('email.policy', 'email.notifications'),
       ],
       consumer: {
@@ -937,7 +946,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.notifications'),
       description:
-        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3), security alerts (step 6.2) and account takeover notifications (step 8.4)',
+        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3), security alerts (step 6.2), account takeover notifications (step 8.4) and assistant report emails (step AI-R)',
     },
     {
       // v11 (step 6.2 W1, W3, §4.3, ADR-0055): the webhook-worker fanout projects these internal

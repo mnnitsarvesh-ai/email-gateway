@@ -20,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/3', () => {
+describe('assistant-system/4', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/3');
+    expect(PROMPT_VERSION).toBe('assistant-system/4');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -77,12 +77,29 @@ describe('assistant-system/3', () => {
   it('is assistant-system/2 plus the scope section and rule 12 (step AI-3); earlier versions stay readable', () => {
     const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
     const v2 = read('assistant-system-2.md');
-    const v3 = loadSystemPromptTemplate().text;
+    const v3 = read('assistant-system-3.md').trim();
     expect(v3.replace(/^12\. .*\n/m, '').replace(/# Scope\n\n.*\n\n/, '')).toBe(v2.trim());
     expect([...v3.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
       Array.from({ length: 12 }, (_, i) => i + 1),
     );
     expect(read('assistant-system-1.md').length).toBeGreaterThan(0);
+  });
+
+  it('is assistant-system/3 plus rule 13 (step AI-R D10); the Scope section is byte-identical', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
+    const v3 = read('assistant-system-3.md');
+    const v4 = read('assistant-system-4.md');
+    expect(loadSystemPromptTemplate().text).toBe(v4.trim());
+    const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
+    expect(scope(v4)).toBe(scope(v3));
+    expect(scope(v4).length).toBeGreaterThan(20);
+    expect(v4.replace(/^13\. .*\n/m, '')).toBe(v3);
+    expect([...v4.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: 13 }, (_, i) => i + 1),
+    );
+    expect(v4).toContain(
+      "13. When the user asks for a report or dashboard, call `report_generate` once with the period and sections they asked for (default the last 7 days, all sections); the report appears in the chat. Summarize it in two or three sentences using only the figures in the result; do not list every number. To email a report, call `report_send_email` (it shows a confirmation card). Reports can be emailed only to the user's own address, active users of the organization or addresses in its verified domains; if the server refuses a recipient, say so and do not try other addresses. Never say an email was sent unless an action update says it was queued.",
+    );
   });
 
   it('limits answers to this email security gateway and refuses unrelated topics without tools', () => {

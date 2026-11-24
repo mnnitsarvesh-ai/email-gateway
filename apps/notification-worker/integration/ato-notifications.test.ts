@@ -284,6 +284,10 @@ afterAll(async () => {
     where: { consumer: POLICY_NOTIFICATION_CONSUMER, eventId: { in: eventIds } },
   });
   await prisma.messageConsumerProgress.deleteMany({ where: { eventId: { in: eventIds } } });
+  // A running stack's ato-worker digest scheduler may open throttle windows (and outbox rows)
+  // for these organizations while the suite runs; remove them too so the organizations go.
+  await prisma.notificationAlertWindow.deleteMany({ where });
+  await prisma.messageOutbox.deleteMany({ where });
   await prisma.atoResponseAction.deleteMany({ where });
   await prisma.securityIncident.deleteMany({ where });
   await prisma.atoAccount.deleteMany({ where });

@@ -43,6 +43,7 @@ import {
 import {
   availableTools,
   lookupTool,
+  nativeSwitchesOf,
   scopeOrganizationPublicId,
   toolAvailability,
 } from '../domain/tool-catalog';
@@ -188,6 +189,7 @@ export function actionUpdatesOf(rows: readonly UnreportedConfirmation[]): Action
         error: row.errorCode,
         resultSeq: row.resultSeq,
         resultRowRef: row.resultRowRef,
+        ...(row.recipient !== null ? { recipient: row.recipient } : {}),
       },
     ];
   });
@@ -639,7 +641,7 @@ export class TurnEngineService {
     }
     if (me.kind === 'aborted') throw new TurnFailure(TURN_FAILURE_CODES.turnLimit);
     const profile = me.kind === 'response' && me.status === 200 ? (me.body as Profile) : null;
-    const tools = availableTools(principal);
+    const tools = availableTools(principal, nativeSwitchesOf(this.config));
     const system = buildSystemPrompt({
       organization: principal.override
         ? {
@@ -711,6 +713,10 @@ export class TurnEngineService {
       correlationBase: correlationId,
       signal,
       allocateSeq: () => nextSeq++,
+      // Step AI-R: the report header names the organization as the context block does.
+      organizationName: principal.override
+        ? 'Organization under platform override'
+        : (profile?.organization?.name ?? null),
     };
 
     const onDelta = (text: string): void => {
@@ -858,7 +864,11 @@ export class TurnEngineService {
           sessionExpired: false,
         };
       }
-      const availability = toolAvailability(ctx.principal, found.tool);
+      const availability = toolAvailability(
+        ctx.principal,
+        found.tool,
+        nativeSwitchesOf(this.config),
+      );
       return {
         content: JSON.stringify(
           describeTool(

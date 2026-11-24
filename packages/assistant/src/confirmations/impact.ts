@@ -1,6 +1,8 @@
 import { fillRoute, routePage } from '../results/card';
 import { sanitizeText } from '../results/sanitize';
 import { findOperation } from '../registry/registry';
+import { fmtBytes } from '../reports/escape';
+import { normalizeRecipient, recipientKindText, type RecipientKind } from '../reports/recipients';
 import type { OperationTool } from '../registry/types';
 import { valueAtPath } from './digest';
 import {
@@ -67,6 +69,23 @@ export interface ImpactInput {
    * appended to the template's warnings (deduplicated; at most `SUMMARY_LIMITS.warnings` in all).
    */
   escalationWarnings?: readonly string[];
+  /**
+   * The native snapshot of a native write (step AI-R D5): for `report_send_email` the report, the
+   * classified recipient and the remaining daily limits, as the api's `NativeToolsService`
+   * prepared them. The address is not mail-derived but is still normalized and sanitized.
+   */
+  native?: NativeImpactSnapshot | null;
+}
+
+export interface NativeImpactSnapshot {
+  report: { title: string; period: string; sizeBytes: number };
+  recipient: { address: string; kind: RecipientKind; domain: string };
+  limits: {
+    userRemaining: number;
+    userLimit: number;
+    tenantRemaining: number;
+    tenantLimit: number;
+  };
 }
 
 interface Draft {
@@ -78,6 +97,8 @@ interface Draft {
   impact?: string[];
   warnings?: string[];
   reversible: boolean;
+  /** Overrides the portal route derived from the tool (native templates). */
+  portalRoute?: string | null;
 }
 
 type Template = (ctx: TemplateContext) => Draft;
@@ -88,6 +109,7 @@ interface TemplateContext {
   snap: Readonly<ConfirmationSnapshot>;
   items: readonly EachSnapshotItem[];
   validation: DefinitionValidation | null;
+  native: NativeImpactSnapshot | null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -561,8 +583,57 @@ const webhookName = (ctx: TemplateContext): string => quoted(ctx.snap.name, 'thi
 
 const REPLAY_TWICE = 'Receivers may process these events a second time.';
 
-/** The 78 templates (31 of step AI-2, 47 of step AI-3), keyed by operation id. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const count = (value: unknown): string =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? String(Math.max(0, Math.floor(value)))
+    : '0';
+
+/** `report_send_email` (step AI-R D5 step 5). */
+const reportSendEmail: Template = (ctx) => {
+  const native = ctx.native;
+  const raw = native?.recipient.address ?? (typeof ctx.args.to === 'string' ? ctx.args.to : null);
+  const address = normalizeRecipient(raw) ?? sanitizeText(raw ?? '(unknown)', 120);
+  const domain = sanitizeText(native?.recipient.domain ?? address.split('@')[1] ?? '', 253);
+  const reportId = typeof ctx.args.reportId === 'string' ? ctx.args.reportId : null;
+  const limits = native?.limits;
+  return {
+    title: 'Email security report',
+    action: `Sends the security report as an HTML email to ${address}.`,
+    target: [
+      ...target('Report', native?.report.title),
+      ...target('Period', native?.report.period),
+      ...target('Recipient', address),
+      ...target('Recipient type', native ? recipientKindText(native.recipient.kind, domain) : null),
+      ...target('Size', native ? fmtBytes(native.report.sizeBytes) : null),
+    ],
+    impact: [
+      'The email leaves the platform through the notification mailer; the recipient can forward it.',
+      'The same HTML is attached as a file.',
+    ],
+    warnings: [
+      'Emails cannot be recalled after sending.',
+      ...(limits
+        ? [
+            `${count(limits.userRemaining)} of ${count(limits.userLimit)} report emails left today for you (${count(limits.tenantRemaining)} for your organization).`,
+          ]
+        : []),
+    ],
+    reversible: false,
+    portalRoute:
+      reportId && UUID.test(reportId)
+        ? `/assistant/reports/${reportId.toLowerCase()}`
+        : '/assistant',
+  };
+};
+
+/**
+ * The 79 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
+ * AI-R), keyed by operation id.
+ */
 export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
+  // --- native (step AI-R D5) ---
+  AssistantNative_reportSendEmail: reportSendEmail,
   // --- policies ---
   PolicyManagementController_create_v1: (ctx) => {
     const definition = ctx.body.definition;
@@ -1987,7 +2058,7 @@ function finalize(
 
 /**
  * The confirmation summary of a write (D5). `operationId` must be a registry tool; templates
- * exist for the 78 writes of AI-2 and AI-3 (others get the generic fallback, which the registry
+ * exist for the 78 writes of AI-2 and AI-3 and the native `report_send_email` of AI-R (others get the generic fallback, which the registry
  * check keeps away from enabled tools).
  */
 export function impactOf(operationId: string, input: ImpactInput): ConfirmationSummary {
@@ -2003,11 +2074,15 @@ export function impactOf(operationId: string, input: ImpactInput): ConfirmationS
     snap: input.snapshot ?? {},
     items: input.items ?? [],
     validation: input.validation ?? null,
+    native: input.native ?? null,
   });
   const route = tool.portalRoute;
-  const portalRoute = route
-    ? (fillRoute(route, input.args, tool.pathParams)?.href ?? routePage(route))
-    : null;
+  const portalRoute =
+    draft.portalRoute !== undefined
+      ? draft.portalRoute
+      : route
+        ? (fillRoute(route, input.args, tool.pathParams)?.href ?? routePage(route))
+        : null;
   return finalize(
     draft,
     portalRoute,

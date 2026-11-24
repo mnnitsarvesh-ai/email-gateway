@@ -7,6 +7,7 @@ import {
   type DigestPreconditions,
   type EachSnapshotItem,
   type HttpMethod,
+  NATIVE_PATH_PREFIX,
   type OperationTool,
 } from '@email-gateway/assistant';
 
@@ -54,7 +55,10 @@ export function parseStoredRequest(value: unknown): StoredRequest | null {
   if (!isRecord(value)) return null;
   const { method, path, body, params } = value;
   if (typeof method !== 'string' || !METHODS.includes(method)) return null;
-  if (typeof path !== 'string' || !path.startsWith('/api/v1/')) return null;
+  // An `/api/v1` operation, or a native tool's `native:<name>` (step AI-R D5 step 4; the confirm
+  // route still requires the path to equal the native tool's template).
+  if (typeof path !== 'string') return null;
+  if (!path.startsWith('/api/v1/') && !/^native:[a-z0-9_]{1,64}$/.test(path)) return null;
   if (!isRecord(params)) return null;
   return { method: method as HttpMethod, path, body: body ?? null, params };
 }
@@ -89,6 +93,27 @@ export function parseStoredPreconditions(value: unknown): StoredPreconditions | 
     out.action = str(value.action);
   }
   return out;
+}
+
+/**
+ * The stored request of a native write (step AI-R D5 step 4): `POST native:<name>` with the
+ * final arguments as the body and no params.
+ */
+export function nativeRequestOf(
+  tool: Pick<OperationTool, 'method' | 'pathTemplate'>,
+  args: Readonly<Record<string, unknown>>,
+): StoredRequest {
+  return { method: tool.method, path: tool.pathTemplate, body: { ...args }, params: {} };
+}
+
+/** The final arguments of a stored native request (its body). */
+export function nativeArgsOf(request: StoredRequest): Record<string, unknown> {
+  return request.path.startsWith(NATIVE_PATH_PREFIX) &&
+    request.body !== null &&
+    typeof request.body === 'object' &&
+    !Array.isArray(request.body)
+    ? { ...(request.body as Record<string, unknown>) }
+    : {};
 }
 
 /** The final arguments of the stored request (`params` + `body`). */

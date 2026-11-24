@@ -6,7 +6,8 @@
  *   tsx scripts/generate-registry.ts --check   regenerates in memory; exit 1 when either file is
  *                                              stale (the package `test` runs it)
  *
- * Inputs: ../../docs/api/openapi.json, src/registry/manifest.ts and the portal's operation usage
+ * Inputs: ../../docs/api/openapi.json, src/registry/manifest.ts, the native tools
+ * (src/registry/native.ts, step AI-R) and the portal's operation usage
  * (operation-id strings `<Name>Controller_<method>_v1` in ../../apps/admin-portal/src/features/**,
  * the app shell excluded by the manifest). Output is formatted with the repository Prettier
  * config and is deterministic.
@@ -15,6 +16,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, existsSy
 import { dirname, join, relative } from 'node:path';
 import { buildRegistry, type OpenApiDocument, type RegistryBuild } from '../src/registry/build';
 import { registryConsistencyIssues } from '../src/registry/consistency';
+import { NATIVE_TOOLS } from '../src/registry/native';
 import { renderMatrix, renderOperationsModule } from '../src/registry/render';
 
 export const PACKAGE_DIR = join(__dirname, '..');
@@ -72,7 +74,14 @@ export interface GeneratedOutputs {
 export async function generateOutputs(): Promise<GeneratedOutputs> {
   const document = readOpenApi();
   const build = buildRegistry(document, readPortalUsage());
-  const issues = registryConsistencyIssues(build.tools);
+  const openApiOperationIds = new Set<string>();
+  for (const item of Object.values(document.paths))
+    for (const op of Object.values(item))
+      if (op?.operationId) openApiOperationIds.add(op.operationId);
+  // Step AI-R D1: the native tools are checked together with the generated ones.
+  const issues = registryConsistencyIssues([...build.tools, ...NATIVE_TOOLS], {
+    openApiOperationIds,
+  });
   if (issues.length > 0)
     throw new Error(`Assistant registry consistency check failed:\n- ${issues.join('\n- ')}`);
   const idempotency = new Map<string, string>();
@@ -120,7 +129,7 @@ async function main(): Promise<void> {
   }
   const enabled = build.tools.filter((tool) => tool.enabled).length;
   process.stdout.write(
-    `registry ${build.version}: ${build.tools.length} tools (${enabled} enabled), ${build.notApplicable.length} not applicable\n`,
+    `registry ${build.version}: ${build.tools.length} tools (${enabled} enabled), ${NATIVE_TOOLS.length} native tools, ${build.notApplicable.length} not applicable\n`,
   );
 }
 

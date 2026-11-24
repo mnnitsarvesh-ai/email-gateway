@@ -137,34 +137,65 @@ const decision = z.enum([
   'denied_budget',
   'denied_guard',
 ]);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const cardValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
-export const cardSchema = z.object({
-  version: z.literal(CARD_VERSION),
-  executionId: z.string(),
-  tool: z.string(),
-  title: z.string(),
-  status: z.enum(['ok', 'error']),
-  kind: z.enum(['table', 'kv', 'series', 'message', 'error']),
-  columns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
-  rows: z.array(z.record(z.string(), cardValue)).optional(),
-  fields: z.array(z.object({ key: z.string(), label: z.string(), value: cardValue })).optional(),
-  series: z
-    .object({
-      x: z.array(z.string()),
-      series: z.array(z.object({ name: z.string(), values: z.array(z.number().nullable()) })),
-    })
-    .optional(),
-  total: z.number().optional(),
-  nextCursor: z.boolean().optional(),
-  portalLinks: z.array(
-    z.object({ label: z.string(), href: z.string(), ref: z.string().optional() }),
+/** `CardSchema.report` (step AI-R): a report card carries its id, period and figures only. */
+const reportCardSchema = z.object({
+  reportId: z.string().regex(UUID),
+  title: z.string().max(500),
+  period: z.object({
+    from: z.string(),
+    to: z.string(),
+    granularity: z.string(),
+    atoRange: z.string().nullable(),
+    label: z.string().max(200),
+  }),
+  generatedAt: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  sections: z.array(z.string()),
+  omitted: z.array(
+    z.object({
+      section: z.string(),
+      reason: z.enum(['permission', 'not_enabled', 'unavailable', 'unexpected_response']),
+      code: z.string().nullable().optional(),
+    }),
   ),
-  refs: z.array(z.string()),
-  truncated: z.boolean().optional(),
-  message: z.string().optional(),
-  error: z.object({ httpStatus: z.number(), code: z.string(), message: z.string() }).optional(),
+  figures: z.array(z.object({ label: z.string(), value: z.string() })).max(50),
 });
+
+export const cardSchema = z
+  .object({
+    version: z.literal(CARD_VERSION),
+    executionId: z.string(),
+    tool: z.string(),
+    title: z.string(),
+    status: z.enum(['ok', 'error']),
+    kind: z.enum(['table', 'kv', 'series', 'message', 'error', 'report']),
+    columns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
+    rows: z.array(z.record(z.string(), cardValue)).optional(),
+    fields: z.array(z.object({ key: z.string(), label: z.string(), value: cardValue })).optional(),
+    series: z
+      .object({
+        x: z.array(z.string()),
+        series: z.array(z.object({ name: z.string(), values: z.array(z.number().nullable()) })),
+      })
+      .optional(),
+    total: z.number().optional(),
+    nextCursor: z.boolean().optional(),
+    portalLinks: z.array(
+      z.object({ label: z.string(), href: z.string(), ref: z.string().optional() }),
+    ),
+    refs: z.array(z.string()),
+    truncated: z.boolean().optional(),
+    message: z.string().optional(),
+    error: z.object({ httpStatus: z.number(), code: z.string(), message: z.string() }).optional(),
+    report: reportCardSchema.optional(),
+  })
+  .refine((card) => card.kind !== 'report' || card.report !== undefined, {
+    message: 'A report card carries its report',
+    path: ['report'],
+  });
 
 const confirmationSummarySchema = z.object({
   version: z.literal(CONFIRMATION_SUMMARY_VERSION),

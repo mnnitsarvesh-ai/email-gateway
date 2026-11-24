@@ -7,7 +7,9 @@
  * turn as JSON and as `assistant-stream/1`, replay of a `clientTurnId`, cancellation, "more"
  * pages and the availability gates; step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-
  * writes.md §4.1, §9 item 3): a write proposal in a turn, then get, confirm and cancel of its
- * confirmation over HTTP. Synthetic data only.
+ * confirmation over HTTP; step AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1, §9 item 3): a
+ * report generated in a turn, its view with the HTML, and an emailed report confirmed over HTTP.
+ * Synthetic data only.
  */
 // @covers get /api/v1/assistant/status
 // @covers get /api/v1/assistant/settings
@@ -27,10 +29,13 @@
 // @covers get /api/v1/assistant/confirmations/:confirmationId
 // @covers post /api/v1/assistant/confirmations/:confirmationId/confirm
 // @covers post /api/v1/assistant/confirmations/:confirmationId/cancel
+// @covers get /api/v1/assistant/reports/:reportId
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ASSISTANT_EXAMPLES } from '../src/modules/assistant/dto/assistant.schemas';
+import { findTool, REPORT_SOURCE_DEFS, type ReportSourceKey } from '@email-gateway/assistant';
 import { createStubbedApiApp, type StubbedApiApp } from './support/api-test-app';
+import { reportSourceBodies } from './support/assistant-report-fixtures';
 import {
   AssistantWorld,
   FakeLoopback,
@@ -135,6 +140,7 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
         { token: 'A'.repeat(43), actionDigest: 'a'.repeat(64) },
       ],
       ['post', `${BASE}/confirmations/${randomUUID()}/cancel`, USE],
+      ['get', `${BASE}/reports/${randomUUID()}`, USE],
     ];
     for (const [method, path, permission, body] of routes) {
       const key = api.http()[method](path).set(api.principals.apiKeyHeaders);
@@ -559,6 +565,123 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
       );
       expect(confirm.status).toBe(409);
       expect(writes).toEqual([]);
+    });
+  });
+  describe('reports (step AI-R §4.1)', () => {
+    const REPORTERS = [USE, 'report:read', 'quarantine:read', 'ato:read'];
+    const SELF = 'it-e2e-analyst@example.test';
+
+    beforeEach(() => {
+      const window = { from: '2026-11-16T09:00:00.000Z', to: '2026-11-23T09:00:00.000Z' };
+      const bodies = reportSourceBodies(window);
+      for (const key of Object.keys(REPORT_SOURCE_DEFS) as ReportSourceKey[]) {
+        const path = findTool(REPORT_SOURCE_DEFS[key].tool)!.pathTemplate;
+        loopback.on(`GET ${path}`, () => ({ kind: 'response', status: 200, body: bodies[key] }));
+      }
+      world.reportWorld.users.push({
+        id: 10n,
+        organizationId: ORG,
+        email: SELF,
+        status: 'active',
+        verified: true,
+        deleted: false,
+      });
+    });
+
+    const turnOf = async (conversationId: string, message: string) => {
+      const res = await send(
+        'post',
+        `${BASE}/conversations/${conversationId}/turns`,
+        { clientTurnId: randomUUID(), message },
+        REPORTERS,
+      );
+      expect(res.status).toBe(200);
+      return res;
+    };
+
+    it('a turn generates a report card; GET returns the view and the inert HTML (no-store)', async () => {
+      const id = await newConversation();
+      const res = await turnOf(id, 'generate a security report');
+      const execution = res.body.executions[0];
+      expect(execution).toMatchObject({
+        tool: 'report_generate',
+        operationId: 'AssistantNative_reportGenerate',
+        decision: 'allowed',
+        status: 'succeeded',
+        httpStatus: 201,
+        card: { kind: 'report', status: 'ok' },
+      });
+      const reportId = execution.card.report.reportId as string;
+      expect(res.body.message.content).toMatch(/security report/i);
+      expect(loopback.toolCalls.every((c) => c.path.startsWith('/api/v1/'))).toBe(true);
+
+      const view = await send('get', `${BASE}/reports/${reportId}`, undefined, REPORTERS);
+      expect(view.status).toBe(200);
+      expect(view.headers['cache-control']).toBe('no-store');
+      expect(view.headers['content-type']).toMatch(/^application\/json/);
+      expect(view.body.report).toMatchObject({
+        id: reportId,
+        conversationId: id,
+        executionId: execution.id,
+        status: 'available',
+        deliveries: [],
+      });
+      expect(view.body.html).toMatch(/^<!doctype html>/);
+      expect(view.body.html).not.toMatch(/<script|<a |<img|<iframe|href=|src=/i);
+
+      // Another user of the organization (same id space, other user id) answers 404.
+      const report = world.reportWorld.reports[0]!;
+      report.userId = 999n;
+      const foreign = await send('get', `${BASE}/reports/${reportId}`, undefined, REPORTERS);
+      expect(foreign.status).toBe(404);
+      expect(foreign.body.code).toBe('assistant_report_not_found');
+      const bad = await send('get', `${BASE}/reports/not-a-uuid`, undefined, REPORTERS);
+      expect(bad.status).toBe(400);
+    });
+
+    it('send this report to my email: medium confirmation, confirm → delivery queued with its outbox event', async () => {
+      const id = await newConversation();
+      await turnOf(id, 'generate a security report');
+      const proposal = await turnOf(id, 'send this report to my email');
+      expect(proposal.body.confirmations).toHaveLength(1);
+      const { confirmation, token } = proposal.body.confirmations[0];
+      expect(confirmation).toMatchObject({
+        tool: 'report_send_email',
+        risk: 'medium',
+        requiresReauth: false,
+        summary: { title: 'Email security report', request: { path: 'native:report_send_email' } },
+      });
+      const confirmed = await send(
+        'post',
+        `${BASE}/confirmations/${confirmation.id}/confirm`,
+        { token, actionDigest: confirmation.actionDigest },
+        REPORTERS,
+      );
+      expect(confirmed.status).toBe(200);
+      expect(confirmed.body.confirmation.status).toBe('executed');
+      expect(confirmed.body.execution).toMatchObject({
+        httpStatus: 202,
+        card: { kind: 'message', message: `Report email queued to ${SELF}` },
+      });
+      const delivery = world.reportWorld.deliveries[0]!;
+      expect(delivery).toMatchObject({ status: 'queued', recipientAddress: SELF });
+      expect(world.reportWorld.outbox[0]).toMatchObject({
+        eventType: 'assistant.report.email_requested.v1',
+        eventId: delivery.publicId,
+      });
+      const reportId = world.reportWorld.reports[0]!.publicId;
+      const view = await send('get', `${BASE}/reports/${reportId}`, undefined, REPORTERS);
+      expect(view.body.report.deliveries).toEqual([
+        expect.objectContaining({ id: delivery.publicId, to: SELF, status: 'queued' }),
+      ]);
+
+      // An address outside the organization is refused: no confirmation card.
+      const refused = await turnOf(id, 'send the report to someone@outside.test');
+      expect(refused.body.confirmations).toEqual([]);
+      expect(refused.body.executions[0]).toMatchObject({
+        tool: 'report_send_email',
+        decision: 'denied_guard',
+      });
     });
   });
 });

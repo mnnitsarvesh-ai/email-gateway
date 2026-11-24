@@ -201,3 +201,20 @@ From the generated matrix (registry version `b031a24c9868f02c`, program phase AI
 | Platform-only enabled tools | 13: the 7 AI-1 reads (`organization_deletion_get`, `attachment_rescans_list`, `attachment_rescans_get`, `platform_audit_logs_search`, `dead_letters_stats`, `threat_hashes_list`, `threat_indicators_list`) and 6 AI-3 writes (`organizations_create`, `organization_deletion_cancel`, `organization_configuration_override_feature`, `_reset_feature`, `_override_limit`, `_reset_limit`) |
 
 The three `MISSING` reads are side-effect-free `POST`s (risk dry run, DLP pattern test, mail-flow preview), planned with their module's write phase.
+
+## Native tools (step AI-R)
+
+Design [note 31](../plan/steps/31-ai-chat-reports.md) D1, [ADR-0095](../architecture/adr/0095-assistant-reports-native-tools-static-html-email.md) (amendment AI-R of ADR-0091). A **native tool** is a hand-written registry record that is **not** an OpenAPI operation: `packages/assistant/src/registry/native.ts` exports `NATIVE_TOOLS` (`native: true`), next to the generated `OPERATION_TOOLS`; `ALL_TOOLS = [...OPERATION_TOOLS, ...NATIVE_TOOLS]` is what `findTool`, `enabledTools`, the catalogue index, `describe_tool`, `GET /assistant/tools`, the executor and the capability matrix ("Native assistant tools" section) use, and both sets feed the `REGISTRY_VERSION` hash.
+
+| Tool                | Operation id                      | Path template              | Access / risk / confirm             | Requirement   | Phase | `testedBy`                                             |
+| ------------------- | --------------------------------- | -------------------------- | ----------------------------------- | ------------- | ----- | ------------------------------------------------------ |
+| `report_generate`   | `AssistantNative_reportGenerate`  | `native:report_generate`   | read / `read_audited` / none        | `report:read` | AI-R  | `apps/api/integration/assistant-reports.test.ts`       |
+| `report_send_email` | `AssistantNative_reportSendEmail` | `native:report_send_email` | write / `medium` / `confirm+impact` | `report:read` | AI-R  | `apps/api/integration/assistant-report-emails.test.ts` |
+
+Consistency rules (test-enforced in `packages/assistant`): names unique across both sets; native operation ids match `^AssistantNative_[A-Za-z]+$` and never occur in `docs/api/openapi.json`; native path templates start with `native:` (the api's loopback client refuses any path outside `/api/v1`); every enabled native write has a confirmation spec with `native` set (`report_send_email`: `precondition: null`, `native: 'report_send_email'`, state digest bound by the api) and an impact template; every native tool names its `testedBy`; no credential-pattern input key. `PROGRAM_PHASES` = AI-1, AI-2, AI-3, **AI-R**, AI-4, AI-5, AI-6; `ASSISTANT_PROGRAM_PHASE = 'AI-R'` (no AI-4+ tool becomes enabled). The api additionally hides `report_generate` when `ASSISTANT_REPORTS_ENABLED=false` and `report_send_email` when `ASSISTANT_REPORT_EMAIL_ENABLED=false` (`denied_disabled`).
+
+A later native tool needs the same: a record in `native.ts` with a strict `inputSchema`, a requirement and a `testedBy`, a branch in the api's `NativeToolsService` (unknown native names fail closed), and for a write a confirmation spec, an impact template and confirm-time state.
+
+### Counts after AI-R
+
+From the generated matrix (registry version `3606658c6a83a58b`, program phase AI-R): 423 OpenAPI operations (AI-R added `GET /assistant/reports/{reportId}`, not applicable as an assistant route); 349 operation tools, of which 257 enabled (179 reads, 78 writes); 74 not applicable (9 critical); **2 native tools** (1 read, 1 write); **259 enabled chat tools in all (180 reads, 79 writes)**; confirmation specs and impact templates 79. The `Current counts` table above is the AI-3 state of the operation tools and stays valid for them.

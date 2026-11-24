@@ -143,7 +143,7 @@ export function executionView(
     status: row.status,
     httpStatus: row.httpStatus,
     errorCode: row.errorCode,
-    message: refusalMessageOf(row.decision, row.operationId),
+    message: refusalMessageOf(row.decision, row.operationId, row.errorCode),
     hasMore: row.nextCursor !== null,
     card: cardOf(row.resultCard),
     latencyMs: row.latencyMs,

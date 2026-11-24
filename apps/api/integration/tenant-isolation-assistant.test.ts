@@ -21,6 +21,11 @@
  *   and tenant administration writes naming organization A's user, role key, department,
  *   domain, webhook, SMTP connector or API key in organization B's turn fail at the precondition
  *   read with the api's `404` and store no confirmation; `api_keys_get` of A's key answers `404`.
+ * - step AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1, D5, D6, §9 item 5): organization A's
+ *   report answers `404 assistant_report_not_found` to organization B (and to A's own admin
+ *   when it was generated under a platform override), B's `report_send_email` naming A's report
+ *   fails `404` at proposal with no confirmation, each organization's report object lives under
+ *   its own `org/<id>/assistant/report/` prefix, and A's deliveries are never listed to B.
  *
  * Synthetic `it-*` organizations only.
  */
@@ -50,6 +55,7 @@
 // @covers get /api/v1/domains/:id/destinations
 // @covers get /api/v1/webhooks/:webhookId
 // @covers get /api/v1/smtp-connectors/:id
+// @covers get /api/v1/assistant/reports/:reportId
 import { randomUUID } from 'node:crypto';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -73,6 +79,10 @@ import {
   newConversation,
   platformMember,
   propose,
+  REPORTS,
+  reportObjectKeys,
+  reportRow,
+  trackReports,
   turn,
   waitFor,
   waitForRead,
@@ -103,6 +113,8 @@ beforeAll(async () => {
   operator = await platformMember(ctx, fx, ['platform_admin']);
   orgA = await fx.createOrganization({ features: { webhooks: true } });
   orgB = await fx.createOrganization();
+  // Step AI-R: the reports of A and B (rows and MinIO objects).
+  trackReports(ctx, fx, [orgA.id, orgB.id]);
   adminA = await member(ctx, fx, orgA, [
     await fx.createCustomRole(orgA, [...ALL_TENANT_PERMISSIONS]),
   ]);
@@ -394,8 +406,10 @@ describe('API keys cannot use the assistant (user only)', () => {
         { token: 'A'.repeat(43), actionDigest: 'a'.repeat(64) },
       ],
       ['post', `${A}/confirmations/${randomUUID()}/cancel`, undefined],
+      // Step AI-R §4.1.
+      ['get', `${A}/reports/${randomUUID()}`, undefined],
     ] as const;
-    expect(routes).toHaveLength(18);
+    expect(routes).toHaveLength(19);
     for (const [method, path, body] of routes) {
       const res = await call(ctx, key, method, path, body);
       expect(res.status, `${method} ${path}`).toBe(403);
@@ -615,5 +629,117 @@ describe('step AI-3 writes naming another organization’s records (D6)', () => 
     expect(envelope!.parsed).toMatchObject({ status: 'error', httpStatus: 404 });
     expect(envelope!.raw).not.toContain(before.key.keyPrefix);
     expect(await snapshot()).toEqual(before);
+  });
+});
+
+describe('step AI-R reports and deliveries are private to their organization (§4.1, D5, D6)', () => {
+  it('B gets 404 for A’s report, cannot email it and never sees A’s deliveries or objects', async () => {
+    const conversation = await newConversation(ctx, adminA, 'Report of A');
+    const generated = await turn(
+      ctx,
+      adminA.headers,
+      conversation,
+      directive('report_generate', { sections: ['traffic'] }),
+    );
+    expect(generated.body.executions[0]).toMatchObject({ status: 'succeeded', httpStatus: 201 });
+    const reportA = generated.body.executions[0].card.report.reportId as string;
+    // A emails it to A's own admin (a real queued delivery of A).
+    const proposalA = await propose(ctx, adminA, 'send this report to my email', conversation);
+    const confirmedA = await confirm(ctx, adminA, proposalA);
+    expect(confirmedA.body.confirmation).toMatchObject({ status: 'executed' });
+    const rowA = await reportRow(ctx, reportA);
+    expect(rowA.organizationId).toBe(orgA.id);
+
+    // B: the view, an emailing proposal naming A's report, and B's own report.
+    const view = await call(ctx, adminB.headers, 'get', `${REPORTS}/${reportA}`);
+    expect(view.status).toBe(404);
+    expect(view.body.code).toBe('assistant_report_not_found');
+    expect(JSON.stringify(view.body)).not.toContain(adminA.user.email);
+    const conversationB = await newConversation(ctx, adminB);
+    const ownB = await turn(
+      ctx,
+      adminB.headers,
+      conversationB,
+      directive('report_generate', { sections: ['traffic'] }),
+    );
+    const reportB = ownB.body.executions[0].card.report.reportId as string;
+    const steal = await turn(
+      ctx,
+      adminB.headers,
+      conversationB,
+      directive('report_send_email', { reportId: reportA }),
+    );
+    expect(steal.body.executions[0]).toMatchObject({
+      tool: 'report_send_email',
+      status: 'failed',
+      httpStatus: 404,
+      errorCode: 'assistant_report_not_found',
+    });
+    expect(steal.body.confirmations).toEqual([]);
+    expect(
+      await ctx.prisma.aiChatActionConfirmation.count({
+        where: { organizationId: orgB.id },
+      }),
+    ).toBe(0);
+    // B's own report lists none of A's deliveries; the rows and objects stay per organization.
+    const viewB = await call(ctx, adminB.headers, 'get', `${REPORTS}/${reportB}`);
+    expect(viewB.status).toBe(200);
+    expect(viewB.body.report.deliveries).toEqual([]);
+    expect(
+      await ctx.prisma.aiChatReportDelivery.count({ where: { organizationId: orgB.id } }),
+    ).toBe(0);
+    expect(
+      await ctx.prisma.aiChatReportDelivery.count({
+        where: { organizationId: orgA.id, reportId: rowA.id },
+      }),
+    ).toBe(1);
+    const keysA = await reportObjectKeys(ctx, orgA.id);
+    const keysB = await reportObjectKeys(ctx, orgB.id);
+    expect(keysA).toContain(rowA.objectKey);
+    expect(keysB).toEqual([(await reportRow(ctx, reportB)).objectKey]);
+    expect(keysB.every((k) => k.startsWith(`org/${orgB.id.toString()}/assistant/report/`))).toBe(
+      true,
+    );
+  });
+
+  it('a report generated under a platform override is private to the operator in that override', async () => {
+    const started = await ctx.http
+      .post('/api/v1/platform/overrides')
+      .set(operator.headers)
+      .set('X-Forwarded-For', uniqueIp())
+      .send({ organizationId: orgA.publicId, reason: 'Assistant report isolation check' });
+    expect(started.status).toBe(201);
+    const overrideId = started.body.overrideId as string;
+    const override = bearer(started.body.accessToken as string);
+    try {
+      const created = await call(ctx, override, 'post', `${A}/conversations`, {});
+      expect(created.status).toBe(201);
+      const res = await turn(
+        ctx,
+        override,
+        created.body.id as string,
+        directive('report_generate', { sections: ['traffic'] }),
+      );
+      expect(res.status).toBe(200);
+      const execution = res.body.executions[0];
+      expect(execution).toMatchObject({ tool: 'report_generate', status: 'succeeded' });
+      const reportId = execution.card.report.reportId as string;
+      const row = await reportRow(ctx, reportId);
+      expect(row).toMatchObject({
+        organizationId: orgA.id,
+        userId: operator.user.id,
+        platformOverrideId: overrideId,
+      });
+      expect(row.objectKey!.startsWith(`org/${orgA.id.toString()}/assistant/report/`)).toBe(true);
+      expect((await call(ctx, override, 'get', `${REPORTS}/${reportId}`)).status).toBe(200);
+      for (const headers of [adminA.headers, operator.headers, adminB.headers]) {
+        expect((await call(ctx, headers, 'get', `${REPORTS}/${reportId}`)).status).toBe(404);
+      }
+    } finally {
+      await ctx.http
+        .delete(`/api/v1/platform/overrides/${overrideId}`)
+        .set(operator.headers)
+        .set('X-Forwarded-For', uniqueIp());
+    }
   });
 });

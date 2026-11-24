@@ -1,11 +1,18 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '@email-gateway/common';
+import { PrismaService, S3Service } from '@email-gateway/common';
+import { Prisma } from '@email-gateway/database';
 import type { TenantScope } from '../../auth-contracts/tenant-scope';
+import {
+  isReportKeyOf,
+  ReportObjectStore,
+} from '../assistant/services/reports/report-object-store';
 
 /**
  * The organization's AI assistant tables in the order the organization purge deletes them (step
- * AI-1 §3, D12, ADR-0094; step AI-2 §3, D7; docs/runbooks/organization-deletion.md): action
- * confirmations (they reference executions, turns and conversations), tool executions and
+ * AI-1 §3, D12, ADR-0094; step AI-2 §3, D7; step AI-R D7; docs/runbooks/organization-deletion.md):
+ * report deliveries and reports first (each batch deletes its report objects from the mail
+ * bucket, then its rows), action confirmations (they reference executions, turns and
+ * conversations), tool executions and
  * messages (they reference turns and conversations), turns, conversations, the daily usage rows
  * and finally the settings row. Every table references `organizations` with RESTRICT, so the
  * organization row cannot go while any of them holds a row; the conversation children also
@@ -13,6 +20,8 @@ import type { TenantScope } from '../../auth-contracts/tenant-scope';
  * short). Independent of the other purge repositories (no foreign key to or from another area).
  */
 export const ASSISTANT_PURGE_ORDER = [
+  'ai_chat_report_deliveries',
+  'ai_chat_reports',
   'ai_chat_action_confirmations',
   'ai_chat_tool_executions',
   'ai_chat_messages',
@@ -26,7 +35,10 @@ export type AssistantPurgeTable = (typeof ASSISTANT_PURGE_ORDER)[number];
 /** Rows one purge statement deletes (short statements, no long row locks). */
 export const ASSISTANT_PURGE_BATCH = 500;
 
-export type AssistantPurgeCounts = Record<AssistantPurgeTable, number>;
+export interface AssistantPurgeCounts extends Record<AssistantPurgeTable, number> {
+  /** Report objects deleted from the mail bucket (a missing object counts as deleted). */
+  reportObjects: number;
+}
 
 /**
  * Deletes an organization's assistant rows for the organization purge. Writer only, `systemScope`
@@ -35,23 +47,42 @@ export type AssistantPurgeCounts = Record<AssistantPurgeTable, number>;
  * than n rows go, so a crash leaves a resumable, consistent state and a re-run continues where it
  * stopped (0 everywhere once done). Never touches another organization's rows. The rows hold
  * conversation text, masked metadata cards, execution metadata and the stored requests, snapshots
- * and impact summaries of action confirmations (no email body, no attachment, no credential, no
- * confirmation token: only its hash; no S3 object); the `audit_logs` rows of the tool executions stay (append-only,
- * own retention).
+ * and impact summaries of action confirmations, report metadata and report email recipients (no
+ * email body, no attachment, no credential, no confirmation token: only its hash); the report
+ * HTML lives in the mail bucket under `org/<org>/assistant/report/` and is deleted per batch of
+ * report rows before those rows (only keys under that prefix; a missing object is success; any
+ * other S3 error aborts the purge, which is re-run). The `audit_logs` rows of the tool executions
+ * stay (append-only, own retention).
  */
 @Injectable()
 export class AssistantTenantDataRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly store: ReportObjectStore;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    s3: S3Service,
+  ) {
+    // The global S3Service (the tenant-data module provides no assistant services).
+    this.store = new ReportObjectStore(s3);
+  }
 
   async purgeOrganization(
     scope: TenantScope,
     batch: number = ASSISTANT_PURGE_BATCH,
   ): Promise<AssistantPurgeCounts> {
     if (!Number.isSafeInteger(batch) || batch < 1) throw new Error('batch must be positive');
-    const counts = Object.fromEntries(
-      ASSISTANT_PURGE_ORDER.map((t) => [t, 0]),
-    ) as AssistantPurgeCounts;
+    const counts = {
+      ...(Object.fromEntries(ASSISTANT_PURGE_ORDER.map((t) => [t, 0])) as Record<
+        AssistantPurgeTable,
+        number
+      >),
+      reportObjects: 0,
+    };
     for (const table of ASSISTANT_PURGE_ORDER) {
+      if (table === 'ai_chat_reports') {
+        await this.purgeReports(scope.organizationId, batch, counts);
+        continue;
+      }
       for (;;) {
         const deleted = await this.deleteBatch(table, scope.organizationId, batch);
         counts[table] += deleted;
@@ -61,13 +92,48 @@ export class AssistantTenantDataRepository {
     return counts;
   }
 
+  /**
+   * `ai_chat_reports` in batches ordered by id: each batch's objects are deleted from the mail
+   * bucket first (only keys under the organization's report prefix), then its rows.
+   */
+  private async purgeReports(
+    organizationId: bigint,
+    batch: number,
+    counts: AssistantPurgeCounts,
+  ): Promise<void> {
+    for (;;) {
+      const rows = await this.prisma.$queryRaw<
+        Array<{ id: bigint; organization_id: bigint; object_key: string | null }>
+      >`SELECT id, organization_id, object_key FROM ai_chat_reports
+        WHERE organization_id = ${organizationId}
+        ORDER BY user_id, created_at, id LIMIT ${batch}`;
+      if (rows.some((row) => BigInt(row.organization_id) !== organizationId)) {
+        throw new Error('assistant purge: report read returned another organization');
+      }
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        if (row.object_key === null || !isReportKeyOf(row.object_key, organizationId)) continue;
+        await this.store.delete(organizationId, row.object_key);
+        counts.reportObjects += 1;
+      }
+      const ids = rows.map((row) => BigInt(row.id));
+      counts.ai_chat_reports += await this.prisma.$executeRaw`DELETE FROM ai_chat_reports
+        WHERE organization_id = ${organizationId} AND id IN (${Prisma.join(ids)})`;
+      if (rows.length < batch) break;
+    }
+  }
+
   /** One batch; the table name comes from the fixed purge order, never from input. */
   private deleteBatch(
-    table: AssistantPurgeTable,
+    table: Exclude<AssistantPurgeTable, 'ai_chat_reports'>,
     organizationId: bigint,
     batch: number,
   ): Promise<number> {
     switch (table) {
+      case 'ai_chat_report_deliveries':
+        // Index (organization_id, requested_at); before the reports (FK, CASCADE backstop).
+        return this.prisma.$executeRaw`DELETE FROM ai_chat_report_deliveries
+          WHERE organization_id = ${organizationId} ORDER BY requested_at, id LIMIT ${batch}`;
       case 'ai_chat_action_confirmations':
         // Index (organization_id, user_id, status, expires_at). Deleted before the executions
         // (the proposal execution cascades to its confirmation, but organization_id is RESTRICT

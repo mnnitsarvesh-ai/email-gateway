@@ -23,7 +23,7 @@ import { stack } from './support/env';
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
  * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26;
- * v13: step 8.4 §4.1; v14: step 8.2 D12): checks through the management API. The prune case adds one stray binding to the dormant
+ * v13: step 8.4 §4.1; v14: step 8.2 D12; v15: step AI-R D8): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -42,9 +42,11 @@ import { stack } from './support/env';
  * work queue with the same two bindings: still 58. v13 (step 8.4 §4.1): ato.events five (four
  * events + retry), ato.mail two, ato.responses two, email.webhooks four and email.notifications
  * one: 72 (67 queue + 5 exchange bindings). v14 (step 8.2 D12): email.webhooks adds one
- * (integration.connection.health_changed.v1): 73 (68 queue + 5 exchange bindings).
+ * (integration.connection.health_changed.v1): 73 (68 queue + 5 exchange bindings). v15 (step AI-R
+ * D8): email.notifications adds one (assistant.report.email_requested.v1): 74 (69 queue + 5
+ * exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 73;
+const TOPOLOGY_BINDINGS = 74;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -148,10 +150,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v14: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(14);
+  it('is topology v15: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(15);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v14');
+    expect(info.description).toBe('email-gateway topology v15');
     const rescan = bindings
       .filter(
         (b) =>
@@ -574,6 +576,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.policy [org.*.notification.alert_requested.v1]',
         // v13 (step 8.4 D16): account takeover notifications.
         'email.security [org.*.ato.notification.requested.v1]',
+        // v15 (step AI-R D8): assistant report emails.
+        'email.policy [org.*.assistant.report.email_requested.v1]',
         'email.policy [retry.email.notifications.#]',
       ].sort(),
     );

@@ -562,6 +562,15 @@ const AI3_ARGS: Record<string, Record<string, unknown>> = {
 };
 Object.assign(ARGS, AI3_ARGS);
 
+/** Step AI-R: the stored request body of `report_send_email` (after ref resolution). */
+const REPORT = ID(40);
+ARGS.AssistantNative_reportSendEmail = { reportId: REPORT, to: 'ada.admin@example.test' };
+const REPORT_NATIVE: NonNullable<ImpactInput['native']> = {
+  report: { title: 'Security report: Last 7 days', period: 'Last 7 days', sizeBytes: 187_392 },
+  recipient: { address: 'ada.admin@example.test', kind: 'self', domain: 'example.test' },
+  limits: { userRemaining: 9, userLimit: 10, tenantRemaining: 47, tenantLimit: 50 },
+};
+
 const toolOf = (operationId: string) => findOperation(operationId) as OperationTool;
 
 /** What the executor does (D1): snapshot, CAS injection, items; then the summary. */
@@ -588,6 +597,7 @@ function proposal(operationId: string): {
   }
   if (spec.validateDefinition)
     input.validation = { ruleCount: 1, definitionSha256: 'e'.repeat(64) };
+  if (spec.native) input.native = REPORT_NATIVE;
   input.args = args;
   const effective = effectiveRisk(tool, spec, args);
   if (effective.warnings.length > 0) input.escalationWarnings = effective.warnings;
@@ -601,7 +611,7 @@ describe('impact templates (D5)', () => {
       CONFIRMATION_SPECS.map((s) => s.operationId).sort(),
     );
     expect(Object.keys(ARGS).sort()).toEqual(Object.keys(IMPACT_TEMPLATES).sort());
-    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(78);
+    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(79);
     expect(hasImpactTemplate('DlpPoliciesController_create_v1')).toBe(false);
   });
 
@@ -615,7 +625,7 @@ describe('impact templates (D5)', () => {
       expect(summary.impact.length, 'medium/high need impact lines').toBeGreaterThan(0);
     if (risk === 'high') expect(summary.warnings.length, 'high needs a warning').toBeGreaterThan(0);
     expect(summary.request.method).toBe(tool.method);
-    expect(summary.request.path.startsWith('/api/v1/')).toBe(true);
+    expect(summary.request.path.startsWith(tool.native ? 'native:' : '/api/v1/')).toBe(true);
     expect(summary.request.path).not.toMatch(/\{[^}]+\}/);
     if (summary.portalRoute) expect(summary.portalRoute).toMatch(/^\/[^{}]*$/);
     expect(Buffer.byteLength(JSON.stringify(summary))).toBeLessThanOrEqual(SUMMARY_LIMITS.bytes);

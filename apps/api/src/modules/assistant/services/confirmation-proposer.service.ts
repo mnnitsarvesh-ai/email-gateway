@@ -39,7 +39,7 @@ import {
   CONFIRMATION_REQUEST_MAX_BYTES,
   DEFINITION_VIOLATIONS_MAX,
 } from '../assistant.constants';
-import { CONFIRMATION_ROW_CODES } from '../assistant.errors';
+import { CONFIRMATION_ROW_CODES, type ReportGuard } from '../assistant.errors';
 import {
   confirmationRiskOf,
   digestInputOf,
@@ -50,6 +50,7 @@ import { scopeOrganizationPublicId } from '../domain/tool-catalog';
 import { ConfirmationsRepository } from '../repositories/confirmations.repository';
 import { AssistantLimitsService } from './assistant-limits.service';
 import { buildLoopbackRequest, LoopbackDispatcher, type LoopbackResult } from './loopback-client';
+import { NativeToolsService } from './native-tools.service';
 import type { ExecutionContext } from './tool-executor.service';
 
 /** The request facts of the loopback reads (never from the model). */
@@ -119,8 +120,14 @@ export type ProposalOutcome =
       kind: 'denied';
       decision: 'denied_budget' | 'denied_disabled' | 'denied_schema' | 'denied_guard';
       message: string;
-      /** The refusing proposal guard (`denied_guard`, step AI-3 D3). */
-      guard?: GuardKind;
+      /** The refusing proposal guard (`denied_guard`, step AI-3 D3; step AI-R report guards). */
+      guard?: GuardKind | ReportGuard;
+      /** A specific refusal code (step AI-R: `assistant_report_email_limit`), else the decision. */
+      code?: string;
+      /** Further audit metadata of the refusal (a domain and a hash only, never an address). */
+      auditExtra?: Record<string, string>;
+      /** Argument keys never stored or audited (a refused recipient address). */
+      redact?: readonly string[];
     }
   | { kind: 'failed'; result: LoopbackResult }
   | { kind: 'failed_own'; failure: OwnFailure }
@@ -188,6 +195,7 @@ export class ConfirmationProposer {
     private readonly loopback: LoopbackDispatcher,
     private readonly limits: AssistantLimitsService,
     private readonly audit: AuditService,
+    private readonly native: NativeToolsService,
   ) {}
 
   now(): Date {
@@ -219,6 +227,9 @@ export class ConfirmationProposer {
     if (pending >= this.config.ASSISTANT_MAX_PENDING_CONFIRMATIONS) {
       return { kind: 'denied', decision: 'denied_budget', message: PENDING_CAP_MESSAGE };
     }
+    // Step AI-R D5: a native write prepares its own proposal (report, recipient rule, limits,
+    // state digest) instead of the precondition read; the rest is the generic flow below.
+    if (spec.native !== undefined) return this.prepareNative(input, baseRisk, now);
     const call: ReadCall = {
       authorization: ctx.authorization,
       clientIp: ctx.clientIp,
@@ -350,6 +361,101 @@ export class ConfirmationProposer {
       escalationWarnings: effective.warnings,
     });
 
+    return this.plan(input, {
+      now,
+      risk,
+      baseRisk,
+      request,
+      preconditions,
+      summary,
+      finalArgs,
+      stateDigest: state.stateDigest,
+    });
+  }
+
+  /**
+   * Step AI-R D5 steps 1–5 for a native write (`report_send_email`): `NativeToolsService`
+   * resolves the report, applies the recipient rule and the daily limits and returns the stored
+   * request `POST native:<name>`, the state digest and the impact snapshot; the token, digest and
+   * summary are the generic ones (D1 steps 7–11). A refused recipient never gets a confirmation.
+   */
+  private async prepareNative(
+    input: Parameters<ConfirmationProposer['prepare']>[0],
+    baseRisk: ConfirmationRisk,
+    now: Date,
+  ): Promise<ProposalOutcome> {
+    const { ctx, tool, spec, args } = input;
+    const prepared = await this.native.prepareProposal(
+      tool,
+      { principal: ctx.principal, owner: ctx.owner, conversationId: ctx.conversationId },
+      args,
+    );
+    if (prepared.kind === 'denied') {
+      return {
+        kind: 'denied',
+        decision: prepared.decision,
+        message: prepared.message,
+        ...(prepared.guard ? { guard: prepared.guard } : {}),
+        ...(prepared.code ? { code: prepared.code } : {}),
+        ...(prepared.auditExtra ? { auditExtra: prepared.auditExtra } : {}),
+        ...(prepared.redact ? { redact: prepared.redact } : {}),
+      };
+    }
+    if (prepared.kind === 'failed_own') return { kind: 'failed_own', failure: prepared.failure };
+    const preconditions: StoredPreconditions = {
+      rowVersion: null,
+      definitionSha256: null,
+      ruleCount: null,
+      snapshot: null,
+    };
+    if (byteLength(prepared.request) > CONFIRMATION_REQUEST_MAX_BYTES) {
+      return {
+        kind: 'failed_own',
+        failure: {
+          httpStatus: 413,
+          code: 'payload_too_large',
+          message: 'The change is too large to confirm in chat; use the portal page.',
+        },
+      };
+    }
+    const effective = effectiveRisk(tool, spec, prepared.finalArgs);
+    const summary = impactOf(tool.operationId, {
+      args: prepared.finalArgs,
+      snapshot: null,
+      items: [],
+      validation: null,
+      request: { method: prepared.request.method, path: prepared.request.path },
+      escalationWarnings: effective.warnings,
+      native: prepared.native,
+    });
+    return this.plan(input, {
+      now,
+      risk: effective.risk,
+      baseRisk,
+      request: prepared.request,
+      preconditions,
+      summary,
+      finalArgs: prepared.finalArgs,
+      stateDigest: prepared.stateDigest,
+    });
+  }
+
+  /** D1 step 8: token, digest and re-authentication of a prepared proposal. */
+  private async plan(
+    input: Parameters<ConfirmationProposer['prepare']>[0],
+    p: {
+      now: Date;
+      risk: ConfirmationRisk;
+      baseRisk: ConfirmationRisk;
+      request: StoredRequest;
+      preconditions: StoredPreconditions;
+      summary: ConfirmationSummary;
+      finalArgs: Record<string, unknown>;
+      stateDigest: string | null;
+    },
+  ): Promise<ProposalOutcome> {
+    const { ctx, tool } = input;
+    const { now, risk, baseRisk, request, preconditions, summary, finalArgs } = p;
     // 8. Token, digest, re-authentication.
     const confirmationId = uuidv7(now.getTime());
     const token = newConfirmationToken();
@@ -371,7 +477,7 @@ export class ConfirmationProposer {
         risk,
         requiresReauth,
         request,
-        stateDigest: state.stateDigest,
+        stateDigest: p.stateDigest,
         preconditions,
         expiresAt,
       }),
@@ -383,7 +489,7 @@ export class ConfirmationProposer {
         token,
         tokenHash: hashConfirmationToken(token),
         actionDigest: digest,
-        stateDigest: state.stateDigest,
+        stateDigest: p.stateDigest,
         risk,
         baseRisk,
         requiresReauth,

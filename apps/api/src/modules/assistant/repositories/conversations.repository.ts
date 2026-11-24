@@ -7,6 +7,7 @@ import {
 } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import { assertEcho } from '../../../http/listing/echo-check';
+import { purgeReportsOfConversations } from './reports.repository';
 
 type Tx = Prisma.TransactionClient;
 type On = 'writer' | 'replica';
@@ -259,7 +260,9 @@ export class ConversationsRepository {
   /**
    * Clears the content columns of the given conversations (title, message content, transcripts,
    * execution cards, refs and cursors, confirmation requests, preconditions and summaries) and
-   * stamps `content_purged_at`. Metadata stays.
+   * stamps `content_purged_at`. Metadata stays. Step AI-R D7: the conversation's reports become
+   * `purged` and their deliveries lose the address (`queued` ones fail); the report objects are
+   * deleted after the commit (`AssistantRetentionService`, the delete route inline).
    */
   async purgeContent(
     organizationId: bigint,
@@ -286,6 +289,7 @@ export class ConversationsRepository {
       where: { organizationId, conversationId: { in: ids } },
       data: { request: Prisma.DbNull, preconditions: Prisma.DbNull, summary: Prisma.DbNull },
     });
+    await purgeReportsOfConversations(tx, organizationId, ids, now);
     await tx.aiChatConversation.updateMany({
       where: { organizationId, id: { in: ids } },
       data: { title: null, contentPurgedAt: now },
@@ -649,12 +653,18 @@ export class ConversationsRepository {
       ORDER BY started_at, id LIMIT ${batch}`;
   }
 
-  /** Hard delete: conversations inactive since before `before` and without turns left. */
+  /**
+   * Hard delete: conversations inactive since before `before` and without turns left; step AI-R
+   * D7: never one with a report whose object is not deleted yet (the job deletes those objects
+   * first; the reports and deliveries then go with the conversation by FK cascade).
+   */
   deleteConversationsBefore(before: Date, batch: number): Promise<number> {
     return this.writer.$executeRaw`DELETE FROM ai_chat_conversations
       WHERE COALESCE(last_turn_at, created_at) < ${before}
         AND NOT EXISTS (SELECT 1 FROM ai_chat_turns t WHERE t.conversation_id = ai_chat_conversations.id)
         AND NOT EXISTS (SELECT 1 FROM ai_chat_tool_executions e WHERE e.conversation_id = ai_chat_conversations.id)
+        AND NOT EXISTS (SELECT 1 FROM ai_chat_reports r
+          WHERE r.conversation_id = ai_chat_conversations.id AND r.object_key IS NOT NULL)
       ORDER BY id LIMIT ${batch}`;
   }
 }

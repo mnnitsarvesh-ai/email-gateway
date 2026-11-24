@@ -7,6 +7,7 @@ import type {
   ConfirmationView,
   Conversation,
   Execution,
+  ReportDocument,
   StoredMessage,
 } from './types';
 
@@ -593,3 +594,110 @@ export function deniedGuardFrame(): string {
     message: SELF_GUARD_MESSAGE,
   });
 }
+
+// Step AI-R: a report card and its document (`GET /assistant/reports/{reportId}`).
+export const REPORT_ID = '01930000-0000-7000-8000-00000000a001';
+export const REPORT_EXECUTION_ID = '01930000-0000-7000-8000-00000000e320';
+export const DELIVERY_ID = '01930000-0000-7000-8000-00000000d001';
+
+/** Inert report HTML as the api renders it (constant style, inline SVG, no script or link). */
+export const REPORT_HTML =
+  '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">' +
+  '<title>Security report</title><style>body{font-family:sans-serif}</style></head>' +
+  '<body><h1>Security report</h1><p>E2E &lt;script&gt; organization</p>' +
+  '<svg role="img" aria-label="Traffic" viewBox="0 0 10 10"><rect width="4" height="8"></rect></svg>' +
+  '</body></html>';
+
+export const REPORT_CARD: AssistantCard = {
+  version: 'assistant-card/1',
+  executionId: REPORT_EXECUTION_ID,
+  tool: 'report_generate',
+  title: 'Security report: Last 7 days',
+  status: 'ok',
+  kind: 'report',
+  report: {
+    reportId: REPORT_ID,
+    title: 'Security report: Last 7 days',
+    period: {
+      from: '2026-11-16T00:00:00.000Z',
+      to: '2026-11-23T00:00:00.000Z',
+      granularity: 'day',
+      atoRange: '7d',
+      label: 'Last 7 days',
+    },
+    generatedAt: '2026-11-23T09:30:00.000Z',
+    sizeBytes: 182_344,
+    sections: ['summary', 'traffic', 'threats', 'quarantine', 'ato'],
+    omitted: [
+      { section: 'quarantine', reason: 'permission', code: 'quarantine:read' },
+      { section: 'ato', reason: 'not_enabled' },
+    ],
+    figures: [
+      { label: 'Messages', value: '12,480' },
+      { label: 'Threats', value: '312' },
+    ],
+  },
+  portalLinks: [{ label: 'Open full size', href: `/assistant/reports/${REPORT_ID}` }],
+  refs: ['r1.1'],
+};
+
+export function reportDocument(
+  overrides: Partial<ReportDocument['report']> = {},
+  html: string | null = REPORT_HTML,
+): ReportDocument {
+  return {
+    html,
+    report: {
+      id: REPORT_ID,
+      conversationId: CONVERSATION_ID,
+      executionId: REPORT_EXECUTION_ID,
+      status: 'available',
+      title: 'Security report: Last 7 days',
+      period: {
+        from: '2026-11-16T00:00:00.000Z',
+        to: '2026-11-23T00:00:00.000Z',
+        granularity: 'day',
+        atoRange: '7d',
+      },
+      sections: ['summary', 'traffic', 'threats'],
+      omitted: [{ section: 'quarantine', reason: 'permission', code: 'quarantine:read' }],
+      figures: [
+        { label: 'Messages', value: '12,480' },
+        { label: 'Threats', value: '312' },
+      ],
+      sizeBytes: 182_344,
+      sha256: 'ab'.repeat(32),
+      templateVersion: 'assistant-report/1',
+      createdAt: '2026-11-23T09:30:00.000Z',
+      deliveries: [],
+      ...overrides,
+    },
+  };
+}
+
+/** The `report_send_email` summary as the api renders it (packages/assistant impact template). */
+export const REPORT_SEND_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Email security report',
+  action: 'Sends the security report as an HTML email to analyst@example.test.',
+  target: [
+    { label: 'Report', value: 'Security report: Last 7 days' },
+    { label: 'Period', value: 'Last 7 days' },
+    { label: 'Recipient', value: 'analyst@example.test' },
+    { label: 'Recipient type', value: 'your own address' },
+    { label: 'Size', value: '178.1 KiB' },
+  ],
+  changes: [],
+  impact: [
+    'The email leaves the platform through the notification mailer; the recipient can forward it.',
+    'The same HTML is attached as a file.',
+  ],
+  warnings: [
+    'Emails cannot be recalled after sending.',
+    '9 of 10 report emails left today for you (47 for your organization).',
+  ],
+  reversible: false,
+  portalRoute: `/assistant/reports/${REPORT_ID}`,
+  request: { method: 'POST', path: 'native:report_send_email' },
+};

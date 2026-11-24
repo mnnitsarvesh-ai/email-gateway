@@ -5,7 +5,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { OPERATION_TOOLS } from '@email-gateway/assistant';
+import { NATIVE_TOOLS, OPERATION_TOOLS } from '@email-gateway/assistant';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AssistantConfig } from '../assistant.constants';
 import {
@@ -249,6 +249,26 @@ describe('buildLoopbackRequest / buildLoopbackHeaders (D2)', () => {
     const client = new LoopbackClient(config({ ASSISTANT_LOOPBACK_URL: s.url }));
     const result = await client.send({ ...call(), path: '/api/v1/roles/../organizations' });
     expect(result).toEqual({ kind: 'unavailable' });
+    expect(s.seen).toHaveLength(0);
+    client.onModuleDestroy();
+  });
+
+  it('refuses any path outside /api/v1: native tools never reach the loopback (step AI-R D1)', async () => {
+    for (const native of NATIVE_TOOLS) {
+      expect(native.pathTemplate.startsWith('native:')).toBe(true);
+      expect(() => buildLoopbackRequest(native, {})).toThrow(/not under \/api\/v1/);
+    }
+    const s = await stub((res) => res.end('{}'));
+    servers.push(s.server);
+    const client = new LoopbackClient(config({ ASSISTANT_LOOPBACK_URL: s.url }));
+    for (const path of [
+      'native:report_send_email',
+      '/metrics',
+      '/api/v2/x',
+      'http://evil.test/api/v1/x',
+    ]) {
+      expect(await client.send({ ...call(), path }), path).toEqual({ kind: 'unavailable' });
+    }
     expect(s.seen).toHaveLength(0);
     client.onModuleDestroy();
   });

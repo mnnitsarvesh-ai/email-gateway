@@ -46,16 +46,23 @@ import {
   confirmationStateChanged,
   confirmationTokenInvalid,
   confirmationToolChanged,
+  REPORT_GUARD_MESSAGES,
+  REPORT_GUARDS,
 } from '../assistant.errors';
 import {
   argsOfStoredRequest,
   digestInputOf,
+  nativeArgsOf,
   parseStoredPreconditions,
   parseStoredRequest,
   type StoredPreconditions,
   type StoredRequest,
 } from '../domain/confirmation-binding';
-import { scopeOrganizationPublicId, toolAvailability } from '../domain/tool-catalog';
+import {
+  nativeSwitchesOf,
+  scopeOrganizationPublicId,
+  toolAvailability,
+} from '../domain/tool-catalog';
 import { confirmationView } from '../domain/views';
 import type {
   CancelConfirmationResultView,
@@ -69,6 +76,7 @@ import {
 import type { Owner } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
 import { AssistantAvailabilityService } from './assistant-availability.service';
+import { NativeToolsService } from './native-tools.service';
 import { AssistantLimitsService } from './assistant-limits.service';
 import { AssistantMetrics, type ConfirmationOutcome } from './assistant-metrics';
 import { ConfirmationProposer, type PreconditionState } from './confirmation-proposer.service';
@@ -145,6 +153,7 @@ export class ConfirmationService {
     private readonly runner: TransactionRunner,
     private readonly audit: AuditService,
     private readonly metrics: AssistantMetrics,
+    private readonly native: NativeToolsService,
   ) {}
 
   now(): Date {
@@ -322,14 +331,18 @@ export class ConfirmationService {
       this.metrics.confirmations.inc({ risk: row.risk, outcome: 'failed' });
       throw confirmationToolChanged();
     }
-    if (!toolAvailability(principal, tool).available) {
+    if (!toolAvailability(principal, tool, nativeSwitchesOf(this.config)).available) {
       await this.failRow(principal, scope, owner, row, 'forbidden', sourceIp);
       this.metrics.confirmations.inc({ risk: row.risk, outcome: 'failed' });
       throw new CodedHttpException(HttpStatus.FORBIDDEN, 'forbidden', 'Forbidden');
     }
     // 7a. Step AI-3 D4/D10: the effective risk of the stored arguments is the stored risk.
     const spec = confirmationSpecOf(tool.operationId)!;
-    const args = argsOfStoredRequest(stored.request);
+    // Step AI-R D5: a native write's arguments are its stored body (`POST native:<name>`).
+    const args =
+      spec.native !== undefined
+        ? nativeArgsOf(stored.request)
+        : argsOfStoredRequest(stored.request);
     if (this.effectiveRiskOf(tool, spec, args) !== row.risk) {
       await this.failRow(
         principal,
@@ -426,6 +439,41 @@ export class ConfirmationService {
         }
         target = read.state.raw ?? null;
       }
+      // 12 (native, step AI-R D5): the report state and the recipient class with current data. A
+      // recipient no longer allowed refuses (403); any other difference is a changed state (409).
+      if (spec.native !== undefined) {
+        const state = await this.native.readState(
+          tool,
+          { principal, owner, conversationId: row.conversationId },
+          args,
+        );
+        if (state.kind === 'refused') {
+          await this.refuseGuard(
+            principal,
+            scope,
+            owner,
+            row,
+            {
+              guard: REPORT_GUARDS.recipientNotAllowed,
+              message: REPORT_GUARD_MESSAGES.report_recipient_not_allowed,
+            },
+            sourceIp,
+          );
+          throw assistantActionNotAllowed();
+        }
+        if (row.stateDigest === null || !hexEquals(state.stateDigest, row.stateDigest)) {
+          await this.failRow(
+            principal,
+            scope,
+            owner,
+            row,
+            ASSISTANT_ERROR_CODES.confirmationStateChanged,
+            sourceIp,
+          );
+          this.metrics.confirmations.inc({ risk: row.risk, outcome: 'refused_state' });
+          throw confirmationStateChanged();
+        }
+      }
       // 12a. Step AI-3 D10: the after-read proposal guards on the fresh target.
       const afterRead = guardRefusal(
         spec,
@@ -474,6 +522,7 @@ export class ConfirmationService {
         {
           idempotencyKey: row.publicId,
           expectedRequest: stored.request,
+          native: { confirmationRowId: row.id, confirmationPublicId: row.publicId },
           // 14. The outcome, in the transaction of the result execution.
           afterPersist: async (tx, executionRowId, result) => {
             const ok =
@@ -645,7 +694,7 @@ export class ConfirmationService {
     scope: TenantScope,
     owner: Owner,
     row: ConfirmationWithRefs,
-    refusal: GuardRefusal,
+    refusal: Pick<GuardRefusal, 'message'> & { guard: string },
     sourceIp: string | null,
   ): Promise<void> {
     await this.failRow(

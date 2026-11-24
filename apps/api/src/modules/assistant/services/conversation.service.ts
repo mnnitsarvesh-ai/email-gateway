@@ -24,7 +24,7 @@ import {
   MESSAGES_CURSOR_RESOURCE,
 } from '../assistant.constants';
 import { assistantConversationLimit, assistantConversationNotFound } from '../assistant.errors';
-import { availableTools } from '../domain/tool-catalog';
+import { availableTools, nativeSwitchesOf } from '../domain/tool-catalog';
 import { conversationView, executionView, messageView } from '../domain/views';
 import type {
   ConversationListQuery,
@@ -52,6 +52,7 @@ import {
 import { AssistantAvailabilityService } from './assistant-availability.service';
 import { AssistantMetrics } from './assistant-metrics';
 import { ConfirmationViewsService } from './confirmation-views.service';
+import { ReportsService } from './reports/reports.service';
 
 const DAY_MS = 86_400_000;
 
@@ -67,7 +68,9 @@ export const ownerOf = (principal: UserPrincipal, scope: TenantScope): Owner => 
  * organization's ids answer `404`); under a platform override they live in the override's target
  * organization with the override id. Deleting is a soft delete with an immediate content purge,
  * audited `assistant.conversation_deleted`; its pending confirmations are cancelled (step AI-2
- * D7, audited `assistant.confirmation_cancelled` each) and their content purged.
+ * D7, audited `assistant.confirmation_cancelled` each) and their content purged; its reports
+ * become `purged` in the same transaction and their objects are deleted right after (step AI-R
+ * D7).
  */
 @Injectable()
 export class ConversationService {
@@ -83,6 +86,7 @@ export class ConversationService {
     private readonly confirmations: ConfirmationsRepository,
     private readonly confirmationViews: ConfirmationViewsService,
     private readonly metrics: AssistantMetrics,
+    private readonly reports: ReportsService,
   ) {}
 
   now(): Date {
@@ -93,7 +97,7 @@ export class ConversationService {
   tools(principal: UserPrincipal): ToolsView {
     return {
       registryVersion: REGISTRY_VERSION,
-      tools: availableTools(principal).map((tool) => ({
+      tools: availableTools(principal, nativeSwitchesOf(this.config)).map((tool) => ({
         name: tool.name,
         module: tool.module,
         title: tool.display.title ?? tool.summary,
@@ -259,6 +263,9 @@ export class ConversationService {
     for (const confirmation of cancelled) {
       this.metrics.confirmations.inc({ risk: confirmation.risk, outcome: 'cancelled' });
     }
+    // Step AI-R D7: the purged reports' objects, after the commit (best effort; the retention
+    // job deletes whatever is left).
+    await this.reports.deleteConversationObjects(scope.organizationId, row.id);
   }
 
   /** Oldest → newest pages of messages with their turn's executions and cards (v1 cursor). */

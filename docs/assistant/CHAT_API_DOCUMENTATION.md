@@ -1,6 +1,6 @@
 # Chat API
 
-The assistant's HTTP interface: 18 routes under `/api/v1/assistant` (OpenAPI tag `assistant`), one Server-Sent Events stream, coded errors. The normative contract is [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) and, for confirmations (step AI-2), [§35.1](../architecture/contracts.md#351-confirmations-step-ai-2) and, for the identity and tenant administration tools (step AI-3), [§35.2](../architecture/contracts.md#352-identity-and-tenant-administration-tools-step-ai-3); AI-3 added no assistant route; request and response schemas with examples are in the OpenAPI snapshot [`docs/api/openapi.json`](../api/openapi.json) (tag `assistant`). Examples below use synthetic values.
+The assistant's HTTP interface: 19 routes under (step AI-R added `GET /assistant/reports/{reportId}`) `/api/v1/assistant` (OpenAPI tag `assistant`), one Server-Sent Events stream, coded errors. The normative contract is [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) and, for confirmations (step AI-2), [§35.1](../architecture/contracts.md#351-confirmations-step-ai-2) and, for the identity and tenant administration tools (step AI-3), [§35.2](../architecture/contracts.md#352-identity-and-tenant-administration-tools-step-ai-3); AI-3 added no assistant route; request and response schemas with examples are in the OpenAPI snapshot [`docs/api/openapi.json`](../api/openapi.json) (tag `assistant`). Examples below use synthetic values.
 
 ## Conventions
 
@@ -11,26 +11,27 @@ The assistant's HTTP interface: 18 routes under `/api/v1/assistant` (OpenAPI tag
 
 ## Routes
 
-| Method | Path                                                 | Permission            | Purpose                                                                                                                                                       |
-| ------ | ---------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/assistant/status`                                  | `assistant:use`       | Whether the assistant is available to the caller and why not; provider, model, limits, today's budget                                                         |
-| GET    | `/assistant/settings`                                | `assistant:configure` | The organization's `assistant-settings/1` document with `rowVersion`                                                                                          |
-| PUT    | `/assistant/settings`                                | `assistant:configure` | Update with CAS (`expectedRowVersion`); enabling needs `externalProcessingAcknowledged: true` and the feature `ai_assistant`; rate class `sensitive`; audited |
-| GET    | `/assistant/usage`                                   | `assistant:configure` | Tokens and advisory cost per UTC day and model (`from`/`to`, at most 92 days)                                                                                 |
-| GET    | `/assistant/tools`                                   | `assistant:use`       | The caller's enabled tools after the permission pre-filter, with `registryVersion`                                                                            |
-| GET    | `/assistant/conversations`                           | `assistant:use`       | Own conversations, newest first; `q` (title contains), `status` (`active`/`archived`), `limit`, `cursor`                                                      |
-| POST   | `/assistant/conversations`                           | `assistant:use`       | Create (`{ title? }`) → `201`                                                                                                                                 |
-| GET    | `/assistant/conversations/{conversationId}`          | `assistant:use`       | One own conversation                                                                                                                                          |
-| PATCH  | `/assistant/conversations/{conversationId}`          | `assistant:use`       | Rename or archive/restore (`{ title?, status? }`)                                                                                                             |
-| DELETE | `/assistant/conversations/{conversationId}`          | `assistant:use`       | Clear: soft delete and immediate content purge → `204`; audited                                                                                               |
-| GET    | `/assistant/conversations/{conversationId}/messages` | `assistant:use`       | Messages oldest → newest, each with its turn and that turn's executions and cards                                                                             |
-| POST   | `/assistant/conversations/{conversationId}/turns`    | `assistant:use`       | Ask: SSE with `accept: text/event-stream`, else JSON; rate class `expensive`                                                                                  |
-| POST   | `/assistant/turns/{turnId}/cancel`                   | `assistant:use`       | Cancel an own running turn → `202`                                                                                                                            |
-| GET    | `/assistant/executions/{executionId}`                | `assistant:use`       | One own tool execution: card and metadata                                                                                                                     |
-| POST   | `/assistant/executions/{executionId}/more`           | `assistant:use`       | Next page of a list result, without a model call; returns a new execution; rate class `expensive`                                                             |
-| GET    | `/assistant/confirmations/{confirmationId}`          | `assistant:use`       | One own confirmation (`{ confirmation: ConfirmationView }`, any session, never the token); a `pending` row past its expiry is shown `expired` (AI-2)          |
-| POST   | `/assistant/confirmations/{confirmationId}/confirm`  | `assistant:use`       | Confirm a proposed write: `{ token, actionDigest, reauth? }` → `200 { confirmation, execution }`; same session family only; rate class `sensitive` (AI-2)     |
-| POST   | `/assistant/confirmations/{confirmationId}/cancel`   | `assistant:use`       | Cancel a pending proposal (no body, no token; works after a reload) → `200 { confirmation }`; idempotent; rate class `sensitive` (AI-2)                       |
+| Method | Path                                                 | Permission            | Purpose                                                                                                                                                                 |
+| ------ | ---------------------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/assistant/status`                                  | `assistant:use`       | Whether the assistant is available to the caller and why not; provider, model, limits, today's budget                                                                   |
+| GET    | `/assistant/settings`                                | `assistant:configure` | The organization's `assistant-settings/1` document with `rowVersion`                                                                                                    |
+| PUT    | `/assistant/settings`                                | `assistant:configure` | Update with CAS (`expectedRowVersion`); enabling needs `externalProcessingAcknowledged: true` and the feature `ai_assistant`; rate class `sensitive`; audited           |
+| GET    | `/assistant/usage`                                   | `assistant:configure` | Tokens and advisory cost per UTC day and model (`from`/`to`, at most 92 days)                                                                                           |
+| GET    | `/assistant/tools`                                   | `assistant:use`       | The caller's enabled tools after the permission pre-filter, with `registryVersion`                                                                                      |
+| GET    | `/assistant/conversations`                           | `assistant:use`       | Own conversations, newest first; `q` (title contains), `status` (`active`/`archived`), `limit`, `cursor`                                                                |
+| POST   | `/assistant/conversations`                           | `assistant:use`       | Create (`{ title? }`) → `201`                                                                                                                                           |
+| GET    | `/assistant/conversations/{conversationId}`          | `assistant:use`       | One own conversation                                                                                                                                                    |
+| PATCH  | `/assistant/conversations/{conversationId}`          | `assistant:use`       | Rename or archive/restore (`{ title?, status? }`)                                                                                                                       |
+| DELETE | `/assistant/conversations/{conversationId}`          | `assistant:use`       | Clear: soft delete and immediate content purge → `204`; audited                                                                                                         |
+| GET    | `/assistant/conversations/{conversationId}/messages` | `assistant:use`       | Messages oldest → newest, each with its turn and that turn's executions and cards                                                                                       |
+| POST   | `/assistant/conversations/{conversationId}/turns`    | `assistant:use`       | Ask: SSE with `accept: text/event-stream`, else JSON; rate class `expensive`                                                                                            |
+| POST   | `/assistant/turns/{turnId}/cancel`                   | `assistant:use`       | Cancel an own running turn → `202`                                                                                                                                      |
+| GET    | `/assistant/executions/{executionId}`                | `assistant:use`       | One own tool execution: card and metadata                                                                                                                               |
+| POST   | `/assistant/executions/{executionId}/more`           | `assistant:use`       | Next page of a list result, without a model call; returns a new execution; rate class `expensive`                                                                       |
+| GET    | `/assistant/confirmations/{confirmationId}`          | `assistant:use`       | One own confirmation (`{ confirmation: ConfirmationView }`, any session, never the token); a `pending` row past its expiry is shown `expired` (AI-2)                    |
+| POST   | `/assistant/confirmations/{confirmationId}/confirm`  | `assistant:use`       | Confirm a proposed write: `{ token, actionDigest, reauth? }` → `200 { confirmation, execution }`; same session family only; rate class `sensitive` (AI-2)               |
+| POST   | `/assistant/confirmations/{confirmationId}/cancel`   | `assistant:use`       | Cancel a pending proposal (no body, no token; works after a reload) → `200 { confirmation }`; idempotent; rate class `sensitive` (AI-2)                                 |
+| GET    | `/assistant/reports/{reportId}`                      | `assistant:use`       | One own report (AI-R): `200 { report: ReportView, html: string \| null }`; `html` only while `available`; owner only (else `404`); `Cache-Control: no-store`; JSON only |
 
 ## Examples
 
@@ -325,6 +326,14 @@ The summary above is abbreviated. A write the operation itself refuses (for exam
 | `assistant_confirmation_state_changed`    | 409  | The target changed since the proposal (`details.httpStatus` when the re-read failed)                                                                                                            |
 | `assistant_reauth_required`               | 401  | A `high`-risk confirm without `reauth` and without a fresh re-authentication window                                                                                                             |
 | `assistant_reauth_failed`                 | 401  | Re-authentication failed (`details.reason`: `password`, `totp`, `totp_required`, `locked`, `inactive`; counts toward the sign-in lockout)                                                       |
+| `assistant_report_not_found`              | 404  | (AI-R) The report is not the caller's (organization, user, override id), unknown, or (proposal of `report_send_email`) not in this conversation                                                 |
+| `assistant_report_purged`                 | 410  | (AI-R) The report was deleted with the conversation content (proposal of `report_send_email`; the route answers `200` with `html: null`)                                                        |
+| `assistant_report_too_large`              | 413  | (AI-R) The rendered HTML exceeds `ASSISTANT_REPORT_MAX_HTML_BYTES` (generation, or a stored report too large to email)                                                                          |
+| `assistant_report_generation_limit`       | 429  | (AI-R) `ASSISTANT_REPORTS_PER_USER_PER_DAY` reports today (UTC); executor decision `denied_budget`                                                                                              |
+| `assistant_report_email_limit`            | 429  | (AI-R) Daily report emails of the user or organization used up (`scope: user \| tenant`); `denied_budget` at proposal, a failed confirmation (`429`, nothing written) at confirm                |
+| `assistant_report_sources_unavailable`    | 503  | (AI-R) No report source answered (every requested section omitted)                                                                                                                              |
+| `assistant_report_storage_failed`         | 502  | (AI-R) The report object could not be stored; the row becomes `failed`                                                                                                                          |
+| `assistant_report_invalid_window`         | 400  | (AI-R) A window the server refuses (`denied_schema`: `to` in the future, `from ≥ to`, longer than `REPORTS_MAX_RANGE_DAYS`)                                                                     |
 
 Turn failure codes (stream `turn.failed` and the stored turn's `errorCode`): `assistant_session_expired` (a loopback call answered `401`; sign in again and retry), `assistant_turn_limit` (rounds, tool calls or deadline), `assistant_refused` (the provider declined, with its category), `assistant_turn_abandoned` (the process stopped mid-turn; set by the sweeper), `assistant_provider_error`.
 
@@ -349,3 +358,66 @@ Executor decisions (per tool execution, never an HTTP error of the turn): `allow
 | Confirm and cancel requests      | the api rate class `sensitive`                                                              | `429 rate_limited`                          |
 
 Budgets are checked at turn start; a running turn may finish (overshoot of at most one turn). Usage is readable per day and model with `GET /assistant/usage` and in **Settings → AI assistant**.
+
+## Reports (step AI-R)
+
+Contract: [contracts §35.3](../architecture/contracts.md), design [note 31](../plan/steps/31-ai-chat-reports.md) D2, D5, D6.
+
+### Tools
+
+| Tool                | Input                                                                                                                                                                                                                                                                            | Result                                                                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `report_generate`   | `range?: '24h' \| '7d' \| '30d'` (default `7d`); `from?`, `to?` (ISO 8601, both or neither; replace `range`; at most `REPORTS_MAX_RANGE_DAYS`); `sections?`: unique, non-empty subset of `summary, traffic, threats, domains, delivery, processing, url_clicks, quarantine, ato` | `201`, card kind `report`, envelope `data = { ref, reportId, title, period, sections, omitted, figures }` (≤ 8 figures; never the HTML)                                                          |
+| `report_send_email` | `reportId?`: UUID or ref `@r<seq>.1` (default the latest available report of this conversation); `to?`: one plain ASCII address (default the user's own)                                                                                                                         | A `medium` confirmation (`confirmation.required`); after confirm `202`, card kind `message` "Report email queued to <address>", envelope `data = { deliveryId, reportId, to, status: 'queued' }` |
+
+Guard codes (decision `denied_guard`): `report_recipient_not_allowed` (the recipient rule, see [AI_SECURITY_STANDARDS.md](AI_SECURITY_STANDARDS.md#recipient-rule)) and `report_needs_organization` (a platform principal without an override).
+
+### Card kind `report`
+
+```json
+{
+  "version": "assistant-card/1",
+  "executionId": "0193a0c4-0000-7000-8000-00000000c001",
+  "tool": "report_generate",
+  "title": "Security report: Last 7 days",
+  "status": "ok",
+  "kind": "report",
+  "report": {
+    "reportId": "0193a0c4-0000-7000-8000-00000000a001",
+    "title": "Security report: Last 7 days",
+    "period": {
+      "from": "2026-11-16T09:00:00.000Z",
+      "to": "2026-11-23T09:00:00.000Z",
+      "granularity": "day",
+      "atoRange": "7d",
+      "label": "Last 7 days"
+    },
+    "generatedAt": "2026-11-23T09:00:00.000Z",
+    "sizeBytes": 182344,
+    "sections": [
+      "summary",
+      "traffic",
+      "threats",
+      "domains",
+      "delivery",
+      "processing",
+      "url_clicks"
+    ],
+    "omitted": [
+      { "section": "quarantine", "reason": "permission", "code": "quarantine:read" },
+      { "section": "ato", "reason": "permission", "code": "ato:read" }
+    ],
+    "figures": [{ "label": "Messages", "value": "12,480" }]
+  },
+  "portalLinks": [
+    { "label": "Open full size", "href": "/assistant/reports/0193a0c4-0000-7000-8000-00000000a001" }
+  ],
+  "refs": ["r1.1"]
+}
+```
+
+Omission reasons: `permission` (the caller lacks the source's permission; the source is never requested), `not_enabled` (ATO feature off), `unavailable` (the source answered non-2xx; `code` is its error code, e.g. `report_timeout`), `unexpected_response` (the source's shape did not parse).
+
+### `GET /assistant/reports/{reportId}`
+
+`200 { report: ReportView, html: string | null }` (`assistant-report-view/1`): `{ id, conversationId, executionId, status: pending|available|failed|purged, title, period: { from, to, granularity, atoRange }, sections, omitted: [{ section, reason, code|null }], figures, sizeBytes, sha256, templateVersion, createdAt, deliveries: [{ id, to|null, recipientKind: self|member|domain, status: queued|sent|failed, errorCode, requestedAt, sentAt }] }` (deliveries newest first, at most 20). `html` is the stored document only while the report is `available` and its object reads back with the stored SHA-256; a purged report answers `200` with `html: null` and `to: null` on its deliveries. `400` for a non-UUID id, `404 assistant_report_not_found` for anything not the caller's. The HTML is never served as `text/html`.

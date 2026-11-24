@@ -8,7 +8,7 @@ import {
   AI3_WRITES_TESTED_BY,
   CREDENTIAL_KEY_EXCEPTIONS,
 } from '../registry/manifest';
-import { OPERATION_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
+import { ALL_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
 import type { OperationTool } from '../registry/types';
 import { stateDigest } from './digest';
 import {
@@ -34,12 +34,24 @@ const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(opera
 const POLICY = '0193aaaa-0000-7000-8000-000000000002';
 
 describe('confirmation specs (D4)', () => {
-  it('one spec per AI-2 and AI-3 write, every one an enabled write of the registry', () => {
-    expect(CONFIRMATION_SPECS).toHaveLength(78);
+  it('one spec per AI-2, AI-3 and native AI-R write, every one an enabled write of the registry', () => {
+    expect(CONFIRMATION_SPECS).toHaveLength(79);
     expect(CONFIRMATION_SPECS.map((s) => s.operationId).sort()).toEqual(
-      [...Object.keys(AI2_WRITES_TESTED_BY), ...Object.keys(AI3_WRITES_TESTED_BY)].sort(),
+      [
+        ...Object.keys(AI2_WRITES_TESTED_BY),
+        ...Object.keys(AI3_WRITES_TESTED_BY),
+        'AssistantNative_reportSendEmail',
+      ].sort(),
     );
-    const enabledWrites = OPERATION_TOOLS.filter((t) => t.enabled && t.access === 'write');
+    expect(confirmationSpecOf('AssistantNative_reportSendEmail')).toEqual({
+      operationId: 'AssistantNative_reportSendEmail',
+      precondition: null,
+      native: 'report_send_email',
+    });
+    expect(CONFIRMATION_SPECS.filter((s) => s.native).map((s) => s.operationId)).toEqual([
+      'AssistantNative_reportSendEmail',
+    ]);
+    const enabledWrites = ALL_TOOLS.filter((t) => t.enabled && t.access === 'write');
     expect(enabledWrites.map((t) => t.operationId).sort()).toEqual(
       CONFIRMATION_SPECS.map((s) => s.operationId).sort(),
     );
@@ -47,7 +59,7 @@ describe('confirmation specs (D4)', () => {
   });
 
   it('the registry consistency rules hold for the generated registry', () => {
-    expect(registryConsistencyIssues(OPERATION_TOOLS)).toEqual([]);
+    expect(registryConsistencyIssues(ALL_TOOLS)).toEqual([]);
   });
 
   it('names the design D4 preconditions, state fields and CAS injections', () => {
@@ -256,7 +268,7 @@ describe('confirmation specs (D4)', () => {
 });
 
 describe('registry consistency rules (synthetic breaks)', () => {
-  const tools = OPERATION_TOOLS;
+  const tools = ALL_TOOLS;
   const replace = (name: string, patch: Partial<OperationTool>) =>
     tools.map((t) => (t.name === name ? { ...t, ...patch } : t));
 
@@ -872,7 +884,7 @@ describe('selected-item preconditions (D5)', () => {
 });
 
 describe('AI-3 registry consistency rules (synthetic breaks)', () => {
-  const tools = OPERATION_TOOLS;
+  const tools = ALL_TOOLS;
   const patch = (operationId: string, change: Partial<ConfirmationSpec>) =>
     CONFIRMATION_SPECS.map((s) => (s.operationId === operationId ? { ...s, ...change } : s));
   const issues = (operationId: string, change: Partial<ConfirmationSpec>) =>

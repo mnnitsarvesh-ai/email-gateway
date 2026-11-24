@@ -31,6 +31,10 @@ import { ConfirmationProposer } from '../../src/modules/assistant/services/confi
 import { ConfirmationViewsService } from '../../src/modules/assistant/services/confirmation-views.service';
 import { ConversationService } from '../../src/modules/assistant/services/conversation.service';
 import { ExecutionsService } from '../../src/modules/assistant/services/executions.service';
+import { NativeToolsService } from '../../src/modules/assistant/services/native-tools.service';
+import { ReportDeliveryService } from '../../src/modules/assistant/services/reports/report-delivery.service';
+import { ReportGeneratorService } from '../../src/modules/assistant/services/reports/report-generator.service';
+import { ReportsService } from '../../src/modules/assistant/services/reports/reports.service';
 import type { TurnSink } from '../../src/modules/assistant/services/sse-writer';
 import { ToolExecutorService } from '../../src/modules/assistant/services/tool-executor.service';
 import {
@@ -151,6 +155,11 @@ export interface AssistantHarness {
   retention: AssistantRetentionService;
   proposer: ConfirmationProposer;
   confirmations: ConfirmationService;
+  /** Step AI-R: the report services over `world.reportWorld`. */
+  reports: ReportsService;
+  generator: ReportGeneratorService;
+  delivery: ReportDeliveryService;
+  native: NativeToolsService;
   reauth: FakeReauthentication;
   /** The conversations repository double (tests may wrap a method). */
   conversationsRepo: ConversationsRepository;
@@ -213,6 +222,21 @@ export function createAssistantHarness(
   const usage = new AssistantUsageService(usageRepo, provider);
   const codec = new CursorCodec(config);
   const confirmationViews = new ConfirmationViewsService(confirmationsRepo, limits);
+  const reportsRepo = world.reportWorld.reportsDouble();
+  const deliveriesRepo = world.reportWorld.deliveriesDouble();
+  const directoryRepo = world.reportWorld.directoryDouble();
+  const store = world.reportWorld.storeDouble();
+  const reports = new ReportsService(reportsRepo, deliveriesRepo, store);
+  const generator = new ReportGeneratorService(c, reportsRepo, store, loopback, audit, metrics);
+  const delivery = new ReportDeliveryService(
+    c,
+    reportsRepo,
+    deliveriesRepo,
+    directoryRepo,
+    audit,
+    metrics,
+  );
+  const native = new NativeToolsService(generator, delivery);
   const conversations = new ConversationService(
     c,
     conversationsRepo,
@@ -225,8 +249,9 @@ export function createAssistantHarness(
     confirmationsRepo,
     confirmationViews,
     metrics,
+    reports,
   );
-  const proposer = new ConfirmationProposer(c, confirmationsRepo, loopback, limits, audit);
+  const proposer = new ConfirmationProposer(c, confirmationsRepo, loopback, limits, audit, native);
   const executor = new ToolExecutorService(
     c,
     executionsRepo,
@@ -235,6 +260,7 @@ export function createAssistantHarness(
     audit,
     metrics,
     proposer,
+    native,
   );
   const engine = new TurnEngineService(
     c,
@@ -269,6 +295,10 @@ export function createAssistantHarness(
     metrics,
     confirmationsRepo,
     audit,
+    reportsRepo,
+    deliveriesRepo,
+    store,
+    reports,
   );
   const confirmations = new ConfirmationService(
     c,
@@ -282,6 +312,7 @@ export function createAssistantHarness(
     runner,
     audit,
     metrics,
+    native,
   );
   const scope = scopeFromPrincipal(principal);
   let counter = 0;
@@ -304,6 +335,10 @@ export function createAssistantHarness(
     retention,
     proposer,
     confirmations,
+    reports,
+    generator,
+    delivery,
+    native,
     reauth,
     conversationsRepo,
     user: principal,

@@ -122,3 +122,33 @@ export function tokenMatches(token: unknown, hash: unknown): boolean {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Native report send (step AI-R D5)
+// ---------------------------------------------------------------------------------------------
+
+/** The state a `report_send_email` confirmation binds (design 31 D5 step 4). */
+export interface ReportSendState {
+  reportId: string;
+  /** SHA-256 of the stored HTML. */
+  sha256: string;
+  /** The report row status (`available` at proposal). */
+  status: string;
+  recipientKind: 'self' | 'member' | 'domain';
+}
+
+/**
+ * `sha256(canonicalJson({ reportId, sha256, status, recipientKind }))`: the preconditions'
+ * `stateDigest` of a `report_send_email` confirmation, recomputed at confirm (a different value →
+ * `409 assistant_confirmation_state_changed`).
+ */
+export function reportStateDigest(state: ReportSendState): string {
+  return sha256Hex(
+    canonicalJson({
+      reportId: state.reportId,
+      sha256: state.sha256,
+      status: state.status,
+      recipientKind: state.recipientKind,
+    }),
+  );
+}

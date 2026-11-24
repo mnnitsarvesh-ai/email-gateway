@@ -1,3 +1,4 @@
+import { normalizeRecipient } from '../reports/recipients';
 import { sanitizeText } from '../results/sanitize';
 
 /**
@@ -31,7 +32,15 @@ export interface ActionUpdate {
   resultSeq?: number | null;
   /** The result has a row ref `r<resultSeq>.1` (a record with a public id). */
   resultRowRef?: boolean;
+  /**
+   * `report_send_email` (step AI-R D5): the recipient of the stored request (passed in by the
+   * api; normalized and sanitized here, omitted from the line when it is not one address).
+   */
+  recipient?: string | null;
 }
+
+/** The native tool whose executed line names the queued recipient. */
+const REPORT_SEND_EMAIL_TOOL = 'report_send_email';
 
 const TOOL = /^[a-z0-9_]{1,64}$/;
 const CODE = /^[a-z0-9_.:-]{1,64}$/i;
@@ -54,6 +63,12 @@ export function actionUpdateLine(update: ActionUpdate): string {
   const error = codeOf(update.error);
   switch (update.status) {
     case 'executed': {
+      if (update.tool === REPORT_SEND_EMAIL_TOOL) {
+        const to = normalizeRecipient(update.recipient);
+        return `${head} the user confirmed it; the report email was queued${
+          to ? ` for ${sanitizeText(to, 254)}` : ''
+        } (HTTP ${http ?? 202}).`;
+      }
       const result = seqOf(update.resultSeq);
       const refs = result
         ? ` Result: ref r${result}${update.resultRowRef ? `, row ref r${result}.1` : ''}.`

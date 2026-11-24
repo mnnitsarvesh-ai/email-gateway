@@ -7,6 +7,7 @@ import {
   AssistantUsageController,
 } from './controllers/assistant.controller';
 import { AssistantConfirmationsController } from './controllers/confirmations.controller';
+import { AssistantReportsController } from './controllers/reports.controller';
 import {
   AssistantConversationsController,
   AssistantMessagesController,
@@ -19,6 +20,9 @@ import { AssistantSettingsRepository } from './repositories/assistant-settings.r
 import { ConfirmationsRepository } from './repositories/confirmations.repository';
 import { ConversationsRepository } from './repositories/conversations.repository';
 import { ExecutionsRepository } from './repositories/executions.repository';
+import { RecipientDirectoryRepository } from './repositories/recipient-directory.repository';
+import { ReportDeliveriesRepository } from './repositories/report-deliveries.repository';
+import { ReportsRepository } from './repositories/reports.repository';
 import { UsageRepository } from './repositories/usage.repository';
 import { AssistantAvailabilityService } from './services/assistant-availability.service';
 import { AssistantLimitsService } from './services/assistant-limits.service';
@@ -37,7 +41,12 @@ import { ConfirmationViewsService } from './services/confirmation-views.service'
 import { ConversationService } from './services/conversation.service';
 import { ExecutionsService } from './services/executions.service';
 import { LoopbackClient, LoopbackDispatcher } from './services/loopback-client';
+import { NativeToolsService } from './services/native-tools.service';
 import { AssistantReadPrimaryMiddleware } from './services/read-primary';
+import { ReportDeliveryService } from './services/reports/report-delivery.service';
+import { ReportGeneratorService } from './services/reports/report-generator.service';
+import { ReportObjectStore } from './services/reports/report-object-store';
+import { ReportsService } from './services/reports/reports.service';
 import { ToolExecutorService } from './services/tool-executor.service';
 import { TurnEngineService } from './services/turn-engine.service';
 
@@ -47,12 +56,20 @@ import { TurnEngineService } from './services/turn-engine.service';
  * (JSON or `assistant-stream/1`), cancellation and stored executions with their next pages.
  * Tools are existing `/api/v1` operations executed through the api's own HTTP pipeline with the
  * caller's credential (loopback); the module touches only its own `ai_chat_*` tables (plus the
- * acknowledging user's public id), publishes no message and changes no other module. From step
+ * acknowledging user's public id; step AI-R: the recipient lookups and one outbox event kind,
+ * below) and changes no other module. From step
  * AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md) the model may only PROPOSE
  * writes: a write runs only through `POST /assistant/confirmations/{id}/confirm` (ADR-0093
  * amended), whose high-risk re-authentication uses `ReauthenticationService` of `AuthModule`;
  * its precondition reads carry `x-eg-assistant-read-primary` (`AssistantReadPrimaryMiddleware`),
- * so the guarded GET routes read the writer, not a lagging replica.
+ * so the guarded GET routes read the writer, not a lagging replica. Step AI-R
+ * (docs/plan/steps/31-ai-chat-reports.md, ADR-0095) adds the native tools `report_generate`
+ * (fixed loopback reads of existing report operations, a server-rendered inert HTML report in
+ * the mail bucket via the global `S3Service`) and `report_send_email` (a confirmed delivery whose
+ * outbox event `assistant.report.email_requested.v1` the notification-worker sends), the route
+ * `GET /assistant/reports/{reportId}`, and two read-only lookups outside `ai_chat_*`
+ * (`RecipientDirectoryRepository`: the users and domains of the scope's organization, for the
+ * recipient rule only).
  */
 @Module({
   imports: [AuthModule],
@@ -66,6 +83,7 @@ import { TurnEngineService } from './services/turn-engine.service';
     AssistantTurnsController,
     AssistantExecutionsController,
     AssistantConfirmationsController,
+    AssistantReportsController,
   ],
   providers: [
     AssistantSettingsRepository,
@@ -73,6 +91,14 @@ import { TurnEngineService } from './services/turn-engine.service';
     ExecutionsRepository,
     ConfirmationsRepository,
     UsageRepository,
+    ReportsRepository,
+    ReportDeliveriesRepository,
+    RecipientDirectoryRepository,
+    ReportObjectStore,
+    ReportsService,
+    ReportGeneratorService,
+    ReportDeliveryService,
+    NativeToolsService,
     AssistantMetrics,
     { provide: LLM_PROVIDER_FACTORY, useValue: defaultLlmProviderFactory },
     AssistantProviderService,

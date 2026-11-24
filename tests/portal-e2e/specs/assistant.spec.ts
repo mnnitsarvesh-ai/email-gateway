@@ -39,13 +39,22 @@
  * domain pending verification; a self-escalation directive (`users_replace_roles` with the signed-in
  * admin's own id) is refused by the proposal guard before anything is stored: a "Not allowed in
  * chat" card and no confirmation. An invitation card on a phone; axe on every new state.
+ *
+ * Step AI-R (docs/plan/steps/31-ai-chat-reports.md §9 item 8, D9; I15–I17): "generate a security
+ * report" → a report card with the period and figures and the server's HTML in a sandboxed
+ * iframe (`sandbox=""`, `srcdoc`; its heading and charts checked through the frame locator); "Open
+ * full size" shows the same report on `/assistant/reports/<id>` and leads back to the
+ * conversation; "send this report to my email" → a medium-risk confirmation card → Confirm → the
+ * card's email list shows the delivery queued (sent once the stack's notification-worker ran);
+ * "send the report to someone@outside.test" → the "Not allowed in chat" card and no confirmation.
+ * The card on a phone; axe on every new state (including the frame's content).
  */
 import type { Page, Response } from '@playwright/test';
 import { nextTotp, signIn, user } from '../support/auth';
 import { me } from '../support/contract';
 import { expect, test } from '../support/fixtures';
 import { bff, writerDb } from '../support/messages';
-import { expectNoSeriousA11yViolations } from '../support/pages';
+import { expectNoSeriousA11yViolations, expectNoSeriousHtmlViolations } from '../support/pages';
 import { readState } from '../support/state';
 
 test.describe.configure({ timeout: 180_000 });
@@ -1005,5 +1014,170 @@ test.describe('phone viewport (identity confirmations)', () => {
     await cancelButton.click();
     await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
     expect(await deltaUser(email)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-R: HTML dashboard reports in chat and email delivery (design 31 §9 item 8).
+// ---------------------------------------------------------------------------------------------
+
+const REPORT_PATH = /^\/assistant\/reports\/([0-9a-f-]{36})$/;
+
+/** The newest report card of a scope (`Result: Security report: …`). */
+function reportCard(scope: ReturnType<Page['locator']> | Page) {
+  return scope.getByRole('region', { name: /^Result: Security report/ }).last();
+}
+
+/** The report frame is inert: every sandbox restriction on, the HTML only as `srcdoc`. */
+async function expectReportFrame(scope: ReturnType<Page['locator']>): Promise<void> {
+  const iframe = scope.locator('iframe[title="Security report"]');
+  await expect(iframe).toBeVisible({ timeout: 30_000 });
+  await expect(iframe).toHaveAttribute('sandbox', '');
+  await expect(iframe).not.toHaveAttribute('src', /.*/);
+  expect((await iframe.getAttribute('srcdoc'))?.length ?? 0).toBeGreaterThan(1_000);
+  const frame = scope.frameLocator('iframe[title="Security report"]');
+  await expect(frame.getByRole('heading', { level: 1, name: 'Security report' })).toBeVisible();
+  await expect(frame.locator('svg').first()).toBeAttached();
+  expect(await frame.locator('svg').count()).toBeGreaterThan(0);
+  // No script, link or external resource reached the frame's document (I16).
+  expect(await frame.locator('script, a[href], img[src], link, iframe').count()).toBe(0);
+}
+
+async function newestDeltaReport() {
+  return writerDb().aiChatReport.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId() },
+    select: { id: true, publicId: true, status: true },
+    orderBy: { id: 'desc' },
+  });
+}
+
+test('reports: generate a security report, open it full size, email it to me; an outside address is refused', async ({
+  page,
+}) => {
+  test.setTimeout(240_000);
+  const adminEmail = readState().users.deltaAdmin.email;
+  await signIn(page, 'deltaAdmin', { next: '/assistant' });
+  await expect(page.getByRole('heading', { level: 1, name: 'AI assistant' })).toBeVisible();
+  const conversation = page.getByRole('region', { name: 'Conversation' });
+  await page
+    .getByRole('complementary', { name: 'Conversation history' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+
+  // (a) A demo intent of the fake: report_generate over the last 7 days.
+  const turn = await ask(page, conversation, 'generate a security report');
+  expect(turn.status()).toBe(200);
+  await expectTurnDone(conversation);
+  await expect(conversation.getByText(/Your security report for .+ is ready below/)).toBeVisible({
+    timeout: 30_000,
+  });
+  const card = reportCard(conversation);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Last 7 days, UTC');
+  await expect(card.getByRole('list', { name: 'Key figures' })).toBeVisible();
+  await expectReportFrame(card);
+  const stored = await newestDeltaReport();
+  expect(stored.status).toBe('available');
+  await expect(card.getByText(/Not emailed yet/)).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'report card with the sandboxed report');
+  const html = await card.locator('iframe[title="Security report"]').getAttribute('srcdoc');
+  await expectNoSeriousHtmlViolations(page, html ?? '', 'the report HTML (frame content)');
+
+  // (b) Open full size: the same report on its own page, then back to the conversation.
+  await card.getByRole('link', { name: 'Open full size' }).click();
+  await expect(page).toHaveURL((url) => REPORT_PATH.test(url.pathname));
+  expect(REPORT_PATH.exec(new URL(page.url()).pathname)?.[1]).toBe(stored.publicId);
+  const main = page.locator('main');
+  await expect(main.getByRole('heading', { level: 1, name: /^Security report/ })).toBeVisible({
+    timeout: 20_000,
+  });
+  await expectReportFrame(main);
+  await expect(main.getByRole('button', { name: 'Download HTML' })).toBeEnabled();
+  await expectNoSeriousA11yViolations(page, 'full-size report page');
+  await main.getByRole('link', { name: 'Back to the conversation' }).click();
+  await expect(page).toHaveURL(/\/assistant\?conversation=[0-9a-f-]{36}$/);
+  const back = page.getByRole('region', { name: 'Conversation' });
+  await expectReportFrame(reportCard(back));
+
+  // (c) "send this report to my email": a medium-risk card, nothing sent before Confirm.
+  const before = await newestConfirmationId();
+  await ask(page, back, 'send this report to my email');
+  await expectTurnDone(back);
+  const sendCard = confirmationCard(back, 'Email security report');
+  await expect(sendCard).toBeVisible();
+  await expect(sendCard.getByText('Medium risk')).toBeVisible();
+  await expect(sendCard.getByRole('table', { name: 'What it applies to' })).toContainText(
+    adminEmail,
+  );
+  await expect(sendCard.getByRole('list', { name: 'Warnings' })).toContainText(
+    'Emails cannot be recalled after sending.',
+  );
+  await expectNoSeriousA11yViolations(page, 'report email confirmation (medium risk)');
+  expect(await writerDb().aiChatReportDelivery.count({ where: { reportId: stored.id } })).toBe(0);
+  await sendCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(sendCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  const delivery = await writerDb().aiChatReportDelivery.findFirstOrThrow({
+    where: { reportId: stored.id },
+    select: { status: true, recipientAddress: true },
+  });
+  expect(delivery.recipientAddress).toBe(adminEmail);
+  expect(['queued', 'sent']).toContain(delivery.status);
+  // The report card's email list follows (refreshed after the confirmation).
+  const emails = reportCard(back).getByRole('list', { name: 'Emails of this report' });
+  await expect(async () => {
+    await reportCard(back).getByRole('button', { name: 'Refresh' }).click();
+    await expect(emails.getByRole('listitem').first()).toContainText(adminEmail, {
+      timeout: 3_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  await expect(emails.getByRole('listitem').first()).toContainText(/Queued|Sent/);
+
+  // (d) An outside address: refused by the recipient guard (I17), no confirmation, no delivery.
+  const afterSend = await newestConfirmationId();
+  expect(afterSend).not.toBe(before);
+  await ask(page, back, 'send the report to someone@outside.test');
+  await expectTurnDone(back);
+  const denied = back
+    .getByRole('region', { name: /^Result: / })
+    .filter({ hasText: 'Not allowed in chat' })
+    .last();
+  await expect(denied).toBeVisible();
+  await expect(denied.getByRole('button')).toHaveCount(0);
+  await expect(denied).not.toContainText('denied_guard');
+  expect(await newestConfirmationId()).toBe(afterSend);
+  expect(await writerDb().aiChatReportDelivery.count({ where: { reportId: stored.id } })).toBe(1);
+  await expectNoSeriousA11yViolations(page, 'report email to an outside address refused');
+});
+
+test.describe('phone viewport (reports)', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('the report card and its frame fit the full-screen sheet', async ({ page }) => {
+    await signIn(page, 'deltaAdmin');
+    await expectLanded(page);
+    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    const sheet = panel(page);
+    await expect(sheet).toBeVisible();
+    await ask(page, sheet, 'security report for the last 24 hours');
+    await expectTurnDone(sheet);
+    const card = reportCard(sheet);
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await expectReportFrame(card);
+    const iframe = card.locator('iframe[title="Security report"]');
+    const frameBox = await iframe.boundingBox();
+    // 420 px below `md`, inside the card.
+    expect(Math.round(frameBox?.height ?? 0)).toBe(420);
+    const box = await card.boundingBox();
+    expect((box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 999) <= 390).toBe(true);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    const download = card.getByRole('button', { name: 'Download HTML' });
+    await download.scrollIntoViewIfNeeded();
+    await expect(download).toBeInViewport();
+    await expectNoSeriousA11yViolations(page, 'report card on a phone');
   });
 });

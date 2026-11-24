@@ -23,9 +23,9 @@ import type {
 /**
  * Phase the program has reached: tools of this phase and earlier are enabled (reads; writes with
  * a `testedBy` suite and a confirmation spec, step AI-2; identity and tenant administration
- * writes, step AI-3).
+ * writes, step AI-3; the native report tools, step AI-R, which adds no OpenAPI tool).
  */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-3';
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-R';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';

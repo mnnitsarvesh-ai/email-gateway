@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 422 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 422;
+/** Snapshot facts: 423 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 423;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -613,6 +613,22 @@ export const operations = {
     secretReplay: null,
     listKey: 'data',
     sort: ['seq'],
+    bffOnly: false,
+  },
+  AssistantReportsController_get_v1: {
+    operationId: 'AssistantReportsController_get_v1',
+    method: 'GET',
+    path: '/api/v1/assistant/reports/{reportId}',
+    tag: 'assistant',
+    permissions: [{ mode: 'all', permissions: ['assistant:use'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
     bffOnly: false,
   },
   AssistantSettingsController_get_v1: {
@@ -6973,6 +6989,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'GET',
     segments: ['assistant', 'executions', { param: 'executionId' }],
     operationId: 'AssistantExecutionsController_get_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['assistant', 'reports', { param: 'reportId' }],
+    operationId: 'AssistantReportsController_get_v1',
   },
   {
     method: 'GET',

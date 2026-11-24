@@ -3,6 +3,7 @@ import { guardNote } from '../confirmations/guards';
 import { confirmationSpecOf } from '../confirmations/specs';
 import { ASSISTANT_PROGRAM_PHASE, CONFIRMATION_SUPPORT_PHASE } from './manifest';
 import { API_PREFIX, phaseIndex, type RegistryBuild } from './build';
+import { NATIVE_TOOLS } from './native';
 import {
   PROGRAM_PHASES,
   TOOL_RISKS,
@@ -132,6 +133,8 @@ export function renderMatrix(
   const risks = countBy(build.tools, (tool) => tool.risk);
   const critical = build.notApplicable.filter((op) => op.risk === 'critical').length;
   const enabled = build.tools.filter((tool) => tool.enabled);
+  const natives = NATIVE_TOOLS;
+  const nativeEnabled = natives.filter((tool) => tool.enabled);
   const missing = build.tools.filter((tool) => tool.status === 'MISSING');
   const missingReads = missing.filter((tool) => tool.access === 'read').length;
 
@@ -157,6 +160,7 @@ export function renderMatrix(
     `- By phase: ${PROGRAM_PHASES.filter((phase) => phases.has(phase))
       .map((phase) => `${phase} ${phases.get(phase)}`)
       .join(', ')}.`,
+    `- Native assistant tools (not OpenAPI operations, step AI-R): ${natives.length} (enabled ${nativeEnabled.length}: read ${nativeEnabled.filter((t) => t.access === 'read').length}, write ${nativeEnabled.filter((t) => t.access === 'write').length}); enabled chat tools in all: ${enabled.length + nativeEnabled.length} (read ${[...enabled, ...nativeEnabled].filter((t) => t.access === 'read').length}, write ${[...enabled, ...nativeEnabled].filter((t) => t.access === 'write').length}).`,
     `- By risk (tools): ${TOOL_RISKS.filter((risk) => risks.has(risk))
       .map((risk) => `${risk} ${risks.get(risk)}`)
       .join(', ')}.`,
@@ -181,6 +185,36 @@ export function renderMatrix(
     }
     lines.push(row.line);
   }
-  lines.push('');
+  lines.push(
+    '',
+    '## Native assistant tools',
+    '',
+    'Registry records that are not OpenAPI operations (step AI-R, design `docs/plan/steps/31-ai-chat-reports.md` D1, ADR-0095): the api runs them with its own services (`report_generate`: a fixed composition of loopback reads of the report routes, rendered server-side to static HTML; `report_send_email`: a confirmed email of a generated report through the notification mailer). Their `native:` paths never reach the loopback.',
+    '',
+    NATIVE_HEADER,
+    `|${' --- |'.repeat(11)}`,
+    ...natives.map(nativeRow),
+    '',
+  );
   return lines.join('\n');
+}
+
+const NATIVE_HEADER =
+  '| Chat tool | Operation id | Path | Permission | R/W | Risk | Confirm | Status | Phase | Portal page | Test coverage |';
+
+function nativeRow(tool: OperationTool): string {
+  const cells = [
+    toolCell(tool),
+    `\`${tool.operationId}\``,
+    `\`${tool.pathTemplate}\``,
+    permissionText(tool.requirement),
+    tool.access === 'read' ? 'R' : 'W',
+    tool.risk,
+    confirmCell(tool),
+    tool.status,
+    tool.phase,
+    tool.portalRoute ?? '-',
+    tool.testedBy ? `\`${tool.testedBy}\`` : '-',
+  ];
+  return `| ${cells.join(' | ')} |`;
 }

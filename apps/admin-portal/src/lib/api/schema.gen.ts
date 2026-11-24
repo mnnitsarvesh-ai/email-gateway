@@ -635,6 +635,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/assistant/reports/{reportId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an assistant report
+     * @description One of your own security reports generated in chat (`report_generate`): its metadata (`assistant-report-view/1`: status, period, sections, omitted sections with their reasons, summary figures, size, SHA-256, template version) with its emails (newest first, at most 20; the address is null after the content purge) and, while the report is `available`, the stored HTML. The HTML is a self-contained, inert document (no script, no link, no external resource) and is served only inside this JSON: show it in a sandboxed iframe (`srcdoc`, `sandbox=""`). `html` is null for `pending`, `failed` and `purged` reports (purged with the conversation content: still `200`, so the card can show the state). A report belongs to the user, organization (and platform override) that generated it; any other report answers `404 assistant_report_not_found`. `Cache-Control: no-store`. Users only (API keys `403 user_required`); the tenant always comes from your session.
+     */
+    get: operations['AssistantReportsController_get_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/assistant/settings': {
     parameters: {
       query?: never;
@@ -13245,7 +13265,7 @@ export interface operations {
                   value: string | number | boolean | null;
                 }[];
                 /** @enum {string} */
-                kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                kind: 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
                 message?: string;
                 /** @description A next page exists (POST …/more) */
                 nextCursor?: boolean;
@@ -13255,6 +13275,62 @@ export interface operations {
                   ref?: string;
                 }[];
                 refs: string[];
+                /** @description Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML */
+                report?: {
+                  /** @description Summary figures (formatted) */
+                  figures: {
+                    label: string;
+                    value: string;
+                  }[];
+                  /** Format: date-time */
+                  generatedAt: string;
+                  /** @description Requested sections that are not in the report, and why */
+                  omitted: {
+                    /** @description The missing permission (`quarantine:read`) or the source error code */
+                    code?: string;
+                    /** @enum {string} */
+                    reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                    /** @enum {string} */
+                    section:
+                      | 'summary'
+                      | 'traffic'
+                      | 'threats'
+                      | 'domains'
+                      | 'delivery'
+                      | 'processing'
+                      | 'url_clicks'
+                      | 'quarantine'
+                      | 'ato';
+                  }[];
+                  period: {
+                    /** @enum {string|null} */
+                    atoRange: '24h' | '7d' | '30d' | null;
+                    /** Format: date-time */
+                    from: string;
+                    /** @enum {string} */
+                    granularity: 'hour' | 'day';
+                    /** @description `Last 7 days`, or the explicit window in UTC */
+                    label: string;
+                    /** Format: date-time */
+                    to: string;
+                  };
+                  /** Format: uuid */
+                  reportId: string;
+                  /** @description Sections in the report, in order */
+                  sections: (
+                    | 'summary'
+                    | 'traffic'
+                    | 'threats'
+                    | 'domains'
+                    | 'delivery'
+                    | 'processing'
+                    | 'url_clicks'
+                    | 'quarantine'
+                    | 'ato'
+                  )[];
+                  sizeBytes: number;
+                  title: string;
+                };
                 rows?: {
                   [key: string]: string | number | boolean | null;
                 }[];
@@ -13360,7 +13436,7 @@ export interface operations {
               /** Format: date-time */
               createdAt: string;
               /**
-               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)
                * @enum {string}
                */
               decision:
@@ -13373,6 +13449,7 @@ export interface operations {
                 | 'denied_ref'
                 | 'denied_budget'
                 | 'denied_guard';
+              /** @description The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503) */
               errorCode: string | null;
               hasMore: boolean;
               httpStatus: number | null;
@@ -14570,7 +14647,7 @@ export interface operations {
                     value: string | number | boolean | null;
                   }[];
                   /** @enum {string} */
-                  kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                  kind: 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
                   message?: string;
                   /** @description A next page exists (POST …/more) */
                   nextCursor?: boolean;
@@ -14580,6 +14657,62 @@ export interface operations {
                     ref?: string;
                   }[];
                   refs: string[];
+                  /** @description Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML */
+                  report?: {
+                    /** @description Summary figures (formatted) */
+                    figures: {
+                      label: string;
+                      value: string;
+                    }[];
+                    /** Format: date-time */
+                    generatedAt: string;
+                    /** @description Requested sections that are not in the report, and why */
+                    omitted: {
+                      /** @description The missing permission (`quarantine:read`) or the source error code */
+                      code?: string;
+                      /** @enum {string} */
+                      reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                      /** @enum {string} */
+                      section:
+                        | 'summary'
+                        | 'traffic'
+                        | 'threats'
+                        | 'domains'
+                        | 'delivery'
+                        | 'processing'
+                        | 'url_clicks'
+                        | 'quarantine'
+                        | 'ato';
+                    }[];
+                    period: {
+                      /** @enum {string|null} */
+                      atoRange: '24h' | '7d' | '30d' | null;
+                      /** Format: date-time */
+                      from: string;
+                      /** @enum {string} */
+                      granularity: 'hour' | 'day';
+                      /** @description `Last 7 days`, or the explicit window in UTC */
+                      label: string;
+                      /** Format: date-time */
+                      to: string;
+                    };
+                    /** Format: uuid */
+                    reportId: string;
+                    /** @description Sections in the report, in order */
+                    sections: (
+                      | 'summary'
+                      | 'traffic'
+                      | 'threats'
+                      | 'domains'
+                      | 'delivery'
+                      | 'processing'
+                      | 'url_clicks'
+                      | 'quarantine'
+                      | 'ato'
+                    )[];
+                    sizeBytes: number;
+                    title: string;
+                  };
                   rows?: {
                     [key: string]: string | number | boolean | null;
                   }[];
@@ -14685,7 +14818,7 @@ export interface operations {
                 /** Format: date-time */
                 createdAt: string;
                 /**
-                 * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+                 * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)
                  * @enum {string}
                  */
                 decision:
@@ -14698,6 +14831,7 @@ export interface operations {
                   | 'denied_ref'
                   | 'denied_budget'
                   | 'denied_guard';
+                /** @description The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503) */
                 errorCode: string | null;
                 hasMore: boolean;
                 httpStatus: number | null;
@@ -15033,7 +15167,7 @@ export interface operations {
                   value: string | number | boolean | null;
                 }[];
                 /** @enum {string} */
-                kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+                kind: 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
                 message?: string;
                 /** @description A next page exists (POST …/more) */
                 nextCursor?: boolean;
@@ -15043,6 +15177,62 @@ export interface operations {
                   ref?: string;
                 }[];
                 refs: string[];
+                /** @description Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML */
+                report?: {
+                  /** @description Summary figures (formatted) */
+                  figures: {
+                    label: string;
+                    value: string;
+                  }[];
+                  /** Format: date-time */
+                  generatedAt: string;
+                  /** @description Requested sections that are not in the report, and why */
+                  omitted: {
+                    /** @description The missing permission (`quarantine:read`) or the source error code */
+                    code?: string;
+                    /** @enum {string} */
+                    reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                    /** @enum {string} */
+                    section:
+                      | 'summary'
+                      | 'traffic'
+                      | 'threats'
+                      | 'domains'
+                      | 'delivery'
+                      | 'processing'
+                      | 'url_clicks'
+                      | 'quarantine'
+                      | 'ato';
+                  }[];
+                  period: {
+                    /** @enum {string|null} */
+                    atoRange: '24h' | '7d' | '30d' | null;
+                    /** Format: date-time */
+                    from: string;
+                    /** @enum {string} */
+                    granularity: 'hour' | 'day';
+                    /** @description `Last 7 days`, or the explicit window in UTC */
+                    label: string;
+                    /** Format: date-time */
+                    to: string;
+                  };
+                  /** Format: uuid */
+                  reportId: string;
+                  /** @description Sections in the report, in order */
+                  sections: (
+                    | 'summary'
+                    | 'traffic'
+                    | 'threats'
+                    | 'domains'
+                    | 'delivery'
+                    | 'processing'
+                    | 'url_clicks'
+                    | 'quarantine'
+                    | 'ato'
+                  )[];
+                  sizeBytes: number;
+                  title: string;
+                };
                 rows?: {
                   [key: string]: string | number | boolean | null;
                 }[];
@@ -15148,7 +15338,7 @@ export interface operations {
               /** Format: date-time */
               createdAt: string;
               /**
-               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+               * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)
                * @enum {string}
                */
               decision:
@@ -15161,6 +15351,7 @@ export interface operations {
                 | 'denied_ref'
                 | 'denied_budget'
                 | 'denied_guard';
+              /** @description The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503) */
               errorCode: string | null;
               hasMore: boolean;
               httpStatus: number | null;
@@ -15480,7 +15671,7 @@ export interface operations {
                 value: string | number | boolean | null;
               }[];
               /** @enum {string} */
-              kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+              kind: 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
               message?: string;
               /** @description A next page exists (POST …/more) */
               nextCursor?: boolean;
@@ -15490,6 +15681,62 @@ export interface operations {
                 ref?: string;
               }[];
               refs: string[];
+              /** @description Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML */
+              report?: {
+                /** @description Summary figures (formatted) */
+                figures: {
+                  label: string;
+                  value: string;
+                }[];
+                /** Format: date-time */
+                generatedAt: string;
+                /** @description Requested sections that are not in the report, and why */
+                omitted: {
+                  /** @description The missing permission (`quarantine:read`) or the source error code */
+                  code?: string;
+                  /** @enum {string} */
+                  reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                  /** @enum {string} */
+                  section:
+                    | 'summary'
+                    | 'traffic'
+                    | 'threats'
+                    | 'domains'
+                    | 'delivery'
+                    | 'processing'
+                    | 'url_clicks'
+                    | 'quarantine'
+                    | 'ato';
+                }[];
+                period: {
+                  /** @enum {string|null} */
+                  atoRange: '24h' | '7d' | '30d' | null;
+                  /** Format: date-time */
+                  from: string;
+                  /** @enum {string} */
+                  granularity: 'hour' | 'day';
+                  /** @description `Last 7 days`, or the explicit window in UTC */
+                  label: string;
+                  /** Format: date-time */
+                  to: string;
+                };
+                /** Format: uuid */
+                reportId: string;
+                /** @description Sections in the report, in order */
+                sections: (
+                  | 'summary'
+                  | 'traffic'
+                  | 'threats'
+                  | 'domains'
+                  | 'delivery'
+                  | 'processing'
+                  | 'url_clicks'
+                  | 'quarantine'
+                  | 'ato'
+                )[];
+                sizeBytes: number;
+                title: string;
+              };
               rows?: {
                 [key: string]: string | number | boolean | null;
               }[];
@@ -15595,7 +15842,7 @@ export interface operations {
             /** Format: date-time */
             createdAt: string;
             /**
-             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)
              * @enum {string}
              */
             decision:
@@ -15608,6 +15855,7 @@ export interface operations {
               | 'denied_ref'
               | 'denied_budget'
               | 'denied_guard';
+            /** @description The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503) */
             errorCode: string | null;
             hasMore: boolean;
             httpStatus: number | null;
@@ -15815,7 +16063,7 @@ export interface operations {
                 value: string | number | boolean | null;
               }[];
               /** @enum {string} */
-              kind: 'table' | 'kv' | 'series' | 'message' | 'error';
+              kind: 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
               message?: string;
               /** @description A next page exists (POST …/more) */
               nextCursor?: boolean;
@@ -15825,6 +16073,62 @@ export interface operations {
                 ref?: string;
               }[];
               refs: string[];
+              /** @description Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML */
+              report?: {
+                /** @description Summary figures (formatted) */
+                figures: {
+                  label: string;
+                  value: string;
+                }[];
+                /** Format: date-time */
+                generatedAt: string;
+                /** @description Requested sections that are not in the report, and why */
+                omitted: {
+                  /** @description The missing permission (`quarantine:read`) or the source error code */
+                  code?: string;
+                  /** @enum {string} */
+                  reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                  /** @enum {string} */
+                  section:
+                    | 'summary'
+                    | 'traffic'
+                    | 'threats'
+                    | 'domains'
+                    | 'delivery'
+                    | 'processing'
+                    | 'url_clicks'
+                    | 'quarantine'
+                    | 'ato';
+                }[];
+                period: {
+                  /** @enum {string|null} */
+                  atoRange: '24h' | '7d' | '30d' | null;
+                  /** Format: date-time */
+                  from: string;
+                  /** @enum {string} */
+                  granularity: 'hour' | 'day';
+                  /** @description `Last 7 days`, or the explicit window in UTC */
+                  label: string;
+                  /** Format: date-time */
+                  to: string;
+                };
+                /** Format: uuid */
+                reportId: string;
+                /** @description Sections in the report, in order */
+                sections: (
+                  | 'summary'
+                  | 'traffic'
+                  | 'threats'
+                  | 'domains'
+                  | 'delivery'
+                  | 'processing'
+                  | 'url_clicks'
+                  | 'quarantine'
+                  | 'ato'
+                )[];
+                sizeBytes: number;
+                title: string;
+              };
               rows?: {
                 [key: string]: string | number | boolean | null;
               }[];
@@ -15930,7 +16234,7 @@ export interface operations {
             /** Format: date-time */
             createdAt: string;
             /**
-             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)
+             * @description The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)
              * @enum {string}
              */
             decision:
@@ -15943,6 +16247,7 @@ export interface operations {
               | 'denied_ref'
               | 'denied_budget'
               | 'denied_guard';
+            /** @description The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503) */
             errorCode: string | null;
             hasMore: boolean;
             httpStatus: number | null;
@@ -16120,6 +16425,253 @@ export interface operations {
           'application/json': {
             /** @enum {string} */
             code: 'inconsistent_read' | 'service_unavailable' | 'assistant_disabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  AssistantReportsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Report public id (UUID) */
+        reportId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The report and its HTML */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description The self-contained, inert report HTML (no script, link or external resource) for a sandboxed iframe (`srcdoc`, `sandbox=""`); null unless `status` is `available` */
+            html: string | null;
+            /** @description assistant-report-view/1: metadata of a report; the HTML is never stored in MySQL */
+            report: {
+              /** Format: uuid */
+              conversationId: string;
+              /** Format: date-time */
+              createdAt: string;
+              /** @description Emails of this report, newest first (at most 20) */
+              deliveries: {
+                /** @description Why a delivery failed (codes only) */
+                errorCode: string | null;
+                /** Format: uuid */
+                id: string;
+                /**
+                 * @description Your own address, a user of your organization, an address in a verified domain
+                 * @enum {string}
+                 */
+                recipientKind: 'self' | 'member' | 'domain';
+                /** Format: date-time */
+                requestedAt: string;
+                /** Format: date-time */
+                sentAt: string | null;
+                /** @enum {string} */
+                status: 'queued' | 'sent' | 'failed';
+                /** @description The recipient address; null after the content purge */
+                to: string | null;
+              }[];
+              /**
+               * Format: uuid
+               * @description The `report_generate` execution (when available)
+               */
+              executionId: string | null;
+              figures: {
+                label: string;
+                value: string;
+              }[];
+              /** Format: uuid */
+              id: string;
+              omitted: {
+                code: string | null;
+                /** @enum {string} */
+                reason: 'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+                /** @enum {string} */
+                section:
+                  | 'summary'
+                  | 'traffic'
+                  | 'threats'
+                  | 'domains'
+                  | 'delivery'
+                  | 'processing'
+                  | 'url_clicks'
+                  | 'quarantine'
+                  | 'ato';
+              }[];
+              period: {
+                /**
+                 * @description The account-takeover overview range
+                 * @enum {string|null}
+                 */
+                atoRange: '24h' | '7d' | '30d' | null;
+                /** Format: date-time */
+                from: string;
+                /** @enum {string} */
+                granularity: 'hour' | 'day';
+                /** Format: date-time */
+                to: string;
+              };
+              sections: (
+                | 'summary'
+                | 'traffic'
+                | 'threats'
+                | 'domains'
+                | 'delivery'
+                | 'processing'
+                | 'url_clicks'
+                | 'quarantine'
+                | 'ato'
+              )[];
+              /** @description SHA-256 (hex) of the stored HTML */
+              sha256: string | null;
+              sizeBytes: number | null;
+              /** @enum {string} */
+              status: 'pending' | 'available' | 'failed' | 'purged';
+              templateVersion: string;
+              title: string;
+            };
+          };
+        };
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'user_required' | 'mfa_enrollment_required';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown report, or one of another user, organization or platform override */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'assistant_report_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
             correlationId?: string;
             error: string;
             message: string;

@@ -29,6 +29,11 @@ import type {
  * - Follow-ups (D8): "disable/enable the second one" (the newest `policy_management_list` result),
  *   "publish it" (the newest succeeded `policy_management_create` of the action updates) and, step
  *   AI-3, "verify it" / "verify the domain" (the newest succeeded `domains_create`).
+ * - Reports (step AI-R D10): "generate a (security) report", "security dashboard", "report for
+ *   the last 24 hours / 7 days / 30 days" → `report_generate { range }`; "send this report to my
+ *   email" / "email me the report" → `report_send_email {}`; "send the report to <address>" →
+ *   `report_send_email { to }`. After a `report_generate` result the answer cites the envelope's
+ *   figures only ("Your security report for the last 7 days is ready below: …").
  * - After tool results: a deterministic template ("Found N records." / the coded error / the
  *   pending-confirmation sentence).
  * - `obedient: true` (tests only): follows instruction-shaped text found in tool results
@@ -250,11 +255,51 @@ export const FAKE_PLANS: readonly Plan[] = [
   },
 ];
 
+/** A report intent (step AI-R D10): the tool and its arguments from the message's match. */
+interface ReportIntent {
+  pattern: RegExp;
+  tool: 'report_generate' | 'report_send_email';
+  args: (match: RegExpExecArray, lower: string) => Record<string, unknown>;
+}
+
+/** The range a report message names (default the last 7 days). */
+export function fakeReportRange(lower: string): '24h' | '7d' | '30d' {
+  if (/\b(24\s*h(ours?)?|24-hours?|last day|today|one day)\b/.test(lower)) return '24h';
+  if (/\b(30\s*d(ays)?|30-days?|month|monthly)\b/.test(lower)) return '30d';
+  return '7d';
+}
+
+/** The report intents, checked before the other demo intents (first match wins). */
+export const FAKE_REPORT_INTENTS: readonly ReportIntent[] = [
+  {
+    pattern:
+      /\b(?:send|e-?mail|mail)\s+(?:this|the|my)\s+(?:security\s+)?report\s+to\s+(?:my\s+(?:own\s+)?(?:e-?mail|address|inbox)|me)\b/,
+    tool: 'report_send_email',
+    args: () => ({}),
+  },
+  {
+    pattern: /\be-?mail\s+me\s+(?:this|the)\s+(?:security\s+)?report\b/,
+    tool: 'report_send_email',
+    args: () => ({}),
+  },
+  {
+    pattern: /\b(?:send|e-?mail|mail)\s+(?:this|the)\s+(?:security\s+)?report\s+to\s+(\S+@\S+)/,
+    tool: 'report_send_email',
+    args: (match) => ({ to: emailOf(match[1]) }),
+  },
+  {
+    pattern:
+      /\b(?:generate|create|build|make|show|give me)\s+(?:me\s+)?(?:an?\s+)?(?:security\s+)?(?:report|dashboard)\b|\bsecurity (?:report|dashboard)\b|\breport for the last\b/,
+    tool: 'report_generate',
+    args: (_match, lower) => ({ range: fakeReportRange(lower) }),
+  },
+];
+
 export const FAKE_PENDING_TEXT =
   'I prepared this change. Review it in the confirmation card; nothing changes until you confirm it.';
 
 export const FAKE_HELP_TEXT =
-  'I can look things up for you, for example: "show active policies", "what was quarantined today", "show incidents", "journaling status", "archive status", "list domains", "list users", "traffic report today" or "ATO overview".';
+  'I can look things up for you, for example: "show active policies", "what was quarantined today", "show incidents", "journaling status", "archive status", "list domains", "list users", "traffic report today", "ATO overview" or "generate a security report".';
 export const FAKE_UNAVAILABLE_TEXT =
   'That information is not available to you in chat. Ask an administrator for access or use the portal.';
 
@@ -372,6 +417,26 @@ function planMayContinue(content: string): boolean {
   return disposition === null || disposition === 'quarantine';
 }
 
+/** The answer after a `report_generate` result: the period and figures of the envelope only. */
+function reportAnswer(envelope: Record<string, unknown>): string {
+  const data = asRecord(envelope.data);
+  const period = asRecord(data?.period);
+  const label = typeof period?.label === 'string' ? period.label : '';
+  const when = /^Last /.test(label)
+    ? `the ${label.toLowerCase()}`
+    : label || 'the requested period';
+  const figures = Array.isArray(data?.figures) ? (data.figures as unknown[]) : [];
+  const value = (name: string): string | null => {
+    const figure = figures.map(asRecord).find((f) => f?.label === name);
+    return typeof figure?.value === 'string' ? figure.value : null;
+  };
+  const parts = [
+    value('Messages') !== null ? `${value('Messages')} messages` : null,
+    value('Threats') !== null ? `${value('Threats')} threats` : null,
+  ].filter((part): part is string => part !== null);
+  return `Your security report for ${when} is ready below${parts.length > 0 ? `: ${parts.join(', ')}` : ''}.`;
+}
+
 function summarizeResult(content: string): string {
   let parsed: unknown;
   try {
@@ -384,6 +449,7 @@ function summarizeResult(content: string): string {
   if (record.status === 'error') return `The request failed: ${String(record.code)}.`;
   if (record.status === 'denied') return `The request was not allowed: ${String(record.code)}.`;
   if (record.status === 'pending_confirmation') return FAKE_PENDING_TEXT;
+  if (record.status === 'ok' && record.tool === 'report_generate') return reportAnswer(record);
   if (record.status === 'ok') {
     const invalid = invalidDefinition(record);
     if (invalid !== null)
@@ -582,6 +648,14 @@ export class FakeProvider implements LlmProvider {
       return Promise.resolve(
         this.respond(input, '', [callTool('call_tool', { name, arguments: json })], onDelta),
       );
+    }
+
+    for (const report of FAKE_REPORT_INTENTS) {
+      const found = report.pattern.exec(lower);
+      if (!found) continue;
+      if (!inCatalogue(report.tool))
+        return Promise.resolve(this.respond(input, FAKE_UNAVAILABLE_TEXT, [], onDelta));
+      return Promise.resolve(call(report.tool, report.args(found, lower)));
     }
 
     if (plan && match) {

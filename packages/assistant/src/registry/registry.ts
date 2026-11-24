@@ -5,24 +5,29 @@ import {
   OPERATION_TOOLS,
   REGISTRY_VERSION,
 } from './operations.generated';
+import { NATIVE_TOOLS, isNativeTool } from './native';
 import type { NotApplicableOperation, OperationTool, PermissionRequirement } from './types';
 
 /**
  * Runtime helpers over the generated registry (design D3–D5): lookup, the permission pre-filter
  * view of the catalogue, the catalogue index of the system prompt, `describe_tool` output and the
- * cached Ajv validators of tool arguments.
+ * cached Ajv validators of tool arguments. Step AI-R (design 31 D1): the native tools are part of
+ * every helper through `ALL_TOOLS`.
  */
 
-export { NOT_APPLICABLE_OPERATIONS, OPERATION_TOOLS, REGISTRY_VERSION };
+export { NATIVE_TOOLS, NOT_APPLICABLE_OPERATIONS, OPERATION_TOOLS, REGISTRY_VERSION, isNativeTool };
+
+/** The generated operation tools followed by the native tools (step AI-R D1). */
+export const ALL_TOOLS: readonly OperationTool[] = [...OPERATION_TOOLS, ...NATIVE_TOOLS];
 
 const BY_NAME: ReadonlyMap<string, OperationTool> = new Map(
-  OPERATION_TOOLS.map((tool) => [tool.name, tool]),
+  ALL_TOOLS.map((tool) => [tool.name, tool]),
 );
 const BY_OPERATION: ReadonlyMap<string, OperationTool | NotApplicableOperation> = new Map<
   string,
   OperationTool | NotApplicableOperation
 >([
-  ...OPERATION_TOOLS.map((tool) => [tool.operationId, tool] as const),
+  ...ALL_TOOLS.map((tool) => [tool.operationId, tool] as const),
   ...NOT_APPLICABLE_OPERATIONS.map((op) => [op.operationId, op] as const),
 ]);
 
@@ -57,7 +62,7 @@ export function satisfiesRequirement(
 export function enabledTools(
   principalPermissions: Iterable<string>,
   isPlatformUser: boolean,
-  tools: readonly OperationTool[] = OPERATION_TOOLS,
+  tools: readonly OperationTool[] = ALL_TOOLS,
 ): OperationTool[] {
   const held = new Set(principalPermissions);
   return tools.filter(
@@ -84,17 +89,22 @@ function enumValues(schema: unknown): string[] | null {
   return value.filter((v) => v !== null).map((v) => String(v));
 }
 
-/** One signature line (D4): `name(param?: a|b, cursor?, limit?) - Summary`. */
+/**
+ * One signature line (D4): `name(param?: a|b, cursor?, limit?) - Summary`. A native tool lists
+ * its input properties in schema order (it has no path or query parameters).
+ */
 export function toolSignature(tool: OperationTool): string {
   const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
   const required = new Set((tool.inputSchema.required as string[] | undefined) ?? []);
   const paging = ['cursor', 'limit'];
-  const names = [
-    ...tool.pathParams,
-    ...tool.queryParams.filter((name) => !paging.includes(name)),
-    ...(tool.hasBody ? ['body'] : []),
-    ...tool.queryParams.filter((name) => paging.includes(name)),
-  ];
+  const names = isNativeTool(tool)
+    ? Object.keys(properties)
+    : [
+        ...tool.pathParams,
+        ...tool.queryParams.filter((name) => !paging.includes(name)),
+        ...(tool.hasBody ? ['body'] : []),
+        ...tool.queryParams.filter((name) => paging.includes(name)),
+      ];
   const params = names.map((name) => paramSignature(name, properties[name], required.has(name)));
   return `${tool.name}(${params.join(', ')}) - ${tool.summary}`;
 }

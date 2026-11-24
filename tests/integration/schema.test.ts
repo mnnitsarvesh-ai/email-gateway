@@ -30,7 +30,8 @@ import { stack } from './support/env';
  * columns of step 8.1 (23-journaling-archiving.md §3) and the security incident and account
  * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3) and the provider
  * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3) and the AI
- * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3).
+ * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3) and
+ * the AI assistant reports and report emails of step AI-R (31-ai-chat-reports.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -332,17 +333,20 @@ const TENANT_OWNED = [
   'ai_chat_usage_daily',
   // Step AI-2 §3: the assistant's action confirmations (organization_id NOT NULL).
   'ai_chat_action_confirmations',
+  // Step AI-R §3: the assistant's reports and report emails (organization_id NOT NULL on both).
+  'ai_chat_reports',
+  'ai_chat_report_deliveries',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 176 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 178 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(176);
-    expect(new Set(ALL_TABLES).size).toBe(176);
+    expect(ALL_TABLES).toHaveLength(178);
+    expect(new Set(ALL_TABLES).size).toBe(178);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -6224,6 +6228,217 @@ describe('step AI-2 assistant action confirmations schema (29-ai-chat-confirmati
     } finally {
       await prisma.aiChatActionConfirmation.deleteMany({ where: { organizationId } });
       await prisma.aiChatToolExecution.deleteMany({ where: { organizationId } });
+      await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step AI-R assistant reports schema (31-ai-chat-reports.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  it('creates ai_chat_reports (not partitioned) with exactly the §3 columns, keys and foreign keys', async () => {
+    const table = 'ai_chat_reports';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      platform_override_id: ['char(36)', 'YES'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      execution_id: ['bigint unsigned', 'YES'],
+      status: ["enum('pending','available','failed','purged')", 'NO'],
+      title: ['varchar(200)', 'NO'],
+      period_from: ['datetime(3)', 'NO'],
+      period_to: ['datetime(3)', 'NO'],
+      granularity: ["enum('hour','day')", 'NO'],
+      sections: ['json', 'NO'],
+      figures: ['json', 'NO'],
+      template_version: ['varchar(32)', 'NO'],
+      object_key: ['varchar(512)', 'YES'],
+      size_bytes: ['int unsigned', 'YES'],
+      sha256: ['char(64)', 'YES'],
+      error_code: ['varchar(64)', 'YES'],
+      purged_at: ['datetime(3)', 'YES'],
+      object_deleted_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    // Metadata only: the HTML lives in object storage (I5, D6).
+    expect([...cols.keys()].some((k) => /\.(html|content|body)$/.test(k))).toBe(false);
+    expect(cols.get(`${table}.status`)?.columnDefault).toBe('pending');
+    expect(PARTITIONED).not.toHaveProperty(table);
+
+    const idx = await indexes(table);
+    expect(idx.get('ai_chat_reports_public_id_key')).toEqual({
+      columns: ['public_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_reports_execution_id_key')).toEqual({
+      columns: ['execution_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_reports_organization_id_user_id_created_at_idx')).toEqual({
+      columns: ['organization_id', 'user_id', 'created_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_reports_conversation_id_status_created_at_idx')).toEqual({
+      columns: ['conversation_id', 'status', 'created_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_reports_status_object_deleted_at_id_idx')).toEqual({
+      columns: ['status', 'object_deleted_at', 'id'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_reports_status_created_at_idx')).toEqual({
+      columns: ['status', 'created_at'],
+      unique: false,
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'conversation_id', referenced: 'ai_chat_conversations', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('creates ai_chat_report_deliveries (not partitioned) with exactly the §3 columns, keys and foreign keys', async () => {
+    const table = 'ai_chat_report_deliveries';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      report_id: ['bigint unsigned', 'NO'],
+      confirmation_id: ['bigint unsigned', 'NO'],
+      recipient_address: ['varchar(320)', 'YES'],
+      recipient_sha256: ['char(64)', 'NO'],
+      recipient_kind: ["enum('self','member','domain')", 'NO'],
+      status: ["enum('queued','sent','failed')", 'NO'],
+      error_code: ['varchar(64)', 'YES'],
+      message_id: ['varchar(255)', 'YES'],
+      size_bytes: ['int unsigned', 'NO'],
+      correlation_id: ['varchar(128)', 'NO'],
+      requested_at: ['datetime(3)', 'NO'],
+      sent_at: ['datetime(3)', 'YES'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get(`${table}.status`)?.columnDefault).toBe('queued');
+    expect(PARTITIONED).not.toHaveProperty(table);
+
+    const idx = await indexes(table);
+    expect(idx.get('ai_chat_report_deliveries_public_id_key')).toEqual({
+      columns: ['public_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_report_deliveries_confirmation_id_key')).toEqual({
+      columns: ['confirmation_id'],
+      unique: true,
+    });
+    expect(idx.get('ai_chat_report_deliveries_organization_id_requested_at_idx')).toEqual({
+      columns: ['organization_id', 'requested_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_report_deliveries_organization_id_user_id_requested__idx')).toEqual({
+      columns: ['organization_id', 'user_id', 'requested_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_report_deliveries_report_id_requested_at_idx')).toEqual({
+      columns: ['report_id', 'requested_at'],
+      unique: false,
+    });
+    expect(idx.get('ai_chat_report_deliveries_status_requested_at_idx')).toEqual({
+      columns: ['status', 'requested_at'],
+      unique: false,
+    });
+    // No FK on user_id, confirmation_id or conversation_id (the report cascades).
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'report_id', referenced: 'ai_chat_reports', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('keeps one delivery per confirmation, restricts the organization and cascades with the conversation', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `air-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      const conversation = await prisma.aiChatConversation.create({
+        data: { organizationId, userId: user.id },
+      });
+      const report = await prisma.aiChatReport.create({
+        data: {
+          organizationId,
+          userId: user.id,
+          conversationId: conversation.id,
+          title: 'Security report',
+          periodFrom: new Date(Date.now() - 7 * 86_400_000),
+          periodTo: new Date(),
+          granularity: 'day',
+          sections: { included: ['summary', 'traffic'], omitted: [] },
+          figures: [{ label: 'Messages', value: '0' }],
+          templateVersion: 'assistant-report/1',
+        },
+      });
+      expect(report).toMatchObject({
+        status: 'pending',
+        executionId: null,
+        objectKey: null,
+        sizeBytes: null,
+        sha256: null,
+      });
+      expect(report.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      const row = {
+        organizationId,
+        userId: user.id,
+        conversationId: conversation.id,
+        reportId: report.id,
+        confirmationId: 9_000_000_000n + BigInt(report.id),
+        recipientAddress: `air-${suffix}@example.test`,
+        recipientSha256: 'c'.repeat(64),
+        recipientKind: 'self' as const,
+        sizeBytes: 1024,
+        correlationId: `it-${suffix}.1`,
+      };
+      const delivery = await prisma.aiChatReportDelivery.create({ data: row });
+      expect(delivery).toMatchObject({ status: 'queued', sentAt: null, messageId: null });
+      // One delivery per confirmation (D5: the confirmation's state machine, no Idempotency-Key).
+      await expect(prisma.aiChatReportDelivery.create({ data: row })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // The organization cannot go while its report rows reference it (the purge deletes them).
+      await expect(
+        prisma.$executeRaw`DELETE FROM organizations WHERE id = ${organizationId}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // Hard delete of the conversation takes its reports and their deliveries (FK backstop).
+      await prisma.aiChatConversation.delete({ where: { id: conversation.id } });
+      expect(await prisma.aiChatReport.count({ where: { id: report.id } })).toBe(0);
+      expect(await prisma.aiChatReportDelivery.count({ where: { id: delivery.id } })).toBe(0);
+    } finally {
+      await prisma.aiChatReportDelivery.deleteMany({ where: { organizationId } });
+      await prisma.aiChatReport.deleteMany({ where: { organizationId } });
       await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
       await prisma.user.deleteMany({ where: { organizationId } });
       await cleanup();

@@ -11,7 +11,13 @@ import {
   renderWithProviders,
 } from '@/test';
 import { ApiError } from '@/lib/api/errors';
-import { ConfirmationCard, confirmationRefusal, formatRemaining } from './confirmation-card';
+import {
+  ConfirmationCard,
+  awaitsApproval,
+  confirmationRefusal,
+  formatRemaining,
+  outcomeText,
+} from './confirmation-card';
 import {
   CONFIRMATION_ID,
   CONFIRMATION_TOKEN,
@@ -19,6 +25,8 @@ import {
   HIGH_VIEW_OVERRIDES,
   MEDIUM_SUMMARY,
   POLICY_ID,
+  REPORT_ID,
+  REPORT_SEND_SUMMARY,
   RESULT_CARD,
   RESULT_EXECUTION_ID,
   ROLES_VIEW_OVERRIDES,
@@ -721,5 +729,78 @@ describe('ConfirmationCard (step AI-3 identity and tenant administration)', () =
     ]);
     expectRequestMatchesContract('AssistantConfirmationsController_confirm_v1', bodies[0]);
     await expectNoAxeViolations(container);
+  });
+});
+
+describe('ConfirmationCard: report_send_email (step AI-R D9, generic template)', () => {
+  it('renders the report email summary: recipient, impact, warnings and the report link', async () => {
+    const { container } = renderWithProviders(
+      <Harness
+        view={confirmationView({
+          tool: 'report_send_email',
+          operationId: 'AssistantNative_reportSendEmail',
+          risk: 'medium',
+          summary: REPORT_SEND_SUMMARY,
+        })}
+      />,
+    );
+    const card = region('Email security report');
+    expect(within(card).getByText('Medium risk')).toBeInTheDocument();
+    expect(card).toHaveTextContent(
+      'Sends the security report as an HTML email to analyst@example.test.',
+    );
+    const target = within(card).getByRole('table', { name: 'What it applies to' });
+    for (const label of ['Report', 'Period', 'Recipient', 'Recipient type', 'Size'])
+      expect(within(target).getByRole('rowheader', { name: label })).toBeInTheDocument();
+    expect(target).toHaveTextContent('analyst@example.test');
+    expect(target).toHaveTextContent('your own address');
+    expect(within(card).queryByRole('table', { name: 'Changes' })).not.toBeInTheDocument();
+    const impact = within(card).getByRole('list', { name: 'Impact' });
+    expect(within(impact).getAllByRole('listitem')).toHaveLength(2);
+    const warnings = within(card).getByRole('list', { name: 'Warnings' });
+    expect(warnings).toHaveTextContent('Emails cannot be recalled after sending.');
+    expect(warnings).toHaveTextContent('9 of 10 report emails left today for you');
+    expect(card).toHaveTextContent('This cannot be undone.');
+    expect(card).toHaveTextContent('POST native:report_send_email');
+    expect(within(card).getByRole('button', { name: 'Confirm' })).toBeEnabled();
+    await expectNoAxeViolations(container);
+  });
+
+  it('links the executed send to the full-size report (an allow-listed route)', () => {
+    renderWithProviders(
+      <Harness
+        token={null}
+        view={executedView({
+          tool: 'report_send_email',
+          operationId: 'AssistantNative_reportSendEmail',
+          risk: 'medium',
+          summary: REPORT_SEND_SUMMARY,
+          result: { httpStatus: 202, error: null },
+        })}
+      />,
+    );
+    const card = region('Email security report');
+    expect(within(card).getByRole('link', { name: 'Open it in the portal' })).toHaveAttribute(
+      'href',
+      `/assistant/reports/${REPORT_ID}`,
+    );
+    expect(within(card).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  });
+});
+
+describe('awaitsApproval', () => {
+  it('treats a 202 as "waiting for approval" except for queued work such as a report email', () => {
+    const executed = (tool: string, httpStatus: number) => ({
+      ...confirmationView(),
+      tool,
+      status: 'executed' as const,
+      result: { httpStatus, error: null },
+    });
+    expect(awaitsApproval(executed('quarantine_release', 202))).toBe(true);
+    expect(awaitsApproval(executed('quarantine_release', 200))).toBe(false);
+    expect(awaitsApproval(executed('report_send_email', 202))).toBe(false);
+    expect(outcomeText(executed('report_send_email', 202), null)).toBe(
+      'Done: the action was applied.',
+    );
   });
 });

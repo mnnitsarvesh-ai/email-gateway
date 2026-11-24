@@ -59,6 +59,13 @@ export type AssistantConfig = Pick<
   | 'ASSISTANT_CONFIRMATION_TTL_SECONDS'
   | 'ASSISTANT_REAUTH_WINDOW_SECONDS'
   | 'ASSISTANT_MAX_PENDING_CONFIRMATIONS'
+  | 'ASSISTANT_REPORTS_ENABLED'
+  | 'ASSISTANT_REPORT_EMAIL_ENABLED'
+  | 'ASSISTANT_REPORTS_PER_USER_PER_DAY'
+  | 'ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY'
+  | 'ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY'
+  | 'ASSISTANT_REPORT_MAX_HTML_BYTES'
+  | 'REPORTS_MAX_RANGE_DAYS'
 >;
 
 /** Redis keys (prefix `as:`, contracts §35). */
@@ -136,12 +143,43 @@ export const ASSISTANT_AUDIT = {
   confirmationCancelled: 'assistant.confirmation_cancelled',
   confirmationExpired: 'assistant.confirmation_expired',
   confirmationRefused: 'assistant.confirmation_refused',
+  // Step AI-R D11.
+  reportGenerated: 'assistant.report_generated',
+  reportEmailRequested: 'assistant.report_email_requested',
 } as const;
 export const AUDIT_RESOURCE = {
   execution: 'assistant_tool_execution',
   conversation: 'assistant_conversation',
   settings: 'assistant_settings',
   confirmation: 'assistant_action_confirmation',
+  // Step AI-R D11.
+  report: 'assistant_report',
+  delivery: 'assistant_report_delivery',
+} as const;
+
+/** Reports (step AI-R, docs/plan/steps/31-ai-chat-reports.md D2, D6, D7). */
+/** Concurrent source reads of one `report_generate` (D2 step 5). */
+export const REPORT_SOURCE_CONCURRENCY = 4;
+/** Object key prefix below `org/<organizationId>/` (D6). */
+export const REPORT_OBJECT_PREFIX = 'assistant/report/';
+/** Content type of a stored report (D6). */
+export const REPORT_CONTENT_TYPE = 'text/html; charset=utf-8';
+/** A `pending` report older than this is abandoned (crash between the put and the commit, D7). */
+export const REPORT_PENDING_MAX_AGE_MS = 60 * 60_000;
+/** A `queued` delivery older than this failed (beyond the notification queue's 24 h, D7). */
+export const REPORT_DELIVERY_TIMEOUT_MS = 25 * 60 * 60_000;
+/** Deliveries listed in a report view, newest first (§4.1). */
+export const REPORT_VIEW_DELIVERIES = 20;
+/** Report objects deleted per retention batch (D7). */
+export const REPORT_OBJECT_BATCH = 100;
+/** Outbox aggregate type of a report email (§3, §4.3). */
+export const REPORT_DELIVERY_AGGREGATE_TYPE = 'assistant_report_delivery';
+/** Row error codes of reports and deliveries (D2, D7; never answer a request). */
+export const REPORT_ROW_CODES = {
+  storageFailed: 'assistant_report_storage_failed',
+  abandoned: 'assistant_report_abandoned',
+  purged: 'assistant_report_purged',
+  emailTimeout: 'assistant_report_email_timeout',
 } as const;
 
 /** Confirmations (step AI-2 D1, D2, D6, D7). */

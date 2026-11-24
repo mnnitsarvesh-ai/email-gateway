@@ -590,6 +590,12 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     changedAt: '2026-11-17T09:00:00.000Z',
     failingChecks: ['token.acquire', 'domain.provider_verified'],
   },
+  // Step AI-R D8: ids and the request time only (no address, HTML or figures).
+  'assistant.report.email_requested.v1': {
+    deliveryId: '01890a5d-ac96-774b-bcce-b302099a80b1',
+    reportId: '01890a5d-ac96-774b-bcce-b302099a80b0',
+    requestedAt: '2026-11-23T08:00:00.000Z',
+  },
 };
 
 /**

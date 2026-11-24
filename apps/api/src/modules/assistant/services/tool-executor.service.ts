@@ -8,9 +8,12 @@ import {
   type ExecutionDecision,
   type ExecutionStatus,
   extractNextCursor,
-  type GuardKind,
   guardRefusal,
+  isNativeTool,
   type OperationTool,
+  reportCard,
+  reportEnvelope,
+  reportRefs,
   sanitizeText,
   toCard,
   toPendingCard,
@@ -31,13 +34,14 @@ import {
   AUDIT_PARAMS_MAX_BYTES,
   AUDIT_RESOURCE,
   type AssistantConfig,
-  CORRELATION_ID_PATTERN,
   PARAMS_REDACTED_MAX_BYTES,
 } from '../assistant.constants';
-import { sameRequest } from '../domain/confirmation-binding';
+import { nativeRequestOf, sameRequest } from '../domain/confirmation-binding';
+import { executionCorrelationId } from '../domain/correlation';
 import { DENIAL_MESSAGES, refusalMessageOf } from '../domain/denials';
 import {
   lookupTool,
+  nativeSwitchesOf,
   scopeOrganizationPublicId,
   toolAvailability,
   toolTitleOf,
@@ -53,6 +57,8 @@ import {
   type LoopbackResult,
   unsafePathParams,
 } from './loopback-client';
+import { NativeToolsService } from './native-tools.service';
+import type { GeneratedReport } from './reports/report-generator.service';
 
 /**
  * The tool executor of the assistant (step AI-1 D5, ADR-0091). For each `call_tool`, in order,
@@ -101,6 +107,11 @@ export interface ExecutionContext {
   signal: AbortSignal;
   /** Next conversation-wide execution sequence (callers hold the conversation's turn lock). */
   allocateSeq: () => number;
+  /**
+   * The organization's display name as the turn read it (`GET /auth/me`; step AI-R: the report
+   * header). Absent outside turns.
+   */
+  organizationName?: string | null;
 }
 
 export interface ToolCallRequest {
@@ -154,7 +165,15 @@ export interface RunOptions {
     executionRowId: bigint,
     outcome: ExecutionOutcome,
   ) => Promise<void>;
+  /**
+   * A confirmed native write (step AI-R D5 step 13): the confirmation row it executes (the
+   * delivery's unique `confirmation_id`).
+   */
+  native?: { confirmationRowId: bigint; confirmationPublicId: string };
 }
+
+/** Audit metadata of a refusal: the guard and its facts (codes, a domain, a hash; never values). */
+export type DenyExtra = { guard?: string; code?: string } & Record<string, string | undefined>;
 
 /** An answer as the recorder sees it (an API response or an own error). */
 interface Answer {
@@ -181,18 +200,23 @@ export class StoredRequestMismatchError extends Error {
   }
 }
 
+/** The arguments with the values of `keys` replaced (never stored or audited). */
+export function withRedacted(
+  args: Record<string, unknown>,
+  keys: readonly string[] | undefined,
+): Record<string, unknown> {
+  if (!keys || keys.length === 0) return args;
+  const out = { ...args };
+  for (const key of keys) if (key in out) out[key] = '[redacted]';
+  return out;
+}
+
 /** Arguments of the form `@r<seq>.<row>` (D5 step 5). */
 export const REF_ARGUMENT = /^@r(\d{1,9})\.(\d{1,5})$/;
 
 const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
-/** The execution's correlation id `<base>.<seq>` within `^[A-Za-z0-9._:-]{8,128}$`. */
-export function executionCorrelationId(base: string, seq: number): string {
-  const suffix = `.${seq}`;
-  const safe = CORRELATION_ID_PATTERN.test(base) ? base : 'assistant';
-  const id = `${safe.slice(0, 128 - suffix.length)}${suffix}`;
-  return id.length >= 8 ? id : `assistant${suffix}`;
-}
+export { executionCorrelationId } from '../domain/correlation';
 
 /**
  * Credential-scrubbed parameters capped at `maxBytes` (the audit pattern drops credential keys
@@ -265,6 +289,7 @@ export class ToolExecutorService {
     private readonly audit: AuditService,
     private readonly metrics: AssistantMetrics,
     private readonly proposer: ConfirmationProposer,
+    private readonly native: NativeToolsService,
   ) {}
 
   now(): Date {
@@ -315,7 +340,7 @@ export class ToolExecutorService {
       );
     }
     const found = lookup.tool;
-    const availability = toolAvailability(ctx.principal, found);
+    const availability = toolAvailability(ctx.principal, found, nativeSwitchesOf(this.config));
     if (!availability.available && availability.reason === 'disabled') {
       return this.deny(
         base,
@@ -447,6 +472,8 @@ export class ToolExecutorService {
       }
       return this.propose(base, found, spec, checked);
     }
+    // Step AI-R D2: a native read runs its own composition, never the loopback of its path.
+    if (isNativeTool(found)) return this.runNativeRead(base, found, resolved);
     return this.run(base, found, resolved);
   }
 
@@ -479,9 +506,13 @@ export class ToolExecutorService {
           tool,
           prepared.decision,
           prepared.message,
-          args,
+          withRedacted(args, prepared.redact),
           null,
-          prepared.guard ? { guard: prepared.guard } : {},
+          {
+            ...(prepared.auditExtra ?? {}),
+            ...(prepared.guard ? { guard: prepared.guard } : {}),
+            ...(prepared.code ? { code: prepared.code } : {}),
+          },
         );
       case 'failed':
         return this.record(base, tool, args, this.interpret(prepared.result), latencyMs);
@@ -569,6 +600,11 @@ export class ToolExecutorService {
     args: Record<string, unknown>,
     options: RunOptions = {},
   ): Promise<ExecutionOutcome> {
+    if (isNativeTool(tool)) {
+      return tool.access === 'write'
+        ? this.runNativeWrite(base, tool, args, options)
+        : this.runNativeRead(base, tool, args);
+    }
     const { ctx, seq, executionId } = base;
     const correlationId = executionCorrelationId(ctx.correlationBase, seq);
     const request = buildLoopbackRequest(tool, args);
@@ -593,6 +629,228 @@ export class ToolExecutorService {
     return this.record(base, tool, args, this.interpret(result), latencyMs, options.afterPersist);
   }
 
+  /**
+   * Step AI-R D2: `report_generate` through `NativeToolsService` (fixed loopback reads, the
+   * renderer, object storage); the report row becomes `available` and is audited in the
+   * execution's transaction. Refusals and failures are recorded like any other call.
+   */
+  private async runNativeRead(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const started = Date.now();
+    const result = await this.native.read(tool, { ctx, executionId, seq, args });
+    const latencyMs = Date.now() - started;
+    this.metrics.toolSeconds.observe({ module: tool.module }, latencyMs / 1000);
+    switch (result.kind) {
+      case 'denied':
+        return this.deny(
+          base,
+          tool,
+          result.decision,
+          result.message,
+          withRedacted(args, result.redact),
+          null,
+          {
+            ...(result.auditExtra ?? {}),
+            ...(result.guard ? { guard: result.guard } : {}),
+            ...(result.code ? { code: result.code } : {}),
+          },
+        );
+      case 'failed':
+        return this.record(
+          base,
+          tool,
+          args,
+          this.ownError(
+            result.status,
+            result.httpStatus,
+            result.recordedStatus,
+            result.code,
+            result.message,
+          ),
+          latencyMs,
+        );
+      case 'report':
+        return this.recordReport(base, tool, args, result, latencyMs);
+    }
+  }
+
+  /** The `report` card, envelope and refs of a generated report (D2 steps 10–11). */
+  private async recordReport(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    generated: GeneratedReport,
+    latencyMs: number,
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const card = reportCard({ executionId, refSeq: seq, report: generated.report });
+    const envelope = reportEnvelope({ refSeq: seq, report: generated.report });
+    const refs = reportRefs(seq, generated.report.reportId);
+    const outcome = this.outcomeOf(base, tool, {
+      status: 'succeeded',
+      httpStatus: 201,
+      errorCode: null,
+      envelope,
+      card,
+      hasMore: false,
+      latencyMs,
+    });
+    await this.persist(
+      ctx,
+      outcome,
+      tool,
+      {
+        correlationId: executionCorrelationId(ctx.correlationBase, seq),
+        params: redactParams(args, PARAMS_REDACTED_MAX_BYTES).value,
+        args,
+        refs: refs as unknown as Prisma.InputJsonValue,
+        nextCursor: null,
+        latencyMs,
+      },
+      (tx, rowId) => this.native.finalizeRead(ctx, generated, rowId, tx),
+    );
+    this.countAllowed(tool, 'succeeded');
+    return outcome;
+  }
+
+  /**
+   * Step AI-R D5 step 13: a confirmed native write. `NativeToolsService.execute` runs inside the
+   * execution's transaction (lock, recount, delivery, outbox, audit), then the execution row, its
+   * audit and the confirmation's outcome (`afterPersist`) in the same transaction.
+   */
+  private async runNativeWrite(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    options: RunOptions,
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const request = nativeRequestOf(tool, args);
+    if (options.expectedRequest && !sameRequest(request, options.expectedRequest)) {
+      throw new StoredRequestMismatchError();
+    }
+    if (!options.native) throw new Error('a native write runs only from its confirmation');
+    const native = options.native;
+    const correlationId = executionCorrelationId(ctx.correlationBase, seq);
+    const started = Date.now();
+    const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES).value;
+    const outcome = await this.runner.run(async (tx) => {
+      const result = await this.native.execute(
+        tool,
+        {
+          principal: ctx.principal,
+          owner: ctx.owner,
+          conversationId: ctx.conversationId,
+          clientIp: ctx.clientIp,
+        },
+        args,
+        {
+          executionId,
+          correlationId,
+          confirmationRowId: native.confirmationRowId,
+          confirmationPublicId: native.confirmationPublicId,
+        },
+        tx,
+      );
+      const latencyMs = Date.now() - started;
+      const built =
+        result.kind === 'queued'
+          ? this.outcomeOf(base, tool, {
+              status: 'succeeded',
+              httpStatus: result.httpStatus,
+              errorCode: null,
+              envelope: result.envelope(seq),
+              card: result.card(executionId),
+              hasMore: false,
+              latencyMs,
+            })
+          : this.assemble(
+              base,
+              tool,
+              args,
+              this.ownError(
+                result.status,
+                result.httpStatus,
+                result.recordedStatus,
+                result.code,
+                result.message,
+              ),
+              latencyMs,
+            ).outcome;
+      const rowId = await this.writeRows(tx, ctx, built, tool, {
+        correlationId,
+        params,
+        args,
+        refs: null,
+        nextCursor: null,
+        latencyMs,
+      });
+      if (options.afterPersist) await options.afterPersist(tx, rowId, built);
+      return built;
+    });
+    this.metrics.toolSeconds.observe({ module: tool.module }, (Date.now() - started) / 1000);
+    this.countAllowed(tool, outcome.status);
+    return outcome;
+  }
+
+  /** An allowed execution's outcome from its parts. */
+  private outcomeOf(
+    base: Base,
+    tool: OperationTool,
+    parts: {
+      status: ExecutionStatus;
+      httpStatus: number | null;
+      errorCode: string | null;
+      envelope: ToolResultEnvelope;
+      card: AssistantCard;
+      hasMore: boolean;
+      latencyMs: number;
+    },
+  ): ExecutionOutcome {
+    const { ctx, seq, executionId } = base;
+    return {
+      executionId,
+      seq,
+      tool: tool.name,
+      title: base.title,
+      decision: 'allowed',
+      status: parts.status,
+      httpStatus: parts.httpStatus,
+      errorCode: parts.errorCode,
+      envelope: parts.envelope,
+      card: parts.card,
+      denialMessage: null,
+      sessionExpired: parts.httpStatus === 401,
+      confirmation: null,
+      view: this.viewOf(ctx, {
+        executionId,
+        seq,
+        tool,
+        name: tool.name,
+        decision: 'allowed',
+        status: parts.status,
+        httpStatus: parts.httpStatus,
+        errorCode: parts.errorCode,
+        card: parts.card,
+        hasMore: parts.hasMore,
+        latencyMs: parts.latencyMs,
+      }),
+    };
+  }
+
+  private countAllowed(tool: OperationTool, outcome: ExecutionStatus): void {
+    this.metrics.toolCalls.inc({
+      module: tool.module,
+      access: tool.access,
+      decision: 'allowed',
+      outcome,
+    });
+  }
+
   /** Card, envelope, execution row and audit of an answer (D5 step 8). */
   private async record(
     base: Base,
@@ -602,6 +860,27 @@ export class ToolExecutorService {
     latencyMs: number,
     afterPersist?: RunOptions['afterPersist'],
   ): Promise<ExecutionOutcome> {
+    const { ctx } = base;
+    const { outcome, extra } = this.assemble(base, tool, args, answer, latencyMs);
+    await this.persist(
+      ctx,
+      outcome,
+      tool,
+      extra,
+      afterPersist ? (tx, rowId) => afterPersist(tx, rowId, outcome) : undefined,
+    );
+    this.countAllowed(tool, answer.status);
+    return outcome;
+  }
+
+  /** The outcome and stored extras of an answer (card, minimized envelope, cursor). */
+  private assemble(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    answer: Answer,
+    latencyMs: number,
+  ): { outcome: ExecutionOutcome; extra: PersistExtra } {
     const { ctx, seq, executionId } = base;
     const correlationId = executionCorrelationId(ctx.correlationBase, seq);
     const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES);
@@ -631,38 +910,20 @@ export class ToolExecutorService {
     const errorCode =
       answer.errorCode ?? (finalEnvelope.status === 'error' ? finalEnvelope.code : null);
     const outcome: ExecutionOutcome = {
-      executionId,
-      seq,
-      tool: tool.name,
-      title: base.title,
-      decision: 'allowed',
-      status: answer.status,
-      httpStatus: answer.recordedStatus,
-      errorCode,
-      envelope: finalEnvelope,
-      card,
-      denialMessage: null,
-      sessionExpired: answer.recordedStatus === 401,
-      confirmation: null,
-      view: this.viewOf(ctx, {
-        executionId,
-        seq,
-        tool,
-        name: tool.name,
-        decision: 'allowed',
+      ...this.outcomeOf(base, tool, {
         status: answer.status,
         httpStatus: answer.recordedStatus,
         errorCode,
+        envelope: finalEnvelope,
         card,
         hasMore: nextCursor !== null,
         latencyMs,
       }),
+      sessionExpired: answer.recordedStatus === 401,
     };
-    await this.persist(
-      ctx,
+    return {
       outcome,
-      tool,
-      {
+      extra: {
         correlationId,
         params: params.value,
         args,
@@ -670,15 +931,7 @@ export class ToolExecutorService {
         nextCursor,
         latencyMs,
       },
-      afterPersist ? (tx, rowId) => afterPersist(tx, rowId, outcome) : undefined,
-    );
-    this.metrics.toolCalls.inc({
-      module: tool.module,
-      access: tool.access,
-      decision: 'allowed',
-      outcome: answer.status,
-    });
-    return outcome;
+    };
   }
 
   /** A coded failure of a proposal (definition invalid, row version unreadable, too large). */
@@ -757,15 +1010,18 @@ export class ToolExecutorService {
     message: string,
     args: Record<string, unknown>,
     portalRoute: string | null = null,
-    auditExtra: { guard?: GuardKind } = {},
+    extra: DenyExtra = {},
   ): Promise<ExecutionOutcome> {
     const { ctx, seq, executionId, name } = base;
+    // A specific refusal code (step AI-R: `assistant_report_email_limit`, …), else the decision.
+    const { code: specific, ...auditExtra } = extra;
+    const code = specific ?? decision;
     const envelope: ToolResultDenied = {
       kind: 'tool_result/1',
       tool: name,
       status: 'denied',
       decision,
-      code: decision,
+      code,
       message,
       ...(portalRoute ? { portalRoute } : {}),
     };
@@ -777,7 +1033,7 @@ export class ToolExecutorService {
       decision,
       status: 'refused',
       httpStatus: null,
-      errorCode: decision,
+      errorCode: code,
       envelope,
       card: null,
       denialMessage: message,
@@ -791,7 +1047,7 @@ export class ToolExecutorService {
         decision,
         status: 'refused',
         httpStatus: null,
-        errorCode: decision,
+        errorCode: code,
         card: null,
         hasMore: false,
         latencyMs: null,
@@ -854,7 +1110,7 @@ export class ToolExecutorService {
       status: v.status,
       httpStatus: v.httpStatus,
       errorCode: v.errorCode,
-      message: refusalMessageOf(v.decision, v.tool?.operationId ?? 'unknown'),
+      message: refusalMessageOf(v.decision, v.tool?.operationId ?? 'unknown', v.errorCode),
       hasMore: v.hasMore,
       card: v.card,
       latencyMs: v.latencyMs,
@@ -868,83 +1124,98 @@ export class ToolExecutorService {
     ctx: ExecutionContext,
     outcome: ExecutionOutcome,
     tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk'> | null,
-    extra: {
-      correlationId: string;
-      params: Prisma.InputJsonValue;
-      args: Record<string, unknown>;
-      refs: Prisma.InputJsonValue | null;
-      nextCursor: string | null;
-      latencyMs: number | null;
-      /** Further audit metadata (`guard` of a `denied_guard`; keys safe from the scrub). */
-      auditExtra?: { guard?: GuardKind };
-    },
+    extra: PersistExtra,
     also?: (tx: Prisma.TransactionClient, executionRowId: bigint) => Promise<void>,
   ): Promise<void> {
-    const resourceRef = resourceRefOf(tool, extra.args);
-    const auditParams = redactParams(extra.args, AUDIT_PARAMS_MAX_BYTES).value;
     await this.runner.run(async (tx) => {
-      const rowId = await this.executions.create(
-        ctx.owner,
-        {
-          publicId: outcome.executionId,
-          conversationId: ctx.conversationId,
-          turnId: ctx.turnId,
-          parentExecutionId: ctx.parentExecutionId,
-          seq: outcome.seq,
-          toolName: outcome.tool.slice(0, 96),
-          operationId: (tool?.operationId ?? 'unknown').slice(0, 128),
-          httpMethod: tool?.method ?? 'GET',
-          access: tool?.access ?? 'read',
-          risk: tool?.risk ?? 'read',
-          decision: outcome.decision,
-          status: outcome.status,
-          httpStatus: outcome.httpStatus,
-          errorCode: outcome.errorCode?.slice(0, 64) ?? null,
-          correlationId: extra.correlationId,
-          paramsRedacted: extra.params,
-          resourceRef,
-          resultCard: outcome.card as unknown as Prisma.InputJsonValue | null,
-          resultRefs: extra.refs,
-          nextCursor: extra.nextCursor,
-          latencyMs: extra.latencyMs,
-          createdAt: this.now(),
-        },
-        tx,
-      );
-      await this.audit.record(
-        {
-          organizationId: ctx.owner.scope.organizationId,
-          actor: this.audit.actorFrom(ctx.principal),
-          action:
-            outcome.decision === 'allowed'
-              ? ASSISTANT_AUDIT.toolExecuted
-              : ASSISTANT_AUDIT.toolDenied,
-          resourceType: AUDIT_RESOURCE.execution,
-          resourceId: outcome.executionId,
-          sourceIp: ctx.clientIp,
-          metadata: {
-            conversationId: ctx.conversationPublicId,
-            turnId: ctx.turnPublicId,
-            tool: outcome.tool,
-            operationId: tool?.operationId ?? null,
-            access: tool?.access ?? null,
-            risk: tool?.risk ?? null,
-            decision: outcome.decision,
-            status: outcome.status,
-            httpStatus: outcome.httpStatus,
-            // `errorCode` would be dropped by the audit credential-key scrub (`…code`): `error`.
-            error: outcome.errorCode,
-            resourceRef,
-            params: auditParams,
-            correlationId: extra.correlationId,
-            ...extra.auditExtra,
-          },
-        },
-        tx,
-      );
+      const rowId = await this.writeRows(tx, ctx, outcome, tool, extra);
       if (also) await also(tx, rowId);
     });
   }
+
+  /** The execution row and `assistant.tool_executed` / `tool_denied` inside `tx`. */
+  private async writeRows(
+    tx: Prisma.TransactionClient,
+    ctx: ExecutionContext,
+    outcome: ExecutionOutcome,
+    tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk'> | null,
+    extra: PersistExtra,
+  ): Promise<bigint> {
+    const resourceRef = resourceRefOf(tool, extra.args);
+    const auditParams = redactParams(extra.args, AUDIT_PARAMS_MAX_BYTES).value;
+    const rowId = await this.executions.create(
+      ctx.owner,
+      {
+        publicId: outcome.executionId,
+        conversationId: ctx.conversationId,
+        turnId: ctx.turnId,
+        parentExecutionId: ctx.parentExecutionId,
+        seq: outcome.seq,
+        toolName: outcome.tool.slice(0, 96),
+        operationId: (tool?.operationId ?? 'unknown').slice(0, 128),
+        httpMethod: tool?.method ?? 'GET',
+        access: tool?.access ?? 'read',
+        risk: tool?.risk ?? 'read',
+        decision: outcome.decision,
+        status: outcome.status,
+        httpStatus: outcome.httpStatus,
+        errorCode: outcome.errorCode?.slice(0, 64) ?? null,
+        correlationId: extra.correlationId,
+        paramsRedacted: extra.params,
+        resourceRef,
+        resultCard: outcome.card as unknown as Prisma.InputJsonValue | null,
+        resultRefs: extra.refs,
+        nextCursor: extra.nextCursor,
+        latencyMs: extra.latencyMs,
+        createdAt: this.now(),
+      },
+      tx,
+    );
+    await this.audit.record(
+      {
+        organizationId: ctx.owner.scope.organizationId,
+        actor: this.audit.actorFrom(ctx.principal),
+        action:
+          outcome.decision === 'allowed'
+            ? ASSISTANT_AUDIT.toolExecuted
+            : ASSISTANT_AUDIT.toolDenied,
+        resourceType: AUDIT_RESOURCE.execution,
+        resourceId: outcome.executionId,
+        sourceIp: ctx.clientIp,
+        metadata: {
+          conversationId: ctx.conversationPublicId,
+          turnId: ctx.turnPublicId,
+          tool: outcome.tool,
+          operationId: tool?.operationId ?? null,
+          access: tool?.access ?? null,
+          risk: tool?.risk ?? null,
+          decision: outcome.decision,
+          status: outcome.status,
+          httpStatus: outcome.httpStatus,
+          // `errorCode` would be dropped by the audit credential-key scrub (`…code`): `error`.
+          error: outcome.errorCode,
+          resourceRef,
+          params: auditParams,
+          correlationId: extra.correlationId,
+          ...extra.auditExtra,
+        },
+      },
+      tx,
+    );
+    return rowId;
+  }
+}
+
+/** What the execution row stores besides the outcome. */
+interface PersistExtra {
+  correlationId: string;
+  params: Prisma.InputJsonValue;
+  args: Record<string, unknown>;
+  refs: Prisma.InputJsonValue | null;
+  nextCursor: string | null;
+  latencyMs: number | null;
+  /** Further audit metadata (`guard` of a `denied_guard`, …; keys safe from the scrub). */
+  auditExtra?: Record<string, string | undefined>;
 }
 
 /** The single resource a call targets: its first path parameter (a public id), else null. */

@@ -44,13 +44,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v14', () => {
+describe('TOPOLOGY v15', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-four queues (v14)', () => {
-    expect(TOPOLOGY_VERSION).toBe(14);
+  it('declares exactly the six exchanges and twenty-four queues (v15)', () => {
+    expect(TOPOLOGY_VERSION).toBe(15);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -260,6 +260,8 @@ describe('TOPOLOGY v14', () => {
         'email.policy org.*.notification.alert_requested.v1',
         // v13 (step 8.4 D16): account takeover notifications.
         'email.security org.*.ato.notification.requested.v1',
+        // v15 (step AI-R D8): assistant report emails.
+        'email.policy org.*.assistant.report.email_requested.v1',
         'email.policy retry.email.notifications.#',
       ],
       // v11 (step 6.2 §4.3): each source event on the exchange it is published to.
@@ -1123,6 +1125,12 @@ describe('routing (topic semantics)', () => {
       'email.analytics',
       'email.webhooks',
     ]);
+    // Topology v15 (step AI-R D8): report emails reach only the notification-worker and the
+    // firehose.
+    expect(route('assistant.report.email_requested.v1')).toEqual([
+      'email.analytics',
+      'email.notifications',
+    ]);
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -1266,6 +1274,8 @@ describe('routing (topic semantics)', () => {
       ].sort(),
     );
     expect(eventTypesBoundTo('email.notifications')).toEqual([
+      // v15 (step AI-R D8).
+      'assistant.report.email_requested.v1',
       'ato.notification.requested.v1',
       'mail.policy.notification_requested.v1',
       'mail.quarantine.notification_requested.v1',
@@ -1534,7 +1544,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(14);
+    expect(definitions.topology_version).toBe(15);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1579,8 +1589,10 @@ describe('toRabbitDefinitions (Q5)', () => {
     // keeps its two bindings (dormant → work): still 58. v13 (step 8.4 §4.1): ato.events five
     // (four events + retry), ato.mail two, ato.responses two, email.webhooks four,
     // email.notifications one: 67 queue + 5 exchange = 72. v14 (step 8.2 D12): email.webhooks adds
-    // one (integration.connection.health_changed.v1): 68 queue + 5 exchange = 73.
-    expect(definitions.bindings).toHaveLength(73);
+    // one (integration.connection.health_changed.v1): 68 queue + 5 exchange = 73. v15 (step AI-R
+    // D8): email.notifications adds one (assistant.report.email_requested.v1): 69 queue + 5
+    // exchange = 74.
+    expect(definitions.bindings).toHaveLength(74);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );

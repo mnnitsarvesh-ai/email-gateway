@@ -9,6 +9,8 @@ import { NAV_ITEMS } from '@/lib/navigation';
  */
 export const DETAIL_ROUTE_PATTERNS: readonly string[] = [
   '/assistant',
+  // Step AI-R (D9): the full-size page of a chat report (a UUID only, see PARAM_RULES).
+  '/assistant/reports/:reportId',
   '/archive/:messageId',
   '/ato/accounts/:accountId',
   '/ato/providers/:integrationId',
@@ -46,6 +48,10 @@ export const DETAIL_ROUTE_PATTERNS: readonly string[] = [
 const EXCLUDED_SEGMENTS = new Set(['consent-callback', 'forbidden', 'new']);
 
 const PARAM = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
+/** Parameters narrower than PARAM (step AI-R: a report link is `/assistant/reports/<uuid>`). */
+const PARAM_RULES: Readonly<Record<string, RegExp>> = {
+  ':reportId': /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+};
 const QUERY = /^[A-Za-z][A-Za-z0-9_]{0,31}=[A-Za-z0-9_.,:-]{0,128}$/;
 const MAX_HREF = 512;
 
@@ -57,7 +63,12 @@ function patternsOf(): ReadonlyArray<readonly string[]> {
 const PATTERNS = patternsOf();
 
 function segmentMatches(pattern: string, segment: string): boolean {
-  if (pattern.startsWith(':')) return PARAM.test(segment) && !EXCLUDED_SEGMENTS.has(segment);
+  if (pattern.startsWith(':'))
+    return (
+      PARAM.test(segment) &&
+      !EXCLUDED_SEGMENTS.has(segment) &&
+      (PARAM_RULES[pattern]?.test(segment) ?? true)
+    );
   return pattern === segment;
 }
 

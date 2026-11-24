@@ -93,6 +93,12 @@ export interface ConfirmationSpec {
   guards?: readonly ProposalGuard[];
   /** Conditional risk escalation (step AI-3 D4), evaluated by `effectiveRisk`. */
   escalate?: readonly RiskEscalation[];
+  /**
+   * A native write (step AI-R D5): the api prepares the proposal and re-reads the state with its
+   * own native service (`NativeToolsService`) instead of a precondition read; `precondition` is
+   * null and the state digest is `reportStateDigest(...)`.
+   */
+  native?: 'report_send_email';
 }
 
 const POLICY_GET = 'policy_management_get';
@@ -305,8 +311,9 @@ export const ESCALATION_WARNINGS = {
 } as const;
 
 /**
- * The 78 enabled writes: the 31 of step AI-2 (design 29 D4) and the 47 of step AI-3 (design 30
- * D6). Field names checked against docs/api/openapi.json (request and response schemas; the
+ * The 79 enabled writes: the 31 of step AI-2 (design 29 D4), the 47 of step AI-3 (design 30
+ * D6) and the native report_send_email of step AI-R (design 31 D5). Field names checked against
+ * docs/api/openapi.json (request and response schemas; the
  * package tests resolve every state, row-version, display and select path).
  */
 export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
@@ -826,6 +833,12 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
   {
     operationId: 'WebhookDeliveriesController_createReplay_v1',
     precondition: webhook(['status']),
+  },
+  // --- native (step AI-R D5) ---
+  {
+    operationId: 'AssistantNative_reportSendEmail',
+    precondition: null,
+    native: 'report_send_email',
   },
 ];
 

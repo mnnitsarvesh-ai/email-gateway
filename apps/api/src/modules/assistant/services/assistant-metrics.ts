@@ -7,6 +7,17 @@ const TURN_BUCKETS = [0.5, 1, 2.5, 5, 10, 20, 30, 60, 90, 120, 300];
 const TOOL_BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 15, 60];
 /** Seconds from a proposal to the user's decision (≤ ASSISTANT_CONFIRMATION_TTL_SECONDS). */
 const CONFIRMATION_BUCKETS = [1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600, 900];
+/** Bytes of a rendered report (≤ ASSISTANT_REPORT_MAX_HTML_BYTES ≤ 2 MiB). */
+const REPORT_BYTE_BUCKETS = [
+  8192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152,
+];
+
+/** Outcomes of `assistant_reports_total` (step AI-R D11). */
+export type ReportOutcome = 'generated' | 'failed' | 'denied';
+/** Outcomes of `assistant_report_sources_total` (step AI-R D11). */
+export type ReportSourceMetricOutcome = 'ok' | 'omitted_permission' | 'unavailable' | 'unexpected';
+/** Outcomes of `assistant_report_emails_total` (step AI-R D11). */
+export type ReportEmailOutcome = 'queued' | 'refused_recipient' | 'limit' | 'failed';
 
 /** Outcomes of `assistant_confirmations_total` (step AI-2 D11). */
 export type ConfirmationOutcome =
@@ -27,7 +38,8 @@ export type ConfirmationOutcome =
 
 /**
  * The assistant series of design D11 on the api registry (`GET /metrics`). Labels are provider,
- * model, outcome, module, access, decision, kind, reason and budget scope only: never an
+ * model, outcome, module, access, decision, kind, reason, budget scope and (reports) a registry
+ * tool name only: never an
  * organization, user, conversation, tool argument or text.
  */
 @Injectable()
@@ -42,6 +54,10 @@ export class AssistantMetrics {
   readonly activeTurns: Gauge;
   readonly confirmations: Counter<'risk' | 'outcome'>;
   readonly confirmationSeconds: Histogram;
+  readonly reports: Counter<'outcome'>;
+  readonly reportBytes: Histogram;
+  readonly reportSources: Counter<'tool' | 'outcome'>;
+  readonly reportEmails: Counter<'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.turns = metrics.counter(
@@ -97,6 +113,29 @@ export class AssistantMetrics {
       'Time from an assistant write proposal to the user’s decision',
       [],
       CONFIRMATION_BUCKETS,
+    );
+    // Step AI-R D11 (no organization or user labels; `tool` is a fixed registry name).
+    this.reports = metrics.counter(
+      'assistant_reports_total',
+      'Assistant report generations by outcome (generated, failed, denied)',
+      ['outcome'],
+    );
+    this.reportBytes = metrics.histogram(
+      'assistant_report_bytes',
+      'Size of generated assistant reports in bytes',
+      [],
+      REPORT_BYTE_BUCKETS,
+    );
+    this.reportSources = metrics.counter(
+      'assistant_report_sources_total',
+      'Source reads of assistant reports by tool and outcome (ok, omitted_permission, ' +
+        'unavailable, unexpected)',
+      ['tool', 'outcome'],
+    );
+    this.reportEmails = metrics.counter(
+      'assistant_report_emails_total',
+      'Assistant report emails by outcome (queued, refused_recipient, limit, failed)',
+      ['outcome'],
     );
   }
 }

@@ -40,6 +40,13 @@
  *   audit row carries the executions' correlation ids and the identity and tenant administration
  *   tables of the organization are unchanged.
  *
+ * - Step AI-R (docs/plan/steps/31-ai-chat-reports.md D1, §9 item 5): the registry adds two
+ *   NATIVE tools (not OpenAPI operations): the read sweep covers 180 enabled reads
+ *   (`report_generate` builds a real report from the report APIs, stored in MinIO; this suite
+ *   removes the objects), the catalogue of a `report:read` holder lists both native tools, and
+ *   the write sweep covers 79 writes: `report_send_email` (in a conversation with a report) ends
+ *   `pending_confirmation` with no delivery row and no outbox event.
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers get /api/v1/assistant/tools
@@ -71,6 +78,7 @@ import {
   platformMember,
   principalOf,
   recordLoopback,
+  trackReports,
   turn,
   withheldColumns,
 } from './support/assistant';
@@ -125,6 +133,8 @@ beforeAll(async () => {
   fx = createFixtures(ctx);
   operator = await platformMember(ctx, fx);
   org = await fx.createOrganization({ features: allFeatures() });
+  // Step AI-R: report_generate (read sweep) and the report of the write sweep (rows, objects).
+  trackReports(ctx, fx, [org.id]);
   // ato_detection is on: the ATO reads and the live ato-worker (sign-ins) write ATO rows.
   fx.registerCleanup(() => deleteAtoRows(ctx.prisma, [org.id]), { rerunOnConflict: true });
   const all = await fx.createCustomRole(org, [...ALL_TENANT_PERMISSIONS]);
@@ -165,10 +175,15 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
   const swept: SweepResult[] = [];
 
   it('offers exactly the enabled tenant tools to a user with every tenant permission', async () => {
-    // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes.
-    expect(ENABLED_READS).toHaveLength(179);
-    expect(ENABLED_WRITES).toHaveLength(78);
-    expect(ENABLED_TOOLS).toHaveLength(257);
+    // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes; step AI-R: 259 = 180
+    // reads + 79 writes with the native `report_generate` and `report_send_email` (design 31 D1).
+    expect(ENABLED_READS).toHaveLength(180);
+    expect(ENABLED_WRITES).toHaveLength(79);
+    expect(ENABLED_TOOLS).toHaveLength(259);
+    expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
+      ['report_generate', 'read'],
+      ['report_send_email', 'write'],
+    ]);
     expect(ENABLED_WRITES.map((t) => t.name)).toContain('webhooks_test');
     for (const name of [
       'policy_tools_validate',
@@ -176,6 +191,7 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       'policy_tools_sample_dry_run',
       'policy_messages_dry_run',
       'api_keys_get',
+      'report_generate',
     ]) {
       expect(
         ENABLED_READS.map((t) => t.name),
@@ -190,6 +206,8 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
         .map((t) => t.name)
         .sort(),
     );
+    // Step AI-R: a `report:read` holder is offered both native tools.
+    expect(names).toEqual(expect.arrayContaining(['report_generate', 'report_send_email']));
   });
 
   it('calls every enabled tenant read through a turn: ok or a coded 4xx', async () => {
@@ -428,6 +446,9 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
   webhooks_delete: () => ({ webhookId: unknown() }),
   webhooks_test: () => ({ webhookId: unknown() }),
   webhook_deliveries_replay: () => ({ webhookId: unknown(), deliveryId: unknown() }),
+  // Step AI-R (design 31 D5): the native write, in a conversation that holds a report (the
+  // latest report and the user's own address by default).
+  report_send_email: () => ({}),
   webhook_deliveries_create_replay: () => ({
     webhookId: unknown(),
     body: { from: new Date(Date.now() - 3_600_000).toISOString(), to: new Date().toISOString() },
@@ -558,6 +579,16 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
       await principalOf(ctx, platformAdmin.token),
       org,
     );
+    // Step AI-R: report_send_email needs a report of its conversation (generated before the
+    // snapshot: a report is not a write target of the sweep; its delivery would be).
+    const reportConversation = await newConversation(ctx, sweepers[0]!);
+    const generated = await turn(
+      ctx,
+      sweepers[0]!.headers,
+      reportConversation,
+      directive('report_generate', { sections: ['traffic'] }),
+    );
+    expect(generated.body.executions[0]).toMatchObject({ status: 'succeeded', httpStatus: 201 });
     const before = await writeTargets();
     const runner = new TurnRunner(sweepers);
     const recorder = recordLoopback(ctx);
@@ -571,7 +602,11 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
     }> = [];
     try {
       for (const tool of tenantWrites) {
-        const { res } = await runner.run(directive(tool.name, WRITE_SAMPLES[tool.name]!()));
+        const message = directive(tool.name, WRITE_SAMPLES[tool.name]!());
+        const { res } =
+          tool.name === 'report_send_email'
+            ? { res: await turn(ctx, sweepers[0]!.headers, reportConversation, message) }
+            : await runner.run(message);
         expect(res.status, `${tool.name}: turn ${JSON.stringify(res.body)}`).toBe(200);
         expect(res.body.turn.status, tool.name).toBe('completed');
         const execution = res.body.executions[0];
@@ -656,6 +691,10 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
       }),
     ).toBe(0);
     expect(await writeTargets()).toEqual(before);
+    // Step AI-R: the proposed report email queued nothing.
+    expect(await ctx.prisma.aiChatReportDelivery.count({ where: { organizationId: org.id } })).toBe(
+      0,
+    );
     const pending = results.filter((r) => r.status === 'pending_confirmation').map((r) => r.tool);
     expect(pending).toEqual(
       expect.arrayContaining([
@@ -678,6 +717,8 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
         'organizations_create',
         'organization_configuration_override_feature',
         'organization_configuration_override_limit',
+        // Step AI-R: the native report email (the conversation's report, the own address).
+        'report_send_email',
       ]),
     );
     expect(results.filter((r) => r.decision === 'denied_guard').map((r) => r.tool)).toEqual([

@@ -72,6 +72,11 @@ import {
   type LoopbackResult,
 } from '../../src/modules/assistant/services/loopback-client';
 import { OrganizationFeaturesService } from '../../src/tenancy/organization-features.service';
+import { RecipientDirectoryRepository } from '../../src/modules/assistant/repositories/recipient-directory.repository';
+import { ReportDeliveriesRepository } from '../../src/modules/assistant/repositories/report-deliveries.repository';
+import { ReportsRepository } from '../../src/modules/assistant/repositories/reports.repository';
+import { ReportObjectStore } from '../../src/modules/assistant/services/reports/report-object-store';
+import { ReportWorld } from './assistant-report-fixtures';
 
 const clone = <T>(value: T): T => structuredClone(value);
 const later = (a: Date | null, b: Date | null): number => (b?.getTime() ?? 0) - (a?.getTime() ?? 0);
@@ -114,9 +119,18 @@ export class AssistantWorld {
   /** Feature `ai_assistant` per organization. */
   features = new Map<bigint, boolean>();
   users = new Map<bigint, string>();
+  /** Step AI-R: reports, deliveries, outbox, recipient directory and report objects. */
+  readonly reportWorld = new ReportWorld();
   /** Calls in order, e.g. `startTurn`, `execution`, `finishTurn` (persistence order tests). */
   readonly log: string[] = [];
   private nextId = 1000n;
+
+  constructor() {
+    this.reportWorld.conversationPublicIdOf = (id) =>
+      this.conversations.find((c) => c.id === id)?.publicId ?? `conv-${id}`;
+    this.reportWorld.executionPublicIdOf = (id) =>
+      this.executions.find((e) => e.id === id)?.publicId ?? null;
+  }
 
   id(): bigint {
     this.nextId += 1n;
@@ -133,12 +147,14 @@ export class AssistantWorld {
     this.usage = [];
     this.features.clear();
     this.users.clear();
+    this.reportWorld.reset();
     this.log.length = 0;
   }
 
   /** Feature on and settings enabled with the acknowledgement. */
   enable(organizationId: bigint, overrides: Partial<SettingsRow> = {}): void {
     this.features.set(organizationId, true);
+    this.reportWorld.settingsRows.add(organizationId);
     this.settings.set(organizationId, {
       organizationId,
       enabled: true,
@@ -259,6 +275,7 @@ export class AssistantWorld {
           k.preconditions = null;
           k.summary = null;
         }
+      world.reportWorld.purgeConversations(organizationId, ids, now);
       for (const c of world.conversations)
         if (c.organizationId === organizationId && ids.includes(c.id)) {
           c.title = null;
@@ -612,7 +629,10 @@ export class AssistantWorld {
             (c: StoredConversation) =>
               (c.lastTurnAt ?? c.createdAt) < before &&
               !world.turns.some((t) => t.conversationId === c.id) &&
-              !world.executions.some((e) => e.conversationId === c.id),
+              !world.executions.some((e) => e.conversationId === c.id) &&
+              !world.reportWorld.reports.some(
+                (r) => r.conversationId === c.id && r.objectKey !== null,
+              ),
             batch,
           ),
         ),
@@ -952,6 +972,12 @@ export class AssistantWorld {
               errorCode: k.errorCode,
               resultSeq: result?.seq ?? null,
               resultRowRef: result !== undefined && refs != null && `r${result.seq}.1` in refs,
+              recipient:
+                k.toolName === 'report_send_email' &&
+                k.request !== null &&
+                typeof (k.request as { body?: { to?: unknown } }).body?.to === 'string'
+                  ? (k.request as { body: { to: string } }).body.to
+                  : null,
             };
           }),
         );
@@ -1239,5 +1265,13 @@ export function overrideAssistant(
     .overrideProvider(TransactionRunner)
     .useValue(immediateAssistantRunner)
     .overrideProvider(LoopbackDispatcher)
-    .useValue(loopback);
+    .useValue(loopback)
+    .overrideProvider(ReportsRepository)
+    .useValue(world.reportWorld.reportsDouble())
+    .overrideProvider(ReportDeliveriesRepository)
+    .useValue(world.reportWorld.deliveriesDouble())
+    .overrideProvider(RecipientDirectoryRepository)
+    .useValue(world.reportWorld.directoryDouble())
+    .overrideProvider(ReportObjectStore)
+    .useValue(world.reportWorld.storeDouble());
 }

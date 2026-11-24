@@ -19,7 +19,8 @@ export type AlertSuppressionReason = 'opt_out' | 'disabled' | 'invalid_contact';
  * `notification_quarantine_messages_total{kind,result}`; step 6.2 N4 adds
  * `notification_alert_messages_total{kind,result}` and
  * `notification_alerts_suppressed_total{kind,reason}`; step 8.4 D16 adds
- * `notification_ato_messages_total{kind,audience,result}`. Bounded labels; never a tenant or address.
+ * `notification_ato_messages_total{kind,audience,result}`; step AI-R D8 adds
+ * `notification_assistant_report_emails_total{result}`. Bounded labels; never a tenant or address.
  */
 export class NotificationMetrics {
   readonly messages: Counter<'kind' | 'result'>;
@@ -27,6 +28,7 @@ export class NotificationMetrics {
   readonly alertMessages: Counter<'kind' | 'result'>;
   readonly alertsSuppressed: Counter<'kind' | 'reason'>;
   readonly atoMessages: Counter<'kind' | 'audience' | 'result'>;
+  readonly assistantReportEmails: Counter<'result'>;
   readonly sendDuration: Histogram<'kind'>;
 
   constructor(metrics: MetricsService) {
@@ -55,9 +57,14 @@ export class NotificationMetrics {
       'Account takeover notices handled (step 8.4 D16), by kind (incident_alert, approval_requested, response_failed, digest), audience (tenant, soc, platform_soc) and result (sent, no_recipients, disabled, not_applicable, failed)',
       ['kind', 'audience', 'result'],
     );
+    this.assistantReportEmails = metrics.counter(
+      'notification_assistant_report_emails_total',
+      'Assistant report email events handled (step AI-R D8), by result (sent, failed, not_applicable, skipped)',
+      ['result'],
+    );
     this.sendDuration = metrics.histogram(
       'notification_send_duration_seconds',
-      'Duration of one SMTP submission of a policy, quarantine or security alert notice to the relay, by kind',
+      'Duration of one SMTP submission of a policy, quarantine, security alert, ATO notice or assistant report email to the relay, by kind',
       ['kind'],
       [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20],
     );

@@ -1,3 +1,4 @@
+import { REPORT_OMIT_REASONS, REPORT_RANGES, REPORT_SECTIONS } from '@email-gateway/assistant';
 import { z } from 'zod';
 import { defineListQuery } from '../../../http/listing/list-query';
 
@@ -210,6 +211,39 @@ export type UpdateConversationBody = z.output<typeof UpdateConversationBodySchem
 
 const cardValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
+const reportFigure = z.object({ label: z.string(), value: z.string() });
+
+/** The report of a `report` card (step AI-R D2 step 10; metadata only, never the HTML). */
+export const CardReportSchema = z
+  .object({
+    reportId: z.uuid(),
+    title: z.string(),
+    period: z.object({
+      from: isoInstant,
+      to: isoInstant,
+      granularity: z.enum(['hour', 'day']),
+      atoRange: z.enum(REPORT_RANGES).nullable(),
+      label: z.string().describe('`Last 7 days`, or the explicit window in UTC'),
+    }),
+    generatedAt: isoInstant,
+    sizeBytes: z.number().int(),
+    sections: z.array(z.enum(REPORT_SECTIONS)).describe('Sections in the report, in order'),
+    omitted: z
+      .array(
+        z.object({
+          section: z.enum(REPORT_SECTIONS),
+          reason: z.enum(REPORT_OMIT_REASONS),
+          code: z
+            .string()
+            .optional()
+            .describe('The missing permission (`quarantine:read`) or the source error code'),
+        }),
+      )
+      .describe('Requested sections that are not in the report, and why'),
+    figures: z.array(reportFigure).max(8).describe('Summary figures (formatted)'),
+  })
+  .describe('Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML');
+
 export const CardSchema = z
   .object({
     version: z.literal('assistant-card/1'),
@@ -217,7 +251,7 @@ export const CardSchema = z
     tool: z.string(),
     title: z.string(),
     status: z.enum(['ok', 'error']),
-    kind: z.enum(['table', 'kv', 'series', 'message', 'error']),
+    kind: z.enum(['table', 'kv', 'series', 'message', 'error', 'report']),
     columns: z.array(z.object({ key: z.string(), label: z.string() })).optional(),
     rows: z.array(z.record(z.string(), cardValue)).optional(),
     fields: z.array(z.object({ key: z.string(), label: z.string(), value: cardValue })).optional(),
@@ -238,8 +272,12 @@ export const CardSchema = z
     error: z
       .object({ httpStatus: z.number().int(), code: z.string(), message: z.string() })
       .optional(),
+    report: CardReportSchema.optional(),
   })
-  .describe('assistant-card/1: built from the real API response, masked metadata only');
+  .describe(
+    'assistant-card/1: built from the real API response, masked metadata only (kind `report`: ' +
+      'a generated security report, step AI-R)',
+  );
 
 export const EXECUTION_DECISIONS = [
   'allowed',
@@ -250,7 +288,8 @@ export const EXECUTION_DECISIONS = [
   'denied_schema',
   'denied_ref',
   'denied_budget',
-  // Step AI-3 D3: a proposal guard refused the write (e.g. a change to one's own account).
+  // Step AI-3 D3: a proposal guard refused the write (e.g. a change to one's own account);
+  // step AI-R: also `report_needs_organization` and `report_recipient_not_allowed`.
   'denied_guard',
 ] as const;
 export const EXECUTION_STATUSES = [
@@ -364,11 +403,23 @@ export const ExecutionSchema = z.object({
     .enum(EXECUTION_DECISIONS)
     .describe(
       'The executor decision; `denied_guard`: a proposal guard refused the write (not allowed ' +
-        'in chat, e.g. a change to your own account)',
+        'in chat, e.g. a change to your own account) or a report rule refused the call ' +
+        '(`report_needs_organization`: a platform user without an override; ' +
+        '`report_recipient_not_allowed`: a report email to an address outside the organization)',
     ),
   status: z.enum(EXECUTION_STATUSES),
   httpStatus: z.number().int().nullable(),
-  errorCode: z.string().nullable(),
+  errorCode: z
+    .string()
+    .nullable()
+    .describe(
+      'The API error code of a failed call, or the executor decision of a refused one. The ' +
+        'native report tools (step AI-R) add `assistant_report_not_found` (404), ' +
+        '`assistant_report_purged` (410), `assistant_report_too_large` (413), ' +
+        '`assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused ' +
+        '`denied_budget`), `assistant_report_storage_failed` (502) and ' +
+        '`assistant_report_sources_unavailable` (503)',
+    ),
   message: z
     .string()
     .nullable()
@@ -546,6 +597,69 @@ export type ConfirmResultView = z.output<typeof ConfirmResultSchema>;
 export const CancelConfirmationResultSchema = z.object({ confirmation: ConfirmationSchema });
 export type CancelConfirmationResultView = z.output<typeof CancelConfirmationResultSchema>;
 
+// ---- reports (step AI-R §4.1) ---------------------------------------------------------------
+
+export const REPORT_STATUSES = ['pending', 'available', 'failed', 'purged'] as const;
+export const REPORT_DELIVERY_STATUSES = ['queued', 'sent', 'failed'] as const;
+
+export const ReportDeliverySchema = z.object({
+  id: z.uuid(),
+  to: z.string().nullable().describe('The recipient address; null after the content purge'),
+  recipientKind: z
+    .enum(['self', 'member', 'domain'])
+    .describe('Your own address, a user of your organization, an address in a verified domain'),
+  status: z.enum(REPORT_DELIVERY_STATUSES),
+  errorCode: z.string().nullable().describe('Why a delivery failed (codes only)'),
+  requestedAt: isoInstant,
+  sentAt: nullableInstant,
+});
+
+export const ReportViewSchema = z
+  .object({
+    id: z.uuid(),
+    conversationId: z.uuid(),
+    executionId: z.uuid().nullable().describe('The `report_generate` execution (when available)'),
+    status: z.enum(REPORT_STATUSES),
+    title: z.string(),
+    period: z.object({
+      from: isoInstant,
+      to: isoInstant,
+      granularity: z.enum(['hour', 'day']),
+      atoRange: z.enum(REPORT_RANGES).nullable().describe('The account-takeover overview range'),
+    }),
+    sections: z.array(z.enum(REPORT_SECTIONS)),
+    omitted: z.array(
+      z.object({
+        section: z.enum(REPORT_SECTIONS),
+        reason: z.enum(REPORT_OMIT_REASONS),
+        code: z.string().nullable(),
+      }),
+    ),
+    figures: z.array(reportFigure),
+    sizeBytes: z.number().int().nullable(),
+    sha256: z.string().nullable().describe('SHA-256 (hex) of the stored HTML'),
+    templateVersion: z.string(),
+    createdAt: isoInstant,
+    deliveries: z
+      .array(ReportDeliverySchema)
+      .max(20)
+      .describe('Emails of this report, newest first (at most 20)'),
+  })
+  .describe('assistant-report-view/1: metadata of a report; the HTML is never stored in MySQL');
+export type ReportView = z.output<typeof ReportViewSchema>;
+
+export const ReportResultSchema = z.object({
+  report: ReportViewSchema,
+  html: z
+    .string()
+    .nullable()
+    .describe(
+      'The self-contained, inert report HTML (no script, link or external resource) for a ' +
+        'sandboxed iframe (`srcdoc`, `sandbox=""`); null unless `status` is `available`',
+    ),
+});
+export type ReportResultView = z.output<typeof ReportResultSchema>;
+
 // ---- examples (synthetic) -------------------------------------------------------------------
 
 const ID = {
@@ -560,7 +674,62 @@ const ID = {
   confirmation: '0193a1c2-8180-73a5-81c8-9072d38ebf08',
   proposal: '0193a1c2-8290-74b6-92d9-a183e49fc009',
   result: '0193a1c2-83a0-75c7-83ea-b294f5a0d10a',
+  report: '0193a1c2-84b0-76d8-94fb-c3a5f6b1e20b',
+  reportExecution: '0193a1c2-85c0-77e9-850c-d4b6a7c2f30c',
+  delivery: '0193a1c2-86d0-78fa-961d-e5c7b8d3a40d',
 };
+
+const reportPeriod = {
+  from: '2026-11-13T10:00:00.000Z',
+  to: '2026-11-20T10:00:00.000Z',
+  granularity: 'day' as const,
+  atoRange: '7d' as const,
+};
+
+const reportFigures = [
+  { label: 'Messages', value: '12,480' },
+  { label: 'Threats', value: '312' },
+  { label: 'Quarantined', value: '148' },
+  { label: 'Delivery success', value: '98.6%' },
+];
+
+/** A `report` card (step AI-R D2 step 10). */
+const reportCardExample = {
+  version: 'assistant-card/1' as const,
+  executionId: ID.reportExecution,
+  tool: 'report_generate',
+  title: 'Security report: Last 7 days',
+  status: 'ok' as const,
+  kind: 'report' as const,
+  report: {
+    reportId: ID.report,
+    title: 'Security report: Last 7 days',
+    period: { ...reportPeriod, label: 'Last 7 days' },
+    generatedAt: '2026-11-20T10:00:02.000Z',
+    sizeBytes: 182_344,
+    sections: [
+      'summary',
+      'traffic',
+      'threats',
+      'domains',
+      'delivery',
+      'processing',
+      'url_clicks',
+    ] as Array<(typeof REPORT_SECTIONS)[number]>,
+    omitted: [
+      { section: 'quarantine' as const, reason: 'permission' as const, code: 'quarantine:read' },
+      { section: 'ato' as const, reason: 'not_enabled' as const },
+    ],
+    figures: reportFigures,
+  },
+  portalLinks: [{ label: 'Open full size', href: `/assistant/reports/${ID.report}` }],
+  refs: ['r1.1'],
+};
+
+/** The placeholder of an HTML document (synthetic; the real one is a full dashboard). */
+const EXAMPLE_REPORT_HTML =
+  '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Security report: Last 7 ' +
+  'days</title></head><body><main class="report"><h1>Security report</h1></main></body></html>';
 
 const card = {
   version: 'assistant-card/1' as const,
@@ -872,6 +1041,66 @@ export const ASSISTANT_EXAMPLES = {
     confirmation: { ...confirmed, summary: confirmation.summary },
     execution: resultExecution,
   } satisfies ConfirmResultView,
+  reportCard: reportCardExample,
+  report: {
+    report: {
+      id: ID.report,
+      conversationId: ID.conversation,
+      executionId: ID.reportExecution,
+      status: 'available',
+      title: 'Security report: Last 7 days',
+      period: reportPeriod,
+      sections: [
+        'summary',
+        'traffic',
+        'threats',
+        'domains',
+        'delivery',
+        'processing',
+        'url_clicks',
+      ],
+      omitted: [
+        { section: 'quarantine', reason: 'permission', code: 'quarantine:read' },
+        { section: 'ato', reason: 'not_enabled', code: null },
+      ],
+      figures: reportFigures,
+      sizeBytes: 182_344,
+      sha256: 'fedcba9876543210'.repeat(4),
+      templateVersion: 'assistant-report/1',
+      createdAt: '2026-11-20T10:00:02.000Z',
+      deliveries: [
+        {
+          id: ID.delivery,
+          to: 'analyst@example.test',
+          recipientKind: 'self',
+          status: 'sent',
+          errorCode: null,
+          requestedAt: '2026-11-20T10:02:00.000Z',
+          sentAt: '2026-11-20T10:02:03.000Z',
+        },
+      ],
+    },
+    html: EXAMPLE_REPORT_HTML,
+  } satisfies ReportResultView,
+  reportPurged: {
+    report: {
+      id: ID.report,
+      conversationId: ID.conversation,
+      executionId: ID.reportExecution,
+      status: 'purged',
+      title: 'Security report: Last 7 days',
+      period: reportPeriod,
+      sections: ['summary', 'traffic'],
+      omitted: [],
+      figures: reportFigures,
+      sizeBytes: 182_344,
+      sha256: 'fedcba9876543210'.repeat(4),
+      templateVersion: 'assistant-report/1',
+      createdAt: '2026-11-20T10:00:02.000Z',
+      deliveries: [],
+    },
+    html: null,
+  } satisfies ReportResultView,
   cancelConfirmation: {
     confirmation: {
       ...confirmation,

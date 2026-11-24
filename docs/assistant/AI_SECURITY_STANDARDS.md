@@ -114,6 +114,38 @@ Attacker-influenced strings of the AI-3 modules are marked `untrusted_text` in t
 
 The adversarial fake proves the server side holds when the model obeys such text: a display name asking to make the reader `organization_admin` and a session user agent asking to revoke the admin's sessions both end `denied_guard` (self); a webhook delivery's response snippet asking for a new webhook URL becomes a pending `high` confirmation only; nothing changes, and another user cannot confirm (`assistant-injection.test.ts`).
 
-## Not verified in AI-1, AI-2 and AI-3
+## Report rules (step AI-R)
+
+Built in AI-R ([design note 31](../plan/steps/31-ai-chat-reports.md), [ADR-0095](../architecture/adr/0095-assistant-reports-native-tools-static-html-email.md), the AI-R amendments of ADR-0091, ADR-0093 and ADR-0094, [contracts §35.3](../architecture/contracts.md)).
+
+### Invariants
+
+| #   | Invariant                                                                                                                                                                                                                                                                                                                             | Enforced by                                                                                                                                                                                                                                                                                                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| I15 | **Reports are built from the API, by the server.** Every figure is a value of an existing operation's response, fetched in this request with the user's own credential; the composition is fixed server code; the model chooses only the period and the sections.                                                                     | `ReportGeneratorService` reads the fixed `REPORT_SOURCES` plan through the loopback with the turn's bearer; a source the principal may not read is never requested; the envelope carries the server's figures only (`assistant-reports.test.ts`: figures equal the direct API responses of the same window) |
+| I16 | **Report HTML is inert.** No script, event-handler attribute, link, URL or external resource; every data string sanitized and HTML-escaped; attribute values constant or formatted finite numbers; colours from a fixed palette. Displayed only in `<iframe sandbox="">` (no `allow-*` token) and served by the api only inside JSON. | The package renderer (single escaping path, constant `<style>` and CSP meta, `parse5` allow-list and `fast-check` hostile-string tests); the api integration suite walks the stored HTML of a report whose ATO display name holds `<script>` and `<img onerror>` text; `Cache-Control: no-store` JSON route |
+| I17 | **Report mail goes only to the organization.** The recipient rule is evaluated by the server at proposal and again at confirm; the model cannot widen it; a refused recipient never produces a confirmation.                                                                                                                          | `classifyRecipient` + `RecipientDirectoryRepository` (writer, scope organization); `assistant-report-emails.test.ts` (recipient matrix, state change → `403`), `assistant-injection.test.ts` (an instruction planted in an ATO display name → `denied_guard`)                                               |
+
+### Recipient rule
+
+The product owner's rule (2026-11-22): a report can be emailed only to
+
+1. the user's **own address** (`users.email`, verified, not deleted; under a platform override the operator's own address);
+2. an **active user of the organization** (`status = active`, verified email, not deleted; invited, disabled and locked users are refused);
+3. an address whose domain **equals** a domain of the organization with status `verified` or `active` (no subdomain match; `pending_verification`, `failed`, `disabled`, `suspended` and deleted domains are refused).
+
+Anything else is refused with `denied_guard` (`report_recipient_not_allowed`). The address must be one plain ASCII address (no display name, no list, no CR/LF: `denied_schema`); the domain is lower-cased, the local part kept as typed and compared case-insensitively. A refused address is never stored, logged or audited: the execution's parameters show `[redacted]`, the `assistant.tool_denied` row keeps `recipientDomain` and `recipientSha256` only. The rule is re-checked at confirm: a recipient refused by then fails the confirmation with `403 assistant_action_not_allowed`; a changed class or report state fails it with `409 assistant_confirmation_state_changed`. Daily limits per user (`ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY`, 10) and per organization (`ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY`, 50) are counted in MySQL at proposal and recounted under the tenant's settings row lock at confirm; one recipient per send; HTML ≤ `ASSISTANT_REPORT_MAX_HTML_BYTES` (512 KiB). Sending to any other address with extra approval is not offered (R-9).
+
+### Inert HTML and the mailbox copy
+
+- The same HTML is shown in the chat (sandboxed `srcdoc` iframe, the portal's CSP inherited), downloaded as a file, sent as the email's HTML body and attached to the email. It carries its own CSP meta (`default-src 'none'; style-src 'unsafe-inline'; img-src data:`) and `referrer` meta.
+- `GET /assistant/reports/{id}` answers JSON only (`{ report, html }`, `Cache-Control: no-store`): navigating to the URL never renders HTML on the api or portal origin. Only the generating user (organization, user and override id) can open it; everyone else gets `404`.
+- The report object lives in the mail bucket under `org/<org>/assistant/report/` (key never returned to a client or logged) and follows the conversation's content retention; it is deleted with the conversation content and at organization deletion.
+- **A copy in a recipient's mailbox is outside the platform's control**: it cannot be recalled, purged or expired by the platform (stated in the confirmation warnings: "Emails cannot be recalled after sending."; the recipient can forward it).
+- The email event carries ids only (`deliveryId`, `reportId`, `requestedAt`): no address, figure or HTML passes the broker; the worker reads the object with the SHA-256 and size checked against the row.
+
+## Not verified in AI-1, AI-2, AI-3 and AI-R
 
 A real provider call (Anthropic, OpenAI, Azure OpenAI) has not been made (so whether a real model respects the AI-3 prompt rules is untested; the server-side controls above do not depend on it): the provider adapters are tested against recorded synthetic fixtures through an injected `fetch`. Egress restrictions for the provider endpoint (Kubernetes NetworkPolicy) are an AI-6 item. See [CHAT_TESTING_REPORT.md](CHAT_TESTING_REPORT.md).
+
+Not verified for AI-R: how real mail clients render the HTML body and the attachment (Gmail and Outlook desktop are known not to render inline SVG; every chart has a data table and the attachment opens in a browser), whether a real model follows prompt rule 13 (`assistant-system/4`), and the Kubernetes IAM policy of the notification-worker (`s3:GetObject` on `org/*/assistant/report/*` only).

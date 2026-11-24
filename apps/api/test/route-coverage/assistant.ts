@@ -7,8 +7,11 @@
  * encoding (both lists are signed v1 lists). Step AI-2 (docs/plan/steps/
  * 29-ai-chat-confirmations-mail-writes.md §4.1, §9 items 3-4) adds the 3 confirmation routes,
  * covered end to end by the confirmations integration suite (WP4) and the assistant
- * tenant-isolation suite (another user's or organization's confirmations answer 404). Consumed by
- * the route inventory (`route-coverage/index.ts`).
+ * tenant-isolation suite (another user's or organization's confirmations answer 404). Step AI-R
+ * (docs/plan/steps/31-ai-chat-reports.md §4.1, §9 items 3 and 5) adds the report read, covered end
+ * to end by the reports integration suite (WP6: owner view with the HTML from MinIO, another user
+ * or organization 404, purged state) and the assistant tenant-isolation suite. Consumed by the
+ * route inventory (`route-coverage/index.ts`).
  */
 import type { RouteCoverage } from './insights';
 
@@ -16,6 +19,7 @@ const E2E = 'apps/api/test/assistant.e2e.test.ts';
 const INT = 'apps/api/integration/assistant.test.ts';
 const ISOLATION = 'apps/api/integration/tenant-isolation-assistant.test.ts';
 const CONFIRMATIONS_INT = 'apps/api/integration/assistant-confirmations.test.ts';
+const REPORTS_INT = 'apps/api/integration/assistant-reports.test.ts';
 
 const entry = (route: string, cursor?: 'v1'): RouteCoverage => ({
   route,
@@ -25,7 +29,7 @@ const entry = (route: string, cursor?: 'v1'): RouteCoverage => ({
   ...(cursor && { cursor }),
 });
 
-/** The routes of `NEW_IN_AI_1` and `NEW_IN_AI_2` (route inventory), in §4.1 order. */
+/** The routes of `NEW_IN_AI_1`, `NEW_IN_AI_2` and `NEW_IN_AI_R` (route inventory), in §4.1 order. */
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   entry('get /api/v1/assistant/status'),
   entry('get /api/v1/assistant/settings'),
@@ -55,4 +59,6 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     ...entry('post /api/v1/assistant/confirmations/:confirmationId/cancel'),
     integration: CONFIRMATIONS_INT,
   },
+  // Step AI-R §4.1 (`NEW_IN_AI_R`).
+  { ...entry('get /api/v1/assistant/reports/:reportId'), integration: REPORTS_INT },
 ]);

@@ -175,7 +175,10 @@ function ConfirmationSlot({
     void queryClient.invalidateQueries({
       queryKey: ['AssistantMessagesController_list_v1', conversationId],
     });
-  }, [conversationId, queryClient]);
+    // Step AI-R: a confirmed report email adds a delivery; the report cards show it.
+    if (view?.tool === 'report_send_email')
+      void queryClient.invalidateQueries({ queryKey: ['AssistantReportsController_get_v1'] });
+  }, [conversationId, queryClient, view?.tool]);
   if (!view) return null;
   return (
     <ConfirmationCard

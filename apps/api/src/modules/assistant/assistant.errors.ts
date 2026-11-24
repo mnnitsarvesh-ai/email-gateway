@@ -34,7 +34,55 @@ export const ASSISTANT_ERROR_CODES = {
   reauthFailed: 'assistant_reauth_failed',
   // Step AI-3 D3/D10: a proposal guard refused the change at confirm (403).
   actionNotAllowed: 'assistant_action_not_allowed',
+  // Step AI-R §4.1: `GET /assistant/reports/{reportId}` of another user or organization (404).
+  reportNotFound: 'assistant_report_not_found',
 } as const;
+
+/**
+ * Codes of the native report tools (step AI-R §4.1, design 31 D2, D5): the error envelope and
+ * card of a failed `report_generate` / `report_send_email` execution or proposal, the `code` of a
+ * `denied_budget` refusal, and the stored `error_code` of the execution. They never answer a
+ * route of their own (the report route answers only `404 assistant_report_not_found`).
+ */
+export const REPORT_ERROR_CODES = {
+  notFound: 'assistant_report_not_found',
+  purged: 'assistant_report_purged',
+  tooLarge: 'assistant_report_too_large',
+  generationLimit: 'assistant_report_generation_limit',
+  emailLimit: 'assistant_report_email_limit',
+  sourcesUnavailable: 'assistant_report_sources_unavailable',
+  storageFailed: 'assistant_report_storage_failed',
+  invalidWindow: 'assistant_report_invalid_window',
+} as const;
+
+/** The HTTP status each report code is recorded with (§4.1). */
+export const REPORT_ERROR_STATUS: Readonly<Record<string, number>> = {
+  assistant_report_not_found: 404,
+  assistant_report_purged: 410,
+  assistant_report_too_large: 413,
+  assistant_report_generation_limit: 429,
+  assistant_report_email_limit: 429,
+  assistant_report_sources_unavailable: 503,
+  assistant_report_storage_failed: 502,
+};
+
+/**
+ * Guard codes of the native report tools (decision `denied_guard`, audit metadata `guard`):
+ * server rules that refuse the call before anything is read, stored or sent.
+ */
+export const REPORT_GUARDS = {
+  recipientNotAllowed: 'report_recipient_not_allowed',
+  needsOrganization: 'report_needs_organization',
+} as const;
+export type ReportGuard = (typeof REPORT_GUARDS)[keyof typeof REPORT_GUARDS];
+
+/** The fixed messages of the report guards (design 31 D2 step 1, D5 step 2). */
+export const REPORT_GUARD_MESSAGES: Readonly<Record<ReportGuard, string>> = {
+  report_recipient_not_allowed:
+    'Reports can be emailed only to your own address, to active users of your organization or to addresses in its verified domains.',
+  report_needs_organization:
+    'Reports are built for one organization; start a platform override first.',
+};
 
 /**
  * Codes that never answer a request (step AI-2 §4.1): the error envelope of a failed proposal
@@ -244,6 +292,10 @@ export const confirmationStateChanged = (httpStatus: number | null = null): Code
 /** Step AI-3 D10: a proposal guard refused the confirmed change (I12; the row fails). */
 export const assistantActionNotAllowed = (): CodedHttpException =>
   err(HttpStatus.FORBIDDEN, C.actionNotAllowed, 'This change is not allowed in chat.');
+
+/** Step AI-R §4.1: an unknown report, or one of another user, organization or override. */
+export const assistantReportNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.reportNotFound, 'Report not found');
 
 export const assistantReauthRequired = (): CodedHttpException =>
   err(

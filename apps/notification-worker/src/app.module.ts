@@ -7,6 +7,7 @@ import {
   HealthModule,
   MetricsModule,
   PrismaService,
+  S3Module,
 } from '@email-gateway/common';
 import { createLogger } from '@email-gateway/logger';
 import type { WorkerConfig } from './config';
@@ -22,8 +23,11 @@ export const SERVICE_NAME = 'notification-worker';
  * releases, rate-bounded admin alerts and sender notices of rejected outbound/internal entries.
  * Both are consumed from `email.notifications` as the least-privilege broker user
  * `eg-notification` (`RABBITMQ_NOTIFICATION_URL`) and sent through the `NOTIFY_SMTP_*` relay.
- * Webhooks and a general preference center are step 6.2. Writer database only; readiness checks
- * mysql and rabbitmq (connected, not blocked, exchanges and queue verified passively);
+ * Webhooks and a general preference center are step 6.2. Step AI-R D8 adds the assistant report
+ * emails, whose HTML is read from the mail bucket (`S3Module`; `s3:GetObject` on
+ * `org/<organization>/assistant/report/…` only). Writer database only; readiness checks mysql and rabbitmq
+ * (connected, not blocked, exchanges and queue verified passively), not S3: an object storage
+ * outage fails or retries report emails only and must not stop the other notices;
  * Prometheus metrics on GET /metrics.
  */
 @Module({})
@@ -47,6 +51,7 @@ export class AppModule {
           verify: { exchanges: ['email.policy', 'email.events'], queues: [NOTIFICATION_QUEUE] },
         }),
         MetricsModule.forRoot({ service: SERVICE_NAME }),
+        S3Module.forRoot(config),
         NotificationsModule.forRoot(config, logger),
         HealthModule.forRoot({
           service: { name: SERVICE_NAME, version: config.SERVICE_VERSION },

@@ -1774,6 +1774,13 @@ describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
       ASSISTANT_CONFIRMATION_TTL_SECONDS: 300,
       ASSISTANT_MAX_PENDING_CONFIRMATIONS: 5,
       ASSISTANT_REAUTH_WINDOW_SECONDS: 300,
+      // Step AI-R §4.2.
+      ASSISTANT_REPORTS_ENABLED: true,
+      ASSISTANT_REPORT_EMAIL_ENABLED: true,
+      ASSISTANT_REPORTS_PER_USER_PER_DAY: 30,
+      ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY: 10,
+      ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY: 50,
+      ASSISTANT_REPORT_MAX_HTML_BYTES: 524_288,
     });
     for (const key of [
       'ASSISTANT_ANTHROPIC_API_KEY',
@@ -2066,6 +2073,11 @@ describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
       ASSISTANT_REAUTH_WINDOW_SECONDS: [0, 1800],
       ASSISTANT_BREAKER_THRESHOLD: [1, 100],
       ASSISTANT_BREAKER_RESET_MS: [1000, 3_600_000],
+      // Step AI-R §4.2.
+      ASSISTANT_REPORTS_PER_USER_PER_DAY: [1, 1000],
+      ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY: [1, 500],
+      ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY: [1, 10_000],
+      ASSISTANT_REPORT_MAX_HTML_BYTES: [65_536, 2_097_152],
     };
     // The deadline must stay above both timeouts while the others move.
     const roomy = { ASSISTANT_TURN_DEADLINE_MS: '300000' };
@@ -2090,6 +2102,16 @@ describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
     );
   });
 
+  it('switches the report tools off with ASSISTANT_REPORTS_ENABLED / ASSISTANT_REPORT_EMAIL_ENABLED (step AI-R D1)', () => {
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_REPORTS_ENABLED: 'false',
+        ASSISTANT_REPORT_EMAIL_ENABLED: 'false',
+      }),
+    ).toMatchObject({ ASSISTANT_REPORTS_ENABLED: false, ASSISTANT_REPORT_EMAIL_ENABLED: false });
+  });
+
   it.each([
     ['ASSISTANT_PROVIDER', 'gemini'],
     ['ASSISTANT_EFFORT', 'max'],
@@ -2099,6 +2121,9 @@ describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
     ['ASSISTANT_MODEL', 'model with spaces'],
     ['ASSISTANT_AZURE_OPENAI_DEPLOYMENT', 'bad/deployment'],
     ['ASSISTANT_AZURE_OPENAI_API_VERSION', 'latest'],
+    ['ASSISTANT_REPORTS_ENABLED', 'sometimes'],
+    ['ASSISTANT_REPORT_EMAIL_ENABLED', 'on-demand'],
+    ['ASSISTANT_REPORT_MAX_HTML_BYTES', '512k'],
   ])('refuses %s=%s naming the key', (key, value) => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });

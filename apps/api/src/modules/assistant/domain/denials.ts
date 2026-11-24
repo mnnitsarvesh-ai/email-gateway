@@ -3,6 +3,23 @@ import {
   guardMessageOf,
   type ExecutionDecision,
 } from '@email-gateway/assistant';
+import { REPORT_ERROR_CODES, REPORT_GUARD_MESSAGES } from '../assistant.errors';
+
+/**
+ * The one guard of each native tool (step AI-R D2 step 1, D5 step 2): the stored execution keeps
+ * the decision only, so a view shows the same fixed message as the live stream.
+ */
+const REPORT_LIMIT_MESSAGES: Readonly<Record<string, string>> = {
+  [REPORT_ERROR_CODES.generationLimit]:
+    'The daily limit of security reports is reached (UTC day); try again tomorrow.',
+  [REPORT_ERROR_CODES.emailLimit]:
+    'The daily limit of report emails is reached (UTC day); try again tomorrow.',
+};
+
+const NATIVE_GUARD_MESSAGES: Readonly<Record<string, string>> = {
+  AssistantNative_reportGenerate: REPORT_GUARD_MESSAGES.report_needs_organization,
+  AssistantNative_reportSendEmail: REPORT_GUARD_MESSAGES.report_recipient_not_allowed,
+};
 
 /**
  * Fixed server-authored messages of refused tool calls (decision ≠ `allowed`). The executor
@@ -28,9 +45,21 @@ export const DENIAL_MESSAGES: Record<Exclude<ExecutionDecision, 'allowed'>, stri
  * every spec's guards share one message, a registry consistency rule). Never an argument value,
  * so a stored conversation (reload, refetch) shows what the live stream showed.
  */
-export function refusalMessageOf(decision: ExecutionDecision, operationId: string): string | null {
+export function refusalMessageOf(
+  decision: ExecutionDecision,
+  operationId: string,
+  errorCode: string | null = null,
+): string | null {
   if (decision === 'allowed') return null;
+  // Step AI-R: the daily limits of the native report tools (`denied_budget` with its own code).
+  if (decision === 'denied_budget' && errorCode !== null && REPORT_LIMIT_MESSAGES[errorCode]) {
+    return REPORT_LIMIT_MESSAGES[errorCode];
+  }
   if (decision === 'denied_guard')
-    return guardMessageOf(confirmationSpecOf(operationId)) ?? DENIAL_MESSAGES.denied_guard;
+    return (
+      NATIVE_GUARD_MESSAGES[operationId] ??
+      guardMessageOf(confirmationSpecOf(operationId)) ??
+      DENIAL_MESSAGES.denied_guard
+    );
   return DENIAL_MESSAGES[decision];
 }

@@ -53,7 +53,8 @@
  * pages `expensive`. Step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md §4.1) adds
  * the 3 confirmation routes (`NEW_IN_AI_2`, examples required, the assistant manifest): confirm
  * and cancel `sensitive` without an Idempotency-Key (`SENSITIVE_UNKEYED_AI_2`: single use is the
- * confirmation row's atomic transition).
+ * confirmation row's atomic transition). Step AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1)
+ * adds the report read (`NEW_IN_AI_R`, example required, the assistant manifest).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -532,6 +533,9 @@ const NEW_IN_AI_2 = [
   'post /api/v1/assistant/confirmations/:confirmationId/cancel',
 ];
 
+/** Step AI-R §4.1: the report read of the assistant (owner only, HTML inside JSON). */
+const NEW_IN_AI_R = ['get /api/v1/assistant/reports/:reportId'];
+
 /** Step AI-2: confirm and cancel are `sensitive`, unkeyed (the row's transition is single use). */
 const SENSITIVE_UNKEYED_AI_2 = [
   'post /api/v1/assistant/confirmations/:confirmationId/confirm',
@@ -777,8 +781,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // operations of step 8.4, plus the 24 provider-connection operations of step 8.2, plus the 13
     // identity-provider and mailbox state operations of step 8.5, plus the 12 journaling
     // operations of step 8.6, plus the 15 assistant operations of step AI-1, plus the 3
-    // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(422);
+    // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8), plus the
+    // report read of step AI-R (§4.1).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(423);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -888,6 +893,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_8_6,
       ...NEW_IN_AI_1,
       ...NEW_IN_AI_2,
+      ...NEW_IN_AI_R,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -959,10 +965,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
-    // NEW_IN_AI_1 + NEW_IN_AI_2 is exactly the assistant manifest (15 + 3 operations).
+    // NEW_IN_AI_1 + NEW_IN_AI_2 + NEW_IN_AI_R is exactly the assistant manifest (15 + 3 + 1).
     expect(COVERAGE_BY_AREA.assistant.map((c) => c.route).sort()).toEqual(
-      [...NEW_IN_AI_1, ...NEW_IN_AI_2].sort(),
+      [...NEW_IN_AI_1, ...NEW_IN_AI_2, ...NEW_IN_AI_R].sort(),
     );
+    expect(NEW_IN_AI_R).toHaveLength(1);
     expect(NEW_IN_AI_1).toHaveLength(15);
     expect(NEW_IN_AI_2).toHaveLength(3);
   });
@@ -988,6 +995,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_8_6.includes(route), route).toBe(false);
       expect(NEW_IN_AI_1.includes(route), route).toBe(false);
       expect(NEW_IN_AI_2.includes(route), route).toBe(false);
+      expect(NEW_IN_AI_R.includes(route), route).toBe(false);
     }
   });
 
@@ -1042,7 +1050,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_8_5.includes(key) ||
           NEW_IN_8_6.includes(key) ||
           NEW_IN_AI_1.includes(key) ||
-          NEW_IN_AI_2.includes(key)) &&
+          NEW_IN_AI_2.includes(key) ||
+          NEW_IN_AI_R.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);

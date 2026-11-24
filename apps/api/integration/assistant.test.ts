@@ -942,6 +942,10 @@ describe('retention and organization purge (D7, D12, ADR-0094)', () => {
     const repo = ctx.get(AssistantTenantDataRepository);
     const counts = await repo.purgeOrganization(systemScope(org.id), 1);
     expect(counts).toEqual({
+      // Step AI-R: report deliveries and reports (with their objects) go first (none here).
+      ai_chat_report_deliveries: 0,
+      ai_chat_reports: 0,
+      reportObjects: 0,
       // Step AI-2: confirmations go first (none here: both tools are reads).
       ai_chat_action_confirmations: 0,
       ai_chat_tool_executions: 2,

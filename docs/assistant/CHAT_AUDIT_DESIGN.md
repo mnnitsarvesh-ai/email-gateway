@@ -37,6 +37,8 @@ One row per `call_tool` and per "Load more", allowed or denied (I6), written in 
 | `assistant.confirmation_cancelled` | `assistant_action_confirmation` | confirmation public id | The user cancelled, the conversation was deleted, or the fifth wrong token cancelled it                                                                                                                                                                                                                                    |
 | `assistant.confirmation_expired`   | `assistant_action_confirmation` | confirmation public id | A confirm after the expiry, or the sweeper expired a pending row                                                                                                                                                                                                                                                           |
 | `assistant.confirmation_refused`   | `assistant_action_confirmation` | confirmation public id | A confirm or cancel was refused (metadata `reason`: session mismatch, not pending, token, digest, re-auth required or failed, turn in progress, …; AI-3: `guard` with the `guard` kind when a proposal guard refused at confirm, the row then `failed` with `assistant_action_not_allowed`); `404` answers are not audited |
+| `assistant.report_generated`       | `assistant_report`              | report public id       | (AI-R) `report_generate` stored a report (in the execution's persist transaction, next to `assistant.tool_executed`)                                                                                                                                                                                                       |
+| `assistant.report_email_requested` | `assistant_report_delivery`     | delivery public id     | (AI-R) A confirmed `report_send_email` queued a delivery (in the confirm's transaction, with the delivery row and its outbox event)                                                                                                                                                                                        |
 
 Tool-execution metadata (scrubbed by `AuditService` like every audit row):
 
@@ -86,6 +88,40 @@ Since AI-3 `risk` is the **effective** risk (the registry risk raised by the spe
 `assistant.confirmation_refused` adds `reason`. Neither the token, its hash, the digest input, the request body nor the password or code is ever written to an audit row or a log.
 
 Mapping to the brief's audit fields: user → actor; tenant → `organization_id`; conversation → `conversationId`; tool → `tool`; API operation → `operationId`; validated parameters (redacted) → `params`; permission decision → `decision`; confirmation → the `assistant.confirmation_*` rows (AI-2, ADR-0093); execution status → `status`, `httpStatus`, `error`; resource → `resourceRef`; timestamp → `created_at`.
+
+## Report audit (step AI-R)
+
+Design [note 31](../plan/steps/31-ai-chat-reports.md) D11. Keys are chosen to survive the credential-key scrub (no key ends in `code`; error codes are stored under `error`).
+
+`assistant.report_generated` (resource `assistant_report`):
+
+```json
+{
+  "reportId": "0193a0c4-0000-7000-8000-00000000a001",
+  "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+  "executionId": "0193a1c2-7d50-7a6c-8e95-6d4f0a5b8c05",
+  "period": {
+    "from": "2026-11-16T09:00:00.000Z",
+    "to": "2026-11-23T09:00:00.000Z",
+    "granularity": "day",
+    "atoRange": "7d"
+  },
+  "sections": ["summary", "traffic", "threats", "domains", "delivery", "processing", "url_clicks"],
+  "omitted": [{ "section": "quarantine", "reason": "permission", "error": "quarantine:read" }],
+  "sizeBytes": 182344,
+  "sha256": "<64 hex of the stored HTML>",
+  "templateVersion": "assistant-report/1",
+  "sources": [{ "tool": "reports_traffic", "outcome": "ok", "httpStatus": 200, "error": null }]
+}
+```
+
+`sources` lists every planned source with its outcome (`ok`, `omitted_permission`, `unavailable`, `unexpected`) and HTTP status; a source the principal may not read appears without a request. No figure, data string, display name or HTML is written to the audit row or the report row.
+
+`assistant.report_email_requested` (resource `assistant_report_delivery`): `{ deliveryId, reportId, confirmationId, executionId, recipientKind: self|member|domain, recipientDomain, recipientSha256, correlationId }`. It sits next to the AI-2 rows of the same confirmation (`assistant.confirmation_requested`, `assistant.confirmation_executed`); the audit row's own `correlation_id` is the confirm request's, the metadata's `correlationId` the result execution's (the same value the delivery row and the outbox event carry).
+
+Refusals: a refused recipient is audited only by `assistant.tool_denied` with `guard: report_recipient_not_allowed`, `recipientDomain` and `recipientSha256` (SHA-256 of the lower-cased address); the execution's stored `params` show `to: "[redacted]"`. The daily limits add `scope: user|tenant` to `assistant.tool_denied` (`denied_budget`, code `assistant_report_email_limit` or `assistant_report_generation_limit`); a platform principal without an override gets `guard: report_needs_organization`.
+
+The notification-worker writes no audit row: the delivery's outcome is the row's `status` (`sent` with the SMTP Message-ID, or `failed` with a code), shown in the report card (R-6). Report and delivery rows follow the conversation (content purge clears `recipient_address`; hard delete with the conversation; organization purge first); the audit rows stay with the audit retention.
 
 ## Correlation with the operation's own audit rows
 

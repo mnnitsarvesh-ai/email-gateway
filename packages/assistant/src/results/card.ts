@@ -9,6 +9,8 @@ import {
   type CardLink,
   type CardValue,
   type RefMap,
+  type ReportCardData,
+  type ToolResultOk,
 } from './types';
 
 /**
@@ -367,5 +369,99 @@ export function toPendingCard(executionId: string, tool: CardTool): AssistantCar
     message: PENDING_CONFIRMATION_CARD_MESSAGE,
     portalLinks: [],
     refs: [],
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Report cards and envelopes (step AI-R D2 steps 10–11)
+// ---------------------------------------------------------------------------------------------
+
+export const REPORT_CARD_TOOL = 'report_generate';
+export const REPORT_RESOURCE_TYPE = 'assistant_report';
+/** The fixed note of a `report_generate` envelope. */
+export const REPORT_ENVELOPE_NOTE =
+  "The user sees the report in the chat. Numbers come from the platform's report APIs; cite them only from here.";
+
+const REPORT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The portal page of a report (`/assistant/reports/<uuid>`, the portal's link allow-list). */
+export function reportPortalHref(reportId: string): string | null {
+  return REPORT_UUID.test(reportId) ? `/assistant/reports/${reportId.toLowerCase()}` : null;
+}
+
+export interface ReportResultInput {
+  executionId: string;
+  /** Execution sequence: the report is row ref `r<refSeq>.1`. */
+  refSeq: number;
+  report: ReportCardData;
+}
+
+const reportData = (report: ReportCardData): ReportCardData => ({
+  reportId: report.reportId,
+  title: sanitizeText(report.title, 200),
+  period: {
+    from: sanitizeText(report.period.from, 64),
+    to: sanitizeText(report.period.to, 64),
+    granularity: report.period.granularity,
+    atoRange: report.period.atoRange,
+    label: sanitizeText(report.period.label, 120),
+  },
+  generatedAt: sanitizeText(report.generatedAt, 64),
+  sizeBytes: Number.isSafeInteger(report.sizeBytes) ? Math.max(0, report.sizeBytes) : 0,
+  sections: [...report.sections],
+  omitted: report.omitted.map((o) => ({
+    section: o.section,
+    reason: o.reason,
+    ...(o.code ? { code: sanitizeText(o.code, 64) } : {}),
+  })),
+  figures: report.figures
+    .slice(0, 8)
+    .map((f) => ({ label: sanitizeText(f.label, 80), value: sanitizeText(f.value, 40) })),
+});
+
+/** The refs of a report result: `r<seq>.1` → the report's public id. */
+export function reportRefs(refSeq: number, reportId: string): RefMap {
+  return { [`r${refSeq}.1`]: { resourceType: REPORT_RESOURCE_TYPE, publicId: reportId } };
+}
+
+/** The `report` card (`assistant-card/1`, ≤ 64 KiB, no HTML). */
+export function reportCard(input: ReportResultInput): AssistantCard {
+  const report = reportData(input.report);
+  const href = reportPortalHref(report.reportId);
+  return {
+    version: CARD_VERSION,
+    executionId: input.executionId,
+    tool: REPORT_CARD_TOOL,
+    title: report.title,
+    status: 'ok',
+    kind: 'report',
+    report,
+    portalLinks: href ? [{ label: 'Open full size', href }] : [],
+    refs: [`r${input.refSeq}.1`],
+  };
+}
+
+/** The envelope of a `report_generate` result (`assistant-tool-result/1`, HTTP 201). */
+export function reportEnvelope(input: Omit<ReportResultInput, 'executionId'>): ToolResultOk {
+  const report = reportData(input.report);
+  return {
+    kind: 'tool_result/1',
+    tool: REPORT_CARD_TOOL,
+    status: 'ok',
+    httpStatus: 201,
+    ref: `r${input.refSeq}`,
+    returned: 1,
+    hasMore: false,
+    truncated: false,
+    note: REPORT_ENVELOPE_NOTE,
+    data: {
+      ref: `r${input.refSeq}.1`,
+      reportId: report.reportId,
+      title: report.title,
+      period: report.period,
+      sections: report.sections,
+      omitted: report.omitted,
+      figures: report.figures,
+    },
   };
 }

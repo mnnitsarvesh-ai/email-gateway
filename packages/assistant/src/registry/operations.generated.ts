@@ -3,7 +3,7 @@
 // (or the API and its OpenAPI snapshot), then run the command again.
 import type { NotApplicableOperation, OperationTool } from './types';
 
-export const REGISTRY_VERSION = 'b031a24c9868f02c';
+export const REGISTRY_VERSION = '3606658c6a83a58b';
 
 export const OPERATION_TOOLS: readonly OperationTool[] = [
   {
@@ -21962,6 +21962,19 @@ export const NOT_APPLICABLE_OPERATIONS: readonly NotApplicableOperation[] = [
     summary: 'Load the next page of an assistant result',
     requirement: { mode: 'all', permissions: ['assistant:use'] },
     access: 'write',
+    risk: null,
+    reason: "the assistant's own routes are never tools (no recursion)",
+    portalRoute: '/assistant',
+    portalPages: ['/assistant'],
+  },
+  {
+    operationId: 'AssistantReportsController_get_v1',
+    method: 'GET',
+    pathTemplate: '/api/v1/assistant/reports/{reportId}',
+    module: 'assistant',
+    summary: 'Get an assistant report',
+    requirement: { mode: 'all', permissions: ['assistant:use'] },
+    access: 'read',
     risk: null,
     reason: "the assistant's own routes are never tools (no recursion)",
     portalRoute: '/assistant',

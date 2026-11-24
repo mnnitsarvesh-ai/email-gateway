@@ -82,4 +82,23 @@ describe('refusal message of an execution view (step AI-3 D12)', () => {
     expect(view.message).toBeNull();
     expect(view.title).toBe('no_such_tool');
   });
+
+  it('shows the native report guards’ fixed messages (step AI-R D2 step 1, D5 step 2)', () => {
+    expect(refusalMessageOf('denied_guard', 'AssistantNative_reportSendEmail')).toMatch(
+      /^Reports can be emailed only to your own address/,
+    );
+    expect(refusalMessageOf('denied_guard', 'AssistantNative_reportGenerate')).toMatch(
+      /platform override/,
+    );
+    expect(refusalMessageOf('denied_budget', 'AssistantNative_reportGenerate')).toBe(
+      DENIAL_MESSAGES.denied_budget,
+    );
+    expect(
+      refusalMessageOf(
+        'denied_budget',
+        'AssistantNative_reportGenerate',
+        'assistant_report_generation_limit',
+      ),
+    ).toMatch(/daily limit of security reports/);
+  });
 });

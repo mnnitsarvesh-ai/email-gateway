@@ -11,7 +11,7 @@ export const STREAM_VERSION = 'assistant-stream/1';
 export const CARD_VERSION = 'assistant-card/1';
 export const CONFIRMATION_SUMMARY_VERSION = 'assistant-confirmation/1';
 
-export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error';
+export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
 export type CardValue = string | number | boolean | null;
 
 export interface CardColumn {
@@ -24,6 +24,37 @@ export interface CardLink {
   readonly href: string;
   /** Row ref the link belongs to (table rows). */
   readonly ref?: string;
+}
+
+/** Why a requested report section is not in the report (step AI-R D3). */
+export type ReportOmissionReason =
+  'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
+
+/**
+ * The `report` object of a card of kind `report` (step AI-R D2 step 10, `CardSchema.report`):
+ * server figures only; the HTML itself is fetched with `GET /assistant/reports/{reportId}`.
+ */
+export interface ReportCardData {
+  readonly reportId: string;
+  readonly title: string;
+  readonly period: {
+    readonly from: string;
+    readonly to: string;
+    readonly granularity: string;
+    readonly atoRange: string | null;
+    /** `Last 7 days`, or the explicit window in UTC. */
+    readonly label: string;
+  };
+  readonly generatedAt: string;
+  readonly sizeBytes: number;
+  readonly sections: readonly string[];
+  readonly omitted: ReadonlyArray<{
+    readonly section: string;
+    readonly reason: ReportOmissionReason;
+    /** The missing permission (`quarantine:read`) or the source error code. */
+    readonly code?: string | null;
+  }>;
+  readonly figures: ReadonlyArray<{ readonly label: string; readonly value: string }>;
 }
 
 /** `assistant-card/1`: built by the api from the real API response, never from model text. */
@@ -56,6 +87,8 @@ export interface AssistantCard {
   readonly truncated?: boolean;
   readonly message?: string;
   readonly error?: { readonly httpStatus: number; readonly code: string; readonly message: string };
+  /** Kind `report` only (step AI-R). */
+  readonly report?: ReportCardData;
 }
 
 export type ExecutionDecision =
@@ -208,3 +241,7 @@ export type Execution = SuccessBody<'AssistantExecutionsController_get_v1'>;
 export type TurnResult = SuccessBody<'AssistantTurnsController_create_v1'>;
 export type ConfirmResult = SuccessBody<'AssistantConfirmationsController_confirm_v1'>;
 export type CancelResult = SuccessBody<'AssistantConfirmationsController_cancel_v1'>;
+/** `GET /assistant/reports/{reportId}` (step AI-R §4.1): `{ report: ReportView, html }`. */
+export type ReportDocument = SuccessBody<'AssistantReportsController_get_v1'>;
+export type ReportView = ReportDocument['report'];
+export type ReportDelivery = ReportView['deliveries'][number];

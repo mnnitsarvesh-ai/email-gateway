@@ -6,6 +6,7 @@
  */
 
 import type { ConfirmationRisk, ConfirmationView } from '../confirmations/types';
+import type { ReportFigure, ReportOmission, ReportPeriod, ReportSection } from '../reports/types';
 
 export const TOOL_RESULT_VERSION = 'assistant-tool-result/1';
 export const CARD_VERSION = 'assistant-card/1';
@@ -108,7 +109,8 @@ export function toPendingEnvelope(
   };
 }
 
-export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error';
+/** `report`: a generated security report (step AI-R D2 step 10; no HTML in the card). */
+export type CardKind = 'table' | 'kv' | 'series' | 'message' | 'error' | 'report';
 export type CardValue = string | number | boolean | null;
 
 export interface CardColumn {
@@ -144,6 +146,21 @@ export interface AssistantCard {
   truncated?: boolean;
   message?: string;
   error?: { httpStatus: number; code: string; message: string };
+  /** Kind `report` (step AI-R): the report's metadata; the HTML is fetched separately. */
+  report?: ReportCardData;
+}
+
+/** The report of a `report` card (step AI-R D2 step 10). */
+export interface ReportCardData {
+  reportId: string;
+  title: string;
+  period: ReportPeriod;
+  generatedAt: string;
+  sizeBytes: number;
+  sections: ReportSection[];
+  omitted: ReportOmission[];
+  /** ≤ 8. */
+  figures: ReportFigure[];
 }
 
 export type ExecutionDecision =

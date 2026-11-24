@@ -5,6 +5,7 @@ import {
   httpConfigSchema,
   loadConfig,
   notifySmtpFieldsSchema,
+  s3ConfigSchema,
   validateNotifySmtpConfig,
 } from '@email-gateway/config';
 import { z } from 'zod';
@@ -17,12 +18,15 @@ const int = (min: number, max: number) => z.coerce.number().int().min(min).max(m
  * APP_ENV is local or ci), its broker user (`RABBITMQ_NOTIFICATION_URL`, eg-notification: read
  * `email.notifications`, write retry and dead-letter copies), the consumer's prefetch and
  * transaction budget (≥ 120 s, the 4.2 §6 rule), the alert recipient cap and the portal origin
- * the notices link to.
+ * the notices link to. Step AI-R D8 (docs/plan/steps/31-ai-chat-reports.md) adds object storage
+ * (`S3_*`: the assistant reports are read from `S3_BUCKET_MAIL`) and the largest report HTML the
+ * worker reads and mails.
  */
 export const configSchema = baseConfigSchema
   .extend(httpConfigSchema(3050).shape)
   .extend(databaseConfigSchema.shape)
   .extend(notifySmtpFieldsSchema.shape)
+  .extend(s3ConfigSchema.shape)
   .extend({
     /** amqp(s) URL(s) of the `eg-notification` broker user (comma list = cluster nodes). */
     RABBITMQ_NOTIFICATION_URL: amqpUrlListSchema,
@@ -43,6 +47,11 @@ export const configSchema = baseConfigSchema
       .default('')
       .pipe(z.union([z.literal(''), z.email({ message: 'must be an e-mail address or empty' })]))
       .transform((v) => v.toLowerCase()),
+    /**
+     * Step AI-R D8: the largest stored assistant report HTML (bytes) the worker reads and mails;
+     * a larger object (or row `size_bytes`) fails the delivery `assistant_report_integrity`.
+     */
+    NOTIFICATION_REPORT_MAX_HTML_BYTES: int(65_536, 4_194_304).default(2_097_152),
     /** Origin of the admin portal; notices link to `${PORTAL_PUBLIC_URL}/messages/<id>`. */
     PORTAL_PUBLIC_URL: z
       .url({ protocol: /^https?$/ })

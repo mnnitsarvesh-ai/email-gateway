@@ -93,12 +93,12 @@ afterAll(async () => {
 }, 60_000);
 
 describe('init.mjs --cleanup-legacy (quorum legacy queues)', () => {
-  it('provisions the v14 topology in the test vhost: email.archive and ato.mail are lossy work queues (steps 8.1 A26, 8.4 D3)', async () => {
+  it('provisions the v15 topology in the test vhost: email.archive and ato.mail are lossy work queues (steps 8.1 A26, 8.4 D3)', async () => {
     const info = await mgmt.get<{ description?: string }>(
       `/vhosts/${encodeURIComponent(vhost.vhost)}`,
     );
     expect(info.description).toBe(`email-gateway topology v${TOPOLOGY_VERSION}`);
-    expect(TOPOLOGY_VERSION).toBe(14);
+    expect(TOPOLOGY_VERSION).toBe(15);
     expect(queueDefinition('email.archive')).toMatchObject({ role: 'work', lossy: true });
     const archive = (await mgmt.queues(vhost.vhost)).find((q) => q.name === 'email.archive');
     expect(archive?.effective_policy_definition).toEqual(policyFor('work-lossy', 'email.archive'));

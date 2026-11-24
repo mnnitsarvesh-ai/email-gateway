@@ -177174,7 +177174,7 @@
                                     "denied_budget",
                                     "denied_guard"
                                   ],
-                                  "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
+                                  "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)"
                                 },
                                 "status": {
                                   "type": "string",
@@ -177192,7 +177192,11 @@
                                   "minimum": -9007199254740991,
                                   "maximum": 9007199254740991
                                 },
-                                "errorCode": { "nullable": true, "type": "string" },
+                                "errorCode": {
+                                  "nullable": true,
+                                  "description": "The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503)",
+                                  "type": "string"
+                                },
                                 "message": {
                                   "nullable": true,
                                   "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
@@ -177215,7 +177219,14 @@
                                     "status": { "type": "string", "enum": ["ok", "error"] },
                                     "kind": {
                                       "type": "string",
-                                      "enum": ["table", "kv", "series", "message", "error"]
+                                      "enum": [
+                                        "table",
+                                        "kv",
+                                        "series",
+                                        "message",
+                                        "error",
+                                        "report"
+                                      ]
                                     },
                                     "columns": {
                                       "type": "array",
@@ -177324,6 +177335,145 @@
                                       },
                                       "required": ["httpStatus", "code", "message"],
                                       "additionalProperties": false
+                                    },
+                                    "report": {
+                                      "type": "object",
+                                      "properties": {
+                                        "reportId": {
+                                          "type": "string",
+                                          "format": "uuid",
+                                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                        },
+                                        "title": { "type": "string" },
+                                        "period": {
+                                          "type": "object",
+                                          "properties": {
+                                            "from": {
+                                              "type": "string",
+                                              "format": "date-time",
+                                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                            },
+                                            "to": {
+                                              "type": "string",
+                                              "format": "date-time",
+                                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                            },
+                                            "granularity": {
+                                              "type": "string",
+                                              "enum": ["hour", "day"]
+                                            },
+                                            "atoRange": {
+                                              "nullable": true,
+                                              "type": "string",
+                                              "enum": ["24h", "7d", "30d"]
+                                            },
+                                            "label": {
+                                              "type": "string",
+                                              "description": "`Last 7 days`, or the explicit window in UTC"
+                                            }
+                                          },
+                                          "required": [
+                                            "from",
+                                            "to",
+                                            "granularity",
+                                            "atoRange",
+                                            "label"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        "generatedAt": {
+                                          "type": "string",
+                                          "format": "date-time",
+                                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                        },
+                                        "sizeBytes": {
+                                          "type": "integer",
+                                          "minimum": -9007199254740991,
+                                          "maximum": 9007199254740991
+                                        },
+                                        "sections": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string",
+                                            "enum": [
+                                              "summary",
+                                              "traffic",
+                                              "threats",
+                                              "domains",
+                                              "delivery",
+                                              "processing",
+                                              "url_clicks",
+                                              "quarantine",
+                                              "ato"
+                                            ]
+                                          },
+                                          "description": "Sections in the report, in order"
+                                        },
+                                        "omitted": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "properties": {
+                                              "section": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "summary",
+                                                  "traffic",
+                                                  "threats",
+                                                  "domains",
+                                                  "delivery",
+                                                  "processing",
+                                                  "url_clicks",
+                                                  "quarantine",
+                                                  "ato"
+                                                ]
+                                              },
+                                              "reason": {
+                                                "type": "string",
+                                                "enum": [
+                                                  "permission",
+                                                  "not_enabled",
+                                                  "unavailable",
+                                                  "unexpected_response"
+                                                ]
+                                              },
+                                              "code": {
+                                                "description": "The missing permission (`quarantine:read`) or the source error code",
+                                                "type": "string"
+                                              }
+                                            },
+                                            "required": ["section", "reason"],
+                                            "additionalProperties": false
+                                          },
+                                          "description": "Requested sections that are not in the report, and why"
+                                        },
+                                        "figures": {
+                                          "maxItems": 8,
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "properties": {
+                                              "label": { "type": "string" },
+                                              "value": { "type": "string" }
+                                            },
+                                            "required": ["label", "value"],
+                                            "additionalProperties": false
+                                          },
+                                          "description": "Summary figures (formatted)"
+                                        }
+                                      },
+                                      "required": [
+                                        "reportId",
+                                        "title",
+                                        "period",
+                                        "generatedAt",
+                                        "sizeBytes",
+                                        "sections",
+                                        "omitted",
+                                        "figures"
+                                      ],
+                                      "additionalProperties": false,
+                                      "description": "Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML"
                                     }
                                   },
                                   "required": [
@@ -178138,7 +178288,7 @@
                               "denied_budget",
                               "denied_guard"
                             ],
-                            "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
+                            "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)"
                           },
                           "status": {
                             "type": "string",
@@ -178156,7 +178306,11 @@
                             "minimum": -9007199254740991,
                             "maximum": 9007199254740991
                           },
-                          "errorCode": { "nullable": true, "type": "string" },
+                          "errorCode": {
+                            "nullable": true,
+                            "description": "The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503)",
+                            "type": "string"
+                          },
                           "message": {
                             "nullable": true,
                             "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
@@ -178179,7 +178333,7 @@
                               "status": { "type": "string", "enum": ["ok", "error"] },
                               "kind": {
                                 "type": "string",
-                                "enum": ["table", "kv", "series", "message", "error"]
+                                "enum": ["table", "kv", "series", "message", "error", "report"]
                               },
                               "columns": {
                                 "type": "array",
@@ -178288,6 +178442,136 @@
                                 },
                                 "required": ["httpStatus", "code", "message"],
                                 "additionalProperties": false
+                              },
+                              "report": {
+                                "type": "object",
+                                "properties": {
+                                  "reportId": {
+                                    "type": "string",
+                                    "format": "uuid",
+                                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                  },
+                                  "title": { "type": "string" },
+                                  "period": {
+                                    "type": "object",
+                                    "properties": {
+                                      "from": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                      },
+                                      "to": {
+                                        "type": "string",
+                                        "format": "date-time",
+                                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                      },
+                                      "granularity": { "type": "string", "enum": ["hour", "day"] },
+                                      "atoRange": {
+                                        "nullable": true,
+                                        "type": "string",
+                                        "enum": ["24h", "7d", "30d"]
+                                      },
+                                      "label": {
+                                        "type": "string",
+                                        "description": "`Last 7 days`, or the explicit window in UTC"
+                                      }
+                                    },
+                                    "required": ["from", "to", "granularity", "atoRange", "label"],
+                                    "additionalProperties": false
+                                  },
+                                  "generatedAt": {
+                                    "type": "string",
+                                    "format": "date-time",
+                                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                  },
+                                  "sizeBytes": {
+                                    "type": "integer",
+                                    "minimum": -9007199254740991,
+                                    "maximum": 9007199254740991
+                                  },
+                                  "sections": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string",
+                                      "enum": [
+                                        "summary",
+                                        "traffic",
+                                        "threats",
+                                        "domains",
+                                        "delivery",
+                                        "processing",
+                                        "url_clicks",
+                                        "quarantine",
+                                        "ato"
+                                      ]
+                                    },
+                                    "description": "Sections in the report, in order"
+                                  },
+                                  "omitted": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "section": {
+                                          "type": "string",
+                                          "enum": [
+                                            "summary",
+                                            "traffic",
+                                            "threats",
+                                            "domains",
+                                            "delivery",
+                                            "processing",
+                                            "url_clicks",
+                                            "quarantine",
+                                            "ato"
+                                          ]
+                                        },
+                                        "reason": {
+                                          "type": "string",
+                                          "enum": [
+                                            "permission",
+                                            "not_enabled",
+                                            "unavailable",
+                                            "unexpected_response"
+                                          ]
+                                        },
+                                        "code": {
+                                          "description": "The missing permission (`quarantine:read`) or the source error code",
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": ["section", "reason"],
+                                      "additionalProperties": false
+                                    },
+                                    "description": "Requested sections that are not in the report, and why"
+                                  },
+                                  "figures": {
+                                    "maxItems": 8,
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "label": { "type": "string" },
+                                        "value": { "type": "string" }
+                                      },
+                                      "required": ["label", "value"],
+                                      "additionalProperties": false
+                                    },
+                                    "description": "Summary figures (formatted)"
+                                  }
+                                },
+                                "required": [
+                                  "reportId",
+                                  "title",
+                                  "period",
+                                  "generatedAt",
+                                  "sizeBytes",
+                                  "sections",
+                                  "omitted",
+                                  "figures"
+                                ],
+                                "additionalProperties": false,
+                                "description": "Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML"
                               }
                             },
                             "required": [
@@ -179403,7 +179687,7 @@
                         "denied_budget",
                         "denied_guard"
                       ],
-                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
+                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)"
                     },
                     "status": {
                       "type": "string",
@@ -179415,7 +179699,11 @@
                       "minimum": -9007199254740991,
                       "maximum": 9007199254740991
                     },
-                    "errorCode": { "nullable": true, "type": "string" },
+                    "errorCode": {
+                      "nullable": true,
+                      "description": "The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503)",
+                      "type": "string"
+                    },
                     "message": {
                       "nullable": true,
                       "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
@@ -179438,7 +179726,7 @@
                         "status": { "type": "string", "enum": ["ok", "error"] },
                         "kind": {
                           "type": "string",
-                          "enum": ["table", "kv", "series", "message", "error"]
+                          "enum": ["table", "kv", "series", "message", "error", "report"]
                         },
                         "columns": {
                           "type": "array",
@@ -179547,6 +179835,136 @@
                           },
                           "required": ["httpStatus", "code", "message"],
                           "additionalProperties": false
+                        },
+                        "report": {
+                          "type": "object",
+                          "properties": {
+                            "reportId": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "title": { "type": "string" },
+                            "period": {
+                              "type": "object",
+                              "properties": {
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "granularity": { "type": "string", "enum": ["hour", "day"] },
+                                "atoRange": {
+                                  "nullable": true,
+                                  "type": "string",
+                                  "enum": ["24h", "7d", "30d"]
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "description": "`Last 7 days`, or the explicit window in UTC"
+                                }
+                              },
+                              "required": ["from", "to", "granularity", "atoRange", "label"],
+                              "additionalProperties": false
+                            },
+                            "generatedAt": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "sizeBytes": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "sections": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "summary",
+                                  "traffic",
+                                  "threats",
+                                  "domains",
+                                  "delivery",
+                                  "processing",
+                                  "url_clicks",
+                                  "quarantine",
+                                  "ato"
+                                ]
+                              },
+                              "description": "Sections in the report, in order"
+                            },
+                            "omitted": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "section": {
+                                    "type": "string",
+                                    "enum": [
+                                      "summary",
+                                      "traffic",
+                                      "threats",
+                                      "domains",
+                                      "delivery",
+                                      "processing",
+                                      "url_clicks",
+                                      "quarantine",
+                                      "ato"
+                                    ]
+                                  },
+                                  "reason": {
+                                    "type": "string",
+                                    "enum": [
+                                      "permission",
+                                      "not_enabled",
+                                      "unavailable",
+                                      "unexpected_response"
+                                    ]
+                                  },
+                                  "code": {
+                                    "description": "The missing permission (`quarantine:read`) or the source error code",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": ["section", "reason"],
+                                "additionalProperties": false
+                              },
+                              "description": "Requested sections that are not in the report, and why"
+                            },
+                            "figures": {
+                              "maxItems": 8,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              },
+                              "description": "Summary figures (formatted)"
+                            }
+                          },
+                          "required": [
+                            "reportId",
+                            "title",
+                            "period",
+                            "generatedAt",
+                            "sizeBytes",
+                            "sections",
+                            "omitted",
+                            "figures"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML"
                         }
                       },
                       "required": [
@@ -180097,7 +180515,7 @@
                         "denied_budget",
                         "denied_guard"
                       ],
-                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
+                      "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)"
                     },
                     "status": {
                       "type": "string",
@@ -180109,7 +180527,11 @@
                       "minimum": -9007199254740991,
                       "maximum": 9007199254740991
                     },
-                    "errorCode": { "nullable": true, "type": "string" },
+                    "errorCode": {
+                      "nullable": true,
+                      "description": "The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503)",
+                      "type": "string"
+                    },
                     "message": {
                       "nullable": true,
                       "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
@@ -180132,7 +180554,7 @@
                         "status": { "type": "string", "enum": ["ok", "error"] },
                         "kind": {
                           "type": "string",
-                          "enum": ["table", "kv", "series", "message", "error"]
+                          "enum": ["table", "kv", "series", "message", "error", "report"]
                         },
                         "columns": {
                           "type": "array",
@@ -180241,6 +180663,136 @@
                           },
                           "required": ["httpStatus", "code", "message"],
                           "additionalProperties": false
+                        },
+                        "report": {
+                          "type": "object",
+                          "properties": {
+                            "reportId": {
+                              "type": "string",
+                              "format": "uuid",
+                              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "title": { "type": "string" },
+                            "period": {
+                              "type": "object",
+                              "properties": {
+                                "from": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "to": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "granularity": { "type": "string", "enum": ["hour", "day"] },
+                                "atoRange": {
+                                  "nullable": true,
+                                  "type": "string",
+                                  "enum": ["24h", "7d", "30d"]
+                                },
+                                "label": {
+                                  "type": "string",
+                                  "description": "`Last 7 days`, or the explicit window in UTC"
+                                }
+                              },
+                              "required": ["from", "to", "granularity", "atoRange", "label"],
+                              "additionalProperties": false
+                            },
+                            "generatedAt": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "sizeBytes": {
+                              "type": "integer",
+                              "minimum": -9007199254740991,
+                              "maximum": 9007199254740991
+                            },
+                            "sections": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "summary",
+                                  "traffic",
+                                  "threats",
+                                  "domains",
+                                  "delivery",
+                                  "processing",
+                                  "url_clicks",
+                                  "quarantine",
+                                  "ato"
+                                ]
+                              },
+                              "description": "Sections in the report, in order"
+                            },
+                            "omitted": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "section": {
+                                    "type": "string",
+                                    "enum": [
+                                      "summary",
+                                      "traffic",
+                                      "threats",
+                                      "domains",
+                                      "delivery",
+                                      "processing",
+                                      "url_clicks",
+                                      "quarantine",
+                                      "ato"
+                                    ]
+                                  },
+                                  "reason": {
+                                    "type": "string",
+                                    "enum": [
+                                      "permission",
+                                      "not_enabled",
+                                      "unavailable",
+                                      "unexpected_response"
+                                    ]
+                                  },
+                                  "code": {
+                                    "description": "The missing permission (`quarantine:read`) or the source error code",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": ["section", "reason"],
+                                "additionalProperties": false
+                              },
+                              "description": "Requested sections that are not in the report, and why"
+                            },
+                            "figures": {
+                              "maxItems": 8,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "label": { "type": "string" },
+                                  "value": { "type": "string" }
+                                },
+                                "required": ["label", "value"],
+                                "additionalProperties": false
+                              },
+                              "description": "Summary figures (formatted)"
+                            }
+                          },
+                          "required": [
+                            "reportId",
+                            "title",
+                            "period",
+                            "generatedAt",
+                            "sizeBytes",
+                            "sections",
+                            "omitted",
+                            "figures"
+                          ],
+                          "additionalProperties": false,
+                          "description": "Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML"
                         }
                       },
                       "required": [
@@ -181518,7 +182070,7 @@
                             "denied_budget",
                             "denied_guard"
                           ],
-                          "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account)"
+                          "description": "The executor decision; `denied_guard`: a proposal guard refused the write (not allowed in chat, e.g. a change to your own account) or a report rule refused the call (`report_needs_organization`: a platform user without an override; `report_recipient_not_allowed`: a report email to an address outside the organization)"
                         },
                         "status": {
                           "type": "string",
@@ -181536,7 +182088,11 @@
                           "minimum": -9007199254740991,
                           "maximum": 9007199254740991
                         },
-                        "errorCode": { "nullable": true, "type": "string" },
+                        "errorCode": {
+                          "nullable": true,
+                          "description": "The API error code of a failed call, or the executor decision of a refused one. The native report tools (step AI-R) add `assistant_report_not_found` (404), `assistant_report_purged` (410), `assistant_report_too_large` (413), `assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused `denied_budget`), `assistant_report_storage_failed` (502) and `assistant_report_sources_unavailable` (503)",
+                          "type": "string"
+                        },
                         "message": {
                           "nullable": true,
                           "description": "Fixed server-authored explanation of a refused call (decision other than `allowed`; for `denied_guard` the guard message); null for an allowed call. Never an argument value",
@@ -181559,7 +182115,7 @@
                             "status": { "type": "string", "enum": ["ok", "error"] },
                             "kind": {
                               "type": "string",
-                              "enum": ["table", "kv", "series", "message", "error"]
+                              "enum": ["table", "kv", "series", "message", "error", "report"]
                             },
                             "columns": {
                               "type": "array",
@@ -181668,6 +182224,136 @@
                               },
                               "required": ["httpStatus", "code", "message"],
                               "additionalProperties": false
+                            },
+                            "report": {
+                              "type": "object",
+                              "properties": {
+                                "reportId": {
+                                  "type": "string",
+                                  "format": "uuid",
+                                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                                },
+                                "title": { "type": "string" },
+                                "period": {
+                                  "type": "object",
+                                  "properties": {
+                                    "from": {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "to": {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    "granularity": { "type": "string", "enum": ["hour", "day"] },
+                                    "atoRange": {
+                                      "nullable": true,
+                                      "type": "string",
+                                      "enum": ["24h", "7d", "30d"]
+                                    },
+                                    "label": {
+                                      "type": "string",
+                                      "description": "`Last 7 days`, or the explicit window in UTC"
+                                    }
+                                  },
+                                  "required": ["from", "to", "granularity", "atoRange", "label"],
+                                  "additionalProperties": false
+                                },
+                                "generatedAt": {
+                                  "type": "string",
+                                  "format": "date-time",
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                },
+                                "sizeBytes": {
+                                  "type": "integer",
+                                  "minimum": -9007199254740991,
+                                  "maximum": 9007199254740991
+                                },
+                                "sections": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "enum": [
+                                      "summary",
+                                      "traffic",
+                                      "threats",
+                                      "domains",
+                                      "delivery",
+                                      "processing",
+                                      "url_clicks",
+                                      "quarantine",
+                                      "ato"
+                                    ]
+                                  },
+                                  "description": "Sections in the report, in order"
+                                },
+                                "omitted": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "section": {
+                                        "type": "string",
+                                        "enum": [
+                                          "summary",
+                                          "traffic",
+                                          "threats",
+                                          "domains",
+                                          "delivery",
+                                          "processing",
+                                          "url_clicks",
+                                          "quarantine",
+                                          "ato"
+                                        ]
+                                      },
+                                      "reason": {
+                                        "type": "string",
+                                        "enum": [
+                                          "permission",
+                                          "not_enabled",
+                                          "unavailable",
+                                          "unexpected_response"
+                                        ]
+                                      },
+                                      "code": {
+                                        "description": "The missing permission (`quarantine:read`) or the source error code",
+                                        "type": "string"
+                                      }
+                                    },
+                                    "required": ["section", "reason"],
+                                    "additionalProperties": false
+                                  },
+                                  "description": "Requested sections that are not in the report, and why"
+                                },
+                                "figures": {
+                                  "maxItems": 8,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "label": { "type": "string" },
+                                      "value": { "type": "string" }
+                                    },
+                                    "required": ["label", "value"],
+                                    "additionalProperties": false
+                                  },
+                                  "description": "Summary figures (formatted)"
+                                }
+                              },
+                              "required": [
+                                "reportId",
+                                "title",
+                                "period",
+                                "generatedAt",
+                                "sizeBytes",
+                                "sections",
+                                "omitted",
+                                "figures"
+                              ],
+                              "additionalProperties": false,
+                              "description": "Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML"
                             }
                           },
                           "required": [
@@ -182753,6 +183439,453 @@
         "tags": ["assistant"],
         "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] },
         "x-eg-rate-class": "sensitive"
+      }
+    },
+    "/api/v1/assistant/reports/{reportId}": {
+      "get": {
+        "description": "One of your own security reports generated in chat (`report_generate`): its metadata (`assistant-report-view/1`: status, period, sections, omitted sections with their reasons, summary figures, size, SHA-256, template version) with its emails (newest first, at most 20; the address is null after the content purge) and, while the report is `available`, the stored HTML. The HTML is a self-contained, inert document (no script, no link, no external resource) and is served only inside this JSON: show it in a sandboxed iframe (`srcdoc`, `sandbox=\"\"`). `html` is null for `pending`, `failed` and `purged` reports (purged with the conversation content: still `200`, so the card can show the state). A report belongs to the user, organization (and platform override) that generated it; any other report answers `404 assistant_report_not_found`. `Cache-Control: no-store`. Users only (API keys `403 user_required`); the tenant always comes from your session.",
+        "operationId": "AssistantReportsController_get_v1",
+        "parameters": [
+          {
+            "name": "reportId",
+            "required": true,
+            "in": "path",
+            "description": "Report public id (UUID)",
+            "schema": { "format": "uuid", "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report and its HTML",
+            "headers": {
+              "Cache-Control": {
+                "description": "`no-store`",
+                "schema": { "type": "string", "enum": ["no-store"] }
+              },
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "report": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "conversationId": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "executionId": {
+                          "nullable": true,
+                          "description": "The `report_generate` execution (when available)",
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": ["pending", "available", "failed", "purged"]
+                        },
+                        "title": { "type": "string" },
+                        "period": {
+                          "type": "object",
+                          "properties": {
+                            "from": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "to": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            },
+                            "granularity": { "type": "string", "enum": ["hour", "day"] },
+                            "atoRange": {
+                              "nullable": true,
+                              "description": "The account-takeover overview range",
+                              "type": "string",
+                              "enum": ["24h", "7d", "30d"]
+                            }
+                          },
+                          "required": ["from", "to", "granularity", "atoRange"],
+                          "additionalProperties": false
+                        },
+                        "sections": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "enum": [
+                              "summary",
+                              "traffic",
+                              "threats",
+                              "domains",
+                              "delivery",
+                              "processing",
+                              "url_clicks",
+                              "quarantine",
+                              "ato"
+                            ]
+                          }
+                        },
+                        "omitted": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "section": {
+                                "type": "string",
+                                "enum": [
+                                  "summary",
+                                  "traffic",
+                                  "threats",
+                                  "domains",
+                                  "delivery",
+                                  "processing",
+                                  "url_clicks",
+                                  "quarantine",
+                                  "ato"
+                                ]
+                              },
+                              "reason": {
+                                "type": "string",
+                                "enum": [
+                                  "permission",
+                                  "not_enabled",
+                                  "unavailable",
+                                  "unexpected_response"
+                                ]
+                              },
+                              "code": { "nullable": true, "type": "string" }
+                            },
+                            "required": ["section", "reason", "code"],
+                            "additionalProperties": false
+                          }
+                        },
+                        "figures": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "label": { "type": "string" },
+                              "value": { "type": "string" }
+                            },
+                            "required": ["label", "value"],
+                            "additionalProperties": false
+                          }
+                        },
+                        "sizeBytes": {
+                          "nullable": true,
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        "sha256": {
+                          "nullable": true,
+                          "description": "SHA-256 (hex) of the stored HTML",
+                          "type": "string"
+                        },
+                        "templateVersion": { "type": "string" },
+                        "createdAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        },
+                        "deliveries": {
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "format": "uuid",
+                                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                              },
+                              "to": {
+                                "nullable": true,
+                                "description": "The recipient address; null after the content purge",
+                                "type": "string"
+                              },
+                              "recipientKind": {
+                                "type": "string",
+                                "enum": ["self", "member", "domain"],
+                                "description": "Your own address, a user of your organization, an address in a verified domain"
+                              },
+                              "status": { "type": "string", "enum": ["queued", "sent", "failed"] },
+                              "errorCode": {
+                                "nullable": true,
+                                "description": "Why a delivery failed (codes only)",
+                                "type": "string"
+                              },
+                              "requestedAt": {
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              },
+                              "sentAt": {
+                                "nullable": true,
+                                "type": "string",
+                                "format": "date-time",
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "to",
+                              "recipientKind",
+                              "status",
+                              "errorCode",
+                              "requestedAt",
+                              "sentAt"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "description": "Emails of this report, newest first (at most 20)"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "conversationId",
+                        "executionId",
+                        "status",
+                        "title",
+                        "period",
+                        "sections",
+                        "omitted",
+                        "figures",
+                        "sizeBytes",
+                        "sha256",
+                        "templateVersion",
+                        "createdAt",
+                        "deliveries"
+                      ],
+                      "additionalProperties": false,
+                      "description": "assistant-report-view/1: metadata of a report; the HTML is never stored in MySQL"
+                    },
+                    "html": {
+                      "nullable": true,
+                      "description": "The self-contained, inert report HTML (no script, link or external resource) for a sandboxed iframe (`srcdoc`, `sandbox=\"\"`); null unless `status` is `available`",
+                      "type": "string"
+                    }
+                  },
+                  "required": ["report", "html"],
+                  "additionalProperties": false,
+                  "example": {
+                    "report": {
+                      "id": "0193a1c2-84b0-76d8-94fb-c3a5f6b1e20b",
+                      "conversationId": "0193a1c2-7a10-7c3e-9a51-2f0b6c1d4e01",
+                      "executionId": "0193a1c2-85c0-77e9-850c-d4b6a7c2f30c",
+                      "status": "available",
+                      "title": "Security report: Last 7 days",
+                      "period": {
+                        "from": "2026-11-13T10:00:00.000Z",
+                        "to": "2026-11-20T10:00:00.000Z",
+                        "granularity": "day",
+                        "atoRange": "7d"
+                      },
+                      "sections": [
+                        "summary",
+                        "traffic",
+                        "threats",
+                        "domains",
+                        "delivery",
+                        "processing",
+                        "url_clicks"
+                      ],
+                      "omitted": [
+                        {
+                          "section": "quarantine",
+                          "reason": "permission",
+                          "code": "quarantine:read"
+                        },
+                        { "section": "ato", "reason": "not_enabled", "code": null }
+                      ],
+                      "figures": [
+                        { "label": "Messages", "value": "12,480" },
+                        { "label": "Threats", "value": "312" },
+                        { "label": "Quarantined", "value": "148" },
+                        { "label": "Delivery success", "value": "98.6%" }
+                      ],
+                      "sizeBytes": 182344,
+                      "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                      "templateVersion": "assistant-report/1",
+                      "createdAt": "2026-11-20T10:00:02.000Z",
+                      "deliveries": [
+                        {
+                          "id": "0193a1c2-86d0-78fa-961d-e5c7b8d3a40d",
+                          "to": "analyst@example.test",
+                          "recipientKind": "self",
+                          "status": "sent",
+                          "errorCode": null,
+                          "requestedAt": "2026-11-20T10:02:00.000Z",
+                          "sentAt": "2026-11-20T10:02:03.000Z"
+                        }
+                      ]
+                    },
+                    "html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Security report: Last 7 days</title></head><body><main class=\"report\"><h1>Security report</h1></main></body></html>"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (validation_failed or a specific code)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ValidationErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials (unauthorized)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "403": {
+            "description": "Missing permission (`forbidden`), API key on a user-only route (`user_required`), MFA enrollment pending (`mfa_enrollment_required`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [403] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["forbidden", "user_required", "mfa_enrollment_required"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "404": {
+            "description": "Unknown report, or one of another user, organization or platform override",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [404] },
+                    "error": { "type": "string" },
+                    "code": { "type": "string", "enum": ["assistant_report_not_found"] },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "429": {
+            "description": "Too many requests (rate_limited, with scope and Retry-After)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RateLimitedErrorBody" }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" },
+              "Retry-After": { "$ref": "#/components/headers/Retry-After" }
+            }
+          },
+          "500": {
+            "description": "Unexpected error (internal_error; no details are disclosed)",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorBody" } }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          },
+          "503": {
+            "description": "The database returned an inconsistent read (`inconsistent_read`) or a dependency is down (`service_unavailable`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "statusCode": { "type": "integer", "enum": [503] },
+                    "error": { "type": "string" },
+                    "code": {
+                      "type": "string",
+                      "enum": ["inconsistent_read", "service_unavailable"]
+                    },
+                    "message": { "type": "string" },
+                    "correlationId": { "type": "string" },
+                    "requestId": { "type": "string", "format": "uuid" }
+                  },
+                  "required": ["statusCode", "error", "code", "message"]
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/X-Request-Id" },
+              "X-Correlation-Id": { "$ref": "#/components/headers/X-Correlation-Id" },
+              "RateLimit-Limit": { "$ref": "#/components/headers/RateLimit-Limit" },
+              "RateLimit-Remaining": { "$ref": "#/components/headers/RateLimit-Remaining" },
+              "RateLimit-Reset": { "$ref": "#/components/headers/RateLimit-Reset" }
+            }
+          }
+        },
+        "security": [{ "access-token": [] }],
+        "summary": "Get an assistant report",
+        "tags": ["assistant"],
+        "x-eg-permissions": { "mode": "all", "permissions": ["assistant:use"] }
       }
     }
   },

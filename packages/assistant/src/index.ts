@@ -1,5 +1,6 @@
 // @email-gateway/assistant: providers, prompt, context, results and the tool registry of the AI
-// assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091/0092). Only apps/api depends on
+// assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091/0092) and the reports of step
+// AI-R (docs/plan/steps/31-ai-chat-reports.md, ADR-0095). Only apps/api depends on
 // this package; the portal may import its types.
 export * from './providers/types';
 export * from './providers/meta-tools';
@@ -29,4 +30,15 @@ export * from './confirmations/updates';
 export * from './registry/types';
 export * from './registry/manifest';
 export * from './registry/registry';
+export {
+  NATIVE_OPERATION_ID,
+  NATIVE_PATH_PREFIX,
+  RECIPIENT_MAX_LENGTH,
+  REPORT_GENERATE,
+  REPORT_GENERATE_TESTED_BY,
+  REPORT_REF_PATTERN,
+  REPORT_SEND_EMAIL,
+  REPORT_SEND_EMAIL_TESTED_BY,
+} from './registry/native';
+export * from './reports';
 export { API_PREFIX, phaseIndex, toolNameOf } from './registry/build';

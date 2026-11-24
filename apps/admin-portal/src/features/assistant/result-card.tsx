@@ -12,6 +12,7 @@ import { callOperation } from '@/lib/api/call';
 import { cn } from '@/lib/utils';
 import { decisionLabel, turnErrorText } from './model';
 import { safePortalHref } from './portal-routes';
+import { ReportCard } from './report-card';
 import { cardSchema } from './stream';
 import type { AssistantCard, CardLink, CardValue, ExecutionDecision } from './types';
 
@@ -20,7 +21,8 @@ import type { AssistantCard, CardLink, CardValue, ExecutionDecision } from './ty
  * card the api built from the real API response (never from the model's text). Table cards use
  * the design-system DataTable with row links to the portal page and "Load more" (`POST
  * /assistant/executions/{id}/more`, appended rows); key-value, series (time-series or bar chart),
- * message and error cards; and the denied card for a refused tool call.
+ * message and error cards; report cards (step AI-R, `report-card.tsx`); and the denied card for
+ * a refused tool call.
  */
 
 type Row = Readonly<Record<string, CardValue>> & { readonly __ref: string };
@@ -486,6 +488,12 @@ export function ResultCard({
       return <SeriesCard card={card} onNavigate={onNavigate} />;
     case 'error':
       return <ErrorCard card={card} onNavigate={onNavigate} />;
+    case 'report':
+      return card.report ? (
+        <ReportCard card={card} onNavigate={onNavigate} />
+      ) : (
+        <MessageCard card={card} onNavigate={onNavigate} />
+      );
     case 'message':
     default:
       return <MessageCard card={card} onNavigate={onNavigate} />;

@@ -219,8 +219,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // operations of step AI-1 (docs/plan/steps/28-ai-chat-management.md §4.1): 418; plus the 3
     // confirmation operations of step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md
     // §4.1): 421; plus the API key read of step AI-3
-    // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422, all under /api/v1.
-    expect(count).toBe(422);
+    // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422; plus the report read of step
+    // AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1): 423, all under /api/v1.
+    expect(count).toBe(423);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1456,7 +1457,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     ).toContain('Step 8.5');
   });
 
-  it('documents the 15 step AI-1 and 3 step AI-2 assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
+  it('documents the 15 step AI-1, 3 step AI-2 and 1 step AI-R assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
     const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/assistant'));
     const expected: Record<string, [string, string, string | null, 'v1' | null]> = {
       'GET /api/v1/assistant/status': [
@@ -1568,6 +1569,13 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         'sensitive',
         null,
       ],
+      // Step AI-R §4.1.
+      'GET /api/v1/assistant/reports/{reportId}': [
+        'AssistantReportsController_get_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
     };
     expect(ops.map((op) => op.key).sort()).toEqual(Object.keys(expected).sort());
     for (const [key, [operationId, permission, rateClass, cursor]] of Object.entries(expected)) {
@@ -1622,6 +1630,17 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       // Step AI-3 D10, §4.1.
       'assistant_action_not_allowed',
       'denied_guard',
+      // Step AI-R §4.1.
+      'assistant_report_not_found',
+      'assistant_report_purged',
+      'assistant_report_too_large',
+      'assistant_report_generation_limit',
+      'assistant_report_email_limit',
+      'assistant_report_storage_failed',
+      'assistant_report_sources_unavailable',
+      'report_recipient_not_allowed',
+      'report_needs_organization',
+      'assistant-report-view/1',
     ]) {
       expect(docs, code).toContain(code);
     }

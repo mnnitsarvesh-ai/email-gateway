@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { staleOutputs } from '../../scripts/generate-registry';
+import { readPortalUsage, staleOutputs } from '../../scripts/generate-registry';
 import {
   buildRegistry,
   freeFormResponsePaths,
@@ -12,7 +13,11 @@ import {
   untrustedFieldsOf,
   type OpenApiDocument,
 } from './build';
-import { confirmationSpecOf } from '../confirmations/specs';
+import {
+  CONFIRMATION_SPECS,
+  confirmationSpecOf,
+  type ConfirmationSpec,
+} from '../confirmations/specs';
 import { registryConsistencyIssues } from './consistency';
 import {
   AI2_WRITES_TESTED_BY,
@@ -30,9 +35,12 @@ import {
   classifyOperation,
 } from './manifest';
 import {
+  ALL_TOOLS,
+  NATIVE_TOOLS,
   NOT_APPLICABLE_OPERATIONS,
   OPERATION_TOOLS,
   REGISTRY_VERSION,
+  isNativeTool,
   compileValidator,
   describeTool,
   enabledTools,
@@ -42,7 +50,7 @@ import {
   satisfiesRequirement,
   toolSignature,
 } from './registry';
-import { PROGRAM_PHASES, type OperationOverride } from './types';
+import { PROGRAM_PHASES, type OperationOverride, type OperationTool } from './types';
 
 const REPO = join(__dirname, '../../../..');
 const openapi = JSON.parse(
@@ -53,6 +61,7 @@ const operations = Object.entries(openapi.paths).flatMap(([path, item]) =>
   METHODS.flatMap((method) => (item[method] ? [{ path, method, op: item[method] }] : [])),
 );
 const phase = (p: string) => PROGRAM_PHASES.indexOf(p as (typeof PROGRAM_PHASES)[number]);
+const OPENAPI_IDS: ReadonlySet<string> = new Set(operations.map((o) => o.op.operationId!));
 
 describe('registry check (generated outputs)', () => {
   it('operations.generated.ts and UI_TO_CHAT_CAPABILITY_MATRIX.md are in sync', async () => {
@@ -100,9 +109,12 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('AI-3: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-3');
-    expect(registryConsistencyIssues(OPERATION_TOOLS)).toEqual([]);
+  it('AI-R: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-R');
+    expect(PROGRAM_PHASES).toEqual(['AI-1', 'AI-2', 'AI-3', 'AI-R', 'AI-4', 'AI-5', 'AI-6']);
+    expect(registryConsistencyIssues(ALL_TOOLS, { openApiOperationIds: OPENAPI_IDS })).toEqual([]);
+    // AI-R adds no OpenAPI tool: every generated tool of AI-4 and later stays disabled.
+    expect(OPERATION_TOOLS.some((t) => t.phase === 'AI-R')).toBe(false);
     for (const tool of OPERATION_TOOLS) {
       if (tool.enabled) {
         expect(phase(tool.phase), tool.name).toBeLessThanOrEqual(phase(ASSISTANT_PROGRAM_PHASE));
@@ -163,7 +175,7 @@ describe('registry completeness and consistency (D3)', () => {
     expect(count((t) => t.status === 'MISSING')).toBe(92);
     expect(count((t) => t.status === 'MISSING' && t.access === 'read')).toBe(3);
     expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
-      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 48, 'AI-4': 66, 'AI-5': 26, 'AI-6': 0 },
+      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 66, 'AI-5': 26, 'AI-6': 0 },
     );
     expect(count((t) => t.enabled && phase(t.phase) > phase('AI-3'))).toBe(0);
     const writesByRisk = Object.fromEntries(
@@ -274,7 +286,7 @@ describe('registry completeness and consistency (D3)', () => {
     expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(55);
     expect(count((t) => t.enabled)).toBe(174);
     expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
-      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 47, 'AI-4': 66, 'AI-5': 26, 'AI-6': 0 },
+      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 47, 'AI-R': 0, 'AI-4': 66, 'AI-5': 26, 'AI-6': 0 },
     );
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
   });
@@ -602,3 +614,242 @@ describe('permission pre-filter, catalogue index, describe', () => {
     });
   });
 });
+
+describe('native tools (step AI-R D1)', () => {
+  const generate = findTool('report_generate')!;
+  const send = findTool('report_send_email')!;
+
+  it('are exactly report_generate and report_send_email with the design D1 records', () => {
+    expect(NATIVE_TOOLS.map((t) => t.name)).toEqual(['report_generate', 'report_send_email']);
+    expect(ALL_TOOLS).toEqual([...OPERATION_TOOLS, ...NATIVE_TOOLS]);
+    expect(generate).toMatchObject({
+      operationId: 'AssistantNative_reportGenerate',
+      method: 'POST',
+      pathTemplate: 'native:report_generate',
+      native: true,
+      module: 'reports',
+      phase: 'AI-R',
+      access: 'read',
+      risk: 'read_audited',
+      confirm: 'none',
+      requirement: { mode: 'all', permissions: ['report:read'] },
+      enabled: true,
+      status: 'IMPLEMENTED',
+      display: { title: 'Generate security report' },
+      untrustedFields: [],
+      bind: {},
+      portalRoute: null,
+      testedBy: 'apps/api/integration/assistant-reports.test.ts',
+    });
+    expect(send).toMatchObject({
+      operationId: 'AssistantNative_reportSendEmail',
+      method: 'POST',
+      pathTemplate: 'native:report_send_email',
+      native: true,
+      module: 'reports',
+      phase: 'AI-R',
+      access: 'write',
+      risk: 'medium',
+      confirm: 'confirm+impact',
+      requirement: { mode: 'all', permissions: ['report:read'] },
+      enabled: true,
+      status: 'IMPLEMENTED',
+      display: { title: 'Email security report' },
+      untrustedFields: [],
+      bind: {},
+      portalRoute: '/assistant',
+      testedBy: 'apps/api/integration/assistant-report-emails.test.ts',
+    });
+    for (const tool of NATIVE_TOOLS) {
+      expect(isNativeTool(tool)).toBe(true);
+      expect(tool.operationId).toMatch(/^AssistantNative_[A-Za-z]+$/);
+      expect(OPENAPI_IDS.has(tool.operationId)).toBe(false);
+      expect(tool.pathTemplate.startsWith('native:')).toBe(true);
+      expect(tool.inputSchema.additionalProperties).toBe(false);
+      expect([tool.pathParams, tool.queryParams, tool.hasBody]).toEqual([[], [], false]);
+      expect(findOperation(tool.operationId)).toBe(tool);
+      expect(findTool(tool.name)).toBe(tool);
+      expect(() => compileValidator(tool)).not.toThrow();
+    }
+    expect(OPERATION_TOOLS.some(isNativeTool)).toBe(false);
+    expect(new Set(ALL_TOOLS.map((t) => t.name)).size).toBe(ALL_TOOLS.length);
+    expect(confirmationSpecOf('AssistantNative_reportSendEmail')?.native).toBe('report_send_email');
+    expect(confirmationSpecOf('AssistantNative_reportGenerate')).toBeUndefined();
+  });
+
+  it('are in the pre-filter view, the catalogue index and describe_tool', () => {
+    const names = enabledTools(['report:read'], false).map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(['report_generate', 'report_send_email']));
+    expect(enabledTools(['policy:read'], false).some((t) => t.native)).toBe(false);
+    expect(toolSignature(generate)).toBe(
+      'report_generate(range?: 24h|7d|30d, from?, to?, sections?) - Generate a security report (HTML dashboard) for a period',
+    );
+    expect(toolSignature(send)).toBe(
+      'report_send_email(reportId?, to?) - Email a generated security report',
+    );
+    const index = renderCatalogueIndex(enabledTools(['report:read'], false));
+    expect(index).toContain('\nreport_generate(');
+    expect(index).toContain('\nreport_send_email(');
+    expect(describeTool(send)).toMatchObject({
+      name: 'report_send_email',
+      access: 'write',
+      risk: 'medium',
+      available: true,
+      inputSchema: send.inputSchema,
+    });
+  });
+
+  it('validate arguments strictly (Ajv)', () => {
+    const g = compileValidator(generate);
+    expect(g({}).ok).toBe(true);
+    expect(g({ range: '24h', sections: ['summary', 'ato'] }).ok).toBe(true);
+    expect(g({ from: '2026-11-01T00:00:00Z', to: '2026-11-08T00:00:00Z' }).ok).toBe(true);
+    for (const bad of [
+      { range: '90d' },
+      { from: '2026-11-01T00:00:00Z' },
+      { to: '2026-11-01T00:00:00Z' },
+      { from: 'yesterday', to: '2026-11-01T00:00:00Z' },
+      { sections: [] },
+      { sections: ['traffic', 'traffic'] },
+      { sections: ['top_senders'] },
+      { format: 'pdf' },
+    ])
+      expect(g(bad).ok, JSON.stringify(bad)).toBe(false);
+    const s = compileValidator(send);
+    expect(s({}).ok).toBe(true);
+    expect(s({ reportId: '@r3.1', to: 'ada@example.test' }).ok).toBe(true);
+    expect(s({ reportId: '0193aaaa-0000-7000-8000-000000000040' }).ok).toBe(true);
+    for (const bad of [
+      { reportId: 'r3.1' },
+      { reportId: '@r3' },
+      { to: 'Ada <ada@example.test>' },
+      { to: 'ada@example.test\r\nBcc: x@example.test' },
+      { to: 'ada@example.test,bob@example.test' },
+      { to: 'ada@example.test bob@example.test' },
+      { to: 'jürgen@example.test' },
+      { to: `${'a'.repeat(250)}@x.test` },
+      { to: 'ada@example.test', cc: 'bob@example.test' },
+    ])
+      expect(s(bad).ok, JSON.stringify(bad)).toBe(false);
+  });
+
+  it('consistency rules for native records (synthetic breaks)', () => {
+    const issues = (
+      natives: OperationTool[],
+      specs?: Parameters<typeof registryConsistencyIssues>[1],
+    ) =>
+      registryConsistencyIssues([...OPERATION_TOOLS, ...natives], {
+        openApiOperationIds: OPENAPI_IDS,
+        ...specs,
+      });
+    expect(issues([...NATIVE_TOOLS])).toEqual([]);
+    expect(issues([send, { ...generate, operationId: 'ReportsController_traffic_v1' }])).toEqual(
+      expect.arrayContaining([
+        'report_generate: native operation id must match ^AssistantNative_[A-Za-z]+$',
+        'report_generate: native operation id ReportsController_traffic_v1 exists in OpenAPI',
+        'ReportsController_traffic_v1: duplicate operation id',
+      ]),
+    );
+    expect(issues([send, { ...generate, pathTemplate: '/api/v1/reports/generate' }])).toEqual([
+      'report_generate: native path template must start with native:',
+    ]);
+    expect(issues([send, { ...generate, testedBy: null }])).toEqual([
+      'report_generate: native tool without testedBy',
+    ]);
+    expect(issues([send, { ...generate, name: 'reports_traffic' }])).toEqual([
+      'reports_traffic: duplicate tool name',
+    ]);
+    expect(issues([send, { ...generate, queryParams: ['range'] }])).toEqual([
+      'report_generate: a native tool has no path, query or body parameters',
+    ]);
+    expect(
+      issues([
+        send,
+        {
+          ...generate,
+          inputSchema: {
+            type: 'object',
+            properties: { apiToken: { type: 'string' } },
+            additionalProperties: true,
+          },
+        },
+      ]),
+    ).toEqual([
+      'report_generate: native input schema must set additionalProperties: false',
+      'report_generate: input property apiToken matches the credential-key pattern',
+    ]);
+    const plainSpec = CONFIRMATION_SPECS_WITHOUT_NATIVE();
+    expect(issues([...NATIVE_TOOLS], { specs: plainSpec })).toEqual([
+      'report_send_email: enabled native write without a native confirmation spec',
+    ]);
+    // A generated tool may not borrow the native markers.
+    const traffic = findTool('reports_traffic')!;
+    expect(
+      registryConsistencyIssues(
+        ALL_TOOLS.map((t) =>
+          t.name === 'reports_traffic' ? { ...traffic, native: true as const } : t,
+        ),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        'reports_traffic: native operation id must match ^AssistantNative_[A-Za-z]+$',
+        'reports_traffic: native path template must start with native:',
+      ]),
+    );
+    expect(
+      registryConsistencyIssues(
+        ALL_TOOLS.map((t) =>
+          t.name === 'reports_traffic' ? { ...traffic, pathTemplate: 'native:reports_traffic' } : t,
+        ),
+      ),
+    ).toEqual(['reports_traffic: only native tools may use native ids or native: paths']);
+  });
+
+  it('§4.4 totals: 349 operation tools, 2 native tools, 259 enabled (180 reads, 79 writes)', () => {
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    expect(OPERATION_TOOLS).toHaveLength(349);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    // Not-applicable operations are derived from the document (step AI-R adds one assistant route).
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(operations.length - OPERATION_TOOLS.length);
+    expect(enabled).toHaveLength(259);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(180);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(79);
+    expect(ALL_TOOLS.filter((t) => t.enabled && t.phase === 'AI-R').map((t) => t.name)).toEqual([
+      'report_generate',
+      'report_send_email',
+    ]);
+    expect(ALL_TOOLS.some((t) => t.enabled && phase(t.phase) > phase('AI-R'))).toBe(false);
+  });
+
+  it('are part of the REGISTRY_VERSION hash input and of the capability matrix', () => {
+    const built = buildRegistry(openapi, readPortalUsage());
+    const hash = (input: unknown) =>
+      createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 16);
+    expect(built.version).toBe(REGISTRY_VERSION);
+    expect(
+      hash({ tools: built.tools, notApplicable: built.notApplicable, native: NATIVE_TOOLS }),
+    ).toBe(REGISTRY_VERSION);
+    expect(hash({ tools: built.tools, notApplicable: built.notApplicable })).not.toBe(
+      REGISTRY_VERSION,
+    );
+    const matrix = readFileSync(
+      join(REPO, 'docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md'),
+      'utf8',
+    );
+    expect(matrix).toContain('## Native assistant tools');
+    expect(matrix).toMatch(
+      /\| `report_generate` +\| `AssistantNative_reportGenerate` +\| `native:report_generate` +\| `report:read` +\| R +\| read_audited +\| none +\| IMPLEMENTED +\| AI-R +\| - +\| `apps\/api\/integration\/assistant-reports\.test\.ts` +\|/,
+    );
+    expect(matrix).toMatch(
+      /\| `report_send_email` .*\| W +\| medium +\| confirm\+impact +\| IMPLEMENTED +\| AI-R +\| \/assistant +\|/,
+    );
+  });
+});
+
+function CONFIRMATION_SPECS_WITHOUT_NATIVE(): ConfirmationSpec[] {
+  return CONFIRMATION_SPECS.map((spec) => {
+    if (!spec.native) return spec;
+    const { native: _native, ...rest } = spec;
+    return rest;
+  });
+}

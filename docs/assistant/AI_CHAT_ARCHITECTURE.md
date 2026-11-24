@@ -184,3 +184,79 @@ Api only; section "AI assistant (step AI-1)" of `.env.example` (AI-2 appended `A
 | `ASSISTANT_MAX_PENDING_CONFIRMATIONS`                                                                        | `5`                         | Pending confirmations per conversation (1–20); a further proposal is `denied_budget` (AI-2)                                          |
 
 The Docker Compose api service passes no `ASSISTANT_*` key, so the containerized api runs with the assistant off; see [README.md](README.md#enabling-it-locally).
+
+## Reports in chat and email delivery (step AI-R, ADR-0095)
+
+Normative sources: [design note 31](../plan/steps/31-ai-chat-reports.md) (I15–I17, D1–D11), [ADR-0095](../architecture/adr/0095-assistant-reports-native-tools-static-html-email.md) and the "Amendment AI-R" sections of ADR-0091, ADR-0093 and ADR-0094, [contracts §35.3](../architecture/contracts.md), topology v15.
+
+### Native tools
+
+Two registry records are **native tools** (`packages/assistant/src/registry/native.ts`): they are not OpenAPI operations, their operation ids are `AssistantNative_<camel>` (never in `docs/api/openapi.json`) and their path templates start with `native:`, which the loopback client refuses. `ALL_TOOLS = [...OPERATION_TOOLS, ...NATIVE_TOOLS]` feeds the catalogue index, `describe_tool`, `GET /assistant/tools`, the executor and the capability matrix ("Native assistant tools").
+
+| Tool                | Access / risk / confirm             | Requirement   | What the api runs (`NativeToolsService`)                                                                                              |
+| ------------------- | ----------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `report_generate`   | read / `read_audited` / none        | `report:read` | `ReportGeneratorService`: a fixed composition of up to ten loopback GETs, the pure renderer of `@email-gateway/assistant`, storage    |
+| `report_send_email` | write / `medium` / `confirm+impact` | `report:read` | `ReportDeliveryService`: proposal (recipient rule, limits, bound state), confirm-time re-check, the delivery row and its outbox event |
+
+The platform switches `ASSISTANT_REPORTS_ENABLED` and `ASSISTANT_REPORT_EMAIL_ENABLED` hide each tool (`denied_disabled`, absent from the catalogue).
+
+### Report flow
+
+```text
+user: "generate a security report"
+  │  turn engine → model calls report_generate {range|from/to, sections}
+  ▼
+ToolExecutorService (D5 steps 1–6: budget, lookup, permission, refs, schema)
+  │  native read → ReportGeneratorService
+  ├─ platform principal without override → denied_guard (report_needs_organization)
+  ├─ reports of the user today ≥ ASSISTANT_REPORTS_PER_USER_PER_DAY → denied_budget
+  ├─ window (≤ REPORTS_MAX_RANGE_DAYS; hour buckets ≤ 48 h, else day)
+  ├─ source plan (REPORT_SOURCES): a source the principal may not read is NOT requested
+  │    (omitted "permission"); the rest as loopback GETs with the user's bearer,
+  │    concurrency 4, correlation <turn>.<seq>.<n>, x-eg-assistant-execution:
+  │    /reports/{traffic,threats,top-domains,delivery,processing,url-clicks},
+  │    /quarantine/summary, /ato/overview, then /ato/accounts?sort=-riskScore
+  │    (only when ATO monitoring is on; feature off → omitted "not_enabled")
+  ├─ zod parse per source (unexpected shape → omitted "unexpected_response");
+  │    every requested section omitted → 503 assistant_report_sources_unavailable
+  ├─ buildReportModel → renderReportHtml (pure, deterministic, inert HTML, static SVG;
+  │    > ASSISTANT_REPORT_MAX_HTML_BYTES → 413 assistant_report_too_large)
+  ├─ ai_chat_reports row "pending" → PutObject (mail bucket,
+  │    org/<org>/assistant/report/<yyyy>/<mm>/<dd>/<reportId>.html, ChecksumSHA256)
+  └─ persist transaction: row "available", execution row, card kind "report",
+       audit assistant.tool_executed + assistant.report_generated
+  ▼
+chat: report card → portal ReportFrame fetches GET /assistant/reports/{id}
+      ({ report, html } inside JSON, Cache-Control: no-store) → <iframe sandbox="" srcdoc>
+```
+
+Every figure in the report, the card and the model's envelope is a value of an API response read in that request with the user's own credential (I15); the model only chooses the period and the sections and receives the figures (≤ 8), never the HTML.
+
+### Email path
+
+```text
+user: "send this report to my email" → model calls report_send_email {reportId?, to?}
+  ▼ proposal (ReportDeliveryService.prepareProposal)
+  report of this owner and conversation (404 / 410 / 413) → recipient class
+  (self | member | domain; anything else → denied_guard report_recipient_not_allowed,
+  no confirmation, audit with domain + SHA-256 only) → daily limits (denied_budget)
+  → confirmation card (risk medium, stateDigest of report + recipient class)
+  ▼ confirm (AI-2 steps 1–11, then)
+  step 12 readState: recipient now refused → 403 assistant_action_not_allowed;
+          digest changed (report purged, class changed) → 409 state_changed
+  step 13 in one transaction: SELECT … ai_chat_settings FOR UPDATE (tenant lock),
+          exact recount (limit → failed 429, nothing written), ai_chat_report_deliveries
+          "queued", message_outbox assistant.report.email_requested.v1 (ids only,
+          eventId = delivery id), audit assistant.report_email_requested
+  ▼ event-relay → email.policy → email.notifications (topology v15)
+notification-worker AssistantReportEmailHandler: delivery (org-scoped) → report
+  "available" → object read from the mail bucket (key prefix, size, SHA-256 checked)
+  → NoticeMailer → postfix-notify: To: one recipient, HTML body + the same HTML attached
+  + plain-text part with the portal link → delivery "sent" (or "failed" with a code)
+```
+
+The api never sends mail; the worker writes only the delivery row's status columns and no audit row. A copy in a recipient's mailbox is outside the platform's control.
+
+### Storage and retention
+
+MySQL holds metadata only (`ai_chat_reports`, `ai_chat_report_deliveries`); the HTML is an object in the mail bucket, never returned outside JSON and never logged. The content purge of a conversation (retention job, `DELETE /assistant/conversations/{id}`) moves its reports to `purged`, clears delivery addresses and fails `queued` deliveries; the job deletes the objects after the commit (the delete route inline, best effort), sweeps `pending` reports older than 1 hour and `queued` deliveries older than 25 hours. The organization purge deletes deliveries, then reports (objects first, per batch).

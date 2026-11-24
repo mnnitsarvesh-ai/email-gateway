@@ -26,7 +26,8 @@
   "devDependencies": {
     "@email-gateway/policy-dsl": "workspace:*",
     "fast-check": "3.23.2",
-    "tsx": "4.23.15",
-    "prettier": "^3.6.2"
+    "parse5": "7.3.0",
+    "prettier": "^3.6.2",
+    "tsx": "4.23.15"
   }
 }

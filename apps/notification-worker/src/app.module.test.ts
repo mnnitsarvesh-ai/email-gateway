@@ -9,11 +9,15 @@ import { describe, expect, it } from 'vitest';
 import { AppModule } from './app.module';
 import { loadWorkerConfig } from './config';
 import { AlertNotificationHandler } from './notifications/alert-notification.handler';
+import { AssistantReportEmailHandler } from './notifications/assistant-report.handler';
 import { PolicyNotificationHandler } from './notifications/policy-notification.handler';
 
 const config = loadWorkerConfig({
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
   RABBITMQ_NOTIFICATION_URL: 'amqp://test:test@localhost:5672/email-gateway',
+  S3_REGION: 'ap-south-1',
+  S3_BUCKET_MAIL: 'gateway-mail',
+  S3_BUCKET_ARCHIVE: 'gateway-archive',
   LOG_LEVEL: 'fatal',
 });
 
@@ -52,6 +56,10 @@ describe('AppModule wiring', () => {
       expect(report.checks.map((c) => c.name)).toEqual(['mysql', 'rabbitmq']);
       expect(moduleRef.get(PolicyNotificationHandler)).toBeInstanceOf(PolicyNotificationHandler);
       expect(moduleRef.get(AlertNotificationHandler)).toBeInstanceOf(AlertNotificationHandler);
+      // Step AI-R D8: the report email handler; S3 is not a readiness check (notices first).
+      expect(moduleRef.get(AssistantReportEmailHandler)).toBeInstanceOf(
+        AssistantReportEmailHandler,
+      );
       expect(setups).toBeGreaterThanOrEqual(1);
       expect(JSON.stringify(topology)).toContain('email.notifications');
       const text = await moduleRef.get(MetricsService).metrics();
@@ -59,6 +67,7 @@ describe('AppModule wiring', () => {
       expect(text).toContain('notification_send_duration_seconds');
       expect(text).toContain('notification_alert_messages_total');
       expect(text).toContain('notification_alerts_suppressed_total');
+      expect(text).toContain('notification_assistant_report_emails_total');
     } finally {
       await moduleRef.close();
     }

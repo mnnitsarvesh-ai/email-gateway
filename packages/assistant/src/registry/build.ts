@@ -11,6 +11,7 @@ import {
   classifyOperation,
   type OperationFacts,
 } from './manifest';
+import { NATIVE_TOOLS } from './native';
 import {
   PROGRAM_PHASES,
   type HttpMethod,
@@ -441,8 +442,9 @@ export function buildRegistry(document: OpenApiDocument, usage: PortalUsage): Re
   }
   tools.sort(comparePaths);
   notApplicable.sort(comparePaths);
+  // Step AI-R D1: the hand-written native tools are part of the version's hash input.
   const version = createHash('sha256')
-    .update(JSON.stringify({ tools, notApplicable }))
+    .update(JSON.stringify({ tools, notApplicable, native: NATIVE_TOOLS }))
     .digest('hex')
     .slice(0, 16);
   return { version, tools, notApplicable };

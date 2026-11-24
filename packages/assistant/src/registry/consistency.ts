@@ -9,6 +9,7 @@ import {
   CONFIRMATION_SUPPORT_PHASE,
   CREDENTIAL_KEY_EXCEPTIONS,
 } from './manifest';
+import { NATIVE_OPERATION_ID, NATIVE_PATH_PREFIX } from './native';
 import type { OperationTool, ProgramPhase } from './types';
 
 /**
@@ -37,11 +38,24 @@ import type { OperationTool, ProgramPhase } from './types';
  *   `anyOf`/`oneOf`/`allOf`, `additionalProperties`) whose key matches the credential-key pattern
  *   (`isCredentialKey`, I14), except the named `CREDENTIAL_KEY_EXCEPTIONS`;
  * - the generator refuses an access override other than `'write'` (`build.ts`).
+ *
+ * Step AI-R (design 31 D1) adds the native tools (pass `[...operationTools, ...NATIVE_TOOLS]`):
+ *
+ * - tool names and operation ids are unique across both sets;
+ * - a native tool has `native: true`, an operation id matching `^AssistantNative_[A-Za-z]+$`
+ *   that is absent from OpenAPI (`openApiOperationIds`), a path template starting with
+ *   `native:`, no path or query parameters, a strict input schema and a `testedBy` suite; no
+ *   input key of a native tool matches the credential-key pattern;
+ * - a generated tool never has `native` set or a `native:` path;
+ * - every enabled native write has a confirmation spec with `native` set (and an impact
+ *   template, as every enabled write); a spec of an OpenAPI write never sets `native`.
  */
 
 export interface ConsistencyOptions {
   specs?: readonly ConfirmationSpec[];
   programPhase?: ProgramPhase;
+  /** The operation ids of `docs/api/openapi.json` (native ids must not be among them). */
+  openApiOperationIds?: ReadonlySet<string>;
 }
 
 type Schema = Record<string, unknown>;
@@ -100,7 +114,39 @@ export function registryConsistencyIssues(
     specByOperation.set(spec.operationId, spec);
   }
 
+  const names = new Set<string>();
+  const operationIds = new Set<string>();
   for (const tool of tools) {
+    if (names.has(tool.name)) issues.push(`${tool.name}: duplicate tool name`);
+    if (operationIds.has(tool.operationId))
+      issues.push(`${tool.operationId}: duplicate operation id`);
+    names.add(tool.name);
+    operationIds.add(tool.operationId);
+    const nativePath = tool.pathTemplate.startsWith(NATIVE_PATH_PREFIX);
+    if (tool.native === true) {
+      if (!NATIVE_OPERATION_ID.test(tool.operationId))
+        issues.push(`${tool.name}: native operation id must match ${NATIVE_OPERATION_ID.source}`);
+      if (options.openApiOperationIds?.has(tool.operationId))
+        issues.push(`${tool.name}: native operation id ${tool.operationId} exists in OpenAPI`);
+      if (!nativePath)
+        issues.push(`${tool.name}: native path template must start with ${NATIVE_PATH_PREFIX}`);
+      if (tool.pathParams.length > 0 || tool.queryParams.length > 0 || tool.hasBody)
+        issues.push(`${tool.name}: a native tool has no path, query or body parameters`);
+      if (tool.inputSchema.additionalProperties !== false)
+        issues.push(`${tool.name}: native input schema must set additionalProperties: false`);
+      if (!tool.testedBy) issues.push(`${tool.name}: native tool without testedBy`);
+      for (const path of credentialKeyPaths(tool.inputSchema))
+        issues.push(`${tool.name}: input property ${path} matches the credential-key pattern`);
+      if (tool.enabled && tool.access === 'write' && !specByOperation.get(tool.operationId)?.native)
+        issues.push(`${tool.name}: enabled native write without a native confirmation spec`);
+    } else if (
+      nativePath ||
+      tool.native !== undefined ||
+      NATIVE_OPERATION_ID.test(tool.operationId)
+    )
+      issues.push(`${tool.name}: only native tools may use native ids or native: paths`);
+    if (!tool.native && tool.access === 'write' && specByOperation.get(tool.operationId)?.native)
+      issues.push(`${tool.name}: a native confirmation spec on an OpenAPI write`);
     if ((tool.risk as string) === 'critical')
       issues.push(`${tool.name}: a critical operation must be not_applicable (portal only)`);
     if (!tool.enabled) continue;
@@ -118,6 +164,7 @@ export function registryConsistencyIssues(
       issues.push(`${tool.name}: enabled write without an impact template`);
     if (!['low', 'medium', 'high'].includes(tool.risk))
       issues.push(`${tool.name}: enabled write with the non-confirmable risk ${tool.risk}`);
+    if (tool.native) continue; // credential keys of native inputs are checked above
     const allowed = CREDENTIAL_KEY_EXCEPTIONS[tool.operationId] ?? {};
     for (const path of credentialKeyPaths(tool.inputSchema))
       if (!Object.prototype.hasOwnProperty.call(allowed, path))

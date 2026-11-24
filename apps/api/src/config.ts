@@ -1520,8 +1520,9 @@ const assistantModelPrices = z
  * tenant and platform daily token budgets, content and execution retention, the conversations per
  * user, the loopback URL of tool calls (empty = the api's own listening address), the background
  * jobs (retention purge, stale-turn sweeper), the provider breaker, optional model prices and the
- * AI-2 confirmation lifetime and re-authentication window (validated now, used from AI-2).
- * Start-up errors name the key, never the value.
+ * AI-2 confirmation lifetime and re-authentication window (validated now, used from AI-2), and
+ * the step AI-R report switches and limits (docs/plan/steps/31-ai-chat-reports.md §4.2, D1, D2,
+ * D5; ADR-0095). Start-up errors name the key, never the value.
  */
 export const assistantConfigShape = {
   ASSISTANT_ENABLED: bool.default(false),
@@ -1591,6 +1592,21 @@ export const assistantConfigShape = {
   ASSISTANT_MAX_PENDING_CONFIRMATIONS: int(1, 20).default(5),
   /** AI-2: a re-authentication this recent satisfies a high-risk confirmation; 0 = always ask. */
   ASSISTANT_REAUTH_WINDOW_SECONDS: int(0, 1800).default(300),
+  /**
+   * AI-R (D1): platform switch of the native tool `report_generate`; false = `denied_disabled`,
+   * absent from the catalogue and `GET /assistant/tools`.
+   */
+  ASSISTANT_REPORTS_ENABLED: bool.default(true),
+  /** AI-R (D1): platform switch of the native write tool `report_send_email` (as above). */
+  ASSISTANT_REPORT_EMAIL_ENABLED: bool.default(true),
+  /** AI-R (D2 step 2): reports per user per UTC day (`denied_budget`, `assistant_report_generation_limit`). */
+  ASSISTANT_REPORTS_PER_USER_PER_DAY: int(1, 1000).default(30),
+  /** AI-R (D5): report emails per user per UTC day, at proposal and at confirm (`assistant_report_email_limit`). */
+  ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY: int(1, 500).default(10),
+  /** AI-R (D5): report emails per organization per UTC day (as above, `scope: tenant`). */
+  ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY: int(1, 10_000).default(50),
+  /** AI-R (D2 step 8, D5): size cap of a rendered report (`413 assistant_report_too_large`). */
+  ASSISTANT_REPORT_MAX_HTML_BYTES: int(65_536, 2_097_152).default(524_288),
 };
 
 export type AssistantConfigKeys = {

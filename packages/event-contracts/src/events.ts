@@ -2250,4 +2250,7 @@ export const EventTypes = {
   AtoRestrictionChanged: 'ato.restriction.changed.v1',
   AtoNotificationRequested: 'ato.notification.requested.v1',
   IntegrationHealthChanged: 'integration.connection.health_changed.v1',
+  // Step AI-R (docs/plan/steps/31-ai-chat-reports.md D8, §4.3): a confirmed assistant report
+  // email (schema in assistant-events.ts).
+  AssistantReportEmailRequested: 'assistant.report.email_requested.v1',
 } as const;

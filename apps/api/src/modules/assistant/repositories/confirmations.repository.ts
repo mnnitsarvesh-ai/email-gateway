@@ -103,6 +103,21 @@ export interface UnreportedConfirmation {
   errorCode: string | null;
   resultSeq: number | null;
   resultRowRef: boolean;
+  /**
+   * Step AI-R D5: the recipient of a `report_send_email` (the stored request's `body.to`; null
+   * after the content purge and for every other tool).
+   */
+  recipient: string | null;
+}
+
+/** The `to` of a stored native `report_send_email` request (the action-update line). */
+function recipientOf(toolName: string, request: unknown): string | null {
+  if (toolName !== 'report_send_email' || request === null || typeof request !== 'object') {
+    return null;
+  }
+  const body = (request as { body?: unknown }).body;
+  const to = body !== null && typeof body === 'object' ? (body as { to?: unknown }).to : null;
+  return typeof to === 'string' ? to : null;
 }
 
 /** A row a system job moved (audit per row). */
@@ -375,6 +390,7 @@ export class ConfirmationsRepository {
         resultHttpStatus: true,
         errorCode: true,
         resultExecutionId: true,
+        request: true,
         execution: { select: { seq: true } },
       },
     });
@@ -406,6 +422,7 @@ export class ConfirmationsRepository {
           typeof refs === 'object' &&
           !Array.isArray(refs) &&
           Object.prototype.hasOwnProperty.call(refs, `r${result.seq}.1`),
+        recipient: recipientOf(row.toolName, row.request),
       };
     });
   }

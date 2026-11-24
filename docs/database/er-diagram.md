@@ -1598,6 +1598,12 @@ erDiagram
   ai_chat_tool_executions ||..o{ audit_logs : "correlation_id, resource id"
   organizations ||--o{ ai_chat_usage_daily : "RESTRICT"
   organizations ||--o{ ai_chat_action_confirmations : "RESTRICT"
+  organizations ||--o{ ai_chat_reports : "RESTRICT"
+  ai_chat_conversations ||--o{ ai_chat_reports : "CASCADE"
+  ai_chat_reports |o..o| ai_chat_tool_executions : "execution_id, no FK"
+  organizations ||--o{ ai_chat_report_deliveries : "RESTRICT"
+  ai_chat_reports ||--o{ ai_chat_report_deliveries : "CASCADE"
+  ai_chat_report_deliveries |o..o| ai_chat_action_confirmations : "confirmation_id UK, no FK"
   ai_chat_conversations ||--o{ ai_chat_action_confirmations : "CASCADE"
   ai_chat_turns |o--o{ ai_chat_action_confirmations : "CASCADE"
   ai_chat_tool_executions ||--o| ai_chat_action_confirmations : "CASCADE (the proposal)"
@@ -1676,7 +1682,37 @@ erDiagram
     enum status "pending, executing, executed, failed, expired, cancelled"
     datetime expires_at
   }
+  ai_chat_reports {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint user_id "no FK"
+    bigint conversation_id FK
+    bigint execution_id UK "report_generate, no FK"
+    enum status "pending, available, failed, purged"
+    datetime period_from
+    datetime period_to
+    json sections
+    json figures
+    varchar object_key "mail bucket; HTML never in MySQL"
+    char sha256
+    datetime object_deleted_at
+  }
+  ai_chat_report_deliveries {
+    bigint id PK
+    char public_id UK "outbox eventId"
+    bigint organization_id FK
+    bigint report_id FK
+    bigint confirmation_id UK "no FK"
+    varchar recipient_address "content, purged"
+    char recipient_sha256
+    enum recipient_kind "self, member, domain"
+    enum status "queued, sent, failed"
+    datetime requested_at
+  }
 ```
+
+Step AI-R ([design §3](../plan/steps/31-ai-chat-reports.md#3-data-model-migration-ai_assistant_reports-wp1), ADR-0095) added `ai_chat_reports` (report metadata; the HTML is an object in the mail bucket) and `ai_chat_report_deliveries` (confirmed report emails, one per confirmation).
 
 ## Platform operations
 

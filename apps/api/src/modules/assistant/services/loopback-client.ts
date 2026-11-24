@@ -3,7 +3,7 @@ import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { Inject, Injectable, Logger, type OnModuleDestroy, Optional } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
-import type { OperationTool } from '@email-gateway/assistant';
+import { API_PREFIX, type OperationTool } from '@email-gateway/assistant';
 import { API_CONFIG } from '../../../api-config.token';
 import {
   type AssistantConfig,
@@ -58,6 +58,14 @@ export interface LoopbackCall {
    * reads the writer (`x-eg-assistant-read-primary`), so replica lag cannot hide a change.
    */
   readPrimary?: boolean;
+}
+
+/**
+ * True for a path below the api's `/api/v1` prefix (step AI-R D1 defence: native tools have
+ * `native:` path templates and are never sent through the loopback).
+ */
+export function isApiPath(path: string): boolean {
+  return path.startsWith(`${API_PREFIX}/`);
 }
 
 /** The api's `Idempotency-Key` format (`apps/api/src/http/idempotency/idempotency-key.ts`). */
@@ -130,6 +138,9 @@ export function buildLoopbackRequest(
   tool: Pick<OperationTool, 'method' | 'pathTemplate' | 'pathParams' | 'queryParams' | 'hasBody'>,
   args: Readonly<Record<string, unknown>>,
 ): { method: HttpMethod; path: string; body?: unknown } {
+  if (!isApiPath(tool.pathTemplate)) {
+    throw new Error('loopback: the tool path template is not under /api/v1');
+  }
   let path = tool.pathTemplate;
   for (const name of tool.pathParams) {
     const value = args[name];
@@ -250,6 +261,10 @@ export class LoopbackClient extends LoopbackDispatcher implements OnModuleDestro
 
   send(call: LoopbackCall): Promise<LoopbackResult> {
     if (call.signal.aborted) return Promise.resolve({ kind: 'aborted' });
+    if (!isApiPath(call.path)) {
+      this.logger.warn({ message: 'Loopback path outside /api/v1; call refused' });
+      return Promise.resolve({ kind: 'unavailable' });
+    }
     const url = new URL(call.path, `${this.baseUrl()}/`);
     // Defence in depth: the resolved path must be the one built from the tool's template (no
     // dot-segment collapse, no different route than the one recorded and audited).

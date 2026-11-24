@@ -25,9 +25,42 @@ export async function expectNoSeriousA11yViolations(page: Page, label: string): 
     .toBe(true);
   const results = await new AxeBuilder({ page })
     .exclude('[data-sonner-toast][data-removed="true"]')
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+    // Step AI-R: axe cannot run inside a `sandbox=""` frame (scripts are off there by design, so
+    // its frame.evaluate never returns), so the frame is left out here (its `title` is asserted by
+    // the specs) and the report HTML is checked on its own page (expectNoSeriousHtmlViolations).
+    .exclude('iframe[sandbox=""]')
+    .withTags(AXE_TAGS)
     .analyze();
-  const serious = results.violations
+  expectNoSerious(results.violations, label);
+}
+
+/**
+ * The same axe rules over a self-contained HTML document (step AI-R: a report the portal shows only
+ * in a sandboxed frame), loaded with `setContent` into a fresh page of the context: no navigation,
+ * no request (the report has no external resource).
+ */
+export async function expectNoSeriousHtmlViolations(
+  page: Page,
+  html: string,
+  label: string,
+): Promise<void> {
+  const scratch = await page.context().newPage();
+  try {
+    await scratch.setContent(html, { waitUntil: 'load' });
+    const results = await new AxeBuilder({ page: scratch }).withTags(AXE_TAGS).analyze();
+    expectNoSerious(results.violations, label);
+  } finally {
+    await scratch.close();
+  }
+}
+
+const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+
+function expectNoSerious(
+  violations: Awaited<ReturnType<AxeBuilder['analyze']>>['violations'],
+  label: string,
+): void {
+  const serious = violations
     .filter((v) => v.impact === 'serious' || v.impact === 'critical')
     .map(
       (v) =>

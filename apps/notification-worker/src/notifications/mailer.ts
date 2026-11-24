@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { rootCertificates as tlsRootCertificates } from 'node:tls';
 import type { NotifySmtpConfig } from '@email-gateway/config';
 import { createTransport, type Transporter } from 'nodemailer';
+import type Mail from 'nodemailer/lib/mailer';
 import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 
 export const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
@@ -52,13 +53,60 @@ export function relayTransportOptions(
   };
 }
 
+/** A file attached to a notice: in-memory bytes only (no path, no URL; step AI-R D8). */
+export interface NoticeAttachment {
+  filename: string;
+  content: Buffer;
+  /** e.g. `text/html; charset=utf-8`. */
+  contentType: string;
+}
+
 export interface NoticeMail {
-  /** Envelope and Bcc recipients (no To header: recipients never see each other). */
+  /**
+   * Envelope and Bcc recipients (no To header: recipients never see each other). Ignored when
+   * `to` is set.
+   */
   recipients: readonly string[];
+  /**
+   * Step AI-R D8: one recipient addressed in the `To:` header (envelope recipient too); no Bcc.
+   * Used by the assistant report email, which is sent to exactly one confirmed address.
+   */
+  to?: string;
   subject: string;
   text: string;
+  /** Optional HTML alternative (`multipart/alternative` with `text`; base64, byte-exact). */
+  html?: string;
+  /** Optional attachments (Buffer content only; file and URL access stay disabled). */
+  attachments?: readonly NoticeAttachment[];
   /** Deterministic `<policy-notice.<eventId>@<domain>>`. */
   messageId: string;
+}
+
+/** The nodemailer message of a notice (pure; exported for the unit test). */
+export function noticeMessageOptions(from: string, mail: NoticeMail): Mail.Options {
+  return {
+    from,
+    ...(mail.to !== undefined ? { to: mail.to } : { bcc: [...mail.recipients] }),
+    subject: mail.subject,
+    text: mail.text,
+    // Base64 keeps the HTML part byte-exact (quoted-printable would rewrite the line ends).
+    ...(mail.html !== undefined && {
+      html: { content: mail.html, contentTransferEncoding: 'base64' },
+    }),
+    ...(mail.attachments !== undefined &&
+      mail.attachments.length > 0 && {
+        attachments: mail.attachments.map((a) => ({
+          filename: a.filename,
+          content: a.content,
+          contentType: a.contentType,
+          contentDisposition: 'attachment' as const,
+        })),
+      }),
+    messageId: mail.messageId,
+    headers: { 'Auto-Submitted': 'auto-generated', 'X-Auto-Response-Suppress': 'All' },
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  };
 }
 
 /** A relay failure: retryable (the consumer retries, then dead-letters). Reply code only. */
@@ -70,7 +118,7 @@ export class NoticeSendError extends Error {
   }
 }
 
-/** Sends plain-text notices; `configured = false` without NOTIFY_SMTP_HOST (nothing is sent). */
+/** Sends notices (plain text; step AI-R adds HTML and attachments); `configured = false` without NOTIFY_SMTP_HOST (nothing is sent). */
 export interface NoticeMailer {
   readonly configured: boolean;
   readonly from: string | null;
@@ -95,14 +143,7 @@ export class SmtpNoticeMailer implements NoticeMailer {
 
   async send(mail: NoticeMail): Promise<void> {
     try {
-      await this.transporter.sendMail({
-        from: this.from,
-        bcc: [...mail.recipients],
-        subject: mail.subject,
-        text: mail.text,
-        messageId: mail.messageId,
-        headers: { 'Auto-Submitted': 'auto-generated', 'X-Auto-Response-Suppress': 'All' },
-      });
+      await this.transporter.sendMail(noticeMessageOptions(this.from, mail));
     } catch (err) {
       const code =
         err !== null &&

@@ -9,10 +9,14 @@
  * the model envelopes). Synthetic `it-*` organizations only; tests never reach an LLM or the
  * internet.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { HttpException } from '@nestjs/common';
+import { createRequire } from 'node:module';
 import {
+  ALL_TOOLS,
   FakeProvider,
+  REPORT_CSP,
+  REPORT_STYLE,
   type FakeProviderOptions,
   type FakeTranscriptEntry,
   type LlmProvider,
@@ -22,9 +26,10 @@ import {
   OPERATION_TOOLS,
   type OperationTool,
 } from '@email-gateway/assistant';
-import { uuidv7 } from '@email-gateway/common';
+import { S3Service, uuidv7 } from '@email-gateway/common';
 import {
   type AiChatActionConfirmation,
+  type AiChatReport,
   type AiChatToolExecution,
   type AuditLog,
   TENANT_PERMISSIONS,
@@ -546,13 +551,26 @@ export async function clearAssistantCounters(
   for (const id of organizationIds) await ctx.kv.del(`as:tok:o:${id}:${day}`);
 }
 
-/** The enabled tools of the registry (the reads and the confirmable writes; AI-3: 257). */
-export const ENABLED_TOOLS: readonly OperationTool[] = OPERATION_TOOLS.filter((t) => t.enabled);
-/** The enabled read tools (step AI-2: 178; step AI-3: 179 with `api_keys_get`). */
+/**
+ * The enabled tools of the registry (the reads and the confirmable writes; AI-3: 257; step AI-R:
+ * 259 with the two native tools `report_generate` and `report_send_email`, design 31 D1).
+ */
+export const ENABLED_TOOLS: readonly OperationTool[] = ALL_TOOLS.filter((t) => t.enabled);
+/** The enabled operation tools only (OpenAPI operations; AI-R: 257). */
+export const ENABLED_OPERATION_TOOLS: readonly OperationTool[] = OPERATION_TOOLS.filter(
+  (t) => t.enabled,
+);
+/**
+ * The enabled read tools (step AI-2: 178; step AI-3: 179 with `api_keys_get`; step AI-R: 180
+ * with `report_generate`).
+ */
 export const ENABLED_READS: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'read',
 );
-/** The enabled write tools (step AI-2: 31; step AI-3: 78), each behind a confirmation. */
+/**
+ * The enabled write tools (step AI-2: 31; step AI-3: 78; step AI-R: 79 with
+ * `report_send_email`), each behind a confirmation.
+ */
 export const ENABLED_WRITES: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'write',
 );
@@ -1230,4 +1248,379 @@ export async function enableStorage(
     permissions: ['assistant:configure', 'organization:read'],
   });
   await enableAssistant(ctx, operator, storageOrg, admin);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-R: HTML dashboard reports in chat and their email delivery (docs/plan/steps/31-ai-chat-
+// reports.md D2, D4–D7, §9 item 5; contracts §35.3)
+// ---------------------------------------------------------------------------------------------
+
+/** `GET /assistant/reports/{reportId}` base path. */
+export const REPORTS = `${A}/reports`;
+
+/** The mail-bucket prefix of an organization's report objects (design D6). */
+export const reportPrefixOf = (organizationId: bigint): string =>
+  `org/${organizationId.toString()}/assistant/report/`;
+
+interface ReportS3Commands {
+  HeadObjectCommand: new (input: { Bucket: string; Key: string }) => object;
+  GetObjectCommand: new (input: { Bucket: string; Key: string }) => object;
+  ListObjectsV2Command: new (input: {
+    Bucket: string;
+    Prefix: string;
+    ContinuationToken?: string;
+  }) => object;
+  ListObjectVersionsCommand: new (input: {
+    Bucket: string;
+    Prefix: string;
+    KeyMarker?: string;
+    VersionIdMarker?: string;
+  }) => object;
+  DeleteObjectCommand: new (input: { Bucket: string; Key: string; VersionId?: string }) => object;
+}
+
+/** `@aws-sdk/client-s3` is a dependency of `@email-gateway/common` (as the archive support). */
+const reportS3 = (): ReportS3Commands =>
+  createRequire(require.resolve('@email-gateway/common'))('@aws-sdk/client-s3') as ReportS3Commands;
+
+const s3Send = (ctx: IntegrationApp, command: object): Promise<Record<string, unknown>> =>
+  ctx.get(S3Service).client.send(command as never) as unknown as Promise<Record<string, unknown>>;
+
+/** The current object keys under the organization's report prefix (MinIO, mail bucket). */
+export async function reportObjectKeys(
+  ctx: IntegrationApp,
+  organizationId: bigint,
+): Promise<string[]> {
+  const cmd = reportS3();
+  const bucket = ctx.get(S3Service).mailBucket;
+  const keys: string[] = [];
+  let token: string | undefined;
+  for (;;) {
+    const page = await s3Send(
+      ctx,
+      new cmd.ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: reportPrefixOf(organizationId),
+        ...(token && { ContinuationToken: token }),
+      }),
+    );
+    for (const item of (page.Contents as Array<{ Key?: string }> | undefined) ?? []) {
+      if (item.Key) keys.push(item.Key);
+    }
+    token = page.IsTruncated ? (page.NextContinuationToken as string) : undefined;
+    if (!token) return keys;
+  }
+}
+
+/** True when the report object (current version) exists. */
+export async function reportObjectExists(ctx: IntegrationApp, key: string): Promise<boolean> {
+  const cmd = reportS3();
+  try {
+    await s3Send(
+      ctx,
+      new cmd.HeadObjectCommand({ Bucket: ctx.get(S3Service).mailBucket, Key: key }),
+    );
+    return true;
+  } catch (error) {
+    const e = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+    if (e.name === 'NotFound' || e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+/**
+ * How many object versions and delete markers of exactly this key the (versioned) mail bucket
+ * holds: 0 after a report object is deleted for good (D7).
+ */
+export async function reportObjectVersions(ctx: IntegrationApp, key: string): Promise<number> {
+  const cmd = reportS3();
+  const bucket = ctx.get(S3Service).mailBucket;
+  let count = 0;
+  let keyMarker: string | undefined;
+  let versionMarker: string | undefined;
+  for (;;) {
+    const page = await s3Send(
+      ctx,
+      new cmd.ListObjectVersionsCommand({
+        Bucket: bucket,
+        Prefix: key,
+        ...(keyMarker && { KeyMarker: keyMarker }),
+        ...(versionMarker && { VersionIdMarker: versionMarker }),
+      }),
+    );
+    for (const entry of [
+      ...((page.Versions as Array<{ Key?: string }> | undefined) ?? []),
+      ...((page.DeleteMarkers as Array<{ Key?: string }> | undefined) ?? []),
+    ]) {
+      if (entry.Key === key) count += 1;
+    }
+    if (!page.IsTruncated) return count;
+    keyMarker = page.NextKeyMarker as string | undefined;
+    versionMarker = page.NextVersionIdMarker as string | undefined;
+  }
+}
+
+/** The stored bytes of a report object. */
+export async function reportObjectBytes(ctx: IntegrationApp, key: string): Promise<Buffer> {
+  const cmd = reportS3();
+  const result = await s3Send(
+    ctx,
+    new cmd.GetObjectCommand({ Bucket: ctx.get(S3Service).mailBucket, Key: key }),
+  );
+  const body = result.Body as AsyncIterable<Uint8Array>;
+  const chunks: Buffer[] = [];
+  for await (const chunk of body) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Deletes every object VERSION and delete marker under the organizations' report prefixes (the
+ * mail bucket is versioned; the product's delete removes every version of a purged report's key,
+ * this also removes objects of reports a suite left unpurged). Returns the count.
+ */
+export async function deleteReportObjects(
+  ctx: IntegrationApp,
+  organizationIds: readonly bigint[],
+): Promise<number> {
+  const cmd = reportS3();
+  const bucket = ctx.get(S3Service).mailBucket;
+  let deleted = 0;
+  for (const organizationId of organizationIds) {
+    const prefix = reportPrefixOf(organizationId);
+    let keyMarker: string | undefined;
+    let versionMarker: string | undefined;
+    for (;;) {
+      const page = await s3Send(
+        ctx,
+        new cmd.ListObjectVersionsCommand({
+          Bucket: bucket,
+          Prefix: prefix,
+          ...(keyMarker && { KeyMarker: keyMarker }),
+          ...(versionMarker && { VersionIdMarker: versionMarker }),
+        }),
+      );
+      const entries = [
+        ...((page.Versions as Array<{ Key?: string; VersionId?: string }> | undefined) ?? []),
+        ...((page.DeleteMarkers as Array<{ Key?: string; VersionId?: string }> | undefined) ?? []),
+      ];
+      for (const entry of entries) {
+        if (!entry.Key?.startsWith(prefix)) continue;
+        await s3Send(
+          ctx,
+          new cmd.DeleteObjectCommand({
+            Bucket: bucket,
+            Key: entry.Key,
+            ...(entry.VersionId && { VersionId: entry.VersionId }),
+          }),
+        );
+        deleted += 1;
+      }
+      if (!page.IsTruncated) break;
+      keyMarker = page.NextKeyMarker as string | undefined;
+      versionMarker = page.NextVersionIdMarker as string | undefined;
+    }
+  }
+  return deleted;
+}
+
+/**
+ * Removes the report rows, their outbox events and every report object version of the
+ * organizations (registered as a fixture cleanup before the organization delete: report rows
+ * reference the organization with RESTRICT; conversations would cascade them, but the objects
+ * live in MinIO).
+ */
+export async function deleteReportFixtures(
+  ctx: IntegrationApp,
+  organizationIds: readonly bigint[],
+): Promise<void> {
+  if (organizationIds.length === 0) return;
+  const where = { organizationId: { in: [...organizationIds] } };
+  await ctx.prisma.aiChatReportDelivery.deleteMany({ where });
+  await ctx.prisma.aiChatReport.deleteMany({ where });
+  await ctx.prisma.messageOutbox.deleteMany({
+    where: { ...where, eventType: { startsWith: 'assistant.report.' } },
+  });
+  await deleteReportObjects(ctx, organizationIds);
+}
+
+/** Registers `deleteReportFixtures` for these (growing) organization ids. */
+export function trackReports(ctx: IntegrationApp, fx: Fixtures, organizationIds: bigint[]): void {
+  fx.registerCleanup(() => deleteReportFixtures(ctx, organizationIds), { rerunOnConflict: true });
+}
+
+const REPORT_ELEMENTS = new Set(
+  'html head meta title style body header main section footer h1 h2 h3 p div span strong small ul li table caption thead tbody tr th td figure figcaption svg g path rect circle line polyline polygon text tspan desc'.split(
+    ' ',
+  ),
+);
+const REPORT_ATTRIBUTES = new Set(
+  'class id lang charset name content http-equiv role aria-label aria-labelledby aria-hidden scope colspan viewBox width height x y x1 y1 x2 y2 cx cy r d points fill stroke stroke-width stroke-dasharray text-anchor dominant-baseline font-size font-weight transform opacity xmlns focusable'.split(
+    ' ',
+  ),
+);
+
+interface Parse5Node {
+  nodeName: string;
+  tagName?: string;
+  attrs?: Array<{ name: string; value: string }>;
+  childNodes?: Parse5Node[];
+  content?: Parse5Node;
+  value?: string;
+}
+
+/** `parse5` (7.3.0) is a dev dependency of `@email-gateway/assistant`, resolved from there. */
+const parseHtml = (html: string): Parse5Node =>
+  (
+    createRequire(require.resolve('@email-gateway/assistant'))('parse5') as {
+      parse: (html: string) => unknown;
+    }
+  ).parse(html) as Parse5Node;
+
+/**
+ * The design D4 allow-list over the stored report HTML, walked with `parse5` (I16): every
+ * element and attribute is listed; no event handler, `href`, `src`, `url(`, `javascript:`,
+ * comment or style attribute; exactly one `<style>` (the package's constant, in `<head>`) and the
+ * constant CSP meta. Returns the problems (empty when the document passes).
+ */
+export function reportHtmlProblems(html: string): string[] {
+  const problems: string[] = [];
+  const styles: string[] = [];
+  const csp: string[] = [];
+  const walk = (node: Parse5Node, parent: string): void => {
+    if (node.nodeName === '#comment') problems.push('comment node');
+    if (node.tagName !== undefined) {
+      if (!REPORT_ELEMENTS.has(node.tagName)) problems.push(`element <${node.tagName}>`);
+      for (const attr of node.attrs ?? []) {
+        if (!REPORT_ATTRIBUTES.has(attr.name)) {
+          problems.push(`attribute ${attr.name} on <${node.tagName}>`);
+        }
+        if (/^on/i.test(attr.name)) problems.push(`event handler ${attr.name}`);
+        if (
+          /url\(|javascript:|data:text|expression\(/i.test(attr.value) &&
+          attr.name !== 'content'
+        ) {
+          problems.push(`unsafe value in ${attr.name}`);
+        }
+      }
+      if (node.tagName === 'style') {
+        styles.push((node.childNodes ?? []).map((c) => c.value ?? '').join(''));
+        if (parent !== 'head') problems.push('style outside head');
+      }
+      if (node.tagName === 'meta' && node.attrs?.some((a) => a.name === 'http-equiv')) {
+        csp.push(node.attrs.find((a) => a.name === 'content')?.value ?? '');
+      }
+    }
+    for (const child of node.childNodes ?? []) walk(child, node.tagName ?? parent);
+  };
+  walk(parseHtml(html), '');
+  if (styles.length !== 1 || styles[0] !== REPORT_STYLE) problems.push('style block not constant');
+  if (csp.length !== 1 || csp[0] !== REPORT_CSP) problems.push('CSP meta not constant');
+  if (/<script|<a[\s>]|<img|<iframe|<object|<link|<form|<base|<embed/i.test(html)) {
+    problems.push('forbidden tag text');
+  }
+  return problems;
+}
+
+/** A report card's data (`card.report`, design D2 step 10). */
+export interface ReportCardJson {
+  reportId: string;
+  title: string;
+  period: {
+    from: string;
+    to: string;
+    granularity: 'hour' | 'day';
+    atoRange: string;
+    label: string;
+  };
+  generatedAt: string;
+  sizeBytes: number;
+  sections: string[];
+  omitted: Array<{ section: string; reason: string; code?: string }>;
+  figures: Array<{ label: string; value: string }>;
+}
+
+/** A generated report: the turn, its `report_generate` execution and the card's report. */
+export interface GeneratedReportTurn {
+  res: Response;
+  execution: Record<string, unknown> & { id: string; card: { report: ReportCardJson } };
+  report: ReportCardJson;
+}
+
+/**
+ * A JSON turn of `who` in `conversation` that must generate exactly one report (a directive
+ * `/tool report_generate <args>` unless `message` is given); throws with the turn's executions
+ * otherwise.
+ */
+export async function generateReport(
+  ctx: IntegrationApp,
+  who: Member,
+  conversation: string,
+  options: { args?: Record<string, unknown>; message?: string } = {},
+): Promise<GeneratedReportTurn> {
+  const res = await turn(
+    ctx,
+    who.headers,
+    conversation,
+    options.message ?? directive('report_generate', options.args ?? {}),
+  );
+  const execution = (res.body?.executions as Array<Record<string, unknown>> | undefined)?.find(
+    (e) => e.tool === 'report_generate',
+  ) as GeneratedReportTurn['execution'] | undefined;
+  if (res.status !== 200 || execution?.status !== 'succeeded') {
+    throw new Error(
+      `expected a generated report: ${res.status} ${JSON.stringify(
+        (res.body?.executions as Array<Record<string, unknown>> | undefined)?.map((e) => ({
+          tool: e.tool,
+          decision: e.decision,
+          status: e.status,
+          httpStatus: e.httpStatus,
+          errorCode: e.errorCode,
+        })) ?? res.body,
+      )}`,
+    );
+  }
+  return { res, execution, report: execution.card.report };
+}
+
+/** The stored report row of a public id (writer). */
+export function reportRow(ctx: IntegrationApp, publicId: string): Promise<AiChatReport> {
+  return ctx.prisma.aiChatReport.findUniqueOrThrow({ where: { publicId } });
+}
+
+/**
+ * Synthetic delivery rows of today (UTC) for the daily-limit tests: rows the confirmed send
+ * would write (status `sent`), on an existing report of the organization, with synthetic
+ * confirmation ids (no FK) and `.example` recipients. Nothing is sent.
+ */
+export async function seedDeliveries(
+  ctx: IntegrationApp,
+  report: { id: bigint; organizationId: bigint; conversationId: bigint },
+  userId: bigint,
+  count: number,
+): Promise<void> {
+  const now = new Date();
+  // Synthetic confirmation ids far above any real one (unique column, no FK).
+  const base = 9_000_000_000_000n + BigInt(randomBytes(4).readUInt32BE(0)) * 1_000n;
+  await ctx.prisma.aiChatReportDelivery.createMany({
+    data: Array.from({ length: count }, (_, i) => {
+      const address = `it-limit-${randomUUID().slice(0, 8)}@limits.example`;
+      return {
+        organizationId: report.organizationId,
+        userId,
+        conversationId: report.conversationId,
+        reportId: report.id,
+        confirmationId: base + BigInt(i),
+        recipientAddress: address,
+        recipientSha256: createHash('sha256').update(address).digest('hex'),
+        recipientKind: 'domain' as const,
+        status: 'sent' as const,
+        sizeBytes: 1024,
+        correlationId: `it-limit-${randomUUID()}`,
+        requestedAt: new Date(now.getTime() - (i + 1) * 1000),
+        sentAt: now,
+      };
+    }),
+  });
 }

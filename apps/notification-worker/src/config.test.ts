@@ -4,6 +4,9 @@ import { loadWorkerConfig } from './config';
 const valid = {
   DATABASE_URL: 'mysql://test:test@localhost:3306/test',
   RABBITMQ_NOTIFICATION_URL: 'amqp://eg-notification:pw@localhost:5672/email-gateway',
+  S3_REGION: 'ap-south-1',
+  S3_BUCKET_MAIL: 'gateway-mail',
+  S3_BUCKET_ARCHIVE: 'gateway-archive',
 };
 
 const rejection = (env: Record<string, string>): string => {
@@ -85,7 +88,33 @@ describe('loadWorkerConfig (step 5.2 §5, P25)', () => {
       'NOTIFY_SMTP_SECURE',
     ],
     [{ APP_ENV: 'production', PORTAL_PUBLIC_URL: 'http://portal.example' }, 'PORTAL_PUBLIC_URL'],
+    [{ NOTIFICATION_REPORT_MAX_HTML_BYTES: '65535' }, 'NOTIFICATION_REPORT_MAX_HTML_BYTES'],
+    [{ NOTIFICATION_REPORT_MAX_HTML_BYTES: '4194305' }, 'NOTIFICATION_REPORT_MAX_HTML_BYTES'],
+    [{ S3_BUCKET_MAIL: '' }, 'S3_BUCKET_MAIL'],
   ])('refuses %o naming %s', (env, key) => {
     expect(rejection({ ...valid, ...env })).toContain(key);
+  });
+
+  it('reads object storage and the report HTML bound (step AI-R D8)', () => {
+    const cfg = loadWorkerConfig(valid);
+    expect(cfg.NOTIFICATION_REPORT_MAX_HTML_BYTES).toBe(2_097_152);
+    expect(cfg).toMatchObject({
+      S3_REGION: 'ap-south-1',
+      S3_BUCKET_MAIL: 'gateway-mail',
+      S3_FORCE_PATH_STYLE: false,
+    });
+    expect(cfg.S3_ENDPOINT).toBeUndefined();
+    const bounds = ['65536', '4194304'].map(
+      (v) =>
+        loadWorkerConfig({
+          ...valid,
+          NOTIFICATION_REPORT_MAX_HTML_BYTES: v,
+          S3_ENDPOINT: 'http://minio:9000',
+          S3_FORCE_PATH_STYLE: 'true',
+        }).NOTIFICATION_REPORT_MAX_HTML_BYTES,
+    );
+    expect(bounds).toEqual([65_536, 4_194_304]);
+    const { S3_REGION: _region, ...withoutRegion } = valid;
+    expect(rejection(withoutRegion)).toContain('S3_REGION');
   });
 });

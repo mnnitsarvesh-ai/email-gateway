@@ -115,6 +115,8 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/assistant',
         icon: Sparkles,
         gate: ['AssistantConversationsController_list_v1'],
+        // Step AI-R (D9): the full-size report page below it reads one report.
+        childGate: ['AssistantReportsController_get_v1'],
         landing: false,
       },
     ],

@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { assistantReportEmailRequestedV1 } from './assistant-events';
 import {
   atoAccountRiskUpdatedV1,
   atoNotificationRequestedV1,
@@ -69,6 +70,9 @@ import type { ExchangeName } from './topology';
  *
  * `provider_connection` (step 8.2 §4.2): a provider connection's health transition
  * (`aggregate_id` = the decimal `provider_connections.id`).
+ *
+ * `assistant_report_delivery` (step AI-R D8, §4.3): a confirmed assistant report email
+ * (`aggregate_id` = the `ai_chat_report_deliveries.public_id`).
  */
 export type AggregateType =
   | 'message'
@@ -85,7 +89,8 @@ export type AggregateType =
   | 'ato_response'
   | 'ato_restriction'
   | 'ato_notification'
-  | 'provider_connection';
+  | 'provider_connection'
+  | 'assistant_report_delivery';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -394,6 +399,14 @@ export const EVENT_REGISTRY = {
     'email.events',
     integrationHealthChangedV1,
     'provider_connection',
+  ),
+  // Step AI-R D8: producer api (ReportDeliveryService, confirm transaction) through the outbox;
+  // bound to email.notifications (consumer: notification-worker).
+  [EventTypes.AssistantReportEmailRequested]: define(
+    EventTypes.AssistantReportEmailRequested,
+    'email.policy',
+    assistantReportEmailRequestedV1,
+    'assistant_report_delivery',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

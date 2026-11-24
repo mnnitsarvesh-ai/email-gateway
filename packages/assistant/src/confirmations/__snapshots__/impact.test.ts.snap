@@ -58,6 +58,51 @@ exports[`impact templates (D5) > ApiKeysController_revoke_v1 1`] = `
 }
 `;
 
+exports[`impact templates (D5) > AssistantNative_reportSendEmail 1`] = `
+{
+  "action": "Sends the security report as an HTML email to ada.admin@example.test.",
+  "changes": [],
+  "impact": [
+    "The email leaves the platform through the notification mailer; the recipient can forward it.",
+    "The same HTML is attached as a file.",
+  ],
+  "portalRoute": "/assistant/reports/0193aaaa-0000-7000-8000-000000000040",
+  "request": {
+    "method": "POST",
+    "path": "native:report_send_email",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Report",
+      "value": "Security report: Last 7 days",
+    },
+    {
+      "label": "Period",
+      "value": "Last 7 days",
+    },
+    {
+      "label": "Recipient",
+      "value": "ada.admin@example.test",
+    },
+    {
+      "label": "Recipient type",
+      "value": "your own address",
+    },
+    {
+      "label": "Size",
+      "value": "183.0 KiB",
+    },
+  ],
+  "title": "Email security report",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "Emails cannot be recalled after sending.",
+    "9 of 10 report emails left today for you (47 for your organization).",
+  ],
+}
+`;
+
 exports[`impact templates (D5) > DepartmentsController_addMember_v1 1`] = `
 {
   "action": "Adds a member to the department "Finance".",

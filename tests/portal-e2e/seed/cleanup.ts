@@ -64,7 +64,10 @@ const PARTITION_COLUMN: Record<string, string> = {
 /** Delete order (every table with `organization_id` except `audit_logs` and `organizations`). */
 const ORDER = [
   // Step AI-1: assistant conversations and their children, usage and settings (the purge order of
-  // AssistantTenantDataRepository; every table references organizations RESTRICT).
+  // AssistantTenantDataRepository; every table references organizations RESTRICT). Step AI-R:
+  // report deliveries, then reports (their objects under `org/<id>/` go with deleteObjects).
+  'ai_chat_report_deliveries',
+  'ai_chat_reports',
   'ai_chat_tool_executions',
   'ai_chat_messages',
   'ai_chat_turns',

@@ -18,6 +18,10 @@ import {
   type AssistantConfig,
   assistantKeys,
   CONFIRMATION_EXECUTING_GRACE_MS,
+  REPORT_DELIVERY_TIMEOUT_MS,
+  REPORT_OBJECT_BATCH,
+  REPORT_PENDING_MAX_AGE_MS,
+  REPORT_ROW_CODES,
   RETENTION_CONVERSATION_BATCH,
   RETENTION_DELETE_BATCH,
   RETENTION_INTERVAL_MS,
@@ -32,8 +36,12 @@ import {
 } from '../repositories/confirmations.repository';
 import { ConversationsRepository } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
+import { ReportDeliveriesRepository } from '../repositories/report-deliveries.repository';
+import { ReportsRepository } from '../repositories/reports.repository';
 import { UsageRepository } from '../repositories/usage.repository';
 import { AssistantMetrics } from './assistant-metrics';
+import { isReportKeyOf, ReportObjectStore } from './reports/report-object-store';
+import { ReportsService } from './reports/reports.service';
 
 export interface RetentionResult {
   /** Conversations whose content was purged at `purge_after`. */
@@ -50,6 +58,12 @@ export interface RetentionResult {
   confirmationsExpired: number;
   /** Stale `executing` confirmations marked `failed` (outcome unknown, D7). */
   confirmationsOutcomeUnknown: number;
+  /** Step AI-R D7: objects of purged reports deleted from the mail bucket. */
+  reportObjects: number;
+  /** Step AI-R D7: `pending` reports older than 1 hour marked `failed` (object deleted). */
+  reportsAbandoned: number;
+  /** Step AI-R D7: `queued` deliveries older than 25 hours marked `failed`. */
+  deliveriesTimedOut: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -73,6 +87,14 @@ const DAY_MS = 86_400_000;
  *   is sent) or, if its write was already sent, replaces the outcome with the real one.
  *   Their content is purged with the conversation's; hard deletes follow the executions (FK
  *   cascade).
+ * - reports (step AI-R D7): the content purge moves a conversation's reports to `purged` (its
+ *   deliveries lose the address, `queued` ones fail) in the purge transaction; after the commit
+ *   the objects of purged reports are deleted in batches (`object_deleted_at`, key cleared); a
+ *   `pending` report older than 1 hour (a crash between the put and the commit) loses its object
+ *   and becomes `failed` (`assistant_report_abandoned`); a `queued` delivery older than 25 hours
+ *   (beyond the notification queue's 24 h retry age) becomes `failed`
+ *   (`assistant_report_email_timeout`). The hard delete skips a conversation whose report still
+ *   has an object.
  *
  * Organization deletion purges everything separately (`AssistantTenantDataRepository`).
  */
@@ -92,6 +114,10 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
     private readonly metrics: AssistantMetrics,
     private readonly confirmations: ConfirmationsRepository,
     private readonly audit: AuditService,
+    private readonly reports: ReportsRepository,
+    private readonly deliveries: ReportDeliveriesRepository,
+    private readonly store: ReportObjectStore,
+    private readonly reportObjects: ReportsService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -135,11 +161,17 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
       abandoned: 0,
       confirmationsExpired: 0,
       confirmationsOutcomeUnknown: 0,
+      reportObjects: 0,
+      reportsAbandoned: 0,
+      deliveriesTimedOut: 0,
     };
     result.abandoned = await this.sweepStaleTurns(now);
     result.confirmationsExpired = await this.expireConfirmations(now);
     result.confirmationsOutcomeUnknown = await this.failStaleConfirmations(now);
     result.contentPurged = await this.purgeContent(now);
+    result.reportObjects = await this.deletePurgedReportObjects(now);
+    result.reportsAbandoned = await this.sweepPendingReports(now);
+    result.deliveriesTimedOut = await this.sweepQueuedDeliveries(now);
     const before = new Date(
       now.getTime() - this.config.ASSISTANT_EXECUTION_RETENTION_DAYS * DAY_MS,
     );
@@ -197,6 +229,59 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
       if (due.length < batch) break;
     }
     return total;
+  }
+
+  /**
+   * D7: deletes the objects of `purged` reports (batches of 100; a missing object counts as
+   * deleted; a key outside the organization's prefix is never requested and only cleared). An
+   * S3 error leaves the row for the next run.
+   */
+  async deletePurgedReportObjects(now: Date, batch = REPORT_OBJECT_BATCH): Promise<number> {
+    let total = 0;
+    for (let i = 0; i < 100; i += 1) {
+      const rows = await this.reports.objectPurgeBatch(batch);
+      if (rows.length === 0) break;
+      let progressed = 0;
+      for (const row of rows) {
+        if (await this.reportObjects.deleteObject(row, now)) {
+          total += 1;
+          progressed += 1;
+        }
+      }
+      if (rows.length < batch || progressed === 0) break;
+    }
+    return total;
+  }
+
+  /** D7: `pending` reports older than 1 hour → object deleted, row `failed` (abandoned). */
+  async sweepPendingReports(now: Date, batch = REPORT_OBJECT_BATCH): Promise<number> {
+    const before = new Date(now.getTime() - REPORT_PENDING_MAX_AGE_MS);
+    let total = 0;
+    for (const row of await this.reports.pendingBefore(before, batch)) {
+      try {
+        if (row.objectKey !== null && isReportKeyOf(row.objectKey, row.organizationId)) {
+          await this.store.delete(row.organizationId, row.objectKey);
+        }
+      } catch (err) {
+        this.logger.warn({
+          message: 'Assistant report object delete failed',
+          reportRowId: row.id.toString(),
+          code: (err as { name?: unknown }).name ?? 'error',
+        });
+        continue;
+      }
+      if (await this.reports.abandon(row.organizationId, row.id, now)) total += 1;
+    }
+    return total;
+  }
+
+  /** D7: `queued` deliveries older than 25 hours → `failed` (`assistant_report_email_timeout`). */
+  sweepQueuedDeliveries(now: Date, batch = RETENTION_DELETE_BATCH): Promise<number> {
+    const before = new Date(now.getTime() - REPORT_DELIVERY_TIMEOUT_MS);
+    return purgeInBatches(
+      (n) => this.deliveries.failQueuedBefore(before, REPORT_ROW_CODES.emailTimeout, n),
+      batch,
+    );
   }
 
   /** Pending confirmations past `expires_at` → `expired` (one batch per run, audited). */

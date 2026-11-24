@@ -224,11 +224,20 @@ export function confirmationRefusal(error: unknown): ConfirmationRefusal {
   }
 }
 
+/**
+ * Whether an executed write is waiting for a second approver: a 202 from an approval-gated route.
+ * Some tools answer 202 for queued work instead (a report email goes out asynchronously).
+ */
+const QUEUED_202_TOOLS: ReadonlySet<string> = new Set(['report_send_email']);
+export function awaitsApproval(view: ConfirmationView): boolean {
+  return view.result?.httpStatus === 202 && !QUEUED_202_TOOLS.has(view.tool);
+}
+
 /** The outcome line of a decided confirmation. */
 export function outcomeText(view: ConfirmationView, resultCard: AssistantCard | null): string {
   switch (view.status) {
     case 'executed':
-      return view.result?.httpStatus === 202
+      return awaitsApproval(view)
         ? 'Submitted for approval: another person must approve it before it takes effect.'
         : 'Done: the action was applied.';
     case 'failed': {
@@ -424,7 +433,7 @@ function Outcome({
   const ok = view.status === 'executed';
   const failed = view.status === 'failed';
   const Icon = ok
-    ? view.result?.httpStatus === 202
+    ? awaitsApproval(view)
       ? ClockIcon
       : CheckCircle2Icon
     : failed

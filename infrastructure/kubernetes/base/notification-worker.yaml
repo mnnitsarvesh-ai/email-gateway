@@ -45,6 +45,10 @@ spec:
             # Step 8.4 D16: platform SOC mailbox of critical ATO incident alerts; empty = off. Set
             # the address per overlay (e.g. soc@<operator domain>).
             - { name: NOTIFY_ATO_PLATFORM_SOC_EMAIL, value: '' }
+            # Step AI-R D8: assistant report emails read the stored HTML from S3_BUCKET_MAIL
+            # (S3_REGION/S3_BUCKET_* from the ConfigMap; no static keys, IRSA below) and refuse
+            # objects above this bound (65536-4194304 bytes).
+            - { name: NOTIFICATION_REPORT_MAX_HTML_BYTES, value: '2097152' }
             # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             # Role user eg-notification (step 5.2 P15): consumes email.notifications.
@@ -89,6 +93,9 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: notification-worker
+  # Production: IRSA role (eks.amazonaws.com/role-arn, set per overlay) with s3:GetObject on
+  # arn:aws:s3:::<mail bucket>/org/*/assistant/report/* only (step AI-R D8: the assistant report
+  # emails). No other object, no Put/Delete/List; the api writes and deletes the reports.
 ---
 apiVersion: v1
 kind: Service

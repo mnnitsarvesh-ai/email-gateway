@@ -1,5 +1,5 @@
 {
-  "topology_version": 14,
+  "topology_version": 15,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -513,6 +513,14 @@
       "destination": "email.events",
       "destination_type": "exchange",
       "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "email.notifications",
+      "destination_type": "queue",
+      "routing_key": "org.*.assistant.report.email_requested.v1",
       "arguments": {}
     },
     {
