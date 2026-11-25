@@ -84,6 +84,7 @@ export const REPORT_GENERATE: OperationTool = {
   display: { title: 'Generate security report', resourceType: 'assistant_report' },
   untrustedFields: [],
   bind: {},
+  redactParams: [],
   limitations: null,
   testedBy: REPORT_GENERATE_TESTED_BY,
 };
@@ -137,6 +138,7 @@ export const REPORT_SEND_EMAIL: OperationTool = {
   display: { title: 'Email security report', resourceType: 'assistant_report_delivery' },
   untrustedFields: [],
   bind: {},
+  redactParams: [],
   limitations: null,
   testedBy: REPORT_SEND_EMAIL_TESTED_BY,
 };

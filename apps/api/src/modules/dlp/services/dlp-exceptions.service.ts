@@ -63,6 +63,13 @@ export class DlpExceptionsService {
     return toPage(rows, query.limit, (row) => exceptionView(row, now));
   }
 
+  /** `GET /dlp/exceptions/{id}` (replica; expired and disabled entries included), or `404`. */
+  async get(scope: TenantScope, id: string): Promise<DlpExceptionView> {
+    const row = await this.repository.findException(scope, id);
+    if (!row) throw dlpNotFound('exception');
+    return exceptionView(row, new Date());
+  }
+
   async create(
     principal: Principal,
     scope: TenantScope,

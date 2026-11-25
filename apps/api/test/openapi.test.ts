@@ -220,8 +220,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // confirmation operations of step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-writes.md
     // §4.1): 421; plus the API key read of step AI-3
     // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422; plus the report read of step
-    // AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1): 423, all under /api/v1.
-    expect(count).toBe(423);
+    // AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1): 423; plus the four single-item reads of
+    // step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D8): 427, all under /api/v1.
+    expect(count).toBe(427);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -561,12 +562,14 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'DELETE /api/v1/bec/vendors/{id}',
       'GET /api/v1/bec/trusted-senders',
       'POST /api/v1/bec/trusted-senders',
+      'GET /api/v1/bec/trusted-senders/{id}',
       'PATCH /api/v1/bec/trusted-senders/{id}',
       'DELETE /api/v1/bec/trusted-senders/{id}',
       'POST /api/v1/messages/{messageId}/scans/{scanId}/bec-feedback',
       'GET /api/v1/bec/feedback',
       'GET /api/v1/bec/feedback/export',
       'GET /api/v1/bec/suppressions',
+      'GET /api/v1/bec/suppressions/{id}',
       'DELETE /api/v1/bec/suppressions/{id}',
       'DELETE /api/v1/bec/history',
     ];

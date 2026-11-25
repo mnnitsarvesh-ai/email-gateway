@@ -26,6 +26,14 @@
  *   when it was generated under a platform override), B's `report_send_email` naming A's report
  *   fails `404` at proposal with no confirmation, each organization's report object lives under
  *   its own `org/<id>/assistant/report/` prefix, and A's deliveries are never listed to B.
+ * - step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md §9 item 3): the ATO, incident,
+ *   BEC, DLP and risk-scoring writes naming organization A's account, trusted context, incident,
+ *   response, IdP integration and connection, executive, vendor, trusted sender, suppression,
+ *   message, policy, rule, exception, pattern, dictionary or profile version in organization
+ *   B's turn fail at the precondition read with the api's `404` and store no confirmation; the
+ *   new single reads `bec_trusted_senders_get`, `bec_feedback_get_suppression` and
+ *   `dlp_exceptions_get` answer `404` for A's ids, and `threat_indicators_get` answers `404` to
+ *   a platform user for an organization's own indicator row (not the platform catalog).
  *
  * Synthetic `it-*` organizations only.
  */
@@ -56,11 +64,21 @@
 // @covers get /api/v1/webhooks/:webhookId
 // @covers get /api/v1/smtp-connectors/:id
 // @covers get /api/v1/assistant/reports/:reportId
-import { randomUUID } from 'node:crypto';
+// @covers get /api/v1/bec/trusted-senders/:id
+// @covers get /api/v1/bec/suppressions/:id
+// @covers get /api/v1/dlp/exceptions/:id
+// @covers get /api/v1/platform/threat-indicators/:id
+import { createHash, randomUUID } from 'node:crypto';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
+import { uuidv7 } from '@email-gateway/common';
+import { defaultBindingSettings } from '@email-gateway/idp-adapters';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { systemScope } from '../src/auth-contracts/tenant-scope';
+import { IncidentStores } from '../src/modules/incidents/incident-stores';
+import { BecTenantDataRepository } from '../src/modules/tenant-data/bec-tenant-data.repository';
+import { DlpTenantDataRepository } from '../src/modules/tenant-data/dlp-tenant-data.repository';
 import { PolicyTenantDataRepository } from '../src/modules/tenant-data/policy-tenant-data.repository';
+import { RiskTenantDataRepository } from '../src/modules/tenant-data/risk-tenant-data.repository';
 import type { IntegrationApp } from './support/app';
 import {
   A,
@@ -72,6 +90,7 @@ import {
   confirmationRow,
   createAssistantApp,
   directive,
+  directPlatform,
   enableAssistant,
   envelopesOf,
   member,
@@ -87,8 +106,11 @@ import {
   waitFor,
   waitForRead,
 } from './support/assistant';
+import { deleteAtoRows } from './support/ato';
+import { ProviderSeeder } from './support/ato-providers';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { apiKeyHeader, bearer, idem, uniqueIp } from './support/http';
+import { deleteLifecycleFixtures, insertLifecycleMessage } from './support/lifecycle';
 import { insertDomain, randomV4Network } from './support/smtp';
 import { createBody, WEBHOOKS } from './support/webhooks';
 
@@ -742,4 +764,308 @@ describe('step AI-R reports and deliveries are private to their organization (§
         .set('X-Forwarded-For', uniqueIp());
     }
   });
+});
+
+describe('step AI-4 writes and reads naming another organization’s records (design 32 §9 item 3)', () => {
+  const FEATURES = ['ato_detection', 'dlp', 'bec_detection'] as const;
+
+  it('fail at the precondition read with the api’s 404; nothing stored or changed', async () => {
+    for (const organizationId of [orgA.id, orgB.id]) {
+      for (const featureKey of FEATURES) {
+        await ctx.prisma.organizationFeature.upsert({
+          where: { organizationId_featureKey: { organizationId, featureKey } },
+          create: { organizationId, featureKey, enabled: true },
+          update: { enabled: true },
+        });
+      }
+    }
+    const scopes = [systemScope(orgA.id), systemScope(orgB.id)];
+    fx.registerCleanup(() => deleteLifecycleFixtures(ctx, [orgA.id, orgB.id]));
+    fx.registerCleanup(async () => {
+      for (const scope of scopes) {
+        await ctx.get(BecTenantDataRepository).purgeOrganization(scope);
+        await ctx.get(DlpTenantDataRepository).purgeOrganization(scope);
+        await ctx.get(RiskTenantDataRepository).purgeOrganization(scope);
+      }
+      await ctx.prisma.threatIndicator.deleteMany({ where: { organizationId: orgA.id } });
+    });
+    // The live ato-worker records sign-ins of both organizations now that ATO is on.
+    fx.registerCleanup(() => deleteAtoRows(ctx.prisma, [orgA.id, orgB.id]), {
+      rerunOnConflict: true,
+    });
+    const prov = new ProviderSeeder(ctx, fx);
+    const post = async (path: string, body: object, expected = 201) => {
+      const res = await call(ctx, adminA.headers, 'post', path, body).set(idem());
+      expect(res.status, `${path} ${JSON.stringify(res.body)}`).toBe(expected);
+      return res.body as { id: string };
+    };
+
+    // Organization A's records.
+    const account = await ctx.prisma.$transaction((tx) =>
+      ctx.get(IncidentStores).ato.ensureAccount(tx, {
+        organizationId: orgA.id,
+        subject: {
+          kind: 'mailbox',
+          address: `iso-${randomUUID().slice(0, 6)}@it-ato.example.test`,
+        },
+        at: new Date(),
+      }),
+    );
+    const accountId = account.publicId;
+    await waitForRead(ctx, adminA, `/api/v1/ato/accounts/${accountId}`);
+    const incidentId = (
+      await post('/api/v1/incidents', {
+        category: 'account_takeover',
+        subject: { type: 'ato_account', id: accountId },
+        reason: 'Isolation fixture',
+      })
+    ).id;
+    const responseId = (
+      await post(`/api/v1/ato/incidents/${incidentId}/responses`, {
+        actionType: 'require_mfa',
+        reason: 'Isolation fixture',
+      })
+    ).id;
+    const contextId = (
+      await post(`/api/v1/ato/accounts/${accountId}/trusted-contexts`, {
+        kind: 'country',
+        value: 'DE',
+        reason: 'Isolation fixture',
+        expiresInDays: 30,
+      })
+    ).id;
+    const connection = await prov.connection(orgA);
+    const integrationId = (
+      await post('/api/v1/ato/providers', { connectionId: connection.publicId })
+    ).id;
+    const executiveId = (await post('/api/v1/bec/executives', { displayName: 'Isolation Exec' }))
+      .id;
+    const vendorId = (
+      await post('/api/v1/bec/vendors', {
+        name: 'Isolation Vendor',
+        domains: ['iso-vendor.example'],
+      })
+    ).id;
+    const trustedId = (
+      await post('/api/v1/bec/trusted-senders', {
+        kind: 'address',
+        value: 'ops@iso-partner.example',
+        reason: 'Isolation fixture',
+      })
+    ).id;
+    const suppressionId = uuidv7();
+    await ctx.prisma.becSuppressionRule.create({
+      data: {
+        publicId: suppressionId,
+        organizationId: orgA.id,
+        reasonCode: 'bec.reply_to.freemail',
+        senderScope: 'domain',
+        senderValue: 'iso-partner.example',
+        expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+    const message = await insertLifecycleMessage(ctx, orgA, { state: 'scanned' });
+    const policyId = (await post('/api/v1/dlp/policies', { name: 'Isolation policy' })).id;
+    const ruleId = (
+      await post(`/api/v1/dlp/policies/${policyId}/rules`, {
+        name: 'Isolation rule',
+        conditions: { selectors: { categories: ['payment_card'] } },
+        action: 'alert',
+      })
+    ).id;
+    const exceptionId = (
+      await post('/api/v1/dlp/exceptions', {
+        scope: 'sender_address',
+        value: 'iso@partner.example',
+        reason: 'Isolation fixture',
+        expiresAt: new Date(Date.now() + 10 * 86_400_000).toISOString(),
+      })
+    ).id;
+    const patternId = (
+      await post('/api/v1/dlp/patterns', {
+        name: 'Isolation pattern',
+        pattern: `ISO${randomUUID().slice(0, 6)}-[0-9]{6}`,
+        severity: 'low',
+      })
+    ).id;
+    const dictionaryId = (
+      await post('/api/v1/dlp/dictionaries', {
+        name: 'Isolation terms',
+        category: 'custom',
+        severity: 'low',
+        terms: ['isolationterm'],
+      })
+    ).id;
+    const versionId = (await post('/api/v1/risk-scoring/profile/versions', { overrides: {} })).id;
+    const indicatorValue = `tenant-iso-${randomUUID().slice(0, 8)}.example`;
+    const indicator = await ctx.prisma.threatIndicator.create({
+      data: {
+        organizationId: orgA.id,
+        indicatorType: 'domain',
+        value: indicatorValue,
+        valueSha256: createHash('sha256').update(indicatorValue).digest('hex'),
+        source: `org:${orgA.id.toString()}`,
+        severity: 'high',
+        confidence: 90,
+        firstSeenAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+      select: { id: true },
+    });
+
+    const snapshot = async () => ({
+      account: await ctx.prisma.atoAccount.findUniqueOrThrow({
+        where: { id: account.id },
+        select: { protected: true, overrideId: true },
+      }),
+      response: (
+        await ctx.prisma.atoResponseAction.findUniqueOrThrow({ where: { publicId: responseId } })
+      ).status,
+      contexts: await ctx.prisma.atoTrustedContext.count({ where: { accountId: account.id } }),
+      integration: await ctx.prisma.atoProviderIntegration.findUniqueOrThrow({
+        where: { publicId: integrationId },
+        select: { status: true, rowVersion: true },
+      }),
+      incident: await ctx.prisma.securityIncident.findUniqueOrThrow({
+        where: { publicId: incidentId },
+        select: { status: true, rowVersion: true },
+      }),
+      versions: await Promise.all([
+        ctx.prisma.becExecutiveProfile.findUniqueOrThrow({ where: { publicId: executiveId } }),
+        ctx.prisma.becVendorProfile.findUniqueOrThrow({ where: { publicId: vendorId } }),
+        ctx.prisma.becTrustedSender.findUniqueOrThrow({ where: { publicId: trustedId } }),
+        ctx.prisma.dlpPolicy.findUniqueOrThrow({ where: { publicId: policyId } }),
+        ctx.prisma.dlpPolicyRule.findUniqueOrThrow({ where: { publicId: ruleId } }),
+        ctx.prisma.dlpException.findUniqueOrThrow({ where: { publicId: exceptionId } }),
+        ctx.prisma.dlpCustomPattern.findUniqueOrThrow({ where: { publicId: patternId } }),
+        ctx.prisma.dlpKeywordDictionary.findUniqueOrThrow({ where: { publicId: dictionaryId } }),
+      ]).then((rows) => rows.map((r) => r.version)),
+      suppression: await ctx.prisma.becSuppressionRule.count({
+        where: { publicId: suppressionId },
+      }),
+      feedback: await ctx.prisma.becFeedback.count({ where: { organizationId: orgA.id } }),
+      draft: (
+        await ctx.prisma.riskScoringProfileVersion.findUniqueOrThrow({
+          where: { publicId: versionId },
+        })
+      ).rowVersion,
+    });
+    const before = await snapshot();
+
+    const reason = { reason: 'taken over from another organization' };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['ato_accounts_update', { accountId, body: { protected: true, expectedRowVersion: 1 } }],
+      ['ato_account_mailbox_refresh', { accountId }],
+      [
+        'ato_accounts_set_override',
+        { accountId, body: { verdict: 'benign', expiresInHours: 24, ...reason } },
+      ],
+      ['ato_accounts_clear_override', { accountId, body: reason }],
+      [
+        'ato_accounts_add_trusted_context',
+        { accountId, body: { kind: 'country', value: 'FR', expiresInDays: 30, ...reason } },
+      ],
+      ['ato_accounts_remove_trusted_context', { accountId, contextId }],
+      [
+        'ato_responses_request',
+        { incidentId, body: { actionType: 'restrict_smtp_sending', ...reason } },
+      ],
+      ['ato_responses_approve', { responseId, body: reason }],
+      ['ato_responses_reject', { responseId, body: reason }],
+      ['ato_responses_cancel', { responseId, body: reason }],
+      ['ato_responses_rollback', { responseId, body: reason }],
+      ['ato_providers_create', { body: { connectionId: connection.publicId } }],
+      [
+        'ato_providers_update',
+        { integrationId, body: { rowVersion: 1, settings: defaultBindingSettings() } },
+      ],
+      ['ato_providers_remove', { integrationId, body: reason }],
+      [
+        'ato_providers_backfill',
+        { integrationId, body: { from: new Date(Date.now() - 86_400_000).toISOString() } },
+      ],
+      ['ato_providers_health_check', { integrationId }],
+      ['ato_providers_pause', { integrationId, body: reason }],
+      ['ato_providers_resume', { integrationId }],
+      [
+        'incidents_create',
+        {
+          body: {
+            category: 'account_takeover',
+            subject: { type: 'ato_account', id: accountId },
+            ...reason,
+          },
+        },
+      ],
+      [
+        'incidents_update',
+        { incidentId, body: { status: 'investigating', expectedRowVersion: 1 } },
+      ],
+      ['incidents_add_note', { incidentId, body: { note: 'taken over' } }],
+      ['bec_executives_update', { id: executiveId, body: { version: 1, enabled: false } }],
+      ['bec_executives_remove', { id: executiveId }],
+      ['bec_vendors_update', { id: vendorId, body: { version: 1, enabled: false } }],
+      ['bec_vendors_remove', { id: vendorId }],
+      ['bec_trusted_senders_update', { id: trustedId, body: { version: 1, reason: 'taken over' } }],
+      ['bec_trusted_senders_remove', { id: trustedId }],
+      ['bec_feedback_delete_suppression', { id: suppressionId }],
+      [
+        'bec_message_feedback_record',
+        { messageId: message.publicId, scanId: '1', body: { kind: 'false_negative' } },
+      ],
+      ['dlp_policies_update', { id: policyId, body: { version: 1, enabled: false } }],
+      ['dlp_policies_remove', { id: policyId }],
+      [
+        'dlp_policies_create_rule',
+        {
+          id: policyId,
+          body: {
+            name: 'taken over',
+            conditions: { selectors: { categories: ['credential'] } },
+            action: 'allow',
+          },
+        },
+      ],
+      ['dlp_policies_update_rule', { id: policyId, ruleId, body: { version: 1, enabled: false } }],
+      ['dlp_policies_remove_rule', { id: policyId, ruleId }],
+      ['dlp_exceptions_update', { id: exceptionId, body: { version: 1, enabled: true } }],
+      ['dlp_exceptions_remove', { id: exceptionId }],
+      ['dlp_patterns_update', { id: patternId, body: { version: 1, enabled: false } }],
+      ['dlp_patterns_remove', { id: patternId }],
+      ['dlp_dictionaries_update', { id: dictionaryId, body: { version: 1, enabled: false } }],
+      ['dlp_dictionaries_remove', { id: dictionaryId }],
+      ['risk_profiles_update_draft', { versionId, body: { overrides: {}, expectedRowVersion: 1 } }],
+      ['risk_profiles_delete_draft', { versionId }],
+      ['risk_profiles_publish', { versionId, body: { expectedRowVersion: 1 } }],
+      // The new single reads (D8).
+      ['bec_trusted_senders_get', { id: trustedId }],
+      ['bec_feedback_get_suppression', { id: suppressionId }],
+      ['dlp_exceptions_get', { id: exceptionId }],
+    ];
+    let conversation = '';
+    let turns = 0;
+    for (const [tool, args] of cases) {
+      if (turns++ % 5 === 0) conversation = await newConversation(ctx, adminB);
+      const res = await turn(ctx, adminB.headers, conversation, directive(tool, args));
+      expect(res.status, tool).toBe(200);
+      expect(res.body.executions[0], tool).toMatchObject({
+        tool,
+        decision: 'allowed',
+        status: 'failed',
+        httpStatus: 404,
+      });
+      expect(res.body.confirmations, tool).toEqual([]);
+    }
+    expect(
+      await ctx.prisma.aiChatActionConfirmation.count({ where: { organizationId: orgB.id } }),
+    ).toBe(0);
+
+    // The platform single read: an organization's own indicator row is not the platform catalog.
+    const platform = await directPlatform(ctx, fx, orgB, ['super_admin']);
+    const read = await platform.executor.execute('threat_indicators_get', {
+      id: indicator.id.toString(),
+    });
+    expect(read).toMatchObject({ decision: 'allowed', status: 'failed', httpStatus: 404 });
+    expect(await snapshot()).toEqual(before);
+  }, 300_000);
 });

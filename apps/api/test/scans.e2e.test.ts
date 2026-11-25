@@ -16,6 +16,7 @@
 // @covers get /api/v1/platform/attachment-rescans/:jobId
 // @covers get /api/v1/platform/threat-hashes
 // @covers get /api/v1/platform/threat-indicators
+// @covers get /api/v1/platform/threat-indicators/:id
 // @covers get /api/v1/scan-settings
 // @covers post /api/v1/platform/attachment-rescans
 // @covers post /api/v1/platform/attachment-rescans/:jobId/cancel
@@ -386,6 +387,7 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
     findPlatformForUpdate: vi.fn((_tx: unknown, id: bigint) =>
       Promise.resolve(id === 21n ? indicatorRow() : null),
     ),
+    findPlatform: vi.fn((id: bigint) => Promise.resolve(id === 21n ? indicatorRow() : null)),
     create: vi.fn((_tx: unknown, input: { value: string }) =>
       Promise.resolve(indicatorRow(input.value, 23n)),
     ),
@@ -1674,6 +1676,37 @@ describe('step 4.1 scan routes (e2e, dependencies stubbed)', () => {
         .delete(`${url}/abc?reason=x`)
         .set(await bearer())
         .expect(400);
+    });
+
+    it('gets one indicator by id (step AI-4 D8): 200, coded 404, 400 non-decimal, platform users with MFA only', async () => {
+      const one = await http()
+        .get(`${url}/21`)
+        .set(await bearer())
+        .expect(200);
+      expect(one.body).toMatchObject({ id: '21', type: 'domain', value: 'evil.example' });
+      expect(indicators.findPlatform).toHaveBeenCalledWith(21n);
+      const missing = await http()
+        .get(`${url}/99`)
+        .set(await bearer())
+        .expect(404);
+      expect(missing.body.code).toBe('threat_indicator_not_found');
+      await http()
+        .get(`${url}/abc`)
+        .set(await bearer())
+        .expect(400);
+      indicators.findPlatform.mockClear();
+      apiKeyPermissions = new Set([THREAT_INTEL]);
+      await http().get(`${url}/21`).set(apiKey).expect(403);
+      await http()
+        .get(`${url}/21`)
+        .set(await bearer(['pwd']))
+        .expect(403);
+      principalWith([READ, POLICY_READ, MANAGE]);
+      await http()
+        .get(`${url}/21`)
+        .set(await bearer())
+        .expect(403);
+      expect(indicators.findPlatform).not.toHaveBeenCalled();
     });
 
     it('allows 60 calls per caller per minute (429 after)', async () => {

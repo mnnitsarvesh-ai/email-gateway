@@ -39,6 +39,7 @@ import {
   ApiTrustedSenderNotFound,
   ApiVersionOnlyConflict,
   BEC_APPLY_NOTE,
+  BEC_EXAMPLES,
   BEC_MANAGE,
   BEC_READ,
   becIdPipe,
@@ -86,6 +87,27 @@ export class BecTrustedSendersController {
     @Query(new ZodValidationPipe(BecTrustedSenderListQuerySchema)) query: BecTrustedSenderListQuery,
   ): Promise<BecTrustedSenderPage> {
     return this.trusted.list(scope, query);
+  }
+
+  @Get(':id')
+  @RequirePermissions(BEC_READ)
+  @ApiOperation({
+    summary: 'Get a trusted sender',
+    description:
+      'The entry as the list shows it; an expired entry is returned with `expired: true` (no ' +
+      'longer applied). Another organization’s id is a 404. From the read replica.',
+  })
+  @ApiBecId('Trusted sender public id')
+  @ApiOkResponse({
+    schema: { ...zodToOpenApi(BecTrustedSenderViewSchema), example: BEC_EXAMPLES.trustedSender },
+  })
+  @ApiErrors(400, 401, 403, 503)
+  @ApiTrustedSenderNotFound()
+  get(
+    @CurrentScope() scope: TenantScope,
+    @Param('id', becIdPipe) id: string,
+  ): Promise<BecTrustedSenderView> {
+    return this.trusted.get(scope, id);
   }
 
   @Post()

@@ -554,6 +554,14 @@ export class DlpConfigRepository {
     });
   }
 
+  /** One exception of the scope by public id (replica; expired and disabled ones included). */
+  findException(scope: TenantScope, publicId: string): Promise<ExceptionRow | null> {
+    return this.db.dlpException.findFirst({
+      where: tenantWhere(scope, { publicId }),
+      select: exceptionSelect,
+    });
+  }
+
   async findExceptionForUpdate(
     tx: Client,
     scope: TenantScope,

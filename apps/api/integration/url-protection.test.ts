@@ -12,6 +12,7 @@
 // ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
 // @covers delete /api/v1/platform/threat-indicators/:id
 // @covers get /api/v1/platform/threat-indicators
+// @covers get /api/v1/platform/threat-indicators/:id
 // @covers post /api/v1/platform/threat-indicators
 // ---- end of route coverage ----
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -596,6 +597,78 @@ describe('platform threat indicators (U16)', () => {
       .set(headers(platformAdmin))
       .expect(404);
     expect(missing.body.code).toBe('threat_indicator_not_found');
+  });
+
+  it('gets one indicator by id (step AI-4 D8): replica, expired included, 404 for tenant rows and unknown ids', async () => {
+    const created = await ctx.http
+      .post(path)
+      .set(idem())
+      .set(headers(platformAdmin))
+      .send({
+        type: 'domain',
+        value: `get-${run}.example`,
+        severity: 'low',
+        category: 'spam',
+        reason: 'single read',
+      })
+      .expect(201);
+    const id = created.body.id as string;
+    indicatorIds.add(BigInt(id));
+    await expect
+      .poll(
+        async () => (await ctx.http.get(`${path}/${id}`).set(headers(platformAdmin))).status,
+        POLL,
+      )
+      .toBe(200);
+    const one = await ctx.http.get(`${path}/${id}`).set(headers(platformAdmin)).expect(200);
+    expect(one.body).toEqual(created.body);
+    // An expired indicator is still returned (the lookup ignores it; the read does not).
+    const past = new Date(Date.now() - 60_000);
+    await ctx.prisma.threatIndicator.update({
+      where: { id: BigInt(id) },
+      data: { expiresAt: past },
+    });
+    await expect
+      .poll(
+        async () =>
+          (
+            (await ctx.http.get(`${path}/${id}`).set(headers(platformAdmin))).body as {
+              expiresAt?: string;
+            }
+          ).expiresAt,
+        POLL,
+      )
+      .toBe(past.toISOString());
+    // A tenant's own indicator row is not part of the platform catalog: 404 like an unknown id.
+    const tenantValue = `tenant-${run}.example`;
+    const tenantRow = await ctx.prisma.threatIndicator.create({
+      data: {
+        organizationId: orgA.id,
+        indicatorType: 'domain',
+        value: tenantValue,
+        valueSha256: sha(tenantValue),
+        source: `org:${orgA.id.toString()}`,
+        severity: 'high',
+        confidence: 90,
+        firstSeenAt: new Date(),
+        lastSeenAt: new Date(),
+      },
+      select: { id: true },
+    });
+    indicatorIds.add(tenantRow.id);
+    for (const missingId of [tenantRow.id.toString(), '18446744073709551615']) {
+      const missing = await ctx.http
+        .get(`${path}/${missingId}`)
+        .set(headers(platformAdmin))
+        .expect(404);
+      expect(missing.body.code).toBe('threat_indicator_not_found');
+    }
+    await ctx.http.get(`${path}/${randomUUID()}`).set(headers(platformAdmin)).expect(400);
+    // Platform users only: a tenant administrator and an API key get 403.
+    const tenantAdmin = await tokenOf(await fx.createUser(orgA, { roles: ['organization_admin'] }));
+    await ctx.http.get(`${path}/${id}`).set(headers(tenantAdmin)).expect(403);
+    const key = apiKeyHeader(await fx.createApiKey(orgA, ['message:read', 'policy:read']));
+    await ctx.http.get(`${path}/${id}`).set(headers(key)).expect(403);
   });
 
   it('refuses tenant administrators, API keys and sessions without MFA', async () => {

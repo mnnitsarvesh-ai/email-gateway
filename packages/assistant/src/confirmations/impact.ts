@@ -28,6 +28,10 @@ import {
  * sanitized and capped, and values that come from mail are marked `untrusted`. Policy
  * definitions are summarised rule by rule without depending on `@email-gateway/policy-dsl`.
  *
+ * Step AI-4 (design 32 D6) adds the security-operations templates: weakening changes say what
+ * stops being detected, ATO response approvals name the action and the requester, DLP pattern
+ * text appears only under changes, platform operations name "every organization".
+ *
  * Step AI-3 (design 30 D7) adds the identity and tenant administration templates: role changes
  * list the added and removed role keys or permissions (never the full catalogue), destinations
  * show the old and new servers, user display names, session user agents and API key creators are
@@ -627,9 +631,1502 @@ const reportSendEmail: Template = (ctx) => {
   };
 };
 
+// ---------------------------------------------------------------------------------------------
+// Step AI-4 helpers and templates (design 32 D6)
+// ---------------------------------------------------------------------------------------------
+
+/** The ATO response catalogue in words (`ato_responses_*`). */
+const ATO_ACTION_WORDS: Readonly<Record<string, string>> = {
+  alert_tenant_admins: 'alert the organization administrators',
+  notify_soc: 'notify the SOC',
+  escalate_investigation: 'escalate the investigation',
+  restrict_smtp_sending: 'block outbound SMTP sending',
+  block_smtp_auth: 'block SMTP authentication',
+  record_manual_action: 'record a manual action',
+  revoke_sessions: 'revoke the sign-in sessions',
+  require_mfa: 'require MFA',
+  require_password_reset: 'require a password reset',
+  suspend_account: 'suspend the account',
+  remove_forwarding_rule: 'remove the mail forwarding rule',
+  revoke_oauth_grant: 'revoke the OAuth app grant',
+};
+/** Actions that run in the tenant's identity provider (not in the gateway). */
+const PROVIDER_ACTIONS: ReadonlySet<string> = new Set([
+  'revoke_sessions',
+  'require_mfa',
+  'require_password_reset',
+  'suspend_account',
+  'remove_forwarding_rule',
+  'revoke_oauth_grant',
+]);
+const SMTP_RESTRICTIONS: ReadonlySet<string> = new Set([
+  'restrict_smtp_sending',
+  'block_smtp_auth',
+]);
+
+const actionWords = (value: unknown): string => {
+  const key = text(value);
+  return key === null ? 'the response' : (ATO_ACTION_WORDS[key] ?? sanitizeText(key, 64));
+};
+
+const ATO_APPROVAL_LINE =
+  "Gateway actions with low impact run now; others wait for another responder's approval (you cannot approve your own request).";
+const ATO_PROVIDER_WARNING = "Runs in the organization's identity provider after approval.";
+const ATO_REQUEST_WARNING =
+  'The response acts on a real account; check the action and the target before you confirm.';
+const UNDO_REMOVE = (what: string) =>
+  `Removing cannot be undone; add the ${what} again to restore it.`;
+const EVERY_ORGANIZATION_SCAN = 'Applies to the next scan of every organization.';
+const EVERY_ORGANIZATION_SCAN_CLICK = 'Applies to the next scan and click of every organization.';
+
+/** A capped list: the first `max` items and how many more (`a, b and 3 more`). */
+function cappedList(items: readonly string[], max = 5, empty = 'none'): string {
+  if (items.length === 0) return empty;
+  const shown = items.slice(0, max).map((item) => sanitizeText(item, 80));
+  const rest = items.length - shown.length;
+  return `${shown.join(', ')}${rest > 0 ? ` and ${rest} more` : ''}`;
+}
+/** A list argument as a capped list, or null when the argument is absent. */
+const argList = (value: unknown, max = 10): string | null =>
+  value === undefined ? null : cappedList(argStrings(value), max);
+/** A snapshot list as a capped list, or null when absent or cut. */
+const snapList = (value: SnapshotValue | undefined, max = 10): string | null => {
+  const list = snapStrings(value);
+  return list === null ? null : cappedList(list, max);
+};
+/** "until <date>" / "without expiry" for an optional expiry. */
+const expiryText = (value: unknown): string =>
+  value === null || value === undefined ? 'no expiry' : (text(value) ?? 'no expiry');
+/** The keys of an object argument (sections of a settings or overrides document). */
+const keysOf = (value: unknown): string[] => (isRecord(value) ? Object.keys(value) : []);
+/** Every `on`/enabled entry of a map of `{ enabled }` objects (IdP streams and actions). */
+const enabledKeys = (value: unknown): string[] =>
+  isRecord(value)
+    ? Object.entries(value)
+        .filter(([, item]) => isRecord(item) && item.enabled === true)
+        .map(([key]) => key)
+    : [];
+
+// --- ATO accounts ---
+const atoAccountTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Account', ctx.snap.address, true),
+  ...target('Display name', ctx.snap.displayName, true),
+  ...target('Account id', ctx.args.accountId),
+  ...target('Kind', ctx.snap.kind),
+  ...target('Risk', ctx.snap.riskLevel),
+  ...target('Risk score', ctx.snap.riskScore),
+];
+
+// --- ATO responses ---
+const atoResponseTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Response', ctx.args.responseId),
+  ...target('Action', actionWords(ctx.snap.actionType)),
+  ...target('Impact', ctx.snap.impact),
+  ...target('Provider', ctx.snap.provider),
+  ...target('Account id', ctx.snap['account.id']),
+  ...target('Account kind', ctx.snap['account.kind']),
+  ...target('Target scope', ctx.snap['target.scope']),
+  ...target('Duration (minutes)', ctx.snap['params.durationMinutes']),
+  ...target('Mode', ctx.snap['params.mode']),
+  ...target('Requested by', ctx.snap['requestedBy.type']),
+  ...target('Request reason', ctx.snap.requestReason, true),
+  ...target('Approval expires at', ctx.snap.approvalExpiresAt),
+];
+const isProviderAction = (ctx: TemplateContext): boolean =>
+  PROVIDER_ACTIONS.has(text(ctx.snap.actionType) ?? '');
+const restrictionLine = (
+  action: unknown,
+  scope: unknown,
+  duration: unknown,
+  mode: unknown,
+): string[] =>
+  SMTP_RESTRICTIONS.has(text(action) ?? '')
+    ? [
+        `SMTP ${action === 'block_smtp_auth' ? 'authentication' : 'sending'} is ${
+          mode === 'defer' ? 'deferred' : 'rejected'
+        } for ${text(duration) ?? 'the default number of'} minutes at the ${text(scope) ?? 'default'} scope.`,
+      ]
+    : [];
+
+// --- incidents ---
+const incidentTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Incident', ctx.args.incidentId),
+  ...target('Category', ctx.snap.category),
+  ...target('Subject', ctx.snap['subject.display'], true),
+  ...target('Status', ctx.snap.status),
+  ...target('Severity', ctx.snap.severity),
+  ...target('Assignee', ctx.snap.assigneeId),
+];
+
+// --- IdP integrations ---
+const providerTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Integration', ctx.snap.displayName, true),
+  ...target('Integration id', ctx.args.integrationId),
+  ...target('Provider', ctx.snap.provider),
+  ...target('Status', ctx.snap.status),
+  ...target('Health', ctx.snap['health.status']),
+  ...target('Settings version', ctx.snap.settingsVersion),
+];
+function idpSettingsChanges(settings: unknown): ConfirmationChange[] {
+  if (!isRecord(settings)) return [];
+  const mfa = isRecord(settings.mfaEnforcement) ? settings.mfaEnforcement : {};
+  const forwarding = isRecord(settings.forwardingRemoval) ? settings.forwardingRemoval : {};
+  const snapshot = isRecord(settings.snapshot) ? settings.snapshot : {};
+  return [
+    ...change('Streams read', undefined, cappedList(enabledKeys(settings.streams), 7)),
+    ...change('Response actions allowed', undefined, cappedList(enabledKeys(settings.actions), 6)),
+    ...change('Poll interval (seconds)', undefined, settings.pollIntervalSeconds),
+    ...change('Backfill (days)', undefined, settings.backfillDays),
+    ...change('Mailbox sweep (hours)', undefined, snapshot.sweepIntervalHours ?? null),
+    ...change('MFA enforcement group', undefined, mfa.groupId ?? null),
+    ...change('MFA enforcement org unit', undefined, mfa.orgUnitPath ?? null),
+    ...change('Forwarding removal', undefined, forwarding.mode),
+  ];
+}
+
+// --- BEC ---
+const namedTarget = (label: string, ctx: TemplateContext, name: unknown) => [
+  ...target(label, name),
+  ...target(`${label} id`, ctx.args.id),
+];
+const executiveTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...namedTarget('Executive', ctx, ctx.snap.displayName),
+  ...target('Title', ctx.snap.title),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+];
+const vendorTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...namedTarget('Vendor', ctx, ctx.snap.name),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+  ...target('Payment-change sensitive', yesNo(ctx.snap.paymentChangeSensitive)),
+];
+const trustedSenderTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Trusted sender', ctx.snap.value),
+  ...target('Trusted sender id', ctx.args.id),
+  ...target('Kind', ctx.snap.kind),
+  ...target('Reason', ctx.snap.reason),
+  ...target('Expires at', expiryText(ctx.snap.expiresAt)),
+];
+
+// --- DLP ---
+const DLP_SCOPE_WORDS: Readonly<Record<string, string>> = {
+  sender_address: 'the sender address',
+  sender_domain: 'the sender domain',
+  recipient_address: 'the recipient address',
+  recipient_domain: 'the recipient domain',
+};
+const DLP_RULE_ACTIONS: Readonly<Record<string, string>> = {
+  allow: 'allowed without further DLP action',
+  alert: 'delivered and an alert is raised',
+  require_approval: 'held until another person approves it',
+  quarantine: 'quarantined',
+  block: 'blocked',
+};
+const dictionaryTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...namedTarget('Dictionary', ctx, ctx.snap.name),
+  ...target('Category', ctx.snap.category),
+  ...target('Severity', ctx.snap.severity),
+  ...target('Terms', ctx.snap.termCount),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+];
+const exceptionTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Exception', ctx.args.id),
+  ...target('Scope', ctx.snap.scope),
+  ...target('Value', ctx.snap.value),
+  ...target('Policy', ctx.snap.policyId ?? 'every DLP policy'),
+  ...target('Reason', ctx.snap.reason),
+  ...target('Expires at', ctx.snap.expiresAt),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+];
+const patternTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...namedTarget('Pattern', ctx, ctx.snap.name),
+  ...target('Severity', ctx.snap.severity),
+  ...target('Validator', ctx.snap.validator),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+];
+const dlpPolicyTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...namedTarget('DLP policy', ctx, ctx.snap.name),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+  ...target('Mode', ctx.snap.mode),
+  ...target('Priority', ctx.snap.priority),
+  ...target('Rules', ctx.snap.ruleCount),
+];
+const dlpRuleTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Rule', ctx.snap.name),
+  ...target('Rule id', ctx.args.ruleId),
+  ...target('DLP policy id', ctx.args.id),
+  ...target('Action', ctx.snap.action),
+  ...target('Enabled', yesNo(ctx.snap.enabled)),
+  ...target('Priority', ctx.snap.priority),
+];
+/** The terms of a dictionary body: a count plus the first five (D6). */
+const termsText = (value: unknown): string | null => {
+  if (value === undefined) return null;
+  const terms = argStrings(value);
+  return `${plural(terms.length, 'term')}${terms.length > 0 ? `: ${cappedList(terms, 5)}` : ''}`;
+};
+function dlpConditionChanges(conditions: unknown): ConfirmationChange[] {
+  if (!isRecord(conditions)) return [];
+  const selectors = isRecord(conditions.selectors) ? conditions.selectors : {};
+  const sender = isRecord(conditions.sender) ? conditions.sender : {};
+  const recipients = isRecord(conditions.recipients) ? conditions.recipients : {};
+  return [
+    ...change('Detectors', undefined, argList(selectors.detectors)),
+    ...change('Categories', undefined, argList(selectors.categories)),
+    ...change(
+      'Custom patterns',
+      undefined,
+      selectors.customPatternIds === undefined
+        ? null
+        : plural(argStrings(selectors.customPatternIds).length, 'pattern'),
+    ),
+    ...change(
+      'Dictionaries',
+      undefined,
+      selectors.dictionaryIds === undefined
+        ? null
+        : plural(argStrings(selectors.dictionaryIds).length, 'dictionary'),
+    ),
+    ...change('Coverage reasons', undefined, argList(selectors.coverageReasons)),
+    ...change('Minimum matches', undefined, conditions.minCount),
+    ...change('Minimum confidence', undefined, conditions.minConfidence),
+    ...change('Minimum severity', undefined, conditions.minSeverity),
+    ...change('Directions', undefined, argList(conditions.directions)),
+    ...change('Senders', undefined, argList(sender.addresses)),
+    ...change('Sender domains', undefined, argList(sender.domains)),
+    ...change('Recipients', undefined, argList(recipients.addresses)),
+    ...change('Recipient domains', undefined, argList(recipients.domains)),
+    ...change('External recipients only', undefined, yesNo(recipients.externalOnly)),
+    ...change('Attachments only', undefined, yesNo(conditions.attachmentsOnly)),
+  ];
+}
+/** Pattern fields of a create/update body; the pattern text only here, never in impact (D6). */
+function patternChanges(ctx: TemplateContext, before = false): ConfirmationChange[] {
+  const b = ctx.body;
+  const prior = (key: string) => (before ? ctx.snap[key] : undefined);
+  return [
+    ...change('Name', prior('name'), b.name),
+    ...change('Pattern', undefined, typeof b.pattern === 'string' ? sanitizeText(b.pattern) : null),
+    ...change('Case-insensitive', undefined, yesNo(b.caseInsensitive)),
+    ...change('Validator', prior('validator'), b.validator),
+    ...change('Context keywords', undefined, argList(b.contextKeywords)),
+    ...change('Context required', undefined, yesNo(b.requireContext)),
+    ...change('Severity', prior('severity'), b.severity),
+    ...change('Base confidence', undefined, b.baseConfidence),
+    ...change('Mask style', undefined, b.maskStyle),
+    ...change('Enabled', before ? yesNo(ctx.snap.enabled) : undefined, yesNo(b.enabled)),
+  ];
+}
+
+// --- risk-scoring ---
+const riskVersionTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Profile version id', ctx.args.versionId),
+  ...target('Version', version(ctx.snap.versionNo)),
+  ...target('Status', ctx.snap.status),
+  ...target('Active', yesNo(ctx.snap.active)),
+  ...target('Change note', ctx.snap.changeNote, true),
+];
+const riskProfileTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Active profile', ctx.snap['active.source']),
+  ...target('Active version', version(ctx.snap['active.versionNo'])),
+  ...target('Profile change counter', ctx.snap.profileVersion),
+];
+const RISK_NEXT_ROUND =
+  'Applies to the next scan round only: open rounds and stored scores do not change.';
+
+// --- platform ---
+const RESCAN_STATES = 'scanned, scan failed, quarantined and held messages (the default)';
+const TRAINING_WORDS: Readonly<Record<string, string>> = {
+  learn_spam: 'learn it as spam',
+  learn_ham: 'learn it as legitimate mail (ham)',
+  fuzzy_add: 'add its fuzzy hashes',
+  fuzzy_delete: 'remove its fuzzy hashes',
+};
+
+/** The 64 templates of step AI-4 (design 32 D6), keyed by operation id. */
+const AI4_TEMPLATES: Readonly<Record<string, Template>> = {
+  // --- ATO accounts ---
+  AtoAccountsController_update_v1: (ctx) => {
+    const protect = ctx.body.protected === true;
+    return {
+      title: protect ? 'Protect ATO account' : 'Remove ATO account protection',
+      action: protect
+        ? `Protects this account from automated responses.`
+        : `Removes the protection of this account: automated responses may act on it again.`,
+      target: [
+        ...atoAccountTarget(ctx),
+        ...target('Protection reason', ctx.snap['protection.reason']),
+      ],
+      changes: [
+        ...change('Protected', yesNo(ctx.snap['protection.protected']), yesNo(ctx.body.protected)),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        protect
+          ? 'Automated responses skip this account; analysts can still request responses.'
+          : 'Automated responses may act on this account again when its risk is high enough.',
+      ],
+      reversible: true,
+    };
+  },
+  AtoAccountMailboxController_refresh_v1: (ctx) => ({
+    title: 'Refresh mailbox settings',
+    action: `Queues a priority read of the mailbox settings (forwarding, inbox rules, delegates) of this account from the identity provider.`,
+    target: [
+      ...target('Account', ctx.snap.address, true),
+      ...target('Account id', ctx.args.accountId),
+      ...target('Kind', ctx.snap.kind),
+    ],
+    changes: change('Mailbox state', undefined, 'refresh requested'),
+    impact: ['The result appears on the account page when the provider answers.'],
+    reversible: false,
+  }),
+  AtoAccountsController_setOverride_v1: (ctx) => {
+    const benign = ctx.body.verdict === 'benign';
+    return {
+      title: 'Set ATO analyst verdict',
+      action: `Sets the analyst verdict ${text(ctx.body.verdict) ?? '?'} on this account for ${text(ctx.body.expiresInHours) ?? '?'} hours.`,
+      target: [
+        ...atoAccountTarget(ctx),
+        ...target('Current verdict', ctx.snap['overrideDetail.verdict'] ?? 'none'),
+        ...target('Current verdict expires', ctx.snap['overrideDetail.expiresAt']),
+      ],
+      changes: [
+        ...change('Verdict', ctx.snap['overrideDetail.verdict'] ?? 'none', ctx.body.verdict),
+        ...change('Expires in (hours)', undefined, ctx.body.expiresInHours),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        benign
+          ? "The account's risk is held low until the verdict expires or a strong new signal contradicts it."
+          : "The account's risk is held at least high (score 90); automation may act on it.",
+        'The account is rescored now; an active verdict is replaced.',
+      ],
+      reversible: true,
+    };
+  },
+  AtoAccountsController_clearOverride_v1: (ctx) => ({
+    title: 'Clear ATO analyst verdict',
+    action: `Removes the analyst verdict of this account: it is scored from its signals again.`,
+    target: [
+      ...atoAccountTarget(ctx),
+      ...target('Current verdict', ctx.snap['overrideDetail.verdict'] ?? 'none'),
+    ],
+    changes: [
+      ...change('Verdict', ctx.snap['overrideDetail.verdict'] ?? 'none', 'none'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      ctx.snap['overrideDetail.id'] === null || ctx.snap['overrideDetail.id'] === undefined
+        ? 'The account has no active verdict: nothing changes.'
+        : 'The account is rescored from its signals now.',
+    ],
+    reversible: true,
+  }),
+  AtoAccountsController_addTrustedContext_v1: (ctx) => {
+    const known = snapStrings(ctx.snap['trustedContexts[].kind']);
+    return {
+      title: 'Add ATO trusted context',
+      action: `Trusts the ${text(ctx.body.kind) ?? 'context'} ${quoted(ctx.body.value, '?')} for this account for ${text(ctx.body.expiresInDays) ?? '?'} days.`,
+      target: [
+        ...target('Account', ctx.snap.address, true),
+        ...target('Account id', ctx.args.accountId),
+        ...target('Risk', ctx.snap.riskLevel),
+        ...(known ? target('Trusted contexts now', plural(known.length, 'context')) : []),
+      ],
+      changes: [
+        ...change('Kind', undefined, ctx.body.kind),
+        ...change('Value', undefined, ctx.body.value),
+        ...change('Expires in (days)', undefined, ctx.body.expiresInDays),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        'Sign-ins and mail from this context no longer raise risk for this account.',
+        'An existing context of the same kind and value is renewed.',
+      ],
+      warnings: ['An attacker using this context is no longer detected for this account.'],
+      reversible: true,
+    };
+  },
+  AtoAccountsController_removeTrustedContext_v1: (ctx) => ({
+    title: 'Remove ATO trusted context',
+    action: `Removes the trusted ${text(ctx.snap.kind) ?? 'context'} ${quoted(ctx.snap.value, '?')} from the account.`,
+    target: [
+      ...target('Account id', ctx.args.accountId),
+      ...target('Context id', ctx.args.contextId),
+      ...target('Kind', ctx.snap.kind),
+      ...target('Value', ctx.snap.value),
+      ...target('Reason', ctx.snap.reason, true),
+      ...target('Source', ctx.snap.source),
+      ...target('Expires at', ctx.snap.expiresAt),
+    ],
+    changes: change('Trusted context', 'trusted', 'removed'),
+    impact: ['Sign-ins and mail from this context raise risk for the account again.'],
+    warnings: [UNDO_REMOVE('context')],
+    reversible: false,
+  }),
+  // --- ATO responses (the existing approval model) ---
+  AtoResponsesController_request_v1: (ctx) => {
+    const action = ctx.body.actionType;
+    const scope = isRecord(ctx.body.target) ? ctx.body.target : {};
+    const params = isRecord(ctx.body.params) ? ctx.body.params : {};
+    const provider = PROVIDER_ACTIONS.has(text(action) ?? '');
+    return {
+      title: 'Request ATO response',
+      action: `Requests the response "${actionWords(action)}" for the account of this incident.`,
+      target: [
+        ...target('Incident', ctx.args.incidentId),
+        ...target('Category', ctx.snap.category),
+        ...target('Account', ctx.snap['subject.display'], true),
+        ...target('Incident status', ctx.snap.status),
+        ...target('Severity', ctx.snap.severity),
+      ],
+      changes: [
+        ...change('Action', undefined, actionWords(action)),
+        ...change('Target scope', undefined, scope.scope),
+        ...change('Connector', undefined, scope.connectorId),
+        ...change('Connector IP range', undefined, scope.cidr),
+        ...change('Duration (minutes)', undefined, ctx.body.durationMinutes),
+        ...change('Mode', undefined, ctx.body.mode),
+        ...change('Mailbox item', undefined, params.itemId),
+        ...change('Grant scope', undefined, params.scope),
+        ...change('Reason', undefined, ctx.body.reason),
+        ...change('Description', undefined, ctx.body.description),
+      ],
+      impact: [
+        ATO_APPROVAL_LINE,
+        ...restrictionLine(action, scope.scope, ctx.body.durationMinutes, ctx.body.mode),
+        ...(action === 'remove_forwarding_rule'
+          ? ['The mailbox item is not read before the request: check it on the account page first.']
+          : []),
+        ...(action === 'record_manual_action'
+          ? ['Records what was done elsewhere; nothing runs in the gateway.']
+          : []),
+      ],
+      warnings: [provider ? ATO_PROVIDER_WARNING : ATO_REQUEST_WARNING],
+      reversible: false,
+    };
+  },
+  AtoResponsesController_approve_v1: (ctx) => {
+    const provider = isProviderAction(ctx);
+    const account = text(ctx.snap['account.id']) ?? 'the account';
+    return {
+      title: 'Approve ATO response',
+      action: provider
+        ? `Runs "${actionWords(ctx.snap.actionType)}" for account ${account} now in ${text(ctx.snap.provider) ?? 'the identity provider'}; the provider confirms it later.`
+        : `Runs "${actionWords(ctx.snap.actionType)}" for account ${account} now.`,
+      target: atoResponseTarget(ctx),
+      changes: [
+        ...change('Status', ctx.snap.status, 'approved'),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        'The response runs as soon as it is approved; the approval is recorded with your name.',
+        ...restrictionLine(
+          ctx.snap.actionType,
+          ctx.snap['target.scope'],
+          ctx.snap['params.durationMinutes'],
+          ctx.snap['params.mode'],
+        ),
+      ],
+      warnings: [
+        'Approving runs the action on the account.',
+        ...(provider
+          ? [
+              "Runs in the organization's identity provider; the user may be signed out or locked out.",
+            ]
+          : []),
+      ],
+      reversible: !provider,
+    };
+  },
+  AtoResponsesController_reject_v1: (ctx) => ({
+    title: 'Reject ATO response',
+    action: `Rejects the requested response "${actionWords(ctx.snap.actionType)}".`,
+    target: atoResponseTarget(ctx),
+    changes: [
+      ...change('Status', ctx.snap.status, 'rejected'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['Nothing runs; the request is closed.'],
+    reversible: false,
+  }),
+  AtoResponsesController_cancel_v1: (ctx) => ({
+    title: 'Cancel ATO response',
+    action: `Cancels the response "${actionWords(ctx.snap.actionType)}".`,
+    target: atoResponseTarget(ctx),
+    changes: [
+      ...change('Status', ctx.snap.status, 'cancelled'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['Nothing runs; the request is closed.'],
+    reversible: false,
+  }),
+  AtoResponsesController_rollback_v1: (ctx) => {
+    const action = text(ctx.snap.actionType) ?? '';
+    return {
+      title: 'Roll back ATO response',
+      action: `Rolls back the response "${actionWords(action)}".`,
+      target: [
+        ...atoResponseTarget(ctx),
+        ...target('Executed at', ctx.snap.executedAt),
+        ...target('Effective until', ctx.snap.effectiveUntil),
+      ],
+      changes: [
+        ...change('Status', ctx.snap.status, 'rollback requested'),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        SMTP_RESTRICTIONS.has(action)
+          ? 'The SMTP restriction is lifted.'
+          : PROVIDER_ACTIONS.has(action)
+            ? 'The change is reverted in the identity provider where the provider supports it (for example the account is enabled again).'
+            : 'The effect of the response is reverted.',
+      ],
+      warnings: ['Rolling back removes the protection this response gave the account.'],
+      reversible: false,
+    };
+  },
+  // --- ATO settings ---
+  AtoSettingsController_update_v1: (ctx) => {
+    const settings = isRecord(ctx.body.settings) ? ctx.body.settings : {};
+    const mode = settings.mode;
+    return {
+      title: 'Update ATO settings',
+      action:
+        "Replaces the organization's account takeover settings with the values shown; defaults apply to everything else.",
+      target: [
+        ...target('ATO enabled for the organization', yesNo(ctx.snap.featureEnabled)),
+        ...target('Settings version', ctx.snap.version),
+        ...target('Current mode', ctx.snap['effective.mode']),
+        ...target('Learning period active', yesNo(ctx.snap['learning.active'])),
+        ...target('Platform automation', onOff(ctx.snap['automation.platformEnabled'])),
+        ...target('Approval window (hours)', ctx.snap['automation.approvalTtlHours']),
+      ],
+      changes: [
+        ...change('Mode', ctx.snap['effective.mode'], mode),
+        ...change('Learning (days)', undefined, settings.learningDays),
+        ...change(
+          'Sections set',
+          undefined,
+          cappedList(
+            keysOf(settings).filter((key) => key !== 'mode' && key !== 'learningDays'),
+            12,
+          ),
+        ),
+        ...(isRecord(settings.automation)
+          ? change(
+              'Automatic responses',
+              undefined,
+              cappedList(
+                Object.entries(settings.automation)
+                  .filter(([, item]) => isRecord(item) && item.automatic === true)
+                  .map(([key]) => key),
+                12,
+              ),
+            )
+          : []),
+      ],
+      impact: [
+        'Each change creates a new settings version; the ATO worker applies it within minutes.',
+        'Settings not given return to their defaults.',
+      ],
+      warnings: [
+        ...(mode === 'off'
+          ? ['ATO detection is switched off: no signals are scored and no responses run.']
+          : mode === 'monitor'
+            ? ['ATO detection only records: no responses run automatically.']
+            : []),
+        'These settings decide how account takeover is detected and answered for the whole organization.',
+      ],
+      reversible: true,
+    };
+  },
+  // --- ATO identity-provider integrations ---
+  AtoProvidersController_create_v1: (ctx) => ({
+    title: 'Connect identity-provider integration',
+    action: `Binds the provider connection shown for account takeover detection and starts reading its directory telemetry.`,
+    target: [
+      ...target('Connection', ctx.snap.displayName, true),
+      ...target('Connection id', ctx.body.connectionId),
+      ...target('Provider', ctx.snap.provider),
+      ...target('Connection status', ctx.snap.status),
+      ...target('Eligibility', ctx.snap.eligibility),
+    ],
+    changes:
+      ctx.body.settings !== undefined
+        ? idpSettingsChanges(ctx.body.settings)
+        : change('Settings', undefined, 'the defaults'),
+    impact: [
+      "The gateway starts reading sign-in and mailbox telemetry of the organization's directory.",
+      ...(ctx.snap.eligibility !== undefined &&
+      ctx.snap.eligibility !== null &&
+      ctx.snap.eligibility !== 'eligible'
+        ? [
+            `The connection is not eligible (${text(ctx.snap.eligibility) ?? '?'}): the platform refuses the request.`,
+          ]
+        : []),
+    ],
+    reversible: true,
+  }),
+  AtoProvidersController_update_v1: (ctx) => ({
+    title: 'Update identity-provider integration',
+    action: `Replaces the settings of this integration (the whole document).`,
+    target: providerTarget(ctx),
+    changes: [
+      ...change(
+        'Settings version',
+        ctx.snap.settingsVersion,
+        typeof ctx.snap.settingsVersion === 'number' ? ctx.snap.settingsVersion + 1 : 'next',
+      ),
+      ...idpSettingsChanges(ctx.body.settings),
+    ],
+    impact: ['Enabling a stream schedules it now; disabled streams stop being read.'],
+    warnings: [
+      'The settings decide which data the gateway reads and which response actions it may take in the identity provider.',
+    ],
+    reversible: true,
+  }),
+  AtoProvidersController_remove_v1: (ctx) => ({
+    title: 'Remove identity-provider integration',
+    action: `Removes this integration.`,
+    target: providerTarget(ctx),
+    changes: [
+      ...change('Integration', ctx.snap.status, 'removed'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Telemetry from this identity provider stops, and response actions in it are no longer available.',
+    ],
+    warnings: [UNDO_REMOVE('integration')],
+    reversible: false,
+  }),
+  AtoProvidersController_backfill_v1: (ctx) => ({
+    title: 'Backfill identity-provider telemetry',
+    action: `Queues a backfill of ${argList(ctx.body.streams) ?? 'every enabled stream'} of this integration from ${text(ctx.body.from) ?? '?'}.`,
+    target: providerTarget(ctx),
+    changes: [
+      ...change('From', undefined, ctx.body.from),
+      ...change('Streams', undefined, argList(ctx.body.streams) ?? 'every enabled stream'),
+    ],
+    impact: [
+      'Past events are read again from the provider; detections may raise incidents for them.',
+    ],
+    reversible: false,
+  }),
+  AtoProvidersController_healthCheck_v1: (ctx) => ({
+    title: 'Check identity-provider integration',
+    action: `Queues a read-only health probe of this integration.`,
+    target: providerTarget(ctx),
+    changes: change('Health', ctx.snap['health.status'], 'probe requested'),
+    impact: ['The result appears on the integration page when the probe has run.'],
+    reversible: false,
+  }),
+  AtoProvidersController_pause_v1: (ctx) => ({
+    title: 'Pause identity-provider integration',
+    action: `Pauses this integration.`,
+    target: providerTarget(ctx),
+    changes: [
+      ...change('Status', ctx.snap.status, 'paused'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Telemetry is not read while paused; detections based on it stop until it is resumed.',
+    ],
+    reversible: true,
+  }),
+  AtoProvidersController_resume_v1: (ctx) => ({
+    title: 'Resume identity-provider integration',
+    action: `Resumes this integration.`,
+    target: providerTarget(ctx),
+    changes: change('Status', ctx.snap.status, 'active'),
+    impact: ['Telemetry reading restarts from where it stopped.'],
+    reversible: true,
+  }),
+  // --- incidents ---
+  IncidentsController_create_v1: (ctx) => {
+    const subject = isRecord(ctx.body.subject) ? ctx.body.subject : {};
+    return {
+      title: 'Open incident',
+      action: `Opens an incident of the category ${text(ctx.body.category) ?? '?'} for this account.`,
+      target: [
+        ...target('Account', ctx.snap.address, true),
+        ...target('Account id', subject.id),
+        ...target('Risk', ctx.snap.riskLevel),
+        ...target('Active incident', ctx.snap['activeIncident.id'] ?? 'none'),
+        ...target('Active incident status', ctx.snap['activeIncident.status']),
+      ],
+      changes: [
+        ...change('Category', undefined, ctx.body.category),
+        ...change('Severity', undefined, ctx.body.severity),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        ctx.snap['activeIncident.id'] !== null && ctx.snap['activeIncident.id'] !== undefined
+          ? 'The account already has an active incident; check it before opening another one.'
+          : 'The incident appears on the Incidents page for triage.',
+      ],
+      reversible: false,
+    };
+  },
+  IncidentsController_update_v1: (ctx) => {
+    const resolution = isRecord(ctx.body.resolution) ? ctx.body.resolution : {};
+    return {
+      title: 'Update incident',
+      action: 'Changes the incident as shown below.',
+      target: incidentTarget(ctx),
+      changes: [
+        ...change('Status', ctx.snap.status, ctx.body.status),
+        ...change('Severity', ctx.snap.severity, ctx.body.severity),
+        ...(ctx.body.assigneeId !== undefined
+          ? change('Assignee', ctx.snap.assigneeId, ctx.body.assigneeId ?? '(nobody)')
+          : []),
+        ...change('Resolution', undefined, resolution.code),
+        ...change('Resolution note', undefined, resolution.note),
+        ...change('Note', undefined, ctx.body.note),
+        ...(ctx.body.categoryFeedback !== undefined
+          ? change('Category feedback', undefined, cappedList(keysOf(ctx.body.categoryFeedback)))
+          : []),
+      ],
+      impact: [
+        ...(ctx.body.status === 'resolved' || ctx.body.status === 'false_positive'
+          ? ['The incident is closed.']
+          : []),
+        'Fields not shown keep their values.',
+      ],
+      reversible: ctx.body.status !== 'resolved' && ctx.body.status !== 'false_positive',
+    };
+  },
+  IncidentsController_addNote_v1: (ctx) => ({
+    title: 'Add incident note',
+    action: 'Adds a note to the incident timeline.',
+    target: incidentTarget(ctx),
+    changes: change('Note', undefined, ctx.body.note),
+    impact: ['The note is visible to everyone who can read the incident.'],
+    reversible: false,
+  }),
+  // --- BEC ---
+  BecExecutivesController_create_v1: (ctx) => ({
+    title: 'Add protected executive',
+    action: `Adds the executive ${quoted(ctx.body.displayName, '(unnamed)')} to BEC impersonation protection.`,
+    target: target('Executive', ctx.body.displayName),
+    changes: [
+      ...change('Name', undefined, ctx.body.displayName),
+      ...change('Title', undefined, ctx.body.title),
+      ...change('Aliases', undefined, argList(ctx.body.aliases)),
+      ...change('Known addresses', undefined, argList(ctx.body.knownAddresses)),
+      ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+    ],
+    impact: ["Mail that impersonates this executive's name is flagged by BEC detection."],
+    reversible: true,
+  }),
+  BecExecutivesController_update_v1: (ctx) => ({
+    title: 'Update protected executive',
+    action: `Changes the protected executive ${quoted(ctx.snap.displayName, 'shown')}.`,
+    target: executiveTarget(ctx),
+    changes: [
+      ...change('Name', ctx.snap.displayName, ctx.body.displayName),
+      ...(ctx.body.title !== undefined
+        ? change('Title', ctx.snap.title, ctx.body.title ?? '(none)')
+        : []),
+      ...change('Aliases', undefined, argList(ctx.body.aliases)),
+      ...change(
+        'Known addresses',
+        snapList(ctx.snap.knownAddresses),
+        argList(ctx.body.knownAddresses),
+      ),
+      ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+    ],
+    impact: [
+      ctx.body.enabled === false
+        ? 'Impersonation of this executive is no longer detected.'
+        : 'BEC detection uses the changed executive for new mail.',
+    ],
+    reversible: true,
+  }),
+  BecExecutivesController_remove_v1: (ctx) => ({
+    title: 'Remove protected executive',
+    action: `Removes the executive ${quoted(ctx.snap.displayName, 'shown')} from BEC impersonation protection.`,
+    target: executiveTarget(ctx),
+    changes: change('Executive', 'protected', 'removed'),
+    impact: ['Impersonation of this executive is no longer detected.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  BecTrustedSendersController_create_v1: (ctx) => ({
+    title: 'Add BEC trusted sender',
+    action: `Trusts the ${text(ctx.body.kind) ?? 'sender'} ${quoted(ctx.body.value, '?')} for BEC detection.`,
+    target: [...target('Kind', ctx.body.kind), ...target('Value', ctx.body.value)],
+    changes: [
+      ...change('Kind', undefined, ctx.body.kind),
+      ...change('Value', undefined, ctx.body.value),
+      ...change('Reason', undefined, ctx.body.reason),
+      ...change('Expires at', undefined, expiryText(ctx.body.expiresAt)),
+    ],
+    impact: ['Authenticated mail from this sender skips BEC findings.'],
+    warnings: [
+      'A compromised trusted sender is no longer flagged when its mail authenticates.',
+      ...(ctx.body.expiresAt === undefined || ctx.body.expiresAt === null
+        ? ['The trust never expires.']
+        : []),
+    ],
+    reversible: true,
+  }),
+  BecTrustedSendersController_update_v1: (ctx) => ({
+    title: 'Update BEC trusted sender',
+    action: `Changes the trusted sender ${quoted(ctx.snap.value, 'shown')}.`,
+    target: trustedSenderTarget(ctx),
+    changes: [
+      ...change('Reason', ctx.snap.reason, ctx.body.reason),
+      ...(ctx.body.expiresAt !== undefined
+        ? change('Expires at', expiryText(ctx.snap.expiresAt), expiryText(ctx.body.expiresAt))
+        : []),
+    ],
+    impact: [
+      'Authenticated mail from this sender keeps skipping BEC findings until the trust expires.',
+    ],
+    reversible: true,
+  }),
+  BecTrustedSendersController_remove_v1: (ctx) => ({
+    title: 'Remove BEC trusted sender',
+    action: `Removes the trusted sender ${quoted(ctx.snap.value, 'shown')}.`,
+    target: trustedSenderTarget(ctx),
+    changes: change('Trusted sender', 'trusted', 'removed'),
+    impact: ['Mail from this sender is checked by BEC detection again.'],
+    warnings: [UNDO_REMOVE('sender')],
+    reversible: false,
+  }),
+  BecVendorsController_create_v1: (ctx) => ({
+    title: 'Add protected vendor',
+    action: `Adds the vendor ${quoted(ctx.body.name, '(unnamed)')} to BEC impersonation protection.`,
+    target: target('Vendor', ctx.body.name),
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...change('Aliases', undefined, argList(ctx.body.aliases)),
+      ...change('Domains', undefined, argList(ctx.body.domains)),
+      ...change('Known senders', undefined, argList(ctx.body.knownSenders)),
+      ...change(
+        'Payment-change sensitive',
+        undefined,
+        yesNo(ctx.body.paymentChangeSensitive ?? true),
+      ),
+      ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+    ],
+    impact: ['Mail that impersonates this vendor is flagged by BEC detection.'],
+    reversible: true,
+  }),
+  BecVendorsController_update_v1: (ctx) => ({
+    title: 'Update protected vendor',
+    action: `Changes the protected vendor ${quoted(ctx.snap.name, 'shown')}.`,
+    target: vendorTarget(ctx),
+    changes: [
+      ...change('Name', ctx.snap.name, ctx.body.name),
+      ...change('Aliases', undefined, argList(ctx.body.aliases)),
+      ...change('Domains', snapList(ctx.snap.domains), argList(ctx.body.domains)),
+      ...change('Known senders', snapList(ctx.snap.knownSenders), argList(ctx.body.knownSenders)),
+      ...change(
+        'Payment-change sensitive',
+        yesNo(ctx.snap.paymentChangeSensitive),
+        yesNo(ctx.body.paymentChangeSensitive),
+      ),
+      ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+    ],
+    impact: [
+      ctx.body.enabled === false
+        ? 'Impersonation of this vendor is no longer detected.'
+        : 'BEC detection uses the changed vendor for new mail.',
+    ],
+    reversible: true,
+  }),
+  BecVendorsController_remove_v1: (ctx) => ({
+    title: 'Remove protected vendor',
+    action: `Removes the vendor ${quoted(ctx.snap.name, 'shown')} from BEC impersonation protection.`,
+    target: vendorTarget(ctx),
+    changes: change('Vendor', 'protected', 'removed'),
+    impact: [
+      'Impersonation of this vendor and its payment-change requests are no longer detected.',
+    ],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  BecFeedbackController_deleteSuppression_v1: (ctx) => ({
+    title: 'Delete BEC suppression',
+    action: `Deletes the suppression of the BEC finding ${text(ctx.snap.reasonCode) ?? '?'} for the sender ${text(ctx.snap.senderScope) ?? 'scope'}.`,
+    target: [
+      ...target('Suppression', ctx.args.id),
+      ...target('Reason code', ctx.snap.reasonCode),
+      ...target('Sender scope', ctx.snap.senderScope),
+      ...target('Sender', ctx.snap.senderValue, true),
+      ...target('Expires at', ctx.snap.expiresAt),
+    ],
+    changes: change('Suppression', 'active', 'deleted'),
+    impact: ['BEC findings with this reason code are raised again for the sender.'],
+    reversible: false,
+  }),
+  BecMessageFeedbackController_record_v1: (ctx) => {
+    const suppress = isRecord(ctx.body.suppress) ? ctx.body.suppress : null;
+    return {
+      title: 'Record BEC feedback',
+      action: `Records ${ctx.body.kind === 'false_negative' ? 'a missed BEC finding (false negative)' : 'a false BEC finding (false positive)'} for this message.`,
+      target: [
+        ...target('Message', ctx.args.messageId),
+        ...target('Scan', ctx.args.scanId),
+        ...target('Subject', ctx.snap.subject, true),
+        ...target('Sender', ctx.snap.headerFrom, true),
+        ...target('Direction', ctx.snap.direction),
+        ...target('Verdict', ctx.snap.finalVerdict),
+      ],
+      changes: [
+        ...change('Feedback', undefined, ctx.body.kind),
+        ...change('Reason codes', undefined, argList(ctx.body.reasonCodes)),
+        ...change('Note', undefined, ctx.body.note),
+        ...(suppress
+          ? change(
+              'Suppress',
+              undefined,
+              `${argList(suppress.codes) ?? '?'} for the sender ${text(suppress.scope) ?? '?'} for ${text(suppress.days) ?? '?'} days`,
+            )
+          : []),
+      ],
+      impact: [
+        'The feedback is recorded for BEC tuning.',
+        ...(suppress
+          ? [
+              `Findings with these codes are not raised for the sender ${text(suppress.scope) ?? 'scope'} for ${text(suppress.days) ?? '?'} days.`,
+            ]
+          : []),
+      ],
+      reversible: false,
+    };
+  },
+  // --- DLP ---
+  DlpComplianceController_enable_v1: (ctx) => ({
+    title: 'Enable Aadhaar detection',
+    action: 'Turns on Aadhaar number detection for the organization with the recorded basis.',
+    target: [
+      ...target('Aadhaar detection', onOff(ctx.snap['aadhaar.enabled'])),
+      ...target('Current basis', ctx.snap['aadhaar.basis']),
+      ...target('Review due', ctx.snap['aadhaar.reviewDueAt']),
+    ],
+    changes: [
+      ...change('Aadhaar detection', onOff(ctx.snap['aadhaar.enabled']), 'on'),
+      ...change('Basis', ctx.snap['aadhaar.basis'], ctx.body.basis),
+      ...change('Reference', ctx.snap['aadhaar.reference'], ctx.body.reference),
+      ...change('Attested', yesNo(ctx.snap['aadhaar.attested']), yesNo(ctx.body.attested)),
+      ...change('Review due', ctx.snap['aadhaar.reviewDueAt'], ctx.body.reviewDueAt),
+    ],
+    impact: ['DLP detects Aadhaar numbers in mail of the organization.'],
+    warnings: [
+      'You attest that the organization has a lawful basis to process Aadhaar numbers; the attestation is audited.',
+    ],
+    reversible: true,
+  }),
+  DlpComplianceController_disable_v1: (ctx) => ({
+    title: 'Disable Aadhaar detection',
+    action: 'Turns off Aadhaar number detection for the organization.',
+    target: [
+      ...target('Aadhaar detection', onOff(ctx.snap['aadhaar.enabled'])),
+      ...target('Basis', ctx.snap['aadhaar.basis']),
+    ],
+    changes: change('Aadhaar detection', onOff(ctx.snap['aadhaar.enabled']), 'off'),
+    impact: ['Aadhaar numbers are no longer detected in mail of the organization.'],
+    warnings: ['Mail carrying Aadhaar numbers is no longer held or blocked by DLP.'],
+    reversible: true,
+  }),
+  DlpDictionariesController_create_v1: (ctx) => ({
+    title: 'Create DLP dictionary',
+    action: `Creates the DLP dictionary ${quoted(ctx.body.name, '(unnamed)')} with ${plural(argStrings(ctx.body.terms).length, 'term')}.`,
+    target: [...target('Dictionary', ctx.body.name), ...target('Category', ctx.body.category)],
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...change('Category', undefined, ctx.body.category),
+      ...change('Severity', undefined, ctx.body.severity),
+      ...change('Terms', undefined, termsText(ctx.body.terms)),
+      ...change('Minimum matches', undefined, ctx.body.minMatches),
+      ...change('Base confidence', undefined, ctx.body.baseConfidence),
+      ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+    ],
+    impact: ['Mail is matched against the dictionary once a DLP rule selects it.'],
+    reversible: true,
+  }),
+  DlpDictionariesController_update_v1: (ctx) => ({
+    title: 'Update DLP dictionary',
+    action: `Changes the DLP dictionary ${quoted(ctx.snap.name, 'shown')}.`,
+    target: dictionaryTarget(ctx),
+    changes: [
+      ...change('Name', ctx.snap.name, ctx.body.name),
+      ...change('Category', ctx.snap.category, ctx.body.category),
+      ...change('Severity', ctx.snap.severity, ctx.body.severity),
+      ...change(
+        'Terms',
+        typeof ctx.snap.termCount === 'number' ? plural(ctx.snap.termCount, 'term') : undefined,
+        termsText(ctx.body.terms),
+      ),
+      ...change('Minimum matches', undefined, ctx.body.minMatches),
+      ...change('Base confidence', undefined, ctx.body.baseConfidence),
+      ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+    ],
+    impact: ['Every DLP rule that selects this dictionary uses the new terms and settings.'],
+    reversible: true,
+  }),
+  DlpDictionariesController_remove_v1: (ctx) => ({
+    title: 'Delete DLP dictionary',
+    action: `Deletes the DLP dictionary ${quoted(ctx.snap.name, 'shown')}.`,
+    target: dictionaryTarget(ctx),
+    changes: change('Dictionary', 'active', 'deleted'),
+    impact: ['DLP rules that select this dictionary no longer match its terms.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  DlpExceptionsController_create_v1: (ctx) => {
+    const filters = isRecord(ctx.body.filters) ? ctx.body.filters : {};
+    const scope = DLP_SCOPE_WORDS[text(ctx.body.scope) ?? ''] ?? 'the scope';
+    return {
+      title: 'Add DLP exception',
+      action: `Exempts ${scope} ${quoted(ctx.body.value, '?')} from DLP until ${text(ctx.body.expiresAt) ?? '?'}.`,
+      target: [
+        ...target('Scope', ctx.body.scope),
+        ...target('Value', ctx.body.value),
+        ...target('Policy', ctx.body.policyId ?? 'every DLP policy'),
+        ...target('Rule', ctx.body.ruleId),
+      ],
+      changes: [
+        ...change('Scope', undefined, ctx.body.scope),
+        ...change('Value', undefined, ctx.body.value),
+        ...change('Detectors', undefined, argList(filters.detectors)),
+        ...change('Categories', undefined, argList(filters.categories)),
+        ...change('Reason', undefined, ctx.body.reason),
+        ...change('Expires at', undefined, ctx.body.expiresAt),
+        ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+      ],
+      impact: [
+        'Matching mail of this scope is not held or blocked by DLP while the exception applies.',
+      ],
+      warnings: [
+        'Mail from or to this scope can carry sensitive data out without a DLP action.',
+        ...(ctx.body.policyId === undefined ? ['The exception applies to every DLP policy.'] : []),
+      ],
+      reversible: true,
+    };
+  },
+  DlpExceptionsController_update_v1: (ctx) => {
+    const filters = isRecord(ctx.body.filters) ? ctx.body.filters : null;
+    return {
+      title: 'Update DLP exception',
+      action: `Changes the DLP exception for ${quoted(ctx.snap.value, 'the scope shown')}.`,
+      target: exceptionTarget(ctx),
+      changes: [
+        ...change('Reason', ctx.snap.reason, ctx.body.reason),
+        ...change('Expires at', ctx.snap.expiresAt, ctx.body.expiresAt),
+        ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+        ...(ctx.body.filters === null
+          ? change('Filters', undefined, 'none (every detector and category)')
+          : filters
+            ? [
+                ...change('Detectors', undefined, argList(filters.detectors)),
+                ...change('Categories', undefined, argList(filters.categories)),
+              ]
+            : []),
+      ],
+      impact: [
+        ctx.body.enabled === false
+          ? 'DLP applies to this scope again while the exception is disabled.'
+          : 'Matching mail of this scope is not held or blocked by DLP while the exception applies.',
+      ],
+      reversible: true,
+    };
+  },
+  DlpExceptionsController_remove_v1: (ctx) => ({
+    title: 'Delete DLP exception',
+    action: `Deletes the DLP exception for ${quoted(ctx.snap.value, 'the scope shown')}.`,
+    target: exceptionTarget(ctx),
+    changes: change('Exception', ctx.snap.enabled === false ? 'disabled' : 'active', 'deleted'),
+    impact: ['DLP applies to this scope again.'],
+    warnings: [UNDO_REMOVE('exception')],
+    reversible: false,
+  }),
+  DlpPatternsController_create_v1: (ctx) => ({
+    title: 'Create DLP pattern',
+    action: `Creates the DLP pattern ${quoted(ctx.body.name, '(unnamed)')}.`,
+    target: [...target('Pattern', ctx.body.name), ...target('Severity', ctx.body.severity)],
+    changes: patternChanges(ctx),
+    impact: ['Mail is matched against the pattern once a DLP rule selects it.'],
+    reversible: true,
+  }),
+  DlpPatternsController_update_v1: (ctx) => ({
+    title: 'Update DLP pattern',
+    action: `Changes the DLP pattern ${quoted(ctx.snap.name, 'shown')}.`,
+    target: patternTarget(ctx),
+    changes: patternChanges(ctx, true),
+    impact: ['Every DLP rule that selects this pattern uses the new settings.'],
+    reversible: true,
+  }),
+  DlpPatternsController_remove_v1: (ctx) => ({
+    title: 'Delete DLP pattern',
+    action: `Deletes the DLP pattern ${quoted(ctx.snap.name, 'shown')}.`,
+    target: patternTarget(ctx),
+    changes: change('Pattern', 'active', 'deleted'),
+    impact: ['DLP rules that select this pattern no longer match it.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  DlpPoliciesController_create_v1: (ctx) => ({
+    title: 'Create DLP policy',
+    action: `Creates the DLP policy ${quoted(ctx.body.name, '(unnamed)')}.`,
+    target: target('DLP policy', ctx.body.name),
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...change('Description', undefined, ctx.body.description),
+      ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+      ...change('Mode', undefined, ctx.body.mode ?? 'enforce'),
+      ...change('Priority', undefined, ctx.body.priority),
+      ...change('Directions', undefined, argList(ctx.body.directions) ?? 'outbound, internal'),
+    ],
+    impact: [
+      'The policy has no rules yet: it acts on mail once rules are added.',
+      ...(ctx.body.mode === 'monitor' ? ['In monitor mode matches are only recorded.'] : []),
+    ],
+    reversible: true,
+  }),
+  DlpPoliciesController_update_v1: (ctx) => ({
+    title: 'Update DLP policy',
+    action: `Changes the DLP policy ${quoted(ctx.snap.name, 'shown')}.`,
+    target: dlpPolicyTarget(ctx),
+    changes: [
+      ...change('Name', ctx.snap.name, ctx.body.name),
+      ...(ctx.body.description !== undefined
+        ? change('Description', undefined, ctx.body.description ?? '(none)')
+        : []),
+      ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+      ...change('Mode', ctx.snap.mode, ctx.body.mode),
+      ...change('Priority', ctx.snap.priority, ctx.body.priority),
+      ...change('Directions', undefined, argList(ctx.body.directions)),
+    ],
+    impact: [
+      ctx.body.enabled === false
+        ? 'The policy and its rules stop evaluating new mail.'
+        : ctx.body.mode === 'monitor'
+          ? 'Matches are only recorded; mail is no longer held or blocked by this policy.'
+          : 'DLP evaluates new mail with the changed policy.',
+    ],
+    reversible: true,
+  }),
+  DlpPoliciesController_remove_v1: (ctx) => ({
+    title: 'Delete DLP policy',
+    action: `Deletes the DLP policy ${quoted(ctx.snap.name, 'shown')} with its rules.`,
+    target: dlpPolicyTarget(ctx),
+    changes: change('DLP policy', ctx.snap.enabled === false ? 'disabled' : 'active', 'deleted'),
+    impact: ['Its rules stop evaluating mail.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  DlpPoliciesController_createRule_v1: (ctx) => ({
+    title: 'Add DLP rule',
+    action: `Adds the rule ${quoted(ctx.body.name, '(unnamed)')} to the DLP policy ${quoted(ctx.snap.name, 'shown')}.`,
+    target: [
+      ...target('DLP policy', ctx.snap.name),
+      ...target('DLP policy id', ctx.args.id),
+      ...target('Mode', ctx.snap.mode),
+      ...target('Rules now', ctx.snap.ruleCount),
+    ],
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...change('Action', undefined, ctx.body.action),
+      ...change('Enabled', undefined, yesNo(ctx.body.enabled ?? true)),
+      ...change('Priority', undefined, ctx.body.priority),
+      ...dlpConditionChanges(ctx.body.conditions),
+    ],
+    impact: [
+      ctx.snap.mode === 'monitor'
+        ? 'The policy is in monitor mode: matches are only recorded.'
+        : `Matching mail is ${DLP_RULE_ACTIONS[text(ctx.body.action) ?? ''] ?? 'handled by the rule'}.`,
+    ],
+    reversible: true,
+  }),
+  DlpPoliciesController_updateRule_v1: (ctx) => ({
+    title: 'Update DLP rule',
+    action: `Changes the DLP rule ${quoted(ctx.snap.name, 'shown')}.`,
+    target: dlpRuleTarget(ctx),
+    changes: [
+      ...change('Name', ctx.snap.name, ctx.body.name),
+      ...change('Action', ctx.snap.action, ctx.body.action),
+      ...change('Enabled', yesNo(ctx.snap.enabled), yesNo(ctx.body.enabled)),
+      ...change('Priority', ctx.snap.priority, ctx.body.priority),
+      ...dlpConditionChanges(ctx.body.conditions),
+    ],
+    impact: [
+      ctx.body.enabled === false
+        ? 'The rule stops matching new mail.'
+        : ctx.body.action !== undefined
+          ? `Matching mail is ${DLP_RULE_ACTIONS[text(ctx.body.action) ?? ''] ?? 'handled by the rule'}.`
+          : 'DLP evaluates new mail with the changed rule.',
+    ],
+    reversible: true,
+  }),
+  DlpPoliciesController_removeRule_v1: (ctx) => ({
+    title: 'Delete DLP rule',
+    action: `Deletes the DLP rule ${quoted(ctx.snap.name, 'shown')}.`,
+    target: dlpRuleTarget(ctx),
+    changes: change('Rule', ctx.snap.enabled === false ? 'disabled' : 'active', 'deleted'),
+    impact: ['Mail matched by this rule is no longer handled by it.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  // --- risk-scoring profiles ---
+  RiskProfilesController_createDraft_v1: (ctx) => ({
+    title: 'Create risk profile draft',
+    action: "Creates a draft version of the organization's risk-scoring profile.",
+    target: target('Based on version', ctx.body.basedOnVersionId ?? 'the active profile'),
+    changes: [
+      ...change('Overridden sections', undefined, cappedList(keysOf(ctx.body.overrides), 12)),
+      ...change('Change note', undefined, ctx.body.changeNote),
+    ],
+    impact: ['Nothing changes for mail until the draft is published and activated.'],
+    reversible: true,
+  }),
+  RiskProfilesController_updateDraft_v1: (ctx) => ({
+    title: 'Update risk profile draft',
+    action: `Replaces the overrides of the draft ${version(ctx.snap.versionNo) ?? ''} of the risk-scoring profile.`,
+    target: riskVersionTarget(ctx),
+    changes: [
+      ...change('Overridden sections', undefined, cappedList(keysOf(ctx.body.overrides), 12)),
+      ...change('Change note', ctx.snap.changeNote, ctx.body.changeNote),
+    ],
+    impact: ['Nothing changes for mail until the draft is published and activated.'],
+    reversible: true,
+  }),
+  RiskProfilesController_deleteDraft_v1: (ctx) => ({
+    title: 'Delete risk profile draft',
+    action: `Deletes the draft ${version(ctx.snap.versionNo) ?? ''} of the risk-scoring profile.`,
+    target: riskVersionTarget(ctx),
+    changes: change('Draft', ctx.snap.status, 'deleted'),
+    impact: ['Scoring does not change: only the draft is removed.'],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  RiskProfilesController_publish_v1: (ctx) => {
+    const activate = ctx.body.activate !== false;
+    return {
+      title: 'Publish risk profile version',
+      action: `Publishes the draft ${version(ctx.snap.versionNo) ?? ''} of the risk-scoring profile${activate ? ' and activates it' : ''}.`,
+      target: riskVersionTarget(ctx),
+      changes: [
+        ...change('Status', ctx.snap.status, 'published'),
+        ...change('Active', yesNo(ctx.snap.active), activate ? 'yes' : yesNo(ctx.snap.active)),
+      ],
+      impact: [
+        activate
+          ? `New mail is scored with this version. ${RISK_NEXT_ROUND}`
+          : 'The version can be activated later; scoring does not change now.',
+      ],
+      reversible: true,
+    };
+  },
+  RiskProfilesController_activate_v1: (ctx) => ({
+    title: 'Activate risk profile version',
+    action: `Makes the version ${text(ctx.args.versionId) ?? '?'} the active risk-scoring profile of the organization.`,
+    target: [...target('Version id', ctx.args.versionId), ...riskProfileTarget(ctx)],
+    changes: change(
+      'Active version',
+      version(ctx.snap['active.versionNo']) ?? ctx.snap['active.source'] ?? null,
+      text(ctx.args.versionId) ?? '?',
+    ),
+    impact: [`New mail is scored with this version. ${RISK_NEXT_ROUND}`],
+    reversible: true,
+  }),
+  RiskProfilesController_reset_v1: (ctx) => ({
+    title: 'Reset risk profile',
+    action: 'Returns the organization to the platform risk-scoring profile; its versions are kept.',
+    target: riskProfileTarget(ctx),
+    changes: change(
+      'Active profile',
+      ctx.snap['active.source'] === 'tenant'
+        ? (version(ctx.snap['active.versionNo']) ?? 'tenant')
+        : ctx.snap['active.source'],
+      'platform',
+    ),
+    impact: [
+      ctx.snap['active.source'] === 'platform'
+        ? 'The platform profile is already active: nothing changes.'
+        : `New mail is scored with the platform profile. ${RISK_NEXT_ROUND}`,
+    ],
+    warnings: [
+      "The organization's own thresholds, actions and hard blocks no longer apply until a version is activated again.",
+    ],
+    reversible: true,
+  }),
+  // --- platform operations ---
+  AttachmentRescansController_request_v1: (ctx) => {
+    const organization = text(ctx.body.organizationId);
+    const dry = ctx.body.dryRun === true;
+    return {
+      title: dry ? 'Estimate attachment rescan' : 'Request attachment rescan',
+      action: `Rescans up to ${text(ctx.body.maxMessages) ?? 'the platform maximum of'} messages with attachments received in the last ${text(ctx.body.windowHours) ?? '?'} hours in ${organization ? 'one organization' : 'every organization'}.`,
+      target: [
+        ...target('Organization', organization ?? 'every organization'),
+        ...target('Window (hours)', ctx.body.windowHours),
+        ...target('States', argList(ctx.body.states) ?? RESCAN_STATES),
+      ],
+      changes: [
+        ...change('Maximum messages', undefined, ctx.body.maxMessages),
+        ...change('Dry run', undefined, yesNo(dry)),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        ...(dry ? ['Dry run: nothing is rescanned; only the estimate is returned.'] : []),
+        'Messages are scanned again with the current signatures; verdicts can change and messages can be quarantined.',
+        ...(organization ? [] : ['Applies to every organization.']),
+      ],
+      warnings: [
+        organization
+          ? 'Rescans add load to the scan workers.'
+          : 'Rescans messages of every organization and adds load to the scan workers.',
+      ],
+      reversible: false,
+    };
+  },
+  AttachmentRescansController_cancel_v1: (ctx) => ({
+    title: 'Cancel attachment rescan',
+    action: 'Cancels the attachment rescan job; messages not yet requested are skipped.',
+    target: [
+      ...target('Job', ctx.args.jobId),
+      ...target('Status', ctx.snap.status),
+      ...target('Organization', ctx.snap.organizationId ?? 'every organization'),
+      ...target('Window start', ctx.snap.windowStart),
+      ...target('Window end', ctx.snap.windowEnd),
+      ...target('Maximum messages', ctx.snap.maxMessages),
+      ...target('Selected', ctx.snap.selectedCount),
+    ],
+    changes: [
+      ...change('Status', ctx.snap.status, 'cancelled'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['Messages already requested are still rescanned.'],
+    warnings: ['A cancelled job cannot be resumed; request a new one instead.'],
+    reversible: false,
+  }),
+  DeadLettersController_replay_v1: (ctx) => {
+    const dry = ctx.body.dryRun === true;
+    const organization = text(ctx.body.organizationId);
+    return {
+      title: dry ? 'Dead-letter replay (dry run)' : 'Replay dead letters',
+      action: `Moves up to ${text(ctx.body.limit) ?? '?'} dead letters of ${text(ctx.body.sourceQueue) ?? '?'} back to their work queue.`,
+      target: [
+        ...target('Source queue', ctx.body.sourceQueue),
+        ...target('Organization', organization ?? 'every organization'),
+      ],
+      changes: [
+        ...change('Limit', undefined, ctx.body.limit),
+        ...change('Event type', undefined, ctx.body.eventType),
+        ...change('Failure reason', undefined, ctx.body.failureReason),
+        ...change('Dry run', undefined, yesNo(dry)),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        ...(dry ? ['Dry run: nothing is moved; only the matching count is returned.'] : []),
+        'Replayed messages are processed again by their consumers; events already processed are skipped as duplicates.',
+        ...(organization ? [] : ['Dead letters of every organization can be replayed.']),
+      ],
+      warnings: ['Replaying adds load to the consumers of the work queue.'],
+      reversible: false,
+    };
+  },
+  ScanTrainingController_train_v1: (ctx) => ({
+    title: 'Train the shared spam classifiers',
+    action: `Sends the stored message to the Rspamd controller to ${TRAINING_WORDS[text(ctx.body.operation) ?? ''] ?? 'train it'}; affects classification for every organization.`,
+    target: [
+      ...target('Organization', ctx.args.organizationId),
+      ...target('Message', ctx.args.messageId),
+    ],
+    changes: [
+      ...change('Operation', undefined, ctx.body.operation),
+      ...change('Fuzzy flag', undefined, ctx.body.fuzzyFlag),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Classification of similar mail changes for every organization.',
+      'The message is not rescanned.',
+    ],
+    warnings: [
+      'Bayes and fuzzy storage are shared by every organization; wrong training lowers detection everywhere.',
+    ],
+    reversible: ctx.body.operation === 'fuzzy_add' || ctx.body.operation === 'fuzzy_delete',
+  }),
+  ThreatHashesController_add_v1: (ctx) => ({
+    title: 'Add threat hash',
+    action: `Adds the SHA-256 ${text(ctx.body.sha256) ?? '?'} to the platform threat catalog.`,
+    target: [...target('SHA-256', ctx.body.sha256), ...target('Severity', ctx.body.severity)],
+    changes: [
+      ...change('MD5', undefined, ctx.body.md5),
+      ...change('Severity', undefined, ctx.body.severity),
+      ...change('Family', undefined, ctx.body.family),
+      ...change('Expires at', undefined, expiryText(ctx.body.expiresAt)),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [`${EVERY_ORGANIZATION_SCAN} Attachments with this hash are treated as malicious.`],
+    warnings: ['A wrong hash blocks legitimate attachments in every organization.'],
+    reversible: true,
+  }),
+  ThreatHashesController_remove_v1: (ctx) => ({
+    title: 'Remove threat hash',
+    action: `Removes the SHA-256 ${text(ctx.args.sha256) ?? '?'} from the platform threat catalog.`,
+    target: [
+      ...target('SHA-256', ctx.snap.sha256 ?? ctx.args.sha256),
+      ...target('Severity', ctx.snap.severity),
+      ...target('Family', ctx.snap.family),
+      ...target('Source', ctx.snap.source),
+    ],
+    changes: [
+      ...change('Threat hash', 'listed', 'removed'),
+      ...change('Reason', undefined, ctx.args.reason),
+    ],
+    impact: [`${EVERY_ORGANIZATION_SCAN} Attachments with this hash are no longer matched.`],
+    warnings: [UNDO_REMOVE('hash')],
+    reversible: false,
+  }),
+  ThreatIndicatorsController_add_v1: (ctx) => ({
+    title: 'Add threat indicator',
+    action: `Adds the ${text(ctx.body.type) ?? 'indicator'} ${quoted(ctx.body.value, '?')} to the platform threat catalog.`,
+    target: [
+      ...target('Type', ctx.body.type),
+      ...target('Value', ctx.body.value),
+      ...target('Category', ctx.body.category),
+    ],
+    changes: [
+      ...change('Severity', undefined, ctx.body.severity),
+      ...change('Category', undefined, ctx.body.category),
+      ...change('Expires at', undefined, expiryText(ctx.body.expiresAt)),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [`${EVERY_ORGANIZATION_SCAN_CLICK} Matching mail and links are treated as malicious.`],
+    warnings: ['A wrong indicator blocks legitimate mail or links in every organization.'],
+    reversible: true,
+  }),
+  ThreatIndicatorsController_remove_v1: (ctx) => ({
+    title: 'Remove threat indicator',
+    action: `Removes the ${text(ctx.snap.type) ?? 'threat'} indicator shown from the platform threat catalog.`,
+    target: [
+      ...target('Indicator', ctx.args.id),
+      ...target('Type', ctx.snap.type),
+      ...target('Value', ctx.snap.value, true),
+      ...target('Severity', ctx.snap.severity),
+      ...target('Category', ctx.snap.category),
+      ...target('Source', ctx.snap.source),
+    ],
+    changes: [
+      ...change('Threat indicator', 'listed', 'removed'),
+      ...change('Reason', undefined, ctx.args.reason),
+    ],
+    impact: [
+      `${EVERY_ORGANIZATION_SCAN_CLICK} Matching mail and links are no longer flagged by it.`,
+    ],
+    warnings: [UNDO_REMOVE('indicator')],
+    reversible: false,
+  }),
+};
+
 /**
- * The 79 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
- * AI-R), keyed by operation id.
+ * The 143 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
+ * AI-R, 64 of step AI-4), keyed by operation id.
  */
 export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
   // --- native (step AI-R D5) ---
@@ -1947,6 +3444,8 @@ export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
       reversible: false,
     };
   },
+  // --- step AI-4 (design 32 D6) ---
+  ...AI4_TEMPLATES,
 };
 
 /** Generic fallback (never used by an enabled tool: the registry check requires a template). */
@@ -2058,8 +3557,9 @@ function finalize(
 
 /**
  * The confirmation summary of a write (D5). `operationId` must be a registry tool; templates
- * exist for the 78 writes of AI-2 and AI-3 and the native `report_send_email` of AI-R (others get the generic fallback, which the registry
- * check keeps away from enabled tools).
+ * exist for the 78 writes of AI-2 and AI-3, the native `report_send_email` of AI-R and the 64
+ * writes of AI-4 (others get the generic fallback, which the registry check keeps away from
+ * enabled tools).
  */
 export function impactOf(operationId: string, input: ImpactInput): ConfirmationSummary {
   const operation = findOperation(operationId);

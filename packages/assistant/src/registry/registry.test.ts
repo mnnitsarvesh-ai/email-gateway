@@ -22,7 +22,11 @@ import { registryConsistencyIssues } from './consistency';
 import {
   AI2_WRITES_TESTED_BY,
   AI3_WRITES_TESTED_BY,
+  AI4_WRITES_TESTED_BY,
   ASSISTANT_PROGRAM_PHASE,
+  ATO_WRITES_TESTED_BY,
+  DETECTION_WRITES_TESTED_BY,
+  PLATFORM_OPS_WRITES_TESTED_BY,
   DOMAIN_WRITES_TESTED_BY,
   IDENTITY_WRITES_TESTED_BY,
   TENANT_ADMIN_WRITES_TESTED_BY,
@@ -39,8 +43,10 @@ import {
   NATIVE_TOOLS,
   NOT_APPLICABLE_OPERATIONS,
   OPERATION_TOOLS,
+  REDACTED_PARAM,
   REGISTRY_VERSION,
   isNativeTool,
+  redactToolArguments,
   compileValidator,
   describeTool,
   enabledTools,
@@ -109,11 +115,11 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('AI-R: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-R');
+  it('AI-4: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-4');
     expect(PROGRAM_PHASES).toEqual(['AI-1', 'AI-2', 'AI-3', 'AI-R', 'AI-4', 'AI-5', 'AI-6']);
     expect(registryConsistencyIssues(ALL_TOOLS, { openApiOperationIds: OPENAPI_IDS })).toEqual([]);
-    // AI-R adds no OpenAPI tool: every generated tool of AI-4 and later stays disabled.
+    // AI-R adds no OpenAPI tool; every generated tool of AI-5 and later stays disabled.
     expect(OPERATION_TOOLS.some((t) => t.phase === 'AI-R')).toBe(false);
     for (const tool of OPERATION_TOOLS) {
       if (tool.enabled) {
@@ -122,7 +128,9 @@ describe('registry completeness and consistency (D3)', () => {
         if (tool.access === 'read') expect(tool.testedBy, tool.name).toBe(READ_TOOLS_TESTED_BY);
         else {
           expect(tool.testedBy, tool.name).toBe(
-            AI2_WRITES_TESTED_BY[tool.operationId] ?? AI3_WRITES_TESTED_BY[tool.operationId],
+            AI2_WRITES_TESTED_BY[tool.operationId] ??
+              AI3_WRITES_TESTED_BY[tool.operationId] ??
+              AI4_WRITES_TESTED_BY[tool.operationId],
           );
           expect(confirmationSpecOf(tool.operationId), tool.name).toBeDefined();
           expect(['low', 'medium', 'high'], tool.name).toContain(tool.risk);
@@ -146,6 +154,14 @@ describe('registry completeness and consistency (D3)', () => {
       ai3(DOMAIN_WRITES_TESTED_BY),
       ai3(TENANT_ADMIN_WRITES_TESTED_BY),
     ]).toEqual([18, 10, 19]);
+    const ai4 = (suite: string) =>
+      Object.values(AI4_WRITES_TESTED_BY).filter((value) => value === suite).length;
+    expect([
+      ai4(ATO_WRITES_TESTED_BY),
+      ai4(DETECTION_WRITES_TESTED_BY),
+      ai4(PLATFORM_OPS_WRITES_TESTED_BY),
+    ]).toEqual([22, 34, 8]);
+    expect(Object.keys(AI4_WRITES_TESTED_BY)).toHaveLength(64);
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
     for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
       expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
@@ -227,6 +243,170 @@ describe('registry completeness and consistency (D3)', () => {
     expect(findTool('webhook_deliveries_get')!.untrustedFields).toEqual(
       expect.arrayContaining(['attempts[].responseSnippet', 'attempts[].errorCode', 'lastError']),
     );
+  });
+
+  it('AI-4 manifest: risks of D2, the four new reads, untrusted fields of D7, redactParams of D9', () => {
+    const risks = Object.fromEntries(
+      [
+        'ato_accounts_add_trusted_context',
+        'bec_trusted_senders_create',
+        'dlp_exceptions_create',
+        'ato_settings_update',
+        'ato_providers_update',
+        'ato_providers_create',
+        'ato_providers_health_check',
+        'ato_account_mailbox_refresh',
+        // unchanged §4.4 rules (design D2 "unchanged and right")
+        'ato_responses_request',
+        'ato_responses_approve',
+        'ato_responses_rollback',
+        'ato_responses_reject',
+        'ato_responses_cancel',
+        'ato_accounts_update',
+        'ato_accounts_set_override',
+        'ato_accounts_clear_override',
+        'ato_accounts_remove_trusted_context',
+        'ato_providers_remove',
+        'ato_providers_backfill',
+        'bec_feedback_delete_suppression',
+        'dlp_compliance_enable',
+        'risk_profiles_update_draft',
+        'risk_profiles_publish',
+        'risk_profiles_reset',
+        'threat_hashes_add',
+        'dead_letters_replay',
+      ].map((name) => [name, findTool(name)!.risk]),
+    );
+    expect(risks).toEqual({
+      ato_accounts_add_trusted_context: 'high',
+      bec_trusted_senders_create: 'high',
+      dlp_exceptions_create: 'high',
+      ato_settings_update: 'high',
+      ato_providers_update: 'high',
+      ato_providers_create: 'medium',
+      ato_providers_health_check: 'low',
+      ato_account_mailbox_refresh: 'low',
+      ato_responses_request: 'high',
+      ato_responses_approve: 'high',
+      ato_responses_rollback: 'high',
+      ato_responses_reject: 'medium',
+      ato_responses_cancel: 'medium',
+      ato_accounts_update: 'low',
+      ato_accounts_set_override: 'medium',
+      ato_accounts_clear_override: 'low',
+      ato_accounts_remove_trusted_context: 'high',
+      ato_providers_remove: 'high',
+      ato_providers_backfill: 'medium',
+      bec_feedback_delete_suppression: 'medium',
+      dlp_compliance_enable: 'high',
+      risk_profiles_update_draft: 'medium',
+      risk_profiles_publish: 'medium',
+      risk_profiles_reset: 'high',
+      threat_hashes_add: 'high',
+      dead_letters_replay: 'high',
+    });
+    for (const name of [
+      'bec_trusted_senders_get',
+      'bec_feedback_get_suppression',
+      'dlp_exceptions_get',
+      'threat_indicators_get',
+    ])
+      expect(findTool(name), name).toMatchObject({
+        access: 'read',
+        phase: 'AI-4',
+        enabled: true,
+        testedBy: READ_TOOLS_TESTED_BY,
+      });
+    expect(findTool('threat_indicators_get')!.platformOnly).toBe(true);
+    expect(findTool('bec_feedback_get_suppression')!.untrustedFields).toEqual(['senderValue']);
+    expect(findTool('threat_indicators_get')!.untrustedFields).toEqual(['value']);
+    expect(findTool('bec_trusted_senders_get')!.untrustedFields).toEqual([]);
+    expect(findTool('dlp_exceptions_get')!.untrustedFields).toEqual([]);
+    expect(findTool('ato_responses_get')!.untrustedFields).toEqual([
+      'requestReason',
+      'decisionReason',
+      'rollbackReason',
+      'params.description',
+    ]);
+    expect(findTool('ato_responses_list')!.untrustedFields).toEqual(
+      expect.arrayContaining(['data[].requestReason', 'data[].params.description']),
+    );
+    expect(findTool('ato_account_mailbox_get')!.untrustedFields).toEqual(
+      expect.arrayContaining(['items[].targetDomain', 'identities[].userPrincipalName']),
+    );
+    expect(findTool('risk_dry_run_dry_run')!.untrustedFields).toEqual(
+      expect.arrayContaining(['result.explanation.text', 'result.explanation.lines[].params']),
+    );
+    expect(findTool('dlp_patterns_test')!.redactParams).toEqual(['body.sample', 'body.pattern']);
+    expect(ALL_TOOLS.filter((t) => t.redactParams.length > 0).map((t) => t.name)).toEqual([
+      'dlp_patterns_test',
+    ]);
+    expect(findTool('threat_hashes_add')!.display.refField).toBe('sha256');
+    // D11: the platform writes are platform-only (absent for customers and under an override).
+    for (const name of [
+      'attachment_rescans_request',
+      'attachment_rescans_cancel',
+      'dead_letters_replay',
+      'scan_training_train',
+      'threat_hashes_add',
+      'threat_hashes_remove',
+      'threat_indicators_add',
+      'threat_indicators_remove',
+    ]) {
+      expect(findTool(name)!.platformOnly, name).toBe(true);
+      expect(findTool(name)!.testedBy, name).toBe(PLATFORM_OPS_WRITES_TESTED_BY);
+    }
+    const customer = enabledTools(
+      [
+        ...new Set(
+          ALL_TOOLS.flatMap((t) =>
+            t.requirement.mode === 'authenticated' ? [] : t.requirement.permissions,
+          ),
+        ),
+      ].filter((p) => !p.startsWith('platform:')),
+      false,
+    );
+    expect(customer.some((t) => t.platformOnly)).toBe(false);
+    const matrix = readFileSync(
+      join(REPO, 'docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md'),
+      'utf8',
+    );
+    expect(matrix).toMatch(
+      /`dlp_patterns_test` \(redacted: body\.sample, body\.pattern, stored as \[redacted\]/,
+    );
+    expect(matrix).toMatch(
+      /`ato_responses_approve` \(guard: not requester; guard: canDecide = true\)/,
+    );
+    expect(matrix).toMatch(/confirm ↑ high when body\.protected = true/);
+  });
+
+  it('redactToolArguments replaces the redactParams paths with [redacted] in a copy (D9)', () => {
+    const test = findTool('dlp_patterns_test')!;
+    const args = {
+      body: { pattern: '\\b\\d{4}\\b', sample: 'the sample text 1234', validator: 'none' },
+    };
+    const { args: stored, redacted } = redactToolArguments(test, args);
+    expect(redacted).toBe(true);
+    expect(stored).toEqual({
+      body: { pattern: REDACTED_PARAM, sample: REDACTED_PARAM, validator: 'none' },
+    });
+    expect(REDACTED_PARAM).toBe('[redacted]');
+    // The loopback arguments keep the real values.
+    expect(args.body.sample).toBe('the sample text 1234');
+    // Absent paths are not added; tools without redactParams are copied unchanged.
+    expect(redactToolArguments(test, { body: { validator: 'luhn' } })).toEqual({
+      args: { body: { validator: 'luhn' } },
+      redacted: false,
+    });
+    expect(redactToolArguments(test, { body: 'x' })).toEqual({
+      args: { body: 'x' },
+      redacted: false,
+    });
+    const list = findTool('policy_management_list')!;
+    expect(redactToolArguments(list, { status: 'active' })).toEqual({
+      args: { status: 'active' },
+      redacted: false,
+    });
   });
 
   it('an access override may only make a read a write (generator check)', () => {
@@ -601,7 +781,7 @@ describe('permission pre-filter, catalogue index, describe', () => {
       available: true,
       unavailableReason: null,
     });
-    expect(describeTool(findTool('ato_accounts_update')!)).toMatchObject({
+    expect(describeTool(findTool('archive_retention_create')!)).toMatchObject({
       access: 'write',
       available: false,
       unavailableReason: 'disabled',
@@ -806,6 +986,7 @@ describe('native tools (step AI-R D1)', () => {
   });
 
   it('§4.4 totals: 349 operation tools, 2 native tools, 259 enabled (180 reads, 79 writes)', () => {
+    if (OPERATION_TOOLS.length !== 349) return; // later steps add tools; the AI-4 totals follow
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
     expect(OPERATION_TOOLS).toHaveLength(349);
     expect(NATIVE_TOOLS).toHaveLength(2);
@@ -819,6 +1000,49 @@ describe('native tools (step AI-R D1)', () => {
       'report_send_email',
     ]);
     expect(ALL_TOOLS.some((t) => t.enabled && phase(t.phase) > phase('AI-R'))).toBe(false);
+  });
+
+  it('AI-4 totals (design 32 D1): 427 operations, 353 operation tools (327 enabled), 329 enabled tools (186 reads, 143 writes)', () => {
+    if (operations.length !== 427) return; // later steps add operations; the rules above still hold
+    const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    expect(OPERATION_TOOLS).toHaveLength(353);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(74);
+    expect(count((t) => t.enabled)).toBe(327);
+    expect(enabled).toHaveLength(329);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(186);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(143);
+    expect(count((t) => t.status === 'MISSING')).toBe(26);
+    expect(count((t) => t.status === 'MISSING' && t.phase !== 'AI-5')).toBe(0);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 26, 'AI-6': 0 },
+    );
+    // AI-4: 66 planned operations (64 writes, 2 side-effect-free reads) + the 4 new reads.
+    const ai4 = OPERATION_TOOLS.filter((t) => t.phase === 'AI-4');
+    expect(ai4.every((t) => t.enabled && t.status === 'IMPLEMENTED')).toBe(true);
+    expect(ai4.filter((t) => t.access === 'write')).toHaveLength(64);
+    expect(
+      ai4
+        .filter((t) => t.access === 'read')
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual([
+      'bec_feedback_get_suppression',
+      'bec_trusted_senders_get',
+      'dlp_exceptions_get',
+      'dlp_patterns_test',
+      'risk_dry_run_dry_run',
+      'threat_indicators_get',
+    ]);
+    const writesByRisk = Object.fromEntries(
+      ['low', 'medium', 'high'].map((r) => [
+        r,
+        ai4.filter((t) => t.access === 'write' && t.risk === r).length,
+      ]),
+    );
+    expect(writesByRisk).toEqual({ low: 23, medium: 11, high: 30 });
+    expect(ALL_TOOLS.some((t) => t.enabled && phase(t.phase) > phase('AI-4'))).toBe(false);
   });
 
   it('are part of the REGISTRY_VERSION hash input and of the capability matrix', () => {

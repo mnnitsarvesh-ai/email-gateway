@@ -42,6 +42,31 @@ export interface ActionUpdate {
 /** The native tool whose executed line names the queued recipient. */
 const REPORT_SEND_EMAIL_TOOL = 'report_send_email';
 
+/**
+ * Enabled writes whose `202` answer is queued work, not a request waiting for another person's
+ * approval (step AI-4 D10): their executed line says "it was queued (HTTP 202)". Every other `202`
+ * keeps the approval wording (quarantine release requests and approvals, legacy release replays).
+ * The portal's confirmation card mirrors this list (`awaitsApproval`).
+ */
+export const QUEUED_202_TOOLS: ReadonlySet<string> = new Set([
+  // step AI-R: the report email is queued in the notification outbox
+  REPORT_SEND_EMAIL_TOOL,
+  // step AI-4 (design 32 D10)
+  'ato_providers_health_check',
+  'ato_providers_backfill',
+  'ato_account_mailbox_refresh',
+  'attachment_rescans_request',
+  // earlier steps whose OpenAPI 202 is queued work (checked in step AI-4)
+  'message_lifecycle_rescan',
+  'users_resend_invitation',
+  'webhooks_test',
+  'webhook_deliveries_replay',
+  'webhook_deliveries_create_replay',
+]);
+
+/** The ATO response request (step AI-4 D10): `201` with an action that may wait for approval. */
+const ATO_RESPONSE_REQUEST_TOOL = 'ato_responses_request';
+
 const TOOL = /^[a-z0-9_]{1,64}$/;
 const CODE = /^[a-z0-9_.:-]{1,64}$/i;
 
@@ -73,6 +98,10 @@ export function actionUpdateLine(update: ActionUpdate): string {
       const refs = result
         ? ` Result: ref r${result}${update.resultRowRef ? `, row ref r${result}.1` : ''}.`
         : '';
+      if (http === 202 && QUEUED_202_TOOLS.has(update.tool))
+        return `${head} the user confirmed it; it was queued (HTTP 202).${refs}`;
+      if (update.tool === ATO_RESPONSE_REQUEST_TOOL && (http === null || http === 201))
+        return `${head} the user confirmed it; the response was requested (HTTP 201). If it needs approval, another responder must approve it; the requester cannot.${refs}`;
       const status =
         http === 202
           ? ' (HTTP 202, accepted: waiting for approval by another person)'

@@ -464,15 +464,17 @@ describe('executor helpers', () => {
   });
 
   it('scrubs credential keys and caps parameters (audit 2 KiB, row 4 KiB)', () => {
-    expect(redactParams({ q: 'a', password: 'p', nested: { apiKey: 'k', ok: 1 } }, 2048)).toEqual({
+    expect(
+      redactParams({ q: 'a', password: 'p', nested: { apiKey: 'k', ok: 1 } }, 2048, null),
+    ).toEqual({
       value: { q: 'a', nested: { ok: 1 } },
       exact: false,
     });
-    expect(redactParams({ status: 'active' }, 2048)).toEqual({
+    expect(redactParams({ status: 'active' }, 2048, null)).toEqual({
       value: { status: 'active' },
       exact: true,
     });
-    const big = redactParams({ q: 'x'.repeat(5000) }, 2048);
+    const big = redactParams({ q: 'x'.repeat(5000) }, 2048, null);
     expect(big).toEqual({ value: { truncated: true, keys: ['q'] }, exact: false });
   });
 

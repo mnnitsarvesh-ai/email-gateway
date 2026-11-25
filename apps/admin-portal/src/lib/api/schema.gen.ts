@@ -2008,7 +2008,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get a BEC suppression rule
+     * @description The rule as the list shows it; an expired rule is returned with `expired: true` (no longer applied). Another organization’s id is a 404. From the read replica.
+     */
+    get: operations['BecFeedbackController_getSuppression_v1'];
     put?: never;
     post?: never;
     /**
@@ -2052,7 +2056,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get a trusted sender
+     * @description The entry as the list shows it; an expired entry is returned with `expired: true` (no longer applied). Another organization’s id is a 404. From the read replica.
+     */
+    get: operations['BecTrustedSendersController_get_v1'];
     put?: never;
     post?: never;
     /**
@@ -2444,7 +2452,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get a DLP exception
+     * @description The entry as the list shows it; an expired entry is returned with `expired: true` (never applied), a disabled one with `enabled: false`. Another organization’s id is a 404. From the read replica.
+     */
+    get: operations['DlpExceptionsController_get_v1'];
     put?: never;
     post?: never;
     /**
@@ -4459,7 +4471,11 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get a platform threat indicator
+     * @description The indicator as the list shows it (URL, domain or IP address of the platform catalog); an expired indicator is returned with its past `expiresAt` (the lookup ignores it). An unknown id, an organization’s own indicator or another type is a 404. From the read replica: an indicator added a moment ago may not be found yet. 60 calls per caller per minute (shared by the catalog routes).
+     */
+    get: operations['ThreatIndicatorsController_get_v1'];
     put?: never;
     post?: never;
     /**
@@ -33700,6 +33716,182 @@ export interface operations {
       };
     };
   };
+  BecFeedbackController_getSuppression_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Suppression rule public id */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            createdByUserId: string | null;
+            expired: boolean;
+            /** Format: date-time */
+            expiresAt: string;
+            /**
+             * Format: uuid
+             * @description The feedback that created or renewed the rule
+             */
+            feedbackId: string | null;
+            /** Format: uuid */
+            id: string;
+            reasonCode: string;
+            /** @enum {string} */
+            senderScope: 'address' | 'domain';
+            /** @description The From address or registrable domain */
+            senderValue: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Suppression rule not found (also for another organization’s id) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'bec_suppression_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+    };
+  };
   BecFeedbackController_deleteSuppression_v1: {
     parameters: {
       query?: never;
@@ -34231,6 +34423,181 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  BecTrustedSendersController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Trusted sender public id */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            createdByUserId: string | null;
+            /** @description True once expiresAt has passed (no longer applied) */
+            expired: boolean;
+            /** Format: date-time */
+            expiresAt: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            kind: 'address' | 'domain';
+            reason: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** @description Normalized address or ASCII registrable domain */
+            value: string;
+            version: number;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Trusted sender not found (also for another organization’s id) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'bec_trusted_sender_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
           };
         };
       };
@@ -40017,6 +40384,226 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  DlpExceptionsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Exception public id */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: uuid */
+            createdByUserId: string | null;
+            enabled: boolean;
+            /** @description Past `expiresAt`: no longer applied */
+            expired: boolean;
+            /** Format: date-time */
+            expiresAt: string;
+            filters: {
+              categories?: (
+                | 'payment_card'
+                | 'bank_account'
+                | 'national_id'
+                | 'passport'
+                | 'personal_info'
+                | 'confidential'
+                | 'source_code'
+                | 'credential'
+                | 'financial'
+                | 'custom'
+              )[];
+              detectors?: (
+                | 'PC1'
+                | 'BA1'
+                | 'BA2'
+                | 'BA3'
+                | 'NI1'
+                | 'NI2'
+                | 'PP1'
+                | 'PP2'
+                | 'PI1'
+                | 'PI2'
+                | 'PI3'
+                | 'PI4'
+                | 'CF1'
+                | 'CF2'
+                | 'DC1'
+                | 'SC1'
+                | 'CR1'
+                | 'CR2'
+                | 'CR3'
+                | 'CR4'
+                | 'CR5'
+                | 'FI1'
+                | 'CU1'
+              )[];
+            } | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            policyId: string | null;
+            reason: string;
+            /** Format: uuid */
+            ruleId: string | null;
+            /** @enum {string} */
+            scope: 'sender_address' | 'sender_domain' | 'recipient_address' | 'recipient_domain';
+            /** Format: date-time */
+            updatedAt: string;
+            /** Format: uuid */
+            updatedByUserId: string | null;
+            value: string;
+            version: number;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description DLP exception not found (also for another organization’s id) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'dlp_exception_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
           };
         };
       };
@@ -73285,6 +73872,198 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  ThreatIndicatorsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Indicator id (decimal, from the list) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /**
+             * Format: uuid
+             * @description Public id of the analyst; null for feeds
+             */
+            addedByUserId: string | null;
+            /** @enum {string|null} */
+            category: 'phishing' | 'malware' | 'spam' | 'scam' | 'c2' | 'other' | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt: string | null;
+            /** Format: date-time */
+            firstSeenAt: string;
+            /** @description Indicator id (decimal) */
+            id: string;
+            /** Format: date-time */
+            lastSeenAt: string;
+            reason: string | null;
+            /** @enum {string} */
+            severity: 'low' | 'medium' | 'high' | 'critical';
+            /** @description `analyst` or `feed:<name>` */
+            source: string;
+            /** @enum {string} */
+            type: 'url' | 'domain' | 'ip';
+            /** Format: date-time */
+            updatedAt: string;
+            /** @description Normalized value */
+            value: string;
+            /** @description SHA-256 (hex) of the normalized value */
+            valueSha256: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description No platform threat indicator with that id */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'threat_indicator_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Rate limited (`Retry-After` header when known) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
         };
       };
     };

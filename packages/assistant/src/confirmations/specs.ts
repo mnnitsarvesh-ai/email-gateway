@@ -15,6 +15,9 @@ import type { ProposalGuard } from './guards';
  *
  * Step AI-3 (design 30 D3–D6) adds proposal guards (`guards`, `guards.ts`), conditional risk
  * escalation (`escalate`, `escalation.ts`) and selected-item preconditions (`select`).
+ *
+ * Step AI-4 (design 32 D3–D5) adds the security-operations specs, the ATO four-eyes guards and
+ * the CAS field names `version`, `rowVersion` and `expectedProfileVersion`.
  */
 
 /**
@@ -79,7 +82,9 @@ export type ConfirmationPrecondition = SinglePrecondition | EachPrecondition;
 /** CAS field set from the precondition read's row version (server-authoritative, D1 step 5). */
 export interface CasInjection {
   in: 'body' | 'query';
-  field: 'expectedRowVersion' | 'expectedVersion';
+  /** Step AI-4 adds `version` (BEC, DLP), `rowVersion` (IdP integrations), `expectedProfileVersion`. */
+  field:
+    'expectedRowVersion' | 'expectedVersion' | 'version' | 'rowVersion' | 'expectedProfileVersion';
   /** The schema minimum; also the placeholder used before the read (D1). */
   min: 0 | 1;
 }
@@ -310,9 +315,231 @@ export const ESCALATION_WARNINGS = {
   notificationEmail: 'Organization notifications go to a new address.',
 } as const;
 
+// --- step AI-4 (design 32 D3–D5) ---
+
 /**
- * The 79 enabled writes: the 31 of step AI-2 (design 29 D4), the 47 of step AI-3 (design 30
- * D6) and the native report_send_email of step AI-R (design 31 D5). Field names checked against
+ * I18: the requester of an ATO response, or the creator of the API key that requested it, never
+ * decides it; deciding needs MFA (`canDecide` of the read, computed for the proposing user).
+ */
+const ATO_FOUR_EYES: readonly ProposalGuard[] = [
+  {
+    kind: 'not_self_field',
+    field: 'requestedBy.id',
+    when: { field: 'requestedBy.type', equals: 'user' },
+    message: 'ato_four_eyes',
+  },
+  {
+    kind: 'require_read_value',
+    field: 'canDecide',
+    equals: true,
+    when: { field: 'status', equals: 'pending_approval' },
+    message: 'ato_four_eyes',
+  },
+];
+
+const ATO_ACCOUNT_DISPLAY = [
+  'address',
+  'displayName',
+  'kind',
+  'riskLevel',
+  'riskScore',
+  'protection.protected',
+  'protection.reason',
+] as const;
+const ATO_OVERRIDE_DISPLAY = [
+  'address',
+  'riskScore',
+  'riskLevel',
+  'overrideDetail.verdict',
+  'overrideDetail.expiresAt',
+] as const;
+
+/**
+ * An ATO account read. Its `rowVersion` moves with every rescoring, so it is a state field only
+ * where the write itself CAS-checks it (`ato_accounts_update`, R4).
+ */
+const atoAccount = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+  accountArg = 'accountId',
+  cas = false,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'ato_accounts_get',
+  params: { accountId: accountArg },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+
+const ATO_RESPONSE_DISPLAY = [
+  'actionType',
+  'provider',
+  'impact',
+  'account.id',
+  'account.kind',
+  'target.scope',
+  'params.durationMinutes',
+  'params.mode',
+  'requestedBy.type',
+  'requestReason',
+  'approvalExpiresAt',
+] as const;
+const atoResponse = (
+  stateFields: readonly string[],
+  displayFields: readonly string[] = ATO_RESPONSE_DISPLAY,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'ato_responses_get',
+  params: { responseId: 'responseId' },
+  stateFields,
+  displayFields,
+});
+
+const atoProvider = (stateFields: readonly string[], cas = false): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'ato_providers_get',
+  params: { integrationId: 'integrationId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields: cas
+    ? ['displayName', 'provider', 'status', 'settingsVersion']
+    : ['displayName', 'provider', 'status', 'health.status'],
+});
+
+/** A BEC or DLP record read by `{id}` with its `version` CAS counter. */
+const versioned = (tool: string, displayFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool,
+  params: { id: 'id' },
+  stateFields: ['version'],
+  rowVersionField: 'version',
+  displayFields,
+});
+const BODY_VERSION: CasInjection = { in: 'body', field: 'version', min: 1 };
+const QUERY_VERSION: CasInjection = { in: 'query', field: 'version', min: 1 };
+
+const EXECUTIVE_DISPLAY = ['displayName', 'title', 'enabled', 'knownAddresses'] as const;
+const TRUSTED_SENDER_DISPLAY = ['kind', 'value', 'reason', 'expiresAt'] as const;
+const VENDOR_DISPLAY = [
+  'name',
+  'enabled',
+  'paymentChangeSensitive',
+  'domains',
+  'knownSenders',
+] as const;
+const DICTIONARY_DISPLAY = ['name', 'category', 'severity', 'enabled', 'termCount'] as const;
+const EXCEPTION_DISPLAY = ['scope', 'value', 'policyId', 'reason', 'expiresAt', 'enabled'] as const;
+/** Never the pattern text (D6: it is not shown in impact or warnings). */
+const PATTERN_DISPLAY = ['name', 'severity', 'validator', 'enabled'] as const;
+const DLP_POLICY_DISPLAY = ['name', 'enabled', 'mode', 'priority', 'ruleCount'] as const;
+
+const dlpRule = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'dlp_policies_get',
+  params: { id: 'id' },
+  select: { array: 'rules', field: 'id', arg: 'ruleId', required: true },
+  stateFields: ['version'],
+  rowVersionField: 'version',
+  displayFields: ['name', 'enabled', 'priority', 'action'],
+});
+
+const dlpCompliance = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'dlp_compliance_get',
+  params: {},
+  stateFields: ['version', 'aadhaar.enabled'],
+  rowVersionField: 'version',
+  displayFields: [
+    'aadhaar.enabled',
+    'aadhaar.active',
+    'aadhaar.basis',
+    'aadhaar.reference',
+    'aadhaar.attested',
+    'aadhaar.reviewDueAt',
+  ],
+});
+
+const INCIDENT_DISPLAY = [
+  'category',
+  'status',
+  'severity',
+  'subject.display',
+  'assigneeId',
+] as const;
+const incident = (
+  stateFields: readonly string[],
+  cas = false,
+  displayFields: readonly string[] = INCIDENT_DISPLAY,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'incidents_get',
+  params: { incidentId: 'incidentId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+
+const riskVersion = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'risk_profiles_get_version',
+  params: { versionId: 'versionId' },
+  stateFields: ['rowVersion', 'status'],
+  rowVersionField: 'rowVersion',
+  displayFields: ['versionNo', 'status', 'active', 'changeNote'],
+});
+const riskProfile = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'risk_profiles_profile',
+  params: {},
+  stateFields: ['profileVersion'],
+  rowVersionField: 'profileVersion',
+  displayFields: ['profileVersion', 'active.source', 'active.versionId', 'active.versionNo'],
+});
+const BODY_PROFILE_VERSION: CasInjection = {
+  in: 'body',
+  field: 'expectedProfileVersion',
+  min: 0,
+};
+
+/** Escalation warnings of step AI-4 (design 32 D4; fixed English). */
+export const AI4_ESCALATION_WARNINGS = {
+  atoProtected: 'Automated responses will never act on this account, even when it is compromised.',
+  atoBenign:
+    "The account's risk is held below the medium band and automation never acts on it until a strong new signal arrives.",
+  idpSettings:
+    'Sets which data the gateway reads and which response actions it may take in the identity provider.',
+  incidentResolved: 'The incident is closed and cannot be re-opened.',
+  incidentFalsePositive:
+    'Marks the incident a false positive: its signals are dismissed and the account is rescored.',
+  incidentFeedback: 'Feedback can add trusted contexts for the account and dismiss its signals.',
+  becSuppress: 'Suppresses these BEC findings for the sender scope for the given days.',
+  trustedSenderExpiry: 'Changes how long this sender stays trusted (null: no expiry).',
+  executiveDisabled: 'Impersonation of this executive is no longer detected.',
+  executiveAddresses: "Mail from these addresses is treated as the executive's own.",
+  vendorDisabled: 'Impersonation of this vendor is no longer detected.',
+  vendorSenders: "Mail from these senders or domains is treated as the vendor's own.",
+  vendorPaymentChange: 'Payment-change requests from this vendor are no longer flagged.',
+  dlpPolicyDisabled: 'This DLP policy stops evaluating mail.',
+  dlpPolicyMonitor: 'Matches are only recorded; mail is no longer blocked or held.',
+  dlpAllowRule: 'Matching mail is allowed without further DLP action.',
+  dlpRuleDisabled: 'This rule stops matching.',
+  dlpDetectorDisabled: 'This detector stops matching in every policy that uses it.',
+  dlpPatternChanged: 'Changes what the detector matches.',
+  dlpExceptionWidened: 'Widens or extends who is exempt from DLP.',
+} as const;
+const W = AI4_ESCALATION_WARNINGS;
+const high = (when: RiskEscalation['when'], warning: string): RiskEscalation => ({
+  when,
+  risk: 'high',
+  warning,
+});
+const disabled = (path = 'body.enabled') => ({ equals: { path, value: false } });
+
+/**
+ * The 143 enabled writes: the 31 of step AI-2 (design 29 D4), the 47 of step AI-3 (design 30
+ * D6), the native report_send_email of step AI-R (design 31 D5) and the 64 of step AI-4 (design
+ * 32 D5). Field names checked against
  * docs/api/openapi.json (request and response schemas; the
  * package tests resolve every state, row-version, display and select path).
  */
@@ -833,6 +1060,396 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
   {
     operationId: 'WebhookDeliveriesController_createReplay_v1',
     precondition: webhook(['status']),
+  },
+  // ===== step AI-4 (64) =====
+  // --- ATO accounts (6) ---
+  {
+    operationId: 'AtoAccountsController_update_v1',
+    precondition: atoAccount(
+      ['rowVersion', 'protection.protected'],
+      ATO_ACCOUNT_DISPLAY,
+      'accountId',
+      true,
+    ),
+    inject: BODY_ROW_VERSION,
+    escalate: [high({ equals: { path: 'body.protected', value: true } }, W.atoProtected)],
+  },
+  {
+    operationId: 'AtoAccountMailboxController_refresh_v1',
+    precondition: atoAccount(['status'], ['address', 'kind']),
+  },
+  {
+    operationId: 'AtoAccountsController_setOverride_v1',
+    precondition: atoAccount(['overrideDetail.id', 'overrideDetail.verdict'], ATO_OVERRIDE_DISPLAY),
+    escalate: [high({ equals: { path: 'body.verdict', value: 'benign' } }, W.atoBenign)],
+  },
+  {
+    operationId: 'AtoAccountsController_clearOverride_v1',
+    precondition: atoAccount(['overrideDetail.id'], ATO_OVERRIDE_DISPLAY),
+  },
+  {
+    operationId: 'AtoAccountsController_addTrustedContext_v1',
+    precondition: atoAccount(['status'], ['address', 'riskLevel', 'trustedContexts[].kind']),
+  },
+  {
+    operationId: 'AtoAccountsController_removeTrustedContext_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'ato_accounts_get',
+      params: { accountId: 'accountId' },
+      select: { array: 'trustedContexts', field: 'id', arg: 'contextId', required: true },
+      stateFields: ['id', 'expiresAt'],
+      displayFields: ['kind', 'value', 'reason', 'source', 'expiresAt'],
+    },
+  },
+  // --- ATO responses (5): the existing approval model, four eyes in chat (D3) ---
+  {
+    operationId: 'AtoResponsesController_request_v1',
+    precondition: incident(['status'], false, [
+      'category',
+      'status',
+      'severity',
+      'subject.display',
+    ]),
+  },
+  {
+    operationId: 'AtoResponsesController_approve_v1',
+    precondition: atoResponse(['status', 'approvalExpiresAt']),
+    guards: ATO_FOUR_EYES,
+  },
+  {
+    operationId: 'AtoResponsesController_reject_v1',
+    precondition: atoResponse(['status']),
+    guards: ATO_FOUR_EYES,
+  },
+  { operationId: 'AtoResponsesController_cancel_v1', precondition: atoResponse(['status']) },
+  {
+    operationId: 'AtoResponsesController_rollback_v1',
+    precondition: atoResponse(
+      ['status'],
+      [...ATO_RESPONSE_DISPLAY, 'executedAt', 'effectiveUntil'],
+    ),
+  },
+  // --- ATO settings (1) ---
+  {
+    operationId: 'AtoSettingsController_update_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'ato_settings_get',
+      params: {},
+      stateFields: ['rowVersion'],
+      rowVersionField: 'rowVersion',
+      displayFields: [
+        'featureEnabled',
+        'version',
+        'effective.mode',
+        'learning.active',
+        'automation.platformEnabled',
+        'automation.approvalTtlHours',
+      ],
+    },
+    inject: { in: 'body', field: 'expectedRowVersion', min: 0 },
+  },
+  // --- ATO identity-provider integrations (7; non-secret fields only) ---
+  {
+    operationId: 'AtoProvidersController_create_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'ato_providers_connections',
+      params: {},
+      select: { array: 'data', field: 'id', arg: 'body.connectionId', required: true },
+      stateFields: ['status'],
+      displayFields: ['displayName', 'provider', 'status', 'eligibility'],
+    },
+    escalate: [high({ present: 'body.settings' }, W.idpSettings)],
+  },
+  {
+    operationId: 'AtoProvidersController_update_v1',
+    precondition: atoProvider(['rowVersion', 'status'], true),
+    inject: { in: 'body', field: 'rowVersion', min: 1 },
+  },
+  { operationId: 'AtoProvidersController_remove_v1', precondition: atoProvider(['status']) },
+  { operationId: 'AtoProvidersController_backfill_v1', precondition: atoProvider(['status']) },
+  { operationId: 'AtoProvidersController_healthCheck_v1', precondition: atoProvider(['status']) },
+  { operationId: 'AtoProvidersController_pause_v1', precondition: atoProvider(['status']) },
+  { operationId: 'AtoProvidersController_resume_v1', precondition: atoProvider(['status']) },
+  // --- incidents (3) ---
+  {
+    // ATO is the only incident category (a subject of another category fails this read).
+    operationId: 'IncidentsController_create_v1',
+    precondition: atoAccount(
+      ['status'],
+      ['address', 'riskLevel', 'activeIncident.id', 'activeIncident.status'],
+      'body.subject.id',
+    ),
+  },
+  {
+    operationId: 'IncidentsController_update_v1',
+    precondition: incident(['rowVersion', 'status'], true),
+    inject: BODY_ROW_VERSION,
+    escalate: [
+      {
+        when: { equals: { path: 'body.status', value: 'resolved' } },
+        risk: 'medium',
+        warning: W.incidentResolved,
+      },
+      high({ equals: { path: 'body.status', value: 'false_positive' } }, W.incidentFalsePositive),
+      high({ present: 'body.categoryFeedback' }, W.incidentFeedback),
+    ],
+  },
+  {
+    operationId: 'IncidentsController_addNote_v1',
+    precondition: incident(['status'], false, ['category', 'status', 'subject.display']),
+  },
+  // --- BEC (11) ---
+  // A new profile with known addresses / senders / domains suppresses impersonation findings of
+  // its name as much as the same fields on an update (the first profile whose name matches wins
+  // in packages/bec evaluate), so the create escalates exactly as the update does (I20, A4-2). A
+  // disabled new profile is not escalated: the detection snapshot loads enabled profiles only, so
+  // it weakens nothing.
+  {
+    operationId: 'BecExecutivesController_create_v1',
+    precondition: null,
+    escalate: [high({ present: 'body.knownAddresses' }, W.executiveAddresses)],
+  },
+  {
+    operationId: 'BecExecutivesController_update_v1',
+    precondition: versioned('bec_executives_get', EXECUTIVE_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [
+      high(disabled(), W.executiveDisabled),
+      high({ present: 'body.knownAddresses' }, W.executiveAddresses),
+    ],
+  },
+  {
+    operationId: 'BecExecutivesController_remove_v1',
+    precondition: versioned('bec_executives_get', EXECUTIVE_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  { operationId: 'BecTrustedSendersController_create_v1', precondition: null },
+  {
+    operationId: 'BecTrustedSendersController_update_v1',
+    precondition: versioned('bec_trusted_senders_get', TRUSTED_SENDER_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [high({ present: 'body.expiresAt' }, W.trustedSenderExpiry)],
+  },
+  {
+    operationId: 'BecTrustedSendersController_remove_v1',
+    precondition: versioned('bec_trusted_senders_get', TRUSTED_SENDER_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  {
+    operationId: 'BecVendorsController_create_v1',
+    precondition: null,
+    escalate: [
+      high({ present: 'body.knownSenders' }, W.vendorSenders),
+      high({ present: 'body.domains' }, W.vendorSenders),
+      high(disabled('body.paymentChangeSensitive'), W.vendorPaymentChange),
+    ],
+  },
+  {
+    operationId: 'BecVendorsController_update_v1',
+    precondition: versioned('bec_vendors_get', VENDOR_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [
+      high(disabled(), W.vendorDisabled),
+      high({ present: 'body.knownSenders' }, W.vendorSenders),
+      high({ present: 'body.domains' }, W.vendorSenders),
+      high(disabled('body.paymentChangeSensitive'), W.vendorPaymentChange),
+    ],
+  },
+  {
+    operationId: 'BecVendorsController_remove_v1',
+    precondition: versioned('bec_vendors_get', VENDOR_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  {
+    operationId: 'BecFeedbackController_deleteSuppression_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'bec_feedback_get_suppression',
+      params: { id: 'id' },
+      stateFields: ['expiresAt'],
+      displayFields: ['reasonCode', 'senderScope', 'senderValue', 'expiresAt'],
+    },
+  },
+  {
+    operationId: 'BecMessageFeedbackController_record_v1',
+    precondition: {
+      kind: 'single',
+      tool: MESSAGE_DETAIL,
+      params: { messageId: 'messageId' },
+      stateFields: ['status'],
+      displayFields: ['subject', 'headerFrom', 'direction', 'finalVerdict'],
+    },
+    escalate: [high({ present: 'body.suppress' }, W.becSuppress)],
+  },
+  // --- DLP (17) ---
+  {
+    operationId: 'DlpComplianceController_enable_v1',
+    precondition: dlpCompliance(),
+    inject: { in: 'body', field: 'expectedVersion', min: 0 },
+  },
+  {
+    operationId: 'DlpComplianceController_disable_v1',
+    precondition: dlpCompliance(),
+    inject: { in: 'query', field: 'expectedVersion', min: 0 },
+  },
+  { operationId: 'DlpDictionariesController_create_v1', precondition: null },
+  {
+    operationId: 'DlpDictionariesController_update_v1',
+    precondition: versioned('dlp_dictionaries_get', DICTIONARY_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [high(disabled(), W.dlpDetectorDisabled)],
+  },
+  {
+    operationId: 'DlpDictionariesController_remove_v1',
+    precondition: versioned('dlp_dictionaries_get', DICTIONARY_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  { operationId: 'DlpExceptionsController_create_v1', precondition: null },
+  {
+    operationId: 'DlpExceptionsController_update_v1',
+    precondition: versioned('dlp_exceptions_get', EXCEPTION_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [
+      high({ equals: { path: 'body.enabled', value: true } }, W.dlpExceptionWidened),
+      high({ present: 'body.expiresAt' }, W.dlpExceptionWidened),
+      high({ present: 'body.filters' }, W.dlpExceptionWidened),
+    ],
+  },
+  {
+    operationId: 'DlpExceptionsController_remove_v1',
+    precondition: versioned('dlp_exceptions_get', EXCEPTION_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  { operationId: 'DlpPatternsController_create_v1', precondition: null },
+  {
+    operationId: 'DlpPatternsController_update_v1',
+    precondition: versioned('dlp_patterns_get', PATTERN_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [
+      high(disabled(), W.dlpDetectorDisabled),
+      { when: { present: 'body.pattern' }, risk: 'medium', warning: W.dlpPatternChanged },
+    ],
+  },
+  {
+    operationId: 'DlpPatternsController_remove_v1',
+    precondition: versioned('dlp_patterns_get', PATTERN_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  { operationId: 'DlpPoliciesController_create_v1', precondition: null },
+  {
+    operationId: 'DlpPoliciesController_update_v1',
+    precondition: versioned('dlp_policies_get', DLP_POLICY_DISPLAY),
+    inject: BODY_VERSION,
+    escalate: [
+      high(disabled(), W.dlpPolicyDisabled),
+      high({ equals: { path: 'body.mode', value: 'monitor' } }, W.dlpPolicyMonitor),
+    ],
+  },
+  {
+    operationId: 'DlpPoliciesController_remove_v1',
+    precondition: versioned('dlp_policies_get', DLP_POLICY_DISPLAY),
+    inject: QUERY_VERSION,
+  },
+  {
+    operationId: 'DlpPoliciesController_createRule_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'dlp_policies_get',
+      params: { id: 'id' },
+      stateFields: ['version'],
+      displayFields: ['name', 'mode', 'ruleCount'],
+    },
+    escalate: [high({ equals: { path: 'body.action', value: 'allow' } }, W.dlpAllowRule)],
+  },
+  {
+    operationId: 'DlpPoliciesController_updateRule_v1',
+    precondition: dlpRule(),
+    inject: BODY_VERSION,
+    escalate: [
+      high({ equals: { path: 'body.action', value: 'allow' } }, W.dlpAllowRule),
+      high(disabled(), W.dlpRuleDisabled),
+    ],
+  },
+  {
+    operationId: 'DlpPoliciesController_removeRule_v1',
+    precondition: dlpRule(),
+    inject: QUERY_VERSION,
+  },
+  // --- risk-scoring profiles (6) ---
+  { operationId: 'RiskProfilesController_createDraft_v1', precondition: null },
+  {
+    operationId: 'RiskProfilesController_updateDraft_v1',
+    precondition: riskVersion(),
+    inject: BODY_ROW_VERSION,
+  },
+  {
+    operationId: 'RiskProfilesController_deleteDraft_v1',
+    precondition: riskVersion(),
+    inject: QUERY_ROW_VERSION,
+  },
+  {
+    operationId: 'RiskProfilesController_publish_v1',
+    precondition: riskVersion(),
+    inject: BODY_ROW_VERSION,
+  },
+  {
+    operationId: 'RiskProfilesController_activate_v1',
+    precondition: riskProfile(),
+    inject: BODY_PROFILE_VERSION,
+  },
+  {
+    operationId: 'RiskProfilesController_reset_v1',
+    precondition: riskProfile(),
+    inject: BODY_PROFILE_VERSION,
+  },
+  // --- platform operations (8; platform users without an override only) ---
+  { operationId: 'AttachmentRescansController_request_v1', precondition: null },
+  {
+    operationId: 'AttachmentRescansController_cancel_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'attachment_rescans_get',
+      params: { jobId: 'jobId' },
+      stateFields: ['status'],
+      displayFields: [
+        'status',
+        'windowStart',
+        'windowEnd',
+        'organizationId',
+        'maxMessages',
+        'selectedCount',
+      ],
+    },
+  },
+  // The stats read is a queue summary without a stable state: the impact is from the arguments.
+  { operationId: 'DeadLettersController_replay_v1', precondition: null },
+  // A platform principal reads no tenant message without an override.
+  { operationId: 'ScanTrainingController_train_v1', precondition: null },
+  { operationId: 'ThreatHashesController_add_v1', precondition: null },
+  {
+    operationId: 'ThreatHashesController_remove_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'threat_hashes_list',
+      params: { sha256: 'sha256' },
+      select: { array: 'data', field: 'sha256', arg: 'sha256', required: true },
+      stateFields: ['severity', 'expiresAt'],
+      displayFields: ['sha256', 'severity', 'family', 'source'],
+    },
+  },
+  { operationId: 'ThreatIndicatorsController_add_v1', precondition: null },
+  {
+    operationId: 'ThreatIndicatorsController_remove_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'threat_indicators_get',
+      params: { id: 'id' },
+      stateFields: ['severity', 'expiresAt'],
+      displayFields: ['type', 'value', 'severity', 'category', 'source'],
+    },
   },
   // --- native (step AI-R D5) ---
   {

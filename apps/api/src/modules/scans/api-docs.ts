@@ -17,6 +17,7 @@ import {
   VERSION_CONFLICT,
 } from './scans.errors';
 import { MESSAGE_NOT_FOUND } from '../messages/messages.errors';
+import type { ThreatIndicatorView } from './dto/threat-indicators.schemas';
 
 /** Permissions of the scan routes (seed catalog; `scan:settings_manage` and `platform:scan_training` are new in step 4.1, the last two in step 4.2). */
 export const POLICY_READ = 'policy:read';
@@ -155,3 +156,21 @@ export const ApiIndicatorExists = (): MethodDecorator =>
 
 export const ApiThreatIndicatorNotFound = (): MethodDecorator =>
   ApiCodedError(404, 'No platform threat indicator with that id', [THREAT_INDICATOR_NOT_FOUND]);
+
+/** Response example of the step AI-4 single-item read (D8; synthetic values only). */
+export const THREAT_INDICATOR_EXAMPLE = {
+  id: '4711',
+  type: 'domain',
+  value: 'login-portal.example',
+  valueSha256: '664f2a4806d9b95bc1c9825bf8a58500ce991a39d7345b232f7326bef42a7392',
+  severity: 'high',
+  category: 'phishing',
+  source: 'analyst',
+  reason: 'Credential phishing campaign reported by a customer',
+  expiresAt: null,
+  addedByUserId: '0190f0f0-0000-7000-8000-0000000000a1',
+  firstSeenAt: '2026-11-20T09:30:00.000Z',
+  lastSeenAt: '2026-11-20T09:30:00.000Z',
+  createdAt: '2026-11-20T09:30:00.000Z',
+  updatedAt: '2026-11-20T09:30:00.000Z',
+} satisfies ThreatIndicatorView;

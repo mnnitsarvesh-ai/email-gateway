@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { apiErrorJson, expectNoAxeViolations, mockApi, okJson, renderWithProviders } from '@/test';
-import { DeniedCard, ResultCard, seriesRows } from './result-card';
+import { DeniedCard, ResultCard, deniedLinkOf, seriesRows } from './result-card';
 import {
+  ATO_FOUR_EYES_MESSAGE,
   ERROR_CARD,
   EXECUTION_ID,
   KV_CARD,
@@ -184,6 +185,65 @@ describe('ResultCard (assistant-card/1)', () => {
     expect(within(card).queryByText(/only do what your role allows/)).not.toBeInTheDocument();
     expect(within(card).queryByRole('link')).not.toBeInTheDocument();
     await expectNoAxeViolations(container);
+  });
+
+  it('links a four-eyes refusal of an ATO response decision to the Responses page (step AI-4 D10)', async () => {
+    const onNavigate = vi.fn();
+    const { container, rerender } = renderWithProviders(
+      <DeniedCard
+        title="Approve ATO response"
+        decision="denied_guard"
+        message={ATO_FOUR_EYES_MESSAGE}
+        tool="ato_responses_approve"
+        onNavigate={onNavigate}
+      />,
+    );
+    let card = screen.getByRole('region', { name: 'Result: Approve ATO response' });
+    expect(within(card).getByText('Not allowed in chat')).toBeInTheDocument();
+    expect(within(card).getByText(ATO_FOUR_EYES_MESSAGE)).toBeInTheDocument();
+    const link = within(card).getByRole('link', { name: 'Open Responses in the portal' });
+    expect(link).toHaveAttribute('href', '/ato/responses');
+    link.click();
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    await expectNoAxeViolations(container);
+
+    rerender(
+      <DeniedCard
+        title="Reject ATO response"
+        decision="denied_guard"
+        message={ATO_FOUR_EYES_MESSAGE}
+        tool="ato_responses_reject"
+      />,
+    );
+    card = screen.getByRole('region', { name: 'Result: Reject ATO response' });
+    expect(
+      within(card).getByRole('link', { name: 'Open Responses in the portal' }),
+    ).toHaveAttribute('href', '/ato/responses');
+  });
+
+  it('offers the Responses link only for a guard refusal of approve or reject', () => {
+    expect(deniedLinkOf('ato_responses_approve', 'denied_guard')).toEqual({
+      label: 'Responses',
+      href: '/ato/responses',
+    });
+    expect(deniedLinkOf('ato_responses_reject', 'denied_guard')?.href).toBe('/ato/responses');
+    expect(deniedLinkOf('ato_responses_approve', 'denied_permission')).toBeNull();
+    expect(deniedLinkOf('ato_responses_cancel', 'denied_guard')).toBeNull();
+    expect(deniedLinkOf('users_replace_roles', 'denied_guard')).toBeNull();
+    expect(deniedLinkOf(undefined, 'denied_guard')).toBeNull();
+    renderWithProviders(
+      <DeniedCard
+        title="Approve ATO response"
+        decision="denied_permission"
+        message="Requires ato:respond"
+        tool="ato_responses_approve"
+      />,
+    );
+    expect(
+      within(screen.getByRole('region', { name: 'Result: Approve ATO response' })).queryByRole(
+        'link',
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it('never turns markup or URLs of a denial message into elements', () => {

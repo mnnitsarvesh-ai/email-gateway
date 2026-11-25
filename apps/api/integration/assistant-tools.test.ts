@@ -47,13 +47,27 @@
  *   the write sweep covers 79 writes: `report_send_email` (in a conversation with a report) ends
  *   `pending_confirmation` with no delivery row and no outbox event.
  *
+ * - Step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D1, D11, I19, §9 item 3): the
+ *   read sweep covers 186 enabled reads (the four new single reads `bec_trusted_senders_get`,
+ *   `bec_feedback_get_suppression`, `dlp_exceptions_get`, `threat_indicators_get` and the two
+ *   side-effect-free AI-4 reads `dlp_patterns_test`, `risk_dry_run_dry_run`), the write sweep all
+ *   143 enabled writes (the 56 tenant AI-4 writes through turns, the eight platform operations
+ *   through the executor, each platform write in its own conversation so the per-conversation
+ *   pending cap never applies), and the platform-only tools are proven hidden (I19): a customer
+ *   user holding every tenant permission is never offered one and a forced call is
+ *   `denied_permission` with no loopback request for the operation and no operation audit row; a
+ *   platform `super_admin` under an override into an `it-*` organization gets the same; the same
+ *   user without an override is offered every one of them.
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers get /api/v1/assistant/tools
 // @covers post /api/v1/assistant/conversations
 // @covers post /api/v1/assistant/conversations/:conversationId/turns
 import { createHash, randomUUID } from 'node:crypto';
+import type { Response } from 'supertest';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
+import { defaultBindingSettings } from '@email-gateway/idp-adapters';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IntegrationApp } from './support/app';
 import {
@@ -75,6 +89,7 @@ import {
   type Member,
   minimalArguments,
   newConversation,
+  PLATFORM_ONLY_TOOLS,
   platformMember,
   principalOf,
   recordLoopback,
@@ -84,6 +99,7 @@ import {
 } from './support/assistant';
 import { deleteAtoRows } from './support/ato';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
+import { bearer, uniqueIp } from './support/http';
 
 /** Turns per conversation (keeps each replayed segment small). */
 const TURNS_PER_CONVERSATION = 5;
@@ -177,9 +193,10 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
   it('offers exactly the enabled tenant tools to a user with every tenant permission', async () => {
     // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes; step AI-R: 259 = 180
     // reads + 79 writes with the native `report_generate` and `report_send_email` (design 31 D1).
-    expect(ENABLED_READS).toHaveLength(180);
-    expect(ENABLED_WRITES).toHaveLength(79);
-    expect(ENABLED_TOOLS).toHaveLength(259);
+    // Step AI-4 (design 32 D1): 329 = 186 reads + 143 writes.
+    expect(ENABLED_READS).toHaveLength(186);
+    expect(ENABLED_WRITES).toHaveLength(143);
+    expect(ENABLED_TOOLS).toHaveLength(329);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -192,6 +209,13 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       'policy_messages_dry_run',
       'api_keys_get',
       'report_generate',
+      // Step AI-4: the four new single reads and the two side-effect-free AI-4 reads.
+      'bec_trusted_senders_get',
+      'bec_feedback_get_suppression',
+      'dlp_exceptions_get',
+      'threat_indicators_get',
+      'dlp_patterns_test',
+      'risk_dry_run_dry_run',
     ]) {
       expect(
         ENABLED_READS.map((t) => t.name),
@@ -295,6 +319,11 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
 /** A synthetic id that matches no record. */
 const unknown = (): string => randomUUID();
 const sweepReason = 'requested by the tool sweep';
+const tag = (): string => randomUUID().slice(0, 8);
+const inDays = (days: number): string => new Date(Date.now() + days * 86_400_000).toISOString();
+/** Step AI-4: the synthetic platform catalog values of the write sweep (never stored). */
+const SWEEP_HASH = createHash('sha256').update(`it-sweep-${randomUUID()}`).digest('hex');
+const SWEEP_INDICATOR = `sweep-${randomUUID().slice(0, 8)}.tools-it.test`;
 const viewDefinition = {
   version: 1,
   filters: {},
@@ -481,6 +510,156 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
   }),
   // An organization that does not exist: the selected-item read's 404.
   organization_configuration_reset_limit: () => ({ id: unknown(), limitKey: 'max_users' }),
+  // --- step AI-4 (design 32 D5): ATO, incidents, BEC, DLP, risk scoring (tenant) ---
+  ato_accounts_update: () => ({
+    accountId: unknown(),
+    body: { protected: true, reason: sweepReason, expectedRowVersion: 1 },
+  }),
+  ato_account_mailbox_refresh: () => ({ accountId: unknown() }),
+  ato_accounts_set_override: () => ({
+    accountId: unknown(),
+    body: { verdict: 'benign', reason: sweepReason, expiresInHours: 24 },
+  }),
+  ato_accounts_clear_override: () => ({ accountId: unknown(), body: { reason: sweepReason } }),
+  ato_accounts_add_trusted_context: () => ({
+    accountId: unknown(),
+    body: { kind: 'country', value: 'DE', reason: sweepReason, expiresInDays: 30 },
+  }),
+  ato_accounts_remove_trusted_context: () => ({ accountId: unknown(), contextId: unknown() }),
+  ato_responses_request: () => ({
+    incidentId: unknown(),
+    body: { actionType: 'restrict_smtp_sending', reason: sweepReason },
+  }),
+  ato_responses_approve: () => ({ responseId: unknown(), body: { reason: sweepReason } }),
+  ato_responses_reject: () => ({ responseId: unknown(), body: { reason: sweepReason } }),
+  ato_responses_cancel: () => ({ responseId: unknown(), body: { reason: sweepReason } }),
+  ato_responses_rollback: () => ({ responseId: unknown(), body: { reason: sweepReason } }),
+  ato_settings_update: () => ({ body: { expectedRowVersion: 0, settings: {} } }),
+  // The selected connection of the connections list is required: not found → 404.
+  ato_providers_create: () => ({ body: { connectionId: unknown() } }),
+  ato_providers_update: () => ({
+    integrationId: unknown(),
+    body: { rowVersion: 1, settings: defaultBindingSettings() },
+  }),
+  ato_providers_remove: () => ({ integrationId: unknown(), body: { reason: sweepReason } }),
+  ato_providers_backfill: () => ({ integrationId: unknown(), body: { from: inDays(-1) } }),
+  ato_providers_health_check: () => ({ integrationId: unknown() }),
+  ato_providers_pause: () => ({ integrationId: unknown(), body: { reason: sweepReason } }),
+  ato_providers_resume: () => ({ integrationId: unknown() }),
+  incidents_create: () => ({
+    body: {
+      category: 'account_takeover',
+      subject: { type: 'ato_account', id: unknown() },
+      reason: sweepReason,
+    },
+  }),
+  incidents_update: () => ({
+    incidentId: unknown(),
+    body: { status: 'investigating', expectedRowVersion: 1 },
+  }),
+  incidents_add_note: () => ({ incidentId: unknown(), body: { note: sweepReason } }),
+  bec_executives_create: () => ({ body: { displayName: `Sweep Executive ${tag()}` } }),
+  bec_executives_update: () => ({ id: unknown(), body: { version: 1, title: 'CFO' } }),
+  bec_executives_remove: () => ({ id: unknown() }),
+  bec_trusted_senders_create: () => ({
+    body: { kind: 'address', value: `sweep-${tag()}@partner.example`, reason: sweepReason },
+  }),
+  bec_trusted_senders_update: () => ({ id: unknown(), body: { version: 1, reason: sweepReason } }),
+  bec_trusted_senders_remove: () => ({ id: unknown() }),
+  bec_vendors_create: () => ({
+    body: { name: `Sweep Vendor ${tag()}`, domains: [`sweep-${tag()}.example`] },
+  }),
+  bec_vendors_update: () => ({ id: unknown(), body: { version: 1, name: 'it sweep' } }),
+  bec_vendors_remove: () => ({ id: unknown() }),
+  bec_feedback_delete_suppression: () => ({ id: unknown() }),
+  bec_message_feedback_record: () => ({
+    messageId: unknown(),
+    scanId: '1',
+    body: { kind: 'false_negative' },
+  }),
+  dlp_compliance_enable: () => ({
+    body: {
+      expectedVersion: 0,
+      basis: 'uidai_authorised_entity',
+      reference: 'Sweep reference',
+      attested: true,
+      reviewDueAt: inDays(200),
+    },
+  }),
+  dlp_compliance_disable: () => ({}),
+  dlp_dictionaries_create: () => ({
+    body: { name: `Sweep ${tag()}`, category: 'custom', terms: ['sweepterm'], severity: 'low' },
+  }),
+  dlp_dictionaries_update: () => ({ id: unknown(), body: { version: 1, name: 'it sweep' } }),
+  dlp_dictionaries_remove: () => ({ id: unknown() }),
+  dlp_exceptions_create: () => ({
+    body: {
+      scope: 'sender_address',
+      value: `sweep-${tag()}@partner.example`,
+      reason: sweepReason,
+      expiresAt: inDays(30),
+    },
+  }),
+  dlp_exceptions_update: () => ({ id: unknown(), body: { version: 1, reason: sweepReason } }),
+  dlp_exceptions_remove: () => ({ id: unknown() }),
+  dlp_patterns_create: () => ({
+    body: { name: `Sweep ${tag()}`, pattern: `SWEEP${tag()}-[0-9]{6}`, severity: 'low' },
+  }),
+  dlp_patterns_update: () => ({ id: unknown(), body: { version: 1, name: 'it sweep' } }),
+  dlp_patterns_remove: () => ({ id: unknown() }),
+  dlp_policies_create: () => ({ body: { name: `Sweep ${tag()}` } }),
+  dlp_policies_update: () => ({ id: unknown(), body: { version: 1, name: 'it sweep' } }),
+  dlp_policies_remove: () => ({ id: unknown() }),
+  dlp_policies_create_rule: () => ({
+    id: unknown(),
+    body: {
+      name: 'it sweep',
+      conditions: { selectors: { categories: ['payment_card'] } },
+      action: 'alert',
+    },
+  }),
+  dlp_policies_update_rule: () => ({
+    id: unknown(),
+    ruleId: unknown(),
+    body: { version: 1, name: 'it sweep' },
+  }),
+  dlp_policies_remove_rule: () => ({ id: unknown(), ruleId: unknown() }),
+  risk_profiles_create_draft: () => ({ body: { overrides: {} } }),
+  risk_profiles_update_draft: () => ({
+    versionId: unknown(),
+    body: { overrides: {}, expectedRowVersion: 1 },
+  }),
+  risk_profiles_delete_draft: () => ({ versionId: unknown() }),
+  risk_profiles_publish: () => ({ versionId: unknown(), body: { expectedRowVersion: 1 } }),
+  // The precondition is the organization's profile (not the version): a pending proposal.
+  risk_profiles_activate: () => ({ versionId: unknown() }),
+  risk_profiles_reset: () => ({}),
+  // Step AI-4 platform-only operations (an it-* organization; dry runs; synthetic values).
+  attachment_rescans_request: () => ({
+    body: { windowHours: 1, organizationId: org.publicId, reason: sweepReason, dryRun: true },
+  }),
+  attachment_rescans_cancel: () => ({ jobId: unknown(), body: { reason: sweepReason } }),
+  dead_letters_replay: () => ({
+    body: { sourceQueue: 'email.received', limit: 1, reason: sweepReason, dryRun: true },
+  }),
+  scan_training_train: () => ({
+    organizationId: org.publicId,
+    messageId: unknown(),
+    body: { operation: 'fuzzy_add', fuzzyFlag: 'spam', reason: sweepReason },
+  }),
+  threat_hashes_add: () => ({ body: { sha256: SWEEP_HASH, severity: 'low', reason: sweepReason } }),
+  // The selected hash of the exact-filter list is required: not found → 404.
+  threat_hashes_remove: () => ({ sha256: SWEEP_HASH, reason: sweepReason }),
+  threat_indicators_add: () => ({
+    body: {
+      type: 'domain',
+      value: SWEEP_INDICATOR,
+      severity: 'low',
+      category: 'spam',
+      reason: sweepReason,
+    },
+  }),
+  threat_indicators_remove: () => ({ id: '999999999999', reason: sweepReason }),
 };
 
 /** Checksums of the tables an enabled write could change, for the sweep's organization. */
@@ -552,6 +731,30 @@ async function writeTargets(): Promise<Record<string, string>> {
     connectors: sha(await p.smtpConnector.findMany({ where, orderBy })),
     webhooks: sha(await p.webhookSubscription.findMany({ where, orderBy })),
     webhookDeliveries: String(await p.webhookDelivery.count({ where })),
+    // Step AI-4: ATO, incidents, BEC, DLP, risk scoring and the platform catalogs (counts and
+    // rows; the live ato-worker may add sign-in accounts and settings, which no tool writes).
+    incidents: sha(await p.securityIncident.findMany({ where, orderBy })),
+    atoResponses: sha(await p.atoResponseAction.findMany({ where, orderBy })),
+    atoContexts: sha(await p.atoTrustedContext.findMany({ where, orderBy })),
+    atoOverrides: sha(await p.atoRiskOverride.findMany({ where, orderBy })),
+    atoProviders: sha(await p.atoProviderIntegration.findMany({ where, orderBy })),
+    atoSettingsVersions: String(await p.atoSettingsVersion.count({ where })),
+    becExecutives: sha(await p.becExecutiveProfile.findMany({ where, orderBy })),
+    becVendors: sha(await p.becVendorProfile.findMany({ where, orderBy })),
+    becTrusted: sha(await p.becTrustedSender.findMany({ where, orderBy })),
+    becFeedback: sha(await p.becFeedback.findMany({ where, orderBy })),
+    becSuppressions: sha(await p.becSuppressionRule.findMany({ where, orderBy })),
+    dlpPolicies: sha(await p.dlpPolicy.findMany({ where, orderBy })),
+    dlpRules: sha(await p.dlpPolicyRule.findMany({ where, orderBy })),
+    dlpExceptions: sha(await p.dlpException.findMany({ where, orderBy })),
+    dlpPatterns: sha(await p.dlpCustomPattern.findMany({ where, orderBy })),
+    dlpDictionaries: sha(await p.dlpKeywordDictionary.findMany({ where, orderBy })),
+    dlpCompliance: sha(await p.dlpComplianceSettings.findMany({ where })),
+    riskVersions: sha(await p.riskScoringProfileVersion.findMany({ where, orderBy })),
+    riskProfile: sha(await p.riskScoringProfile.findMany({ where })),
+    rescanJobs: String(await p.attachmentRescanJob.count({ where })),
+    sweepHash: String(await p.malwareSignature.count({ where: { sha256: SWEEP_HASH } })),
+    sweepIndicator: String(await p.threatIndicator.count({ where: { value: SWEEP_INDICATOR } })),
     sweepOrganizations: String(
       await p.organization.count({ where: { slug: { startsWith: 'it-sweep-' } } }),
     ),
@@ -563,22 +766,26 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
     expect(Object.keys(WRITE_SAMPLES).sort()).toEqual(ENABLED_WRITES.map((t) => t.name).sort());
     const tenantWrites = ENABLED_WRITES.filter((t) => !t.platformOnly);
     const platformWrites = ENABLED_WRITES.filter((t) => t.platformOnly);
-    // Step AI-3: the platform-only organization writes (D6).
+    // Step AI-3: the platform-only organization writes (D6); step AI-4: the eight platform
+    // operations (design 32 D5 #57–64).
     expect(platformWrites.map((t) => t.name).sort()).toEqual([
+      'attachment_rescans_cancel',
+      'attachment_rescans_request',
+      'dead_letters_replay',
       'organization_configuration_override_feature',
       'organization_configuration_override_limit',
       'organization_configuration_reset_feature',
       'organization_configuration_reset_limit',
       'organization_deletion_cancel',
       'organizations_create',
+      'scan_training_train',
+      'threat_hashes_add',
+      'threat_hashes_remove',
+      'threat_indicators_add',
+      'threat_indicators_remove',
     ]);
     const platformAdmin = await platformMember(ctx, fx, ['super_admin']);
-    const executor = new DirectExecutor(
-      ctx,
-      platformAdmin,
-      await principalOf(ctx, platformAdmin.token),
-      org,
-    );
+    const platformPrincipal = await principalOf(ctx, platformAdmin.token);
     // Step AI-R: report_send_email needs a report of its conversation (generated before the
     // snapshot: a report is not a write target of the sweep; its delivery would be).
     const reportConversation = await newConversation(ctx, sweepers[0]!);
@@ -630,6 +837,8 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
         );
       }
       for (const tool of platformWrites) {
+        // One conversation per platform write: the pending cap is per conversation.
+        const executor = new DirectExecutor(ctx, platformAdmin, platformPrincipal, org);
         const outcome = await executor.execute(tool.name, WRITE_SAMPLES[tool.name]!());
         const row = await ctx.prisma.aiChatToolExecution.findUniqueOrThrow({
           where: { publicId: outcome.executionId },
@@ -719,6 +928,26 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
         'organization_configuration_override_limit',
         // Step AI-R: the native report email (the conversation's report, the own address).
         'report_send_email',
+        // Step AI-4: creates without a record to read, reads of the organization's own
+        // settings / compliance / profile, and the platform operations without a precondition.
+        'bec_executives_create',
+        'bec_trusted_senders_create',
+        'bec_vendors_create',
+        'dlp_dictionaries_create',
+        'dlp_exceptions_create',
+        'dlp_patterns_create',
+        'dlp_policies_create',
+        'dlp_compliance_enable',
+        'dlp_compliance_disable',
+        'risk_profiles_create_draft',
+        'risk_profiles_activate',
+        'risk_profiles_reset',
+        'ato_settings_update',
+        'attachment_rescans_request',
+        'dead_letters_replay',
+        'scan_training_train',
+        'threat_hashes_add',
+        'threat_indicators_add',
       ]),
     );
     expect(results.filter((r) => r.decision === 'denied_guard').map((r) => r.tool)).toEqual([
@@ -823,4 +1052,118 @@ describe('tools without the permission (D5 step 3)', () => {
       expect(res.body.message.content).toBe('The request was not allowed: denied_permission.');
     }
   });
+});
+
+describe('step AI-4: platform-only tools never reach tenant principals (D11, I19)', () => {
+  /**
+   * Forces every platform-only tool by directive through `runner`: each is `denied_permission`
+   * with the turn's own context read as the only loopback request, no card, the denial audited
+   * and no operation audit row under the execution's correlation id.
+   */
+  async function expectAllDenied(
+    run: (message: string) => Promise<{ res: Response }>,
+    organizationId: bigint,
+  ): Promise<void> {
+    const recorder = recordLoopback(ctx);
+    try {
+      for (const tool of PLATFORM_ONLY_TOOLS) {
+        recorder.calls.length = 0;
+        const { res } = await run(directive(tool.name, minimalArguments(tool, { bound: false })));
+        expect(res.status, tool.name).toBe(200);
+        const execution = res.body.executions[0];
+        expect(execution, tool.name).toMatchObject({
+          tool: tool.name,
+          decision: 'denied_permission',
+          status: 'refused',
+          httpStatus: null,
+          card: null,
+        });
+        expect(res.body.confirmations, tool.name).toEqual([]);
+        expect(
+          recorder.calls.map((c) => c.path),
+          tool.name,
+        ).toEqual(['/api/v1/auth/me']);
+        const row = await ctx.prisma.aiChatToolExecution.findUniqueOrThrow({
+          where: { publicId: execution.id as string },
+        });
+        expect(row.organizationId).toBe(organizationId);
+        const audit = await ctx.prisma.auditLog.findMany({
+          where: { organizationId, resourceId: execution.id as string },
+          select: { action: true },
+        });
+        expect(audit.map((a) => a.action)).toEqual(['assistant.tool_denied']);
+        expect(
+          await ctx.prisma.auditLog.count({ where: { correlationId: row.correlationId } }),
+          tool.name,
+        ).toBe(0);
+      }
+    } finally {
+      recorder.restore();
+    }
+  }
+
+  it('a customer user holding every tenant permission is offered none; forced calls are denied_permission', async () => {
+    // Step AI-4: eight platform writes and the platform reads (design 32 D11).
+    expect(PLATFORM_ONLY_TOOLS.map((t) => t.name)).toEqual(
+      expect.arrayContaining([
+        'attachment_rescans_request',
+        'attachment_rescans_cancel',
+        'attachment_rescans_list',
+        'attachment_rescans_get',
+        'dead_letters_replay',
+        'dead_letters_stats',
+        'scan_training_train',
+        'threat_hashes_add',
+        'threat_hashes_remove',
+        'threat_hashes_list',
+        'threat_indicators_add',
+        'threat_indicators_remove',
+        'threat_indicators_list',
+        'threat_indicators_get',
+        'platform_audit_logs_search',
+      ]),
+    );
+    const listed = await call(ctx, sweepers[0]!.headers, 'get', `${A}/tools`);
+    expect(listed.status).toBe(200);
+    const names = (listed.body.tools as Array<{ name: string }>).map((t) => t.name);
+    expect(names.filter((n) => PLATFORM_ONLY_TOOLS.some((t) => t.name === n))).toEqual([]);
+    const runner = new TurnRunner(sweepers);
+    await expectAllDenied((message) => runner.run(message), org.id);
+  }, 300_000);
+
+  it('a platform super_admin under an override into an it-* organization: none offered, every forced call denied', async () => {
+    const admin = await platformMember(ctx, fx, ['super_admin']);
+    const started = await ctx.http
+      .post('/api/v1/platform/overrides')
+      .set(admin.headers)
+      .set('X-Forwarded-For', uniqueIp())
+      .send({ organizationId: org.publicId, reason: 'Assistant platform-tool hiding check' });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
+    const overrideId = started.body.overrideId as string;
+    const override = bearer(started.body.accessToken as string);
+    try {
+      const listed = await call(ctx, override, 'get', `${A}/tools`);
+      expect(listed.status).toBe(200);
+      const names = (listed.body.tools as Array<{ name: string }>).map((t) => t.name);
+      expect(names).toContain('users_list');
+      expect(names.filter((n) => PLATFORM_ONLY_TOOLS.some((t) => t.name === n))).toEqual([]);
+      let conversation = '';
+      let turns = 0;
+      await expectAllDenied(async (message) => {
+        if (turns++ % TURNS_PER_CONVERSATION === 0) {
+          conversation = await newConversation(ctx, override);
+        }
+        return { res: await turn(ctx, override, conversation, message) };
+      }, org.id);
+    } finally {
+      await ctx.http
+        .delete(`/api/v1/platform/overrides/${overrideId}`)
+        .set(admin.headers)
+        .set('X-Forwarded-For', uniqueIp());
+    }
+    // Without the override the same user is offered every platform-only tool.
+    const home = await call(ctx, admin.headers, 'get', `${A}/tools`);
+    const offered = new Set((home.body.tools as Array<{ name: string }>).map((t) => t.name));
+    for (const tool of PLATFORM_ONLY_TOOLS) expect(offered.has(tool.name), tool.name).toBe(true);
+  }, 300_000);
 });

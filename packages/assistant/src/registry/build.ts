@@ -435,6 +435,7 @@ export function buildRegistry(document: OpenApiDocument, usage: PortalUsage): Re
           freeFormResponsePaths(op, components),
         ),
         bind,
+        redactParams: [...(override.redactParams ?? [])],
         limitations: override.limitations ?? null,
         testedBy,
       });

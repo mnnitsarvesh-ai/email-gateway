@@ -355,6 +355,17 @@ export class BecFeedbackService {
     return toPage(rows, query.limit, (row) => suppressionView(row, feedbackIds, now));
   }
 
+  /** `GET /bec/suppressions/{id}` (replica; expired rules included), or `404`. */
+  async getSuppression(scope: TenantScope, id: string): Promise<BecSuppressionView> {
+    const row = await this.repository.findSuppression(scope, id);
+    if (!row) throw becNotFound('suppression');
+    const feedbackIds = await this.repository.feedbackPublicIds(
+      scope,
+      row.feedbackId === null ? [] : [row.feedbackId],
+    );
+    return suppressionView(row, feedbackIds, new Date());
+  }
+
   /** `DELETE /bec/suppressions/{id}`: `204`, or `404`. */
   async deleteSuppression(
     principal: Principal,

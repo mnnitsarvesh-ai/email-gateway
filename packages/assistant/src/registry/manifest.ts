@@ -23,9 +23,10 @@ import type {
 /**
  * Phase the program has reached: tools of this phase and earlier are enabled (reads; writes with
  * a `testedBy` suite and a confirmation spec, step AI-2; identity and tenant administration
- * writes, step AI-3; the native report tools, step AI-R, which adds no OpenAPI tool).
+ * writes, step AI-3; the native report tools, step AI-R, which adds no OpenAPI tool; security
+ * operations, step AI-4).
  */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-R';
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-4';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';
@@ -155,6 +156,99 @@ export const AI3_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
   ),
 };
 
+/** Integration suites of the AI-4 writes (design 32 §4.4, §9 item 3). */
+export const ATO_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-ato.test.ts';
+export const DETECTION_WRITES_TESTED_BY = 'apps/api/integration/assistant-writes-detection.test.ts';
+export const PLATFORM_OPS_WRITES_TESTED_BY =
+  'apps/api/integration/assistant-writes-platform-ops.test.ts';
+
+/**
+ * The 64 write operations of step AI-4 and the suite that covers each (`testedBy`): 19 ATO and
+ * 3 incident writes, 11 BEC, 17 DLP and 6 risk-scoring writes, 8 platform writes.
+ *
+ * Rule for later steps (design 32 I20): when the request body of one of these routes gains a
+ * field that adds trust or an exception, suppresses findings, disables a detector or switches it
+ * to monitor-only, add a risk escalation for it to the operation's confirmation spec.
+ */
+export const AI4_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    [
+      'AtoAccountsController_update_v1',
+      'AtoAccountMailboxController_refresh_v1',
+      'AtoAccountsController_setOverride_v1',
+      'AtoAccountsController_clearOverride_v1',
+      'AtoAccountsController_addTrustedContext_v1',
+      'AtoAccountsController_removeTrustedContext_v1',
+      'AtoResponsesController_request_v1',
+      'AtoResponsesController_approve_v1',
+      'AtoResponsesController_reject_v1',
+      'AtoResponsesController_cancel_v1',
+      'AtoResponsesController_rollback_v1',
+      'AtoSettingsController_update_v1',
+      'AtoProvidersController_create_v1',
+      'AtoProvidersController_update_v1',
+      'AtoProvidersController_remove_v1',
+      'AtoProvidersController_backfill_v1',
+      'AtoProvidersController_healthCheck_v1',
+      'AtoProvidersController_pause_v1',
+      'AtoProvidersController_resume_v1',
+      'IncidentsController_create_v1',
+      'IncidentsController_update_v1',
+      'IncidentsController_addNote_v1',
+    ].map((id) => [id, ATO_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'BecExecutivesController_create_v1',
+      'BecExecutivesController_update_v1',
+      'BecExecutivesController_remove_v1',
+      'BecTrustedSendersController_create_v1',
+      'BecTrustedSendersController_update_v1',
+      'BecTrustedSendersController_remove_v1',
+      'BecVendorsController_create_v1',
+      'BecVendorsController_update_v1',
+      'BecVendorsController_remove_v1',
+      'BecFeedbackController_deleteSuppression_v1',
+      'BecMessageFeedbackController_record_v1',
+      'DlpComplianceController_enable_v1',
+      'DlpComplianceController_disable_v1',
+      'DlpDictionariesController_create_v1',
+      'DlpDictionariesController_update_v1',
+      'DlpDictionariesController_remove_v1',
+      'DlpExceptionsController_create_v1',
+      'DlpExceptionsController_update_v1',
+      'DlpExceptionsController_remove_v1',
+      'DlpPatternsController_create_v1',
+      'DlpPatternsController_update_v1',
+      'DlpPatternsController_remove_v1',
+      'DlpPoliciesController_create_v1',
+      'DlpPoliciesController_update_v1',
+      'DlpPoliciesController_remove_v1',
+      'DlpPoliciesController_createRule_v1',
+      'DlpPoliciesController_updateRule_v1',
+      'DlpPoliciesController_removeRule_v1',
+      'RiskProfilesController_createDraft_v1',
+      'RiskProfilesController_updateDraft_v1',
+      'RiskProfilesController_deleteDraft_v1',
+      'RiskProfilesController_publish_v1',
+      'RiskProfilesController_activate_v1',
+      'RiskProfilesController_reset_v1',
+    ].map((id) => [id, DETECTION_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'AttachmentRescansController_request_v1',
+      'AttachmentRescansController_cancel_v1',
+      'DeadLettersController_replay_v1',
+      'ScanTrainingController_train_v1',
+      'ThreatHashesController_add_v1',
+      'ThreatHashesController_remove_v1',
+      'ThreatIndicatorsController_add_v1',
+      'ThreatIndicatorsController_remove_v1',
+    ].map((id) => [id, PLATFORM_OPS_WRITES_TESTED_BY]),
+  ),
+};
+
 /**
  * Input properties of enabled writes whose key matches the credential-key pattern
  * (`isCredentialKey`) but which are not credentials (step AI-3 D6, I14). Named per operation and
@@ -166,6 +260,26 @@ export const CREDENTIAL_KEY_EXCEPTIONS: Readonly<Record<string, Readonly<Record<
     RolesController_create_v1: { 'body.key': 'role key (an identifier, not a credential)' },
     RolesController_update_v1: { key: 'role key path parameter (an identifier)' },
     RolesController_remove_v1: { key: 'role key path parameter (an identifier)' },
+    // Step AI-4: response action names and reason/resolution codes (enum identifiers).
+    AtoProvidersController_create_v1: {
+      'body.settings.actions.require_password_reset':
+        'the IdP response action "require password reset" (an on/off setting, not a password)',
+    },
+    AtoProvidersController_update_v1: {
+      'body.settings.actions.require_password_reset':
+        'the IdP response action "require password reset" (an on/off setting, not a password)',
+    },
+    AtoSettingsController_update_v1: {
+      'body.settings.automation.require_password_reset':
+        'automation of the response action "require password reset" (a setting, not a password)',
+    },
+    BecMessageFeedbackController_record_v1: {
+      'body.reasonCodes': 'BEC reason codes (rule identifiers)',
+      'body.suppress.codes': 'BEC reason codes to suppress (rule identifiers)',
+    },
+    IncidentsController_update_v1: {
+      'body.resolution.code': 'incident resolution code (an enum value)',
+    },
   };
 
 export const NOT_APPLICABLE_REASONS = {
@@ -327,6 +441,15 @@ export const RISK_OVERRIDES: Readonly<Record<string, ToolRisk>> = {
   BecFeedbackController_deleteSuppression_v1: 'medium',
   WebhookDeliveriesController_replay_v1: 'medium',
   DomainsController_create_v1: 'medium',
+  // Step AI-4 D2 (I20: weakening detection needs re-authentication).
+  AtoAccountsController_addTrustedContext_v1: 'high',
+  BecTrustedSendersController_create_v1: 'high',
+  DlpExceptionsController_create_v1: 'high',
+  AtoSettingsController_update_v1: 'high',
+  AtoProvidersController_update_v1: 'high',
+  AtoProvidersController_create_v1: 'medium',
+  AtoProvidersController_healthCheck_v1: 'low',
+  AtoAccountMailboxController_refresh_v1: 'low',
 };
 
 export const CONFIRM_OF_RISK: Readonly<Record<ToolRisk, ToolConfirm>> = {
@@ -925,6 +1048,41 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   OrganizationsController_update_v1: { bind: SELF_ORGANIZATION },
   OrganizationConfigurationController_updateSettings_v1: { bind: SELF_ORGANIZATION },
 
+  // --- security operations (step AI-4 D7, D8, D9) ---
+  // Another user's or an API key's free text (request, decision and rollback reasons).
+  AtoResponsesController_get_v1: {
+    untrustedFields: ['requestReason', 'decisionReason', 'rollbackReason', 'params.description'],
+  },
+  AtoResponsesController_list_v1: {
+    untrustedFields: [
+      'data[].requestReason',
+      'data[].decisionReason',
+      'data[].rollbackReason',
+      'data[].params.description',
+    ],
+  },
+  // Provider-reported mailbox state: forwarding target domains and directory principal names.
+  AtoAccountMailboxController_get_v1: {
+    untrustedFields: ['items[].targetDomain', 'identities[].userPrincipalName'],
+  },
+  // The explanation is rendered from engine evidence over the message (free-form params too).
+  RiskDryRunController_dryRun_v1: {
+    untrustedFields: [
+      'result.explanation.text',
+      'result.explanation.lines[].params',
+      'result.evidence.unmappedCodes',
+    ],
+  },
+  // The four single reads the confirmation cards need (D8).
+  BecTrustedSendersController_get_v1: { phase: 'AI-4' },
+  BecFeedbackController_getSuppression_v1: { phase: 'AI-4', untrustedFields: ['senderValue'] },
+  DlpExceptionsController_get_v1: { phase: 'AI-4' },
+  ThreatIndicatorsController_get_v1: { phase: 'AI-4', untrustedFields: ['value'] },
+  // The api never logs, audits or echoes the sample and the pattern (D9).
+  DlpPatternsController_test_v1: { redactParams: ['body.sample', 'body.pattern'] },
+  // The created hash is row ref r<seq>.1 by its SHA-256 (it has no other id).
+  ThreatHashesController_add_v1: { display: { refField: 'sha256' } },
+
   // --- own organization (bind {id}) ---
   OrganizationsController_get_v1: { bind: SELF_ORGANIZATION },
   OrganizationsController_getUsage_v1: { bind: SELF_ORGANIZATION },
@@ -934,12 +1092,13 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   OrganizationConfigurationController_getSettings_v1: { bind: SELF_ORGANIZATION },
 };
 
-/** The overrides with the AI-2 and AI-3 writes' `testedBy` merged in. */
+/** The overrides with the AI-2, AI-3 and AI-4 writes' `testedBy` merged in. */
 export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = (() => {
   const out: Record<string, OperationOverride> = { ...BASE_OVERRIDES };
   for (const [operationId, testedBy] of Object.entries({
     ...AI2_WRITES_TESTED_BY,
     ...AI3_WRITES_TESTED_BY,
+    ...AI4_WRITES_TESTED_BY,
   }))
     out[operationId] = { ...out[operationId], testedBy };
   return out;

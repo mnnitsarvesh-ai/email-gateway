@@ -7,8 +7,10 @@
  * retention policy, a beta archive message (seed/archive.ts); step 8.4: `ato_detection` enabled
  * for both e2e tenants with accounts, signals and incidents written through the ATO stores
  * (seed/ato.ts); step AI-1: the assistant tenants `delta` (assistant on, policies and messages)
- * and `epsilon` (feature on, tenant setting off) (seed/assistant.ts). Idempotent: the previous
- * run's data is removed first (cleanup.ts).
+ * and `epsilon` (feature on, tenant setting off) (seed/assistant.ts); step AI-4: `ato_detection`
+ * for delta with one compromised mailbox and its incident, and two delta analysts with MFA and
+ * `ato:respond` (four eyes through chat). Idempotent: the previous run's data is removed first
+ * (cleanup.ts).
  *
  * Rows are written on the writer as the api integration helpers do (preconditions, metadata
  * only; message content lives only in MinIO). Reserved `.test` domains only. Passwords are
@@ -43,7 +45,14 @@ import {
   planDeltaMessages,
   prepareAssistant,
 } from './assistant';
-import { ALPHA_ATO_PLAN, BETA_ATO_PLAN, expectAtoDashboard, seedAto } from './ato';
+import {
+  ALPHA_ATO_PLAN,
+  BETA_ATO_PLAN,
+  DELTA_ATO_PLAN,
+  expectAtoDashboard,
+  seedAto,
+  seedAtoTenant,
+} from './ato';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
@@ -703,6 +712,19 @@ export async function seed(): Promise<SeedSummary> {
         org: 'delta',
         name: 'Delta MFA Admin',
       },
+      // Step AI-4: two delta analysts with MFA and ato:respond (four eyes through chat).
+      deltaResponderA: {
+        email: `responder-a@${DELTA_DOMAIN}`,
+        roles: ['security_analyst'],
+        org: 'delta',
+        name: 'Delta Responder A',
+      },
+      deltaResponderB: {
+        email: `responder-b@${DELTA_DOMAIN}`,
+        roles: ['security_analyst'],
+        org: 'delta',
+        name: 'Delta Responder B',
+      },
       epsilonAdmin: {
         email: `admin@${EPSILON_DOMAIN}`,
         roles: ['organization_admin'],
@@ -774,6 +796,16 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(deltaMfaSecret, deltaMfaId) },
     });
     users.deltaMfaAdmin.totpSecret = deltaMfaSecret;
+    // Step AI-4: both delta responders sign in with MFA (ATO decisions need an MFA session).
+    for (const key of ['deltaResponderA', 'deltaResponderB'] as const) {
+      const secret = base32Encode(randomBytes(20));
+      const id = userIds.get(spec[key].email)!;
+      await p.user.update({
+        where: { id },
+        data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(secret, id) },
+      });
+      users[key].totpSecret = secret;
+    }
     // Step AI-3: the delta user the assistant spec disables (nobody signs in as it).
     const deltaOffboard = await createUser(p, delta, {
       email: DELTA_OFFBOARD_USER.email,
@@ -1105,6 +1137,10 @@ export async function seed(): Promise<SeedSummary> {
       alpha: { id: alpha.id, domain: ALPHA_DOMAIN },
       beta: { id: beta.id, domain: BETA_DOMAIN },
     });
+    // Step AI-4: delta's compromised mailbox and its incident (the assistant spec's ATO target).
+    const deltaAto = await seedAtoTenant(p, { id: delta.id, domain: DELTA_DOMAIN }, DELTA_ATO_PLAN);
+    const deltaSuspect = deltaAto[0];
+    if (!deltaSuspect?.incidentId) throw new Error('delta ATO seed: no incident');
 
     // Expected figures for the dashboard's default range (7 days ending at the next full hour).
     const to = Math.ceil(Date.now() / 3_600_000) * 3_600_000;
@@ -1131,6 +1167,7 @@ export async function seed(): Promise<SeedSummary> {
         deltaPolicyRows,
         deltaSettings,
         deltaEntries,
+        deltaAtoAccounts,
       ] = await Promise.all([
         r.emailMessage.count({ where: { organizationId: alpha.id } }),
         r.auditLog.count({
@@ -1144,6 +1181,7 @@ export async function seed(): Promise<SeedSummary> {
         r.emailPolicy.count({ where: { organizationId: delta.id } }),
         r.aiChatSettings.count({ where: { organizationId: delta.id, enabled: true } }),
         r.quarantineMessage.count({ where: { organizationId: delta.id } }),
+        r.atoAccount.count({ where: { organizationId: delta.id } }),
       ]);
       return (
         messages === alphaMessages.length &&
@@ -1155,7 +1193,8 @@ export async function seed(): Promise<SeedSummary> {
         atoAccounts === ALPHA_ATO_PLAN.length + BETA_ATO_PLAN.length &&
         deltaPolicyRows === deltaPolicies.length &&
         deltaSettings === 1 &&
-        deltaEntries === deltaPlans.filter((m) => m.quarantine).length
+        deltaEntries === deltaPlans.filter((m) => m.quarantine).length &&
+        deltaAtoAccounts >= DELTA_ATO_PLAN.length
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -1237,6 +1276,11 @@ export async function seed(): Promise<SeedSummary> {
           quarantinedSubjects: deltaPlans.filter((m) => m.quarantine).map((m) => m.subject),
           mfaAdminUserId: userPublicIds.get(spec.deltaMfaAdmin.email)!,
           offboardUser: { id: deltaOffboard.publicId, email: DELTA_OFFBOARD_USER.email },
+          ato: {
+            accountId: deltaSuspect.accountId,
+            address: deltaSuspect.address,
+            incidentId: deltaSuspect.incidentId,
+          },
         },
       },
       ato: {

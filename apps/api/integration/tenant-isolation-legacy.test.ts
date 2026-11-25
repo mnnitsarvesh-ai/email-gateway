@@ -344,6 +344,8 @@ describe('tenant A versus tenant B (pre-6.1 tenant-scoped routes)', () => {
       ],
       // @covers delete /api/v1/bec/vendors/:id
       ['DELETE vendor', () => h.delete(`/api/v1/bec/vendors/${b.vendor}?version=1`)],
+      // @covers get /api/v1/bec/trusted-senders/:id
+      ['GET trusted sender', () => h.get(`/api/v1/bec/trusted-senders/${b.trustedSender}`)],
       // @covers patch /api/v1/bec/trusted-senders/:id
       [
         'PATCH trusted sender',
@@ -389,6 +391,8 @@ describe('tenant A versus tenant B (pre-6.1 tenant-scoped routes)', () => {
         'DELETE dlp rule',
         () => h.delete(`/api/v1/dlp/policies/${b.dlpPolicy}/rules/${b.dlpRule}?version=1`),
       ],
+      // @covers get /api/v1/dlp/exceptions/:id
+      ['GET dlp exception', () => h.get(`/api/v1/dlp/exceptions/${b.dlpException}`)],
       // @covers patch /api/v1/dlp/exceptions/:id
       [
         'PATCH dlp exception',

@@ -225,6 +225,8 @@ function ToolResults({
             title={tool.title}
             decision={tool.decision}
             message={tool.message ?? 'The assistant could not use this tool.'}
+            tool={tool.tool}
+            onNavigate={onNavigate}
           />
         ) : tool.card ? (
           <ResultCard

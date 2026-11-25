@@ -20,7 +20,12 @@ import {
   VENDOR_DOMAIN_FREEMAIL,
   VENDOR_EXISTS,
 } from './bec.errors';
-import { BecIdSchema, BecScanIdSchema } from './dto/bec.schemas';
+import {
+  BecIdSchema,
+  BecScanIdSchema,
+  type BecSuppressionView,
+  type BecTrustedSenderView,
+} from './dto/bec.schemas';
 import { MESSAGE_NOT_FOUND } from '../messages/messages.errors';
 
 /** Permissions of the BEC routes (seed catalog, step 4.4 B18). */
@@ -127,3 +132,30 @@ export const ApiInconsistentRead = (): MethodDecorator =>
   ApiCodedError(503, 'The database returned an inconsistent read twice; retry the request', [
     INCONSISTENT_READ,
   ]);
+
+/** Response examples of the step AI-4 single-item reads (D8; synthetic values only). */
+export const BEC_EXAMPLES = {
+  trustedSender: {
+    id: '0190f0f0-0000-7000-8000-0000000000b1',
+    kind: 'domain',
+    value: 'partner.example',
+    reason: 'Payroll partner',
+    expiresAt: '2027-03-01T00:00:00.000Z',
+    expired: false,
+    version: 2,
+    createdByUserId: '0190f0f0-0000-7000-8000-0000000000a1',
+    createdAt: '2026-11-20T09:30:00.000Z',
+    updatedAt: '2026-11-21T10:00:00.000Z',
+  } satisfies BecTrustedSenderView,
+  suppression: {
+    id: '0190f0f0-0000-7000-8000-0000000000b2',
+    reasonCode: 'bec.reply_to.freemail',
+    senderScope: 'domain',
+    senderValue: 'partner.example',
+    expiresAt: '2026-12-20T09:30:00.000Z',
+    expired: false,
+    feedbackId: '0190f0f0-0000-7000-8000-0000000000b3',
+    createdByUserId: '0190f0f0-0000-7000-8000-0000000000a1',
+    createdAt: '2026-11-20T09:30:00.000Z',
+  } satisfies BecSuppressionView,
+};

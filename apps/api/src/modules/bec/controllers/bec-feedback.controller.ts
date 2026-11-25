@@ -50,6 +50,7 @@ import {
   ApiScanId,
   ApiSuppressionNotFound,
   BEC_APPLY_NOTE,
+  BEC_EXAMPLES,
   BEC_FEEDBACK,
   BEC_FEEDBACK_EXPORT,
   BEC_MANAGE,
@@ -75,6 +76,8 @@ import {
   BecSuppressionListQuerySchema,
   type BecSuppressionPage,
   BecSuppressionPageSchema,
+  type BecSuppressionView,
+  BecSuppressionViewSchema,
 } from '../dto/bec.schemas';
 import { BecFeedbackService } from '../services/bec-feedback.service';
 import { BecController } from './bec-common';
@@ -221,6 +224,27 @@ export class BecFeedbackController {
     @Query(new ZodValidationPipe(BecSuppressionListQuerySchema)) query: BecSuppressionListQuery,
   ): Promise<BecSuppressionPage> {
     return this.feedback.listSuppressions(scope, query);
+  }
+
+  @Get('suppressions/:id')
+  @RequirePermissions(BEC_READ)
+  @ApiOperation({
+    summary: 'Get a BEC suppression rule',
+    description:
+      'The rule as the list shows it; an expired rule is returned with `expired: true` (no ' +
+      'longer applied). Another organization’s id is a 404. From the read replica.',
+  })
+  @ApiBecId('Suppression rule public id')
+  @ApiOkResponse({
+    schema: { ...zodToOpenApi(BecSuppressionViewSchema), example: BEC_EXAMPLES.suppression },
+  })
+  @ApiErrors(400, 401, 403, 503)
+  @ApiSuppressionNotFound()
+  getSuppression(
+    @CurrentScope() scope: TenantScope,
+    @Param('id', becIdPipe) id: string,
+  ): Promise<BecSuppressionView> {
+    return this.feedback.getSuppression(scope, id);
   }
 
   @Delete('suppressions/:id')

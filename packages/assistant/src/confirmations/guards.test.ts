@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   GUARD_MESSAGES,
+  guardArgumentPaths,
   guardMessageOf,
   guardNote,
   guardPhase,
@@ -13,9 +14,12 @@ import { CONFIRMATION_SPECS, confirmationSpecOf, type ConfirmationSpec } from '.
 const SELF = '0193aaaa-0000-7000-8000-00000000abcd';
 const OTHER = '0193aaaa-0000-7000-8000-000000000042';
 const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(operationId)!;
-const before = (s: ConfirmationSpec, args: Record<string, unknown>, read: unknown = null) =>
-  guardRefusal(s, { args, principalUserPublicId: SELF, read }, 'before_read');
-const after = (s: ConfirmationSpec, args: Record<string, unknown>, read: unknown) =>
+const before = (
+  s: Pick<ConfirmationSpec, 'guards'>,
+  args: Record<string, unknown>,
+  read: unknown = null,
+) => guardRefusal(s, { args, principalUserPublicId: SELF, read }, 'before_read');
+const after = (s: Pick<ConfirmationSpec, 'guards'>, args: Record<string, unknown>, read: unknown) =>
   guardRefusal(s, { args, principalUserPublicId: SELF, read }, 'after_read');
 
 describe('proposal guards (design 30 D3)', () => {
@@ -31,6 +35,8 @@ describe('proposal guards (design 30 D3)', () => {
         'The assistant cannot turn itself on or off for an organization. Use the Organizations page in the portal.',
       assistant_configure:
         'The assistant cannot change who may configure it. Change roles that grant assistant:configure in the portal.',
+      ato_four_eyes:
+        'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.',
     });
   });
 
@@ -54,6 +60,9 @@ describe('proposal guards (design 30 D3)', () => {
       RolesController_update_v1: 'guard: no change of assistant:configure',
       OrganizationConfigurationController_overrideFeature_v1: 'guard: featureKey ≠ ai_assistant',
       OrganizationConfigurationController_resetFeature_v1: 'guard: featureKey ≠ ai_assistant',
+      // step AI-4 D3 (I18)
+      AtoResponsesController_approve_v1: 'guard: not requester; guard: canDecide = true',
+      AtoResponsesController_reject_v1: 'guard: not requester; guard: canDecide = true',
     });
   });
 
@@ -166,7 +175,8 @@ describe('proposal guards (design 30 D3)', () => {
 
   it('phases and messages never contain argument values', () => {
     const guards: ProposalGuard[] = CONFIRMATION_SPECS.flatMap((s) => s.guards ?? []);
-    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(1);
+    // roles_update, plus the two four-eyes guards of ATO approve and reject (step AI-4).
+    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(5);
     const marker = 'VALUE-MARKER-1234';
     const refusals = [
       before(spec('UsersController_update_v1'), { id: SELF, body: { displayName: marker } }),
@@ -187,5 +197,122 @@ describe('proposal guards (design 30 D3)', () => {
     expect(
       guardRefusal({}, { args: {}, principalUserPublicId: SELF, read: null }, 'before_read'),
     ).toBeNull();
+  });
+});
+
+describe('ATO four-eyes guards (design 32 D3, I18)', () => {
+  const RESPONSE = '0193aaaa-0000-7000-8000-000000000777';
+  const args = { responseId: RESPONSE, body: { reason: 'Looks right' } };
+  const response = (patch: Record<string, unknown> = {}) => ({
+    id: RESPONSE,
+    actionType: 'restrict_smtp_sending',
+    status: 'pending_approval',
+    requestedBy: { type: 'user', id: OTHER },
+    canDecide: true,
+    ...patch,
+  });
+  const FOUR_EYES = GUARD_MESSAGES.ato_four_eyes;
+
+  it('are after-read guards that read no argument', () => {
+    for (const name of ['AtoResponsesController_approve_v1', 'AtoResponsesController_reject_v1']) {
+      const s = spec(name);
+      expect(s.guards!.map(guardPhase)).toEqual(['after_read', 'after_read']);
+      expect(s.guards!.flatMap(guardArgumentPaths)).toEqual([]);
+      expect(guardMessageOf(s)).toBe(FOUR_EYES);
+      // Nothing is refused before the read: the target is needed.
+      expect(before(s, args)).toBeNull();
+    }
+    expect(spec('AtoResponsesController_cancel_v1').guards).toBeUndefined();
+    expect(spec('AtoResponsesController_rollback_v1').guards).toBeUndefined();
+  });
+
+  it.each(['AtoResponsesController_approve_v1', 'AtoResponsesController_reject_v1'])(
+    '%s: requester refused; API-key request without canDecide refused; another responder allowed',
+    (operationId) => {
+      const s = spec(operationId);
+      // The requesting user (any case of the id): refused by the explicit requester check, even
+      // if the view's canDecide were wrong.
+      expect(after(s, args, response({ requestedBy: { type: 'user', id: SELF } }))).toEqual({
+        guard: 'not_self_field',
+        message: FOUR_EYES,
+      });
+      expect(
+        after(
+          s,
+          args,
+          response({ requestedBy: { type: 'user', id: SELF.toUpperCase() }, canDecide: true }),
+        )?.guard,
+      ).toBe('not_self_field');
+      // Requested by an API key the caller created: the api's canDecide is false.
+      expect(
+        after(s, args, response({ requestedBy: { type: 'api_key', id: SELF }, canDecide: false })),
+      ).toEqual({ guard: 'require_read_value', message: FOUR_EYES });
+      // An API key whose public id happens to equal the user id is not the user (type gate).
+      expect(
+        after(s, args, response({ requestedBy: { type: 'api_key', id: SELF }, canDecide: true })),
+      ).toBeNull();
+      // A session without MFA: canDecide false.
+      expect(after(s, args, response({ canDecide: false }))?.guard).toBe('require_read_value');
+      // Another responder with canDecide true.
+      expect(after(s, args, response())).toBeNull();
+    },
+  );
+
+  it('a response that is not pending passes both guards (the api answers 409)', () => {
+    const s = spec('AtoResponsesController_approve_v1');
+    for (const status of ['approved', 'succeeded', 'rejected', 'expired'])
+      expect(after(s, args, response({ status, canDecide: false })), status).toBeNull();
+    // The requester check does not depend on the status.
+    expect(
+      after(s, args, response({ status: 'approved', requestedBy: { type: 'user', id: SELF } }))
+        ?.guard,
+    ).toBe('not_self_field');
+  });
+
+  it('missing fields: no requester passes the first guard; a missing canDecide fails closed', () => {
+    const s = spec('AtoResponsesController_approve_v1');
+    expect(after(s, args, response({ requestedBy: { type: 'system', id: null } }))).toBeNull();
+    expect(after(s, args, response({ requestedBy: undefined }))).toBeNull();
+    const { canDecide: _canDecide, ...withoutCanDecide } = response();
+    expect(after(s, args, withoutCanDecide)?.guard).toBe('require_read_value');
+    expect(after(s, args, response({ canDecide: 'true' }))?.guard).toBe('require_read_value');
+    // No read at all: the status gate does not hold, so nothing is refused (the proposal has
+    // already failed when the read failed).
+    expect(after(s, args, null)).toBeNull();
+    expect(after(s, args, {})).toBeNull();
+  });
+
+  it('generic semantics of the two kinds (synthetic specs)', () => {
+    const notSelf: ProposalGuard = { kind: 'not_self_field', field: 'owner.id', message: 'self' };
+    const required: ProposalGuard = {
+      kind: 'require_read_value',
+      field: 'state',
+      equals: 'open',
+      message: 'self',
+    };
+    const check = (guard: ProposalGuard, read: unknown) => after({ guards: [guard] }, {}, read);
+    expect(check(notSelf, { owner: { id: ` ${SELF} ` } })?.guard).toBe('not_self_field');
+    expect(check(notSelf, { owner: { id: OTHER } })).toBeNull();
+    expect(check(notSelf, { owner: {} })).toBeNull();
+    expect(check(notSelf, { owner: { id: 42 } })).toBeNull();
+    expect(check(required, { state: 'open' })).toBeNull();
+    expect(check(required, { state: 'closed' })?.guard).toBe('require_read_value');
+    expect(check(required, {})?.guard).toBe('require_read_value');
+    expect(guardNote(notSelf)).toBe('guard: not requester');
+    expect(guardNote(required)).toBe('guard: state = open');
+    // Never evaluated before the read.
+    expect(before({ guards: [notSelf, required] }, {}, { state: 'closed' })).toBeNull();
+  });
+
+  it('refusals carry no read or argument value', () => {
+    const marker = 'VALUE-MARKER-5678';
+    const refusal = after(
+      spec('AtoResponsesController_approve_v1'),
+      { responseId: marker, body: { reason: marker } },
+      response({ requestedBy: { type: 'user', id: SELF }, requestReason: marker }),
+    );
+    expect(refusal).not.toBeNull();
+    expect(JSON.stringify(refusal)).not.toContain(marker);
+    expect(JSON.stringify(refusal)).not.toContain(SELF);
   });
 });

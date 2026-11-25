@@ -1,3 +1,4 @@
+import { Prisma } from '@email-gateway/database';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   GS_DOMAIN,
@@ -33,7 +34,7 @@ beforeAll(async () => {
   const now = clock.now();
   await w.start(
     {
-      microsoft: [1, 2, 3, 4, 5, 6].map((n) => msDirectoryAs(now, T(n), D(n))),
+      microsoft: [1, 2, 3, 4, 5, 6, 8].map((n) => msDirectoryAs(now, T(n), D(n))),
       google: [gsCustomerAs(now, 'Cexample77', 'sched-gs.example')],
     },
     { ATO_IDP_CLAIM_BATCH: '3', ATO_PROVIDER_POLL_INTERVAL_SECONDS: '60' },
@@ -395,5 +396,123 @@ describe('ATO switched off (WP6)', () => {
       data: { enabled: true },
     });
     w.h.comps.orgs.invalidate(org.id);
+  });
+});
+
+describe('transient database errors (step AI-4 D14)', () => {
+  const poolTimeout = () =>
+    new Prisma.PrismaClientKnownRequestError('synthetic pool timeout', {
+      code: 'P2024',
+      clientVersion: 'integration',
+    });
+
+  it('a P2024 in a probe and in a poll defers by seconds: probed and polled again within a minute, no failure counted', async () => {
+    const org = await fx.organization('s10');
+    await configure(w.h, org.id);
+    const integration = await w.bind(
+      w.connect(org.id, 'microsoft_entra', { tenantId: T(8), domain: D(8) }),
+    );
+    const probeDeferredBefore = await w.h.metric('ato_idp_transient_db_errors_total', {
+      loop: 'probe',
+      outcome: 'deferred',
+    });
+    // 1) The probe's organization read fails once with a pool timeout (fault injection).
+    const orgs = w.h.comps.orgs;
+    const originalGet = orgs.get.bind(orgs);
+    let injected = 0;
+    orgs.get = async (id: bigint) => {
+      if (id === org.id && injected === 0) {
+        injected += 1;
+        throw poolTimeout();
+      }
+      return originalGet(id);
+    };
+    try {
+      await w.probe();
+    } finally {
+      orgs.get = originalGet;
+    }
+    expect(injected).toBe(1);
+    let row = await fx.prisma.atoProviderIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+    });
+    const now = clock.now().getTime();
+    // Not leased for ATO_IDP_HEALTH_INTERVAL_SECONDS (900 s): re-scheduled within 5–60 s, health
+    // untouched, no error code recorded.
+    expect(row.healthCheckedAt).toBeNull();
+    expect(row.healthStatus).toBe(integration.healthStatus);
+    expect(row.lastErrorCode).toBeNull();
+    expect(row.nextHealthAt!.getTime() - now).toBeGreaterThanOrEqual(5_000);
+    expect(row.nextHealthAt!.getTime() - now).toBeLessThanOrEqual(60_000);
+    expect(
+      await w.h.metric('ato_idp_transient_db_errors_total', {
+        loop: 'probe',
+        outcome: 'deferred',
+      }),
+    ).toBe(probeDeferredBefore + 1);
+    // Within a minute the integration is probed.
+    clock.advance(61_000);
+    await w.probe();
+    row = await fx.prisma.atoProviderIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+    });
+    expect(row.healthCheckedAt).not.toBeNull();
+    expect(row.healthStatus).not.toBe('unknown');
+
+    // 2) Every page transaction of this organization fails with a pool timeout (all retries).
+    const pipeline = w.h.comps.pipeline;
+    const originalRun = pipeline.run.bind(pipeline);
+    let thrown = 0;
+    pipeline.run = async (tx, req: DetectRequest, after) => {
+      if (req.org.id === org.id) {
+        thrown += 1;
+        throw poolTimeout();
+      }
+      return originalRun(tx, req, after);
+    };
+    await w.due(integration.id);
+    try {
+      await w.poll();
+    } finally {
+      pipeline.run = originalRun;
+    }
+    expect(thrown).toBeGreaterThanOrEqual(5); // IDP_PAGE_TX_ATTEMPTS of one stream at least
+    const deferredAt = clock.now().getTime();
+    // The streams whose page transaction failed are deferred by seconds; no stream counts a
+    // failure or records an error code (which streams have a page depends on the suite's clock).
+    const primaries = (await streamsOf(integration.id)).filter((s) => s.role === 'primary');
+    for (const s of primaries) {
+      expect(s.consecutiveFailures).toBe(0);
+      expect(s.lastErrorCode).toBeNull();
+    }
+    const deferred = primaries.filter((s) => s.lastSuccessAt === null);
+    expect(deferred.length).toBeGreaterThanOrEqual(1);
+    for (const s of deferred) {
+      expect(s.cursor).toBeNull();
+      expect(s.nextPollAt.getTime() - deferredAt).toBeGreaterThanOrEqual(5_000);
+      expect(s.nextPollAt.getTime() - deferredAt).toBeLessThanOrEqual(60_000);
+    }
+    row = await fx.prisma.atoProviderIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+    });
+    expect(row.consecutiveFailures).toBe(0);
+    expect(row.status).toBe('active');
+    expect(row.nextHealthAt!.getTime()).toBeGreaterThan(deferredAt + 60_000); // no early probe
+    expect(
+      await w.h.metric('ato_idp_transient_db_errors_total', {
+        loop: 'stream',
+        outcome: 'deferred',
+      }),
+    ).toBeGreaterThanOrEqual(1);
+    // Within a minute the deferred streams are polled again and commit their pages.
+    clock.advance(61_000);
+    await w.poll();
+    const after = await streamsOf(integration.id);
+    for (const d of deferred) {
+      const s = after.find((x) => x.id === d.id)!;
+      expect(s.lastSuccessAt).not.toBeNull();
+      expect(s.pagesTotal).toBeGreaterThanOrEqual(1n);
+      expect(s.consecutiveFailures).toBe(0);
+    }
   });
 });

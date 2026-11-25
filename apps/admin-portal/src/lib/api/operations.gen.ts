@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 423 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 423;
+/** Snapshot facts: 427 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 427;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -1799,6 +1799,22 @@ export const operations = {
     sort: null,
     bffOnly: false,
   },
+  BecFeedbackController_getSuppression_v1: {
+    operationId: 'BecFeedbackController_getSuppression_v1',
+    method: 'GET',
+    path: '/api/v1/bec/suppressions/{id}',
+    tag: 'bec',
+    permissions: [{ mode: 'all', permissions: ['bec:read'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
   BecFeedbackController_listSuppressions_v1: {
     operationId: 'BecFeedbackController_listSuppressions_v1',
     method: 'GET',
@@ -1869,6 +1885,22 @@ export const operations = {
     path: '/api/v1/bec/trusted-senders',
     tag: 'bec',
     permissions: [{ mode: 'all', permissions: ['bec:manage'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  BecTrustedSendersController_get_v1: {
+    operationId: 'BecTrustedSendersController_get_v1',
+    method: 'GET',
+    path: '/api/v1/bec/trusted-senders/{id}',
+    tag: 'bec',
+    permissions: [{ mode: 'all', permissions: ['bec:read'] }],
     public: false,
     idempotency: null,
     cursor: null,
@@ -2413,6 +2445,22 @@ export const operations = {
     path: '/api/v1/dlp/exceptions',
     tag: 'dlp',
     permissions: [{ mode: 'all', permissions: ['dlp:manage'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  DlpExceptionsController_get_v1: {
+    operationId: 'DlpExceptionsController_get_v1',
+    method: 'GET',
+    path: '/api/v1/dlp/exceptions/{id}',
+    tag: 'dlp',
+    permissions: [{ mode: 'all', permissions: ['dlp:read'] }],
     public: false,
     idempotency: null,
     cursor: null,
@@ -6299,6 +6347,22 @@ export const operations = {
     sort: null,
     bffOnly: false,
   },
+  ThreatIndicatorsController_get_v1: {
+    operationId: 'ThreatIndicatorsController_get_v1',
+    method: 'GET',
+    path: '/api/v1/platform/threat-indicators/{id}',
+    tag: 'platform',
+    permissions: [{ mode: 'all', permissions: ['platform:threat_intel_manage'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
   ThreatIndicatorsController_list_v1: {
     operationId: 'ThreatIndicatorsController_list_v1',
     method: 'GET',
@@ -7323,6 +7387,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
   },
   {
     method: 'GET',
+    segments: ['bec', 'suppressions', { param: 'id' }],
+    operationId: 'BecFeedbackController_getSuppression_v1',
+  },
+  {
+    method: 'GET',
     segments: ['bec', 'suppressions'],
     operationId: 'BecFeedbackController_listSuppressions_v1',
   },
@@ -7330,6 +7399,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'DELETE',
     segments: ['bec', 'trusted-senders', { param: 'id' }],
     operationId: 'BecTrustedSendersController_remove_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['bec', 'trusted-senders', { param: 'id' }],
+    operationId: 'BecTrustedSendersController_get_v1',
   },
   {
     method: 'PATCH',
@@ -7448,6 +7522,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'DELETE',
     segments: ['dlp', 'exceptions', { param: 'id' }],
     operationId: 'DlpExceptionsController_remove_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['dlp', 'exceptions', { param: 'id' }],
+    operationId: 'DlpExceptionsController_get_v1',
   },
   {
     method: 'PATCH',
@@ -8083,6 +8162,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'DELETE',
     segments: ['platform', 'threat-indicators', { param: 'id' }],
     operationId: 'ThreatIndicatorsController_remove_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['platform', 'threat-indicators', { param: 'id' }],
+    operationId: 'ThreatIndicatorsController_get_v1',
   },
   {
     method: 'GET',

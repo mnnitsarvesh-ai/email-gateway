@@ -8,7 +8,12 @@ import { systemScope } from '../../../auth-contracts/tenant-scope';
 import type { TransactionRunner } from '../../../database/transaction-runner';
 import { CodedHttpException } from '../../../http/coded-exception';
 import { InconsistentBecReadError } from '../bec.errors';
-import { BecFeedbackCreateSchema } from '../dto/bec.schemas';
+import { BEC_EXAMPLES } from '../api-docs';
+import {
+  BecFeedbackCreateSchema,
+  BecSuppressionViewSchema,
+  BecTrustedSenderViewSchema,
+} from '../dto/bec.schemas';
 import type { BecFeedbackRepository } from '../repositories/bec-feedback.repository';
 import type { BecProfilesRepository, ExecutiveRow } from '../repositories/bec-profiles.repository';
 import { BecFeedbackService } from './bec-feedback.service';
@@ -315,6 +320,60 @@ describe('BecTrustedSendersService (step 4.4 B7)', () => {
   });
 });
 
+describe('BecTrustedSendersService.get (step AI-4 D8)', () => {
+  const TRUSTED_ID = '0190f0f0-0000-7000-8000-0000000000c1';
+  const trustedRow = (expiresAt: Date | null) => ({
+    id: 21n,
+    publicId: TRUSTED_ID,
+    organizationId: 7n,
+    kind: 'domain' as const,
+    value: 'partner.example',
+    reason: 'Payroll partner',
+    expiresAt,
+    version: 2,
+    createdAt: NOW,
+    updatedAt: NOW,
+    createdBy: { publicId: user.userPublicId },
+  });
+
+  it('reads the scope’s entry on the replica (expired included) and 404s otherwise', async () => {
+    const w = writerWith();
+    const findTrusted = vi.fn((_scope: unknown, id: string) =>
+      Promise.resolve(id === TRUSTED_ID ? trustedRow(new Date('2020-01-01T00:00:00Z')) : null),
+    );
+    const service = new BecTrustedSendersService(
+      { BEC_MAX_TRUSTED_SENDERS: 10 },
+      { findTrusted } as unknown as BecProfilesRepository,
+      w.writer,
+      w.audit as unknown as AuditService,
+    );
+    expect(await service.get(scope, TRUSTED_ID)).toEqual({
+      id: TRUSTED_ID,
+      kind: 'domain',
+      value: 'partner.example',
+      reason: 'Payroll partner',
+      expiresAt: '2020-01-01T00:00:00.000Z',
+      expired: true,
+      version: 2,
+      createdByUserId: user.userPublicId,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    });
+    expect(findTrusted).toHaveBeenCalledWith(scope, TRUSTED_ID);
+    expect(await codeOf(service.get(scope, EXEC_ID))).toBe('bec_trusted_sender_not_found');
+    expect(w.transactions.run).not.toHaveBeenCalled();
+  });
+
+  it('documents examples that match the view schemas', () => {
+    expect(BecTrustedSenderViewSchema.parse(BEC_EXAMPLES.trustedSender)).toEqual(
+      BEC_EXAMPLES.trustedSender,
+    );
+    expect(BecSuppressionViewSchema.parse(BEC_EXAMPLES.suppression)).toEqual(
+      BEC_EXAMPLES.suppression,
+    );
+  });
+});
+
 const FEEDBACK_ID = '0190f0f0-0000-7000-8000-0000000000fb';
 const message = { id: 100n, publicId: '0190f0f0-0000-7000-8000-0000000000a1', receivedAt: NOW };
 
@@ -439,6 +498,35 @@ describe('BecFeedbackService (step 4.4 B11)', () => {
     expect(await s.metricsService.metrics()).toContain(
       'bec_feedback_total{kind="false_positive",service="t"} 1',
     );
+  });
+
+  it('gets one suppression rule (replica, expired included) with its feedback id; 404 otherwise (AI-4 D8)', async () => {
+    const s = feedbackSetup();
+    const row = {
+      ...s.suppressionRow('bec.reply_to.freemail'),
+      expiresAt: new Date('2020-01-01Z'),
+    };
+    const repository = s.repository as unknown as Record<string, unknown>;
+    repository.findSuppression = vi.fn((_scope: unknown, id: string) =>
+      Promise.resolve(id === row.publicId ? row : null),
+    );
+    repository.feedbackPublicIds = vi.fn(() => Promise.resolve(new Map([[900n, FEEDBACK_ID]])));
+    expect(await s.service.getSuppression(scope, row.publicId)).toEqual({
+      id: row.publicId,
+      reasonCode: 'bec.reply_to.freemail',
+      senderScope: 'domain',
+      senderValue: 'partner.example',
+      expiresAt: '2020-01-01T00:00:00.000Z',
+      expired: true,
+      feedbackId: FEEDBACK_ID,
+      createdByUserId: user.userPublicId,
+      createdAt: NOW.toISOString(),
+    });
+    expect(repository.feedbackPublicIds).toHaveBeenCalledWith(scope, [900n]);
+    expect(await codeOf(s.service.getSuppression(scope, EXEC_ID))).toBe(
+      'bec_suppression_not_found',
+    );
+    expect(s.transactions.run).not.toHaveBeenCalled();
   });
 
   it('renews an existing rule and enforces the active-rule cap', async () => {

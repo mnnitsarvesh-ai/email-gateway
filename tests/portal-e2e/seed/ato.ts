@@ -145,6 +145,24 @@ export const BETA_ATO_PLAN: readonly AtoAccountPlan[] = [
   },
 ];
 
+/**
+ * Step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md §9 item 6): delta's one compromised
+ * mailbox (P1 alone → 45, strong floor → 60 high, an open incident of severity high), the target
+ * of the gateway response the assistant spec requests, approves and refuses through chat.
+ */
+export const DELTA_ATO_PLAN: readonly AtoAccountPlan[] = [
+  {
+    key: 'delta-suspect',
+    local: 'ato-suspect',
+    codes: ['ato.content.phishing_sent'],
+    score: 60,
+    level: 'high',
+    incident: 'high',
+    failures: 0,
+    successes: 1,
+  },
+];
+
 const LOGIN_CATEGORIES = new Set(['authentication', 'access_context', 'geography', 'threat_intel']);
 const OUTBOUND_CATEGORIES = new Set(['outbound_behaviour', 'outbound_content']);
 
@@ -323,6 +341,15 @@ async function seedOrganization(
 export interface AtoSeedResult {
   alpha: SeededAtoAccount[];
   beta: SeededAtoAccount[];
+}
+
+/** Seeds the ATO plan of one more e2e tenant (step AI-4: the assistant tenant delta). */
+export async function seedAtoTenant(
+  p: PrismaClient,
+  org: { id: bigint; domain: string },
+  plan: readonly AtoAccountPlan[],
+): Promise<SeededAtoAccount[]> {
+  return seedOrganization(p, stores(), org.id, org.domain, plan);
 }
 
 /** Seeds both e2e tenants (alpha: the plan above; beta: one critical incident, isolation target). */

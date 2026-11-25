@@ -14,6 +14,7 @@ import type { Logger } from '@email-gateway/logger';
 import type { IdpMetrics } from '../metrics/idp-metrics';
 import { directoryDomainsOf, healthDetailOf, type IdpRegistry } from '../provider/idp-runtime';
 import { MysqlActionStateStore } from '../provider/stores';
+import { isTransientDbFailure } from '../provider/transient';
 import { errorFields, InconsistentReadError } from '../shared/errors';
 import { selectIntegration } from './integration-selector';
 
@@ -181,6 +182,10 @@ export class IdpActionExecutor {
               signal,
             );
     } catch (error) {
+      // A database outage (identity mapping, the adapter's state store) is not a provider
+      // failure: rethrown, so the queue or the maintenance loop retries it without counting an
+      // attempt (step AI-4 D14).
+      if (isTransientDbFailure(error, 'adapter')) throw error;
       this.deps.logger.warn(
         { actionPublicId: action.publicId, ...errorFields(error) },
         'ato idp provider action failed',
@@ -259,6 +264,7 @@ export class IdpActionExecutor {
         AbortSignal.timeout(IDP_ACTION_TIMEOUT_MS),
       );
     } catch (error) {
+      if (isTransientDbFailure(error, 'adapter')) throw error; // D14: retried by the loop
       result = failure(error);
     }
     const code = result.status === 'confirmed' ? await this.resultCodeOf(action) : null;

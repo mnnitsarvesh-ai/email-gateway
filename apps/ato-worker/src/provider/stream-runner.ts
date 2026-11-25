@@ -40,7 +40,15 @@ import { big, LEDGERS, orgFilter, type Tx } from '../shared/db';
 import { errorCode, errorFields } from '../shared/errors';
 import { mapLimit } from '../shared/loops';
 import { bindingSettingsOf, directoryDomainsOf, type IdpRegistry } from './idp-runtime';
-import { isLockConflict } from './stores';
+import {
+  deferDelayMs,
+  IDP_PAGE_TX_ATTEMPTS,
+  IDP_WRITE_ATTEMPTS,
+  isTransientDbFailure,
+  withTransientRetry,
+  type FailureOrigin,
+  type RetrySleep,
+} from './transient';
 
 /** Budget of one provider page fetch (never inside a database transaction). */
 export const IDP_INGEST_TIMEOUT_MS = 60_000;
@@ -148,8 +156,16 @@ export class IdpStreamRunner {
       seen: SeenRedis;
       logger: Logger;
       config: IdpStreamRunnerConfig;
+      /** Test seam: the wait between transient retries (default: a timer). */
+      retrySleep?: RetrySleep;
     },
   ) {}
+
+  /**
+   * Consecutive deferrals per stream id after transient database errors (step AI-4 D14); reset
+   * by a successful poll. In-process only: a restart starts again at the shortest deferral.
+   */
+  private readonly deferrals = new Map<string, number>();
 
   /** One pass; true when more streams may be due. */
   async runOnce(): Promise<boolean> {
@@ -178,10 +194,40 @@ export class IdpStreamRunner {
     return claimed.length === this.deps.config.claimBatch;
   }
 
+  /** A bounded retry of one idempotent write or read of the loop (transient errors only). */
+  private write<T>(fn: () => Promise<T>): Promise<T> {
+    return withTransientRetry(fn, {
+      attempts: IDP_WRITE_ATTEMPTS,
+      ...(this.deps.retrySleep ? { sleep: this.deps.retrySleep } : {}),
+      onRetry: () => this.deps.idpMetrics?.transientDbError('stream', 'retried'),
+    });
+  }
+
   private async claim(): Promise<Claimed[]> {
     const now = this.deps.now();
     const lease = new Date(now.getTime() + IDP_STREAM_LEASE_MS);
-    const ids = await this.deps.db.transaction(async (tx) => {
+    const ids = await this.write(() => this.claimIds(now, lease));
+    if (ids.length === 0) return [];
+    try {
+      return await this.write(() => this.loadClaimed(ids));
+    } catch (error) {
+      // The claim committed but its rows could not be read: hand the streams back after a short
+      // deferral instead of leaving them leased for IDP_STREAM_LEASE_MS (best effort).
+      if (isTransientDbFailure(error)) {
+        await this.deps.prisma.atoProviderStream
+          .updateMany({
+            where: { id: { in: ids } },
+            data: { nextPollAt: new Date(this.deps.now().getTime() + deferDelayMs(1)) },
+          })
+          .catch(() => undefined);
+        this.deps.idpMetrics?.transientDbError('stream', 'deferred');
+      }
+      throw error;
+    }
+  }
+
+  private claimIds(now: Date, lease: Date): Promise<bigint[]> {
+    return this.deps.db.transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ id: bigint | number }>>`
         SELECT s.id FROM ato_provider_streams s
         JOIN ato_provider_integrations i
@@ -200,7 +246,9 @@ export class IdpStreamRunner {
       });
       return claimed;
     });
-    if (ids.length === 0) return [];
+  }
+
+  private async loadClaimed(ids: bigint[]): Promise<Claimed[]> {
     const streams = await this.deps.prisma.atoProviderStream.findMany({
       where: { id: { in: ids } },
       orderBy: { id: 'asc' },
@@ -227,7 +275,43 @@ export class IdpStreamRunner {
     }
   }
 
+  /**
+   * One claimed stream. A transient database error anywhere in the poll (organization context,
+   * page transaction after its retries, the success or failure write) defers the stream by
+   * 5–60 s without touching its failure counters (step AI-4 D14); provider errors back off as
+   * before (D7.1).
+   */
   private async poll(c: Claimed): Promise<void> {
+    const phase: { origin: FailureOrigin } = { origin: 'database' };
+    try {
+      await this.pollStream(c, phase);
+    } catch (error) {
+      if (!isTransientDbFailure(error, phase.origin)) throw error;
+      await this.defer(c, error);
+    }
+  }
+
+  /** Re-schedules a stream after a transient database error (counters untouched). */
+  private async defer(c: Claimed, error: unknown): Promise<void> {
+    const { stream } = c;
+    const key = stream.id.toString();
+    const k = (this.deferrals.get(key) ?? 0) + 1;
+    this.deferrals.set(key, k);
+    const delayMs = deferDelayMs(k);
+    this.deps.idpMetrics?.transientDbError('stream', 'deferred');
+    this.deps.logger.warn(
+      { streamId: key, stream: stream.stream, deferMs: delayMs, ...errorFields(error) },
+      'ato idp stream poll deferred after a transient database error',
+    );
+    await this.write(() =>
+      this.deps.prisma.atoProviderStream.updateMany({
+        where: { id: stream.id, organizationId: stream.organizationId },
+        data: { nextPollAt: new Date(this.deps.now().getTime() + delayMs) },
+      }),
+    );
+  }
+
+  private async pollStream(c: Claimed, phase: { origin: FailureOrigin }): Promise<void> {
     const { stream, integration } = c;
     const kind = integration.provider as AtoProviderKind;
     const org = await this.deps.orgs.get(integration.organizationId);
@@ -274,7 +358,9 @@ export class IdpStreamRunner {
     let sweepDone = false;
     try {
       for (; pages < this.deps.config.maxPagesPerPoll; pages++) {
+        phase.origin = 'adapter';
         const page = await this.ingest(adapter, name, cursor);
+        phase.origin = 'database';
         if (page.retryAfterMs !== undefined) retryAfterMs = page.retryAfterMs;
         hasMore = page.hasMore;
         if (page.cursor === cursor) {
@@ -289,7 +375,7 @@ export class IdpStreamRunner {
           break;
         }
         const initialSnapshot = SNAPSHOT_PRIMARY[kind] === name && !initialDone;
-        const moved = await this.withDeadlockRetry(() =>
+        const moved = await this.withPageRetry(() =>
           this.processPage(org, c, adapter, cursor, page, domains, initialSnapshot),
         );
         if (!moved) {
@@ -307,6 +393,8 @@ export class IdpStreamRunner {
       await this.success(c, adapter, { retryAfterMs, hasMore, pages, sweepDone, initialDone });
       initialDone = true;
     } catch (error) {
+      // A database outage is not a provider failure: deferred by poll() (D14).
+      if (isTransientDbFailure(error, phase.origin)) throw error;
       const retryAfter =
         error instanceof ProviderAdapterError || error instanceof ConnectionAccessError
           ? error.retryAfterMs
@@ -361,18 +449,18 @@ export class IdpStreamRunner {
   /**
    * Streams of one integration run in parallel and touch the same accounts and identities, so a
    * page transaction of another replica or role (or the adapter's mailbox upserts) can win a
-   * deadlock (MySQL 1213) or a lock wait (1205). The page is atomic (ledger, effects and cursor
-   * commit together), so it is retried, at most five times with jittered back-off.
+   * deadlock (MySQL 1213) or a lock wait (1205); under load the pool can time out (`P2024`) or
+   * the server be briefly unreachable (`P1001`, `P1017`). The page is atomic (ledger, effects and
+   * cursor commit together), so it is retried on lock conflicts and transient infrastructure
+   * errors, at most IDP_PAGE_TX_ATTEMPTS times with jittered back-off 200 ms × 2^(n−1) ≤ 5 s
+   * (step AI-4 D14).
    */
-  private async withDeadlockRetry<T>(fn: () => Promise<T>): Promise<T> {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await fn();
-      } catch (error) {
-        if (attempt >= IDP_PAGE_DEADLOCK_RETRIES || !isLockConflict(error)) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 100 * attempt + Math.random() * 200));
-      }
-    }
+  private withPageRetry<T>(fn: () => Promise<T>): Promise<T> {
+    return withTransientRetry(fn, {
+      attempts: IDP_PAGE_TX_ATTEMPTS,
+      ...(this.deps.retrySleep ? { sleep: this.deps.retrySleep } : {}),
+      onRetry: () => this.deps.idpMetrics?.transientDbError('stream', 'retried'),
+    });
   }
 
   /** The Redis key remembering that an event of an integration was processed. */
@@ -770,45 +858,50 @@ export class IdpStreamRunner {
     const backfillComplete = stream.status !== 'backfilling' || caughtUp;
     const initialComplete =
       !r.initialDone && backfillComplete && (SNAPSHOT_PRIMARY[kind] !== name || r.sweepDone);
-    await this.deps.prisma.atoProviderStream.updateMany({
-      where: { id: stream.id, organizationId: stream.organizationId },
-      data: {
-        nextPollAt: new Date(nextPoll),
-        consecutiveFailures: 0,
-        lastErrorCode: null,
-        lastSuccessAt: now,
-        throttledUntil:
-          r.retryAfterMs !== undefined ? new Date(now.getTime() + r.retryAfterMs) : null,
-        ...(stream.status === 'backfilling' && backfillComplete
-          ? {
-              status: 'active',
-              // The backfilled range joins what it replayed; the replay window is done.
-              coveredFrom: completedCoverage(stream),
-              replayFrom: null,
-              replayUntil: null,
-            }
-          : {}),
-        ...(initialComplete ? { backfillCompletedAt: now } : {}),
-      },
-    });
+    await this.write(() =>
+      this.deps.prisma.atoProviderStream.updateMany({
+        where: { id: stream.id, organizationId: stream.organizationId },
+        data: {
+          nextPollAt: new Date(nextPoll),
+          consecutiveFailures: 0,
+          lastErrorCode: null,
+          lastSuccessAt: now,
+          throttledUntil:
+            r.retryAfterMs !== undefined ? new Date(now.getTime() + r.retryAfterMs) : null,
+          ...(stream.status === 'backfilling' && backfillComplete
+            ? {
+                status: 'active',
+                // The backfilled range joins what it replayed; the replay window is done.
+                coveredFrom: completedCoverage(stream),
+                replayFrom: null,
+                replayUntil: null,
+              }
+            : {}),
+          ...(initialComplete ? { backfillCompletedAt: now } : {}),
+        },
+      }),
+    );
+    this.deferrals.delete(stream.id.toString());
     // Companions mirror their primary's watermark and success (D3).
     const companions = companionsOf(kind, name);
     if (companions.length > 0) {
-      await this.deps.prisma.atoProviderStream.updateMany({
-        where: {
-          integrationId: integration.id,
-          organizationId: integration.organizationId,
-          stream: { in: companions },
-        },
-        data: {
-          lastSuccessAt: now,
-          consecutiveFailures: 0,
-          lastErrorCode: null,
-          ...(stream.watermarkAt ? { watermarkAt: stream.watermarkAt } : {}),
-        },
-      });
+      await this.write(() =>
+        this.deps.prisma.atoProviderStream.updateMany({
+          where: {
+            integrationId: integration.id,
+            organizationId: integration.organizationId,
+            stream: { in: companions },
+          },
+          data: {
+            lastSuccessAt: now,
+            consecutiveFailures: 0,
+            lastErrorCode: null,
+            ...(stream.watermarkAt ? { watermarkAt: stream.watermarkAt } : {}),
+          },
+        }),
+      );
     }
-    await this.aggregate(integration, now, { success: true });
+    await this.write(() => this.aggregate(integration, now, { success: true }));
   }
 
   /** Backoff after a failed poll (D7.1); throttling is not a failure. */
@@ -817,14 +910,16 @@ export class IdpStreamRunner {
     const now = this.deps.now();
     if (THROTTLE_CODES.has(code)) {
       const wait = Math.max(1000, retryAfterMs ?? 60_000);
-      await this.deps.prisma.atoProviderStream.updateMany({
-        where: { id: stream.id, organizationId: stream.organizationId },
-        data: {
-          nextPollAt: new Date(now.getTime() + wait),
-          throttledUntil: new Date(now.getTime() + wait),
-          lastErrorCode: code.slice(0, 64),
-        },
-      });
+      await this.write(() =>
+        this.deps.prisma.atoProviderStream.updateMany({
+          where: { id: stream.id, organizationId: stream.organizationId },
+          data: {
+            nextPollAt: new Date(now.getTime() + wait),
+            throttledUntil: new Date(now.getTime() + wait),
+            lastErrorCode: code.slice(0, 64),
+          },
+        }),
+      );
       return;
     }
     const failures = stream.consecutiveFailures + 1;
@@ -832,23 +927,27 @@ export class IdpStreamRunner {
       IDP_MAX_STREAM_BACKOFF_MS,
       this.pollIntervalMs(integration) * 2 ** Math.min(failures, 12),
     );
-    await this.deps.prisma.atoProviderStream.updateMany({
-      where: { id: stream.id, organizationId: stream.organizationId },
-      data: {
-        consecutiveFailures: failures,
-        lastErrorCode: code.slice(0, 64),
-        nextPollAt: new Date(now.getTime() + Math.max(backoff, retryAfterMs ?? 0)),
-      },
-    });
+    await this.write(() =>
+      this.deps.prisma.atoProviderStream.updateMany({
+        where: { id: stream.id, organizationId: stream.organizationId },
+        data: {
+          consecutiveFailures: failures,
+          lastErrorCode: code.slice(0, 64),
+          nextPollAt: new Date(now.getTime() + Math.max(backoff, retryAfterMs ?? 0)),
+        },
+      }),
+    );
     stream.consecutiveFailures = failures;
     // D6: probe at once after 3 consecutive failures of a stream or a connection/token failure.
     if (failures >= IDP_PROBE_AFTER_FAILURES || CONNECTION_CODES.has(code)) {
-      await this.deps.prisma.atoProviderIntegration.updateMany({
-        where: { id: integration.id, organizationId: integration.organizationId },
-        data: { nextHealthAt: now },
-      });
+      await this.write(() =>
+        this.deps.prisma.atoProviderIntegration.updateMany({
+          where: { id: integration.id, organizationId: integration.organizationId },
+          data: { nextHealthAt: now },
+        }),
+      );
     }
-    await this.aggregate(integration, now, { success: false, code });
+    await this.write(() => this.aggregate(integration, now, { success: false, code }));
   }
 
   /** The integration's 8.4 failure counters aggregate its primary streams (D7.1). */
@@ -886,8 +985,8 @@ export class IdpStreamRunner {
   }
 }
 
-/** Attempts of a page transaction that lost a deadlock or a lock wait. */
-export const IDP_PAGE_DEADLOCK_RETRIES = 5;
+/** Attempts of a page transaction that lost a deadlock, a lock wait or a transient error (D14). */
+export const IDP_PAGE_DEADLOCK_RETRIES = IDP_PAGE_TX_ATTEMPTS;
 
 /** The stream's cursor changed during the poll (an api backfill or reset): roll the page back. */
 class CursorMovedError extends Error {

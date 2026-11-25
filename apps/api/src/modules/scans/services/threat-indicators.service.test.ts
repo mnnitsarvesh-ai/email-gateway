@@ -6,6 +6,8 @@ import type { AuditService } from '../../../audit/audit.service';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
 import type { TransactionRunner } from '../../../database/transaction-runner';
 import { CodedHttpException } from '../../../http/coded-exception';
+import { THREAT_INDICATOR_EXAMPLE } from '../api-docs';
+import { ThreatIndicatorViewSchema } from '../dto/threat-indicators.schemas';
 import type {
   ThreatIndicatorRow,
   ThreatIndicatorsRepository,
@@ -59,6 +61,7 @@ function setup(existing: ThreatIndicatorRow | null = null, byId: ThreatIndicator
     list: vi.fn(() => Promise.resolve([stored(), stored({ id: 40n })])),
     findAnalystForUpdate: vi.fn(() => Promise.resolve(existing)),
     findPlatformForUpdate: vi.fn(() => Promise.resolve(byId)),
+    findPlatform: vi.fn(() => Promise.resolve(byId)),
     create: vi.fn(
       (
         _tx: unknown,
@@ -246,6 +249,25 @@ describe('ThreatIndicatorsService (step 4.3 U16)', () => {
     await expect(
       service.list(platformUser, { limit: 5, value: 'x.example' }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('gets one platform indicator by id from the replica, expired included; 404 otherwise (AI-4 D8)', async () => {
+    const past = new Date('2026-11-01T00:00:00.000Z');
+    const { service, repository, transactions } = setup(null, stored({ expiresAt: past }));
+    const view = await service.get(platformUser, 41n);
+    expect(view).toMatchObject({ id: '41', value: 'evil.example', expiresAt: past.toISOString() });
+    expect(repository.findPlatform).toHaveBeenCalledWith(41n);
+    expect(repository.findPlatformForUpdate).not.toHaveBeenCalled();
+    expect(transactions.run).not.toHaveBeenCalled();
+    const missing = setup(null, null);
+    const error = await failure(missing.service.get(platformUser, 9n));
+    expect((error as CodedHttpException).code).toBe('threat_indicator_not_found');
+    const tenant = { ...platformUser, organizationKind: 'customer' } as UserPrincipal;
+    await expect(service.get(tenant, 41n)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(ThreatIndicatorViewSchema.parse(THREAT_INDICATOR_EXAMPLE)).toEqual(
+      THREAT_INDICATOR_EXAMPLE,
+    );
+    expect(THREAT_INDICATOR_EXAMPLE.valueSha256).toBe(sha(THREAT_INDICATOR_EXAMPLE.value));
   });
 
   it('refuses non-platform principals and override sessions', async () => {

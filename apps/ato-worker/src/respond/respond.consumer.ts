@@ -15,6 +15,7 @@ import { atoResponseRequestedV1, type EventEnvelope } from '@email-gateway/event
 import type { Logger } from '@email-gateway/logger';
 import type { AtoMetrics } from '../metrics/ato-metrics';
 import { IDP_KINDS } from '../provider/provider-context';
+import { isTransientDbFailure } from '../provider/transient';
 import { type AtoDb, LEDGERS } from '../shared/db';
 import { errorFields, InconsistentReadError } from '../shared/errors';
 import type { IdpActionExecutor, IdpCallOutcome } from './idp-actions';
@@ -266,6 +267,9 @@ export class RespondConsumer {
         signal,
       );
     } catch (error) {
+      // A database outage (identity read, the adapter's state store) is not a provider failure:
+      // the queue redelivers it as transient without counting an attempt (step AI-4 D14).
+      if (isTransientDbFailure(error, 'adapter')) throw error;
       this.deps.logger.warn(
         { actionPublicId: action.publicId, ...errorFields(error) },
         'ato provider action failed',

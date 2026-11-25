@@ -42,6 +42,7 @@ import {
   ApiIndicatorExists,
   ApiThreatIndicatorNotFound,
   PLATFORM_THREAT_INTEL_MANAGE,
+  THREAT_INDICATOR_EXAMPLE,
 } from '../api-docs';
 import {
   type ThreatIndicatorCreate,
@@ -97,6 +98,31 @@ export class ThreatIndicatorsController {
     @Query(new ZodValidationPipe(ThreatIndicatorListQuerySchema)) query: ThreatIndicatorListQuery,
   ): Promise<ThreatIndicatorPage> {
     return this.indicators.list(principal, query);
+  }
+
+  @Get(':id')
+  @RequirePermissions(PLATFORM_THREAT_INTEL_MANAGE)
+  @RequireMfa()
+  @ApiOperation({
+    summary: 'Get a platform threat indicator',
+    description:
+      'The indicator as the list shows it (URL, domain or IP address of the platform catalog); ' +
+      'an expired indicator is returned with its past `expiresAt` (the lookup ignores it). An ' +
+      'unknown id, an organization’s own indicator or another type is a 404. From the read ' +
+      'replica: an indicator added a moment ago may not be found yet. 60 calls per caller per ' +
+      'minute (shared by the catalog routes).',
+  })
+  @ApiParam({ name: 'id', description: 'Indicator id (decimal, from the list)' })
+  @ApiOkResponse({
+    schema: { ...zodToOpenApi(ThreatIndicatorViewSchema), example: THREAT_INDICATOR_EXAMPLE },
+  })
+  @ApiErrors(400, 401, 403, 429, 503)
+  @ApiThreatIndicatorNotFound()
+  get(
+    @CurrentUser() principal: UserPrincipal,
+    @Param('id', idPipe) id: string,
+  ): Promise<ThreatIndicatorView> {
+    return this.indicators.get(principal, BigInt(id));
   }
 
   @Post()

@@ -9,6 +9,7 @@ import {
 import { idpAdapterEnvSchema, loadIdpAdapterConfig } from '@email-gateway/idp-adapters';
 import { parseDnsblZones } from '@email-gateway/url-security';
 import { z } from 'zod';
+import { ATO_TX_MAX_WAIT_MS } from './shared/db';
 
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
 const flag = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' || v === '1');
@@ -122,6 +123,17 @@ export const configSchema = baseConfigSchema
     ATO_RESPONSES_PREFETCH: int(1, 64).default(4),
     /** Budget of every writer transaction (≥ 120 s, the 4.2 §6 wrong-read rule). */
     ATO_TX_TIMEOUT_MS: int(120_000, 600_000).default(120_000),
+    /**
+     * Pool size (`connection_limit`) of the writer client (step AI-4 D14): the queue handlers
+     * (prefetch 32 + 32 + 4), the IdP polls and probes and the maintenance jobs share it. Budget:
+     * replicas × this + other services ≤ 80 % of MySQL `max_connections`.
+     */
+    ATO_DATABASE_CONNECTION_LIMIT: int(4, 200).default(32),
+    /**
+     * `pool_timeout` of the writer client in seconds (step AI-4 D14): at least the transaction
+     * `maxWait` (30 s), so a plain query never gives up on the pool before a transaction would.
+     */
+    ATO_DATABASE_POOL_TIMEOUT_SECONDS: int(5, 300).default(30),
     /** Per-organization feature/mode/time-zone cache of the no-op fast paths. */
     ATO_SETTINGS_CACHE_SECONDS: int(1, 600).default(30),
     /** HMAC key of Redis members (recipient domains, subject keys, attempted e-mails) and of the
@@ -187,6 +199,13 @@ export const configSchema = baseConfigSchema
   })
   .superRefine((cfg, ctx) => {
     const testEnv = TEST_ENVIRONMENTS.includes(cfg.APP_ENV);
+    if (cfg.ATO_DATABASE_POOL_TIMEOUT_SECONDS * 1000 < ATO_TX_MAX_WAIT_MS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ATO_DATABASE_POOL_TIMEOUT_SECONDS'],
+        message: `must be at least ${ATO_TX_MAX_WAIT_MS / 1000} (the writer transaction maxWait in seconds): a shorter pool timeout fails plain queries with P2024 while transactions still wait`,
+      });
+    }
     if (cfg.ATO_GEOIP_ALLOW_DOCUMENTATION_RANGES && !testEnv) {
       ctx.addIssue({
         code: 'custom',

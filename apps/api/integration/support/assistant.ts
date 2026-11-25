@@ -582,6 +582,8 @@ const SPECIAL_VALUES: Readonly<Record<string, unknown>> = {
   key: 'it_unknown_role',
   suppressionId: '999999999999',
   versionNo: 1,
+  // Step AI-4: the decimal scan round id of the message scan routes (risk dry-run, feedback).
+  scanId: '1',
 };
 
 /**
@@ -592,7 +594,11 @@ function minimalObject(schema: Record<string, unknown>): Record<string, unknown>
   const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
   const out: Record<string, unknown> = {};
   for (const name of (schema.required as string[] | undefined) ?? []) {
-    const prop = properties[name] ?? {};
+    // Step AI-4: a union member (the risk dry-run's `profile`) takes its first alternative.
+    const declared = properties[name] ?? {};
+    const prop = Array.isArray(declared.anyOf)
+      ? ((declared.anyOf as Array<Record<string, unknown>>)[0] ?? {})
+      : declared;
     if (prop.type === 'object') out[name] = minimalObject(prop);
     else if (Array.isArray(prop.enum)) out[name] = prop.enum[0];
     else if (prop.type === 'integer' || prop.type === 'number') {
@@ -1624,3 +1630,80 @@ export async function seedDeliveries(
     }),
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-4: security operations writes (docs/plan/steps/32-ai-chat-security-operations.md
+// D2–D5, D10, D11, §9 item 3; contracts §35.4)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Asserts a confirmed write executed with this HTTP status (confirmation `executed`, result
+ * execution `succeeded`) and exactly one non-GET loopback request; returns that request.
+ */
+export function expectExecuted(result: ChatWrite, httpStatus: number): RecordedCall {
+  if (result.res.status !== 200) {
+    throw new Error(`confirm ${result.res.status}: ${JSON.stringify(result.res.body)}`);
+  }
+  const confirmation = result.res.body.confirmation as ConfirmationJson;
+  const execution = result.res.body.execution as Record<string, unknown> | undefined;
+  if (
+    confirmation.status !== 'executed' ||
+    confirmation.result?.httpStatus !== httpStatus ||
+    execution?.status !== 'succeeded' ||
+    execution.httpStatus !== httpStatus
+  ) {
+    throw new Error(
+      `expected executed ${httpStatus}: ${JSON.stringify({ confirmation: confirmation.result, status: confirmation.status, execution: execution && { status: execution.status, httpStatus: execution.httpStatus, errorCode: execution.errorCode } })}`,
+    );
+  }
+  const writes = result.calls.filter((c) => c.method !== 'GET');
+  if (writes.length !== 1) throw new Error(`expected one write: ${JSON.stringify(result.calls)}`);
+  return writes[0]!;
+}
+
+/**
+ * The operation audit actions (not `assistant.*`) of a confirmed write's result execution, in
+ * any organization (platform operations audit with `organization_id` NULL).
+ */
+export async function operationActionsOf(
+  ctx: IntegrationApp,
+  confirmed: { body: Record<string, unknown> },
+): Promise<string[]> {
+  return operationAudit(
+    (await actionsByCorrelation(ctx, await resultCorrelationId(ctx, confirmed))).map((action) => ({
+      action,
+    })),
+  );
+}
+
+/**
+ * A follow-up turn (`/text ok`) in the conversation: the provider transcript of that turn, which
+ * carries the server-authored action-updates block of the confirmed writes (AI-2 D6, AI-4 D10).
+ */
+export async function followUpTranscript(
+  ctx: IntegrationApp,
+  who: Member,
+  conversation: string,
+): Promise<string> {
+  const res = await turn(ctx, who.headers, conversation, '/text ok');
+  if (res.status !== 200) throw new Error(`follow-up turn ${res.status}`);
+  const row = await ctx.prisma.aiChatTurn.findUniqueOrThrow({
+    where: { publicId: res.body.turn.id as string },
+    select: { providerTranscript: true },
+  });
+  return row.providerTranscript ?? '';
+}
+
+/** The stored request of a confirmation (the body and path the confirm will send). */
+export async function storedRequestOf(
+  ctx: IntegrationApp,
+  confirmationId: string,
+): Promise<{ method: string; path: string; body: Record<string, unknown> | null }> {
+  const row = await confirmationRow(ctx, confirmationId);
+  return row.request as { method: string; path: string; body: Record<string, unknown> | null };
+}
+
+/** The platform-only enabled tools (D11): absent for tenant principals and under an override. */
+export const PLATFORM_ONLY_TOOLS: readonly OperationTool[] = ENABLED_TOOLS.filter(
+  (t) => t.platformOnly,
+);

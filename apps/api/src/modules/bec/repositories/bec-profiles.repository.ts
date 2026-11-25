@@ -360,6 +360,14 @@ export class BecProfilesRepository {
     });
   }
 
+  /** One trusted sender of the scope by public id (replica; expired entries included). */
+  findTrusted(scope: TenantScope, publicId: string): Promise<TrustedSenderRow | null> {
+    return this.db.becTrustedSender.findFirst({
+      where: tenantWhere(scope, { publicId }),
+      select: trustedSelect,
+    });
+  }
+
   async findTrustedForUpdate(
     tx: Client,
     scope: TenantScope,

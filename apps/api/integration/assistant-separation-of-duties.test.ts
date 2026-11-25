@@ -23,6 +23,22 @@
  *     re-authentication, and a stored confirmation whose risk was lowered in the database is
  *     refused (`409`: the digest binds the risk, the confirm recomputes the effective risk).
  *
+ * Step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md I18, D3, §9 item 3 points a–f),
+ * ATO responses on an `it-ato-*` organization: (a) the requester asks to approve (the fake's
+ * "approve the pending ato response" plan) or reject through chat → `denied_guard`
+ * (`not_self_field`), no confirmation row, no request to the decision routes, no decision audit
+ * row; (b) the api refuses the requester's direct approve / reject with an MFA session (`403
+ * ato_approval_self`), status unchanged; (c) the requester's second session is refused the same
+ * way; (d) a response requested by an API key the requester created → the creator is
+ * `denied_guard` (`require_read_value` on the api's `canDecide`) and refused directly, another
+ * responder approves through chat and it executes; (e) the response decided elsewhere between
+ * the approver's proposal and confirm → the confirm is refused (`409` state changed or `403`),
+ * nothing executes; (f) approve and rollback need re-authentication; (g) with the assistant's
+ * four-eyes guards removed from the approve / reject specs (a simulated guard regression), the
+ * requester's chat-confirmed decision reaches the api, which refuses it (`403
+ * ato_approval_self`): the confirmation fails, the response stays `pending_approval`, no decision
+ * audit row (I18: the api's refusal is the authority through chat as well as directly).
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers post /api/v1/assistant/conversations
@@ -41,7 +57,13 @@
 // @covers put /api/v1/roles/:key
 // @covers delete /api/v1/roles/:key
 // @covers patch /api/v1/webhooks/:webhookId
+// @covers post /api/v1/ato/incidents/:incidentId/responses
+// @covers post /api/v1/ato/responses/:responseId/approve
+// @covers post /api/v1/ato/responses/:responseId/reject
+// @covers post /api/v1/ato/responses/:responseId/cancel
+// @covers post /api/v1/ato/responses/:responseId/rollback
 import { randomUUID } from 'node:crypto';
+import { confirmationSpecOf, GUARD_MESSAGES } from '@email-gateway/assistant';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { IntegrationApp } from './support/app';
 import {
@@ -57,21 +79,34 @@ import {
   enableAssistant,
   envelopesOf,
   executionRow,
+  expectExecuted,
   member,
   type Member,
   newConversation,
+  operationActionsOf,
   operationAudit,
   platformMember,
   principalOf,
   propose,
+  proposeAndConfirm,
   type Proposal,
   reauthOf,
   recordLoopback,
   requestsTo,
   secondSession,
   turn,
+  waitForRead,
   writesTo,
 } from './support/assistant';
+import {
+  type AtoChat,
+  atoChatTenant,
+  decideDirectly,
+  mailboxLabel,
+  requestResponse,
+  responseRow,
+  responseVisible,
+} from './support/assistant-ato';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { idem } from './support/http';
 import { createBody, subscriptionRow, WEBHOOKS } from './support/webhooks';
@@ -567,5 +602,318 @@ describe('(g) escalated proposals and tampered risk', () => {
         (await executionRow(ctx, renamed.body.execution.id as string)).correlationId,
       ),
     ).toContain('webhook.updated');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md I18, D3, R2, §9 item 3 points
+// a–f): ATO responses keep four eyes in chat. The api's refusal (`ato_approval_self`) stays the
+// authority; the assistant's guards refuse a requester's (or an API-key creator's) decision
+// before anything is stored.
+// ---------------------------------------------------------------------------------------------
+
+describe('step AI-4: ATO responses keep four eyes in chat (I18)', () => {
+  const FOUR_EYES = GUARD_MESSAGES.ato_four_eyes;
+  const APPROVE = '/api/v1/ato/responses/{responseId}/approve';
+  const REJECT = '/api/v1/ato/responses/{responseId}/reject';
+  let ato: AtoChat;
+  let requester: Member;
+  let approver: Member;
+
+  beforeAll(async () => {
+    ato = await atoChatTenant(ctx, fx, operator);
+    requester = ato.analystA;
+    approver = ato.analystB;
+  }, 240_000);
+
+  afterAll(async () => {
+    if (ctx && ato) await clearAssistantCounters(ctx, [ato.org.id]);
+  });
+
+  /** An open incident on a fresh synthetic mailbox account. */
+  async function openIncident(): Promise<string> {
+    const { incident } = await ato.seed.compromised(ato.org.id, mailboxLabel('sod'));
+    await waitForRead(ctx, requester, `/api/v1/incidents/${incident.publicId}`);
+    return incident.publicId;
+  }
+
+  /** The requester asks for `restrict_smtp_sending` through chat: the pending response id. */
+  async function requestedThroughChat(): Promise<string> {
+    const incidentId = await openIncident();
+    const requested = await proposeAndConfirm(ctx, fx, requester, 'ato_responses_request', {
+      incidentId,
+      body: {
+        actionType: 'restrict_smtp_sending',
+        durationMinutes: 60,
+        reason: 'Outbound burst after impossible travel',
+      },
+    });
+    expectExecuted(requested, 201);
+    const row = await ctx.prisma.atoResponseAction.findFirstOrThrow({
+      where: { organizationId: ato.org.id, incident: { publicId: incidentId } },
+    });
+    expect(row.status).toBe('pending_approval');
+    await responseVisible(ctx, approver, row.publicId, 'pending_approval');
+    return row.publicId;
+  }
+
+  const decisionAudits = (responseId: string) =>
+    ctx.prisma.auditLog.count({
+      where: {
+        organizationId: ato.org.id,
+        resourceId: responseId,
+        action: { in: ['ato.response_approved', 'ato.response_rejected'] },
+      },
+    });
+
+  it('(a) the requester asks to approve (the fake plan) or reject (directive): denied_guard, nothing reaches the decision routes', async () => {
+    const responseId = await requestedThroughChat();
+    await waitForRead(
+      ctx,
+      requester,
+      '/api/v1/ato/responses?status=pending_approval&limit=1',
+      (b) => (b.data as Array<{ id: string }>)[0]?.id === responseId,
+    );
+    const recorder = recordLoopback(ctx);
+    let planned;
+    let rejected;
+    try {
+      const conversation = await newConversation(ctx, requester);
+      planned = await turn(
+        ctx,
+        requester.headers,
+        conversation,
+        'approve the pending ato response',
+      );
+      rejected = await single(requester, 'ato_responses_reject', {
+        responseId,
+        body: { reason: 'I asked for it, so I reject it' },
+      });
+    } finally {
+      recorder.restore();
+    }
+    expect(planned.status, JSON.stringify(planned.body)).toBe(200);
+    const [list, approve] = planned.body.executions as Array<Record<string, unknown>>;
+    expect(list).toMatchObject({ tool: 'ato_responses_list', status: 'succeeded' });
+    expect(approve).toMatchObject({
+      tool: 'ato_responses_approve',
+      decision: 'denied_guard',
+      status: 'refused',
+      errorCode: 'denied_guard',
+      message: FOUR_EYES,
+      card: null,
+    });
+    expect(planned.body.confirmations).toEqual([]);
+    const denied = await ctx.prisma.auditLog.findMany({
+      where: { action: 'assistant.tool_denied', resourceId: approve!.id as string },
+    });
+    expect(denied[0]!.metadata).toMatchObject({ guard: 'not_self_field' });
+    await expectGuardDenied(rejected, 'ato_responses_reject', 'not_self_field', FOUR_EYES);
+    // Only the precondition reads ran (after-read guards); no decision request was sent.
+    expect(requestsTo(recorder, APPROVE)).toEqual([]);
+    expect(requestsTo(recorder, REJECT)).toEqual([]);
+    expect(await decisionAudits(responseId)).toBe(0);
+    expect((await responseRow(ctx, responseId)).status).toBe('pending_approval');
+    expect(
+      await ctx.prisma.aiChatActionConfirmation.count({
+        where: {
+          organizationId: ato.org.id,
+          userId: requester.user.id,
+          toolName: { in: ['ato_responses_approve', 'ato_responses_reject'] },
+        },
+      }),
+    ).toBe(0);
+  });
+
+  it('(b) the api refuses a direct self-approval with an MFA session (403), status unchanged', async () => {
+    const responseId = await requestedThroughChat();
+    for (const verb of ['approve', 'reject'] as const) {
+      const res = await decideDirectly(ctx, requester.headers, responseId, verb, {
+        reason: 'Deciding my own request',
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.code).toBe('ato_approval_self');
+    }
+    expect((await responseRow(ctx, responseId)).status).toBe('pending_approval');
+    expect(await decisionAudits(responseId)).toBe(0);
+  });
+
+  it('(c) the requester’s second session is refused the same way (the guard is by user, not session)', async () => {
+    const responseId = await requestedThroughChat();
+    const other = await secondSession(ctx, fx, requester);
+    const outcome = await single(other, 'ato_responses_approve', {
+      responseId,
+      body: { reason: 'From my other browser' },
+    });
+    await expectGuardDenied(outcome, 'ato_responses_approve', 'not_self_field', FOUR_EYES);
+    expect((await responseRow(ctx, responseId)).status).toBe('pending_approval');
+  });
+
+  it('(d) a response requested by an API key the requester created: the creator is refused in chat and directly; another responder approves', async () => {
+    const incidentId = await openIncident();
+    const key = {
+      'X-API-Key': await fx.createApiKey(ato.org, ['ato:read', 'ato:respond'], {
+        createdBy: requester.user,
+      }),
+    };
+    const requested = await requestResponse(ctx, key, incidentId, {
+      actionType: 'restrict_smtp_sending',
+      durationMinutes: 60,
+      reason: 'Requested by automation',
+    });
+    expect(requested.status, JSON.stringify(requested.body)).toBe(201);
+    expect(requested.body).toMatchObject({
+      status: 'pending_approval',
+      requestedBy: { type: 'api_key' },
+    });
+    const responseId = requested.body.id as string;
+    await responseVisible(ctx, requester, responseId, 'pending_approval');
+
+    const outcome = await single(requester, 'ato_responses_approve', {
+      responseId,
+      body: { reason: 'My key asked for it' },
+    });
+    await expectGuardDenied(outcome, 'ato_responses_approve', 'require_read_value', FOUR_EYES);
+    const direct = await decideDirectly(ctx, requester.headers, responseId, 'approve', {
+      reason: 'My key asked for it',
+    });
+    expect(direct.status).toBe(403);
+    expect(direct.body.code).toBe('ato_approval_self');
+
+    const approved = await proposeAndConfirm(ctx, fx, approver, 'ato_responses_approve', {
+      responseId,
+      body: { reason: 'Second pair of eyes' },
+    });
+    expectExecuted(approved, 200);
+    expect(await responseRow(ctx, responseId)).toMatchObject({ status: 'succeeded' });
+    expect(await operationActionsOf(ctx, approved.res)).toContain('ato.response_approved');
+    // Lifted again (the restriction must not outlive the test).
+    const lifted = await decideDirectly(ctx, approver.headers, responseId, 'rollback', {
+      reason: 'Test cleanup: lift it',
+    });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+  });
+
+  it('(e) decided elsewhere between proposal and confirm: the approver’s confirm is refused, nothing executes', async () => {
+    const responseId = await requestedThroughChat();
+    const proposal = await propose(
+      ctx,
+      approver,
+      directive('ato_responses_approve', { responseId, body: { reason: 'Looks right' } }),
+    );
+    expect(proposal.confirmation).toMatchObject({ risk: 'high', status: 'pending' });
+    const cancelled = await decideDirectly(ctx, requester.headers, responseId, 'cancel', {
+      reason: 'Handled by phone instead',
+    });
+    expect(cancelled.status, JSON.stringify(cancelled.body)).toBe(200);
+    await responseVisible(ctx, approver, responseId, 'cancelled');
+    const recorder = recordLoopback(ctx);
+    let res;
+    try {
+      res = await confirm(ctx, approver, proposal, { reauth: await reauthOf(fx, approver) });
+    } finally {
+      recorder.restore();
+    }
+    expect([403, 409]).toContain(res.status);
+    expect(['assistant_action_not_allowed', 'assistant_confirmation_state_changed']).toContain(
+      res.body.code,
+    );
+    expect(writesTo(recorder, APPROVE)).toEqual([]);
+    expect((await responseRow(ctx, responseId)).status).toBe('cancelled');
+    expect(await decisionAudits(responseId)).toBe(0);
+  });
+
+  it('(f) approve and rollback need re-authentication (401 assistant_reauth_required without it)', async () => {
+    const responseId = await requestedThroughChat();
+    await closeReauthWindow(ctx, approver);
+    const approve = await propose(
+      ctx,
+      approver,
+      directive('ato_responses_approve', { responseId, body: { reason: 'Confirmed by phone' } }),
+    );
+    expect(approve.confirmation).toMatchObject({ risk: 'high', requiresReauth: true });
+    const refused = await confirm(ctx, approver, approve);
+    expect(refused.status).toBe(401);
+    expect(refused.body.code).toBe('assistant_reauth_required');
+    expect((await responseRow(ctx, responseId)).status).toBe('pending_approval');
+    const approved = await confirm(ctx, approver, approve, {
+      reauth: await reauthOf(fx, approver),
+    });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(approved.body.confirmation.status).toBe('executed');
+    expect((await responseRow(ctx, responseId)).status).toBe('succeeded');
+
+    await closeReauthWindow(ctx, approver);
+    await responseVisible(ctx, approver, responseId, 'succeeded');
+    const rollback = await propose(
+      ctx,
+      approver,
+      directive('ato_responses_rollback', { responseId, body: { reason: 'Lift it again' } }),
+    );
+    expect(rollback.confirmation).toMatchObject({ risk: 'high', requiresReauth: true });
+    const unauthenticated = await confirm(ctx, approver, rollback);
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.body.code).toBe('assistant_reauth_required');
+    expect((await responseRow(ctx, responseId)).status).toBe('succeeded');
+    const lifted = await confirm(ctx, approver, rollback, { reauth: await reauthOf(fx, approver) });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+    expect((await responseRow(ctx, responseId)).status).toBe('rolled_back');
+  });
+  it('(g) guards regressed: the requester’s chat-confirmed approve / reject reaches the api and is refused (403 ato_approval_self)', async () => {
+    const responseId = await requestedThroughChat();
+    // Simulate a regression of the assistant's guards (both are registry-driven): the api and
+    // this suite share the package's spec objects, so removing `guards` disables them for the
+    // proposal and for the confirm-time re-check. Restored in `finally`.
+    const specs = ['AtoResponsesController_approve_v1', 'AtoResponsesController_reject_v1'].map(
+      (operationId) => confirmationSpecOf(operationId) as { guards?: unknown },
+    );
+    const saved = specs.map((spec) => spec.guards);
+    expect(saved.every((guards) => Array.isArray(guards) && guards.length > 0)).toBe(true);
+    const recorder = recordLoopback(ctx);
+    const outcomes: Array<{ verb: string; res: Awaited<ReturnType<typeof confirm>> }> = [];
+    try {
+      for (const spec of specs) delete spec.guards;
+      for (const [tool, verb] of [
+        ['ato_responses_approve', 'approve'],
+        ['ato_responses_reject', 'reject'],
+      ] as const) {
+        const proposal = await propose(
+          ctx,
+          requester,
+          directive(tool, { responseId, body: { reason: 'Deciding my own request' } }),
+        );
+        expect(proposal.confirmation).toMatchObject({ tool, status: 'pending' });
+        outcomes.push({
+          verb,
+          res: await confirm(ctx, requester, proposal, {
+            reauth: await reauthOf(fx, requester),
+          }),
+        });
+      }
+    } finally {
+      specs.forEach((spec, i) => (spec.guards = saved[i]));
+      recorder.restore();
+    }
+    for (const { verb, res } of outcomes) {
+      expect(res.status, `${verb}: ${JSON.stringify(res.body)}`).toBe(200);
+      expect(res.body.confirmation).toMatchObject({
+        status: 'failed',
+        result: { httpStatus: 403, error: 'ato_approval_self' },
+      });
+      expect(res.body.execution).toMatchObject({ status: 'failed', httpStatus: 403 });
+      const row = await confirmationRow(ctx, res.body.confirmation.id as string);
+      expect(row.status).toBe('failed');
+    }
+    // The requests really reached the api's decision routes (one each), and it refused them.
+    expect(writesTo(recorder, APPROVE)).toHaveLength(1);
+    expect(writesTo(recorder, REJECT)).toHaveLength(1);
+    expect((await responseRow(ctx, responseId)).status).toBe('pending_approval');
+    expect(await decisionAudits(responseId)).toBe(0);
+    // The guards are back: the same request is denied before anything is stored.
+    const after = await single(requester, 'ato_responses_approve', {
+      responseId,
+      body: { reason: 'Deciding my own request' },
+    });
+    await expectGuardDenied(after, 'ato_responses_approve', 'not_self_field', FOUR_EYES);
   });
 });

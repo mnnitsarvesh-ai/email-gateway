@@ -1,6 +1,6 @@
 # AI security standards
 
-Security rules of the AI assistant. Normative sources: [design §2.0 (I1–I8), D2, D5, D8–D11](../plan/steps/28-ai-chat-management.md#2-decisions), [AI-2 design §2.0 (I9–I11), D1–D3, D10, D11](../plan/steps/29-ai-chat-confirmations-mail-writes.md#2-decisions), [AI-3 design §2.0 (I12–I14), D2–D4, D9–D11](../plan/steps/30-ai-chat-identity-tenant-admin.md#2-decisions), [ADR-0091](../architecture/adr/0091-assistant-architecture-loopback-tools.md), [ADR-0092](../architecture/adr/0092-llm-provider-abstraction-and-data-handling.md), [ADR-0093](../architecture/adr/0093-assistant-action-confirmation.md), [ADR-0094](../architecture/adr/0094-assistant-conversation-storage-retention-audit.md). Related: [docs/security/rbac.md](../security/rbac.md#ai-assistant-step-ai-1), [CHAT_RBAC_MAPPING.md](CHAT_RBAC_MAPPING.md), [CHAT_AUDIT_DESIGN.md](CHAT_AUDIT_DESIGN.md).
+Security rules of the AI assistant. Normative sources: [design §2.0 (I1–I8), D2, D5, D8–D11](../plan/steps/28-ai-chat-management.md#2-decisions), [AI-2 design §2.0 (I9–I11), D1–D3, D10, D11](../plan/steps/29-ai-chat-confirmations-mail-writes.md#2-decisions), [AI-3 design §2.0 (I12–I14), D2–D4, D9–D11](../plan/steps/30-ai-chat-identity-tenant-admin.md#2-decisions), [AI-4 design §2.0 (I18–I21)](../plan/steps/32-ai-chat-security-operations.md#2-decisions), [ADR-0091](../architecture/adr/0091-assistant-architecture-loopback-tools.md), [ADR-0092](../architecture/adr/0092-llm-provider-abstraction-and-data-handling.md), [ADR-0093](../architecture/adr/0093-assistant-action-confirmation.md), [ADR-0094](../architecture/adr/0094-assistant-conversation-storage-retention-audit.md). Related: [docs/security/rbac.md](../security/rbac.md#ai-assistant-step-ai-1), [CHAT_RBAC_MAPPING.md](CHAT_RBAC_MAPPING.md), [CHAT_AUDIT_DESIGN.md](CHAT_AUDIT_DESIGN.md).
 
 ## Starting assumption
 
@@ -144,8 +144,60 @@ Anything else is refused with `denied_guard` (`report_recipient_not_allowed`). T
 - **A copy in a recipient's mailbox is outside the platform's control**: it cannot be recalled, purged or expired by the platform (stated in the confirmation warnings: "Emails cannot be recalled after sending."; the recipient can forward it).
 - The email event carries ids only (`deliveryId`, `reportId`, `requestedAt`): no address, figure or HTML passes the broker; the worker reads the object with the SHA-256 and size checked against the row.
 
-## Not verified in AI-1, AI-2, AI-3 and AI-R
+## Security operations rules (step AI-4)
+
+Normative sources: [design note 32 §2.0 (I18–I21), D2–D4, D9, D11, D13](../plan/steps/32-ai-chat-security-operations.md#2-decisions), ADR-0093 "Amendment AI-4" (q)–(u), contracts §35.4.
+
+### Invariants
+
+| #   | Invariant                                                                                                                                                                                   | Enforced by                                                                                                                                                                                                                                                                                                                                                           |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| I18 | **Four eyes stay four eyes.** No ATO response is approved or rejected through chat by its requester or by the creator of the requesting API key; chat never creates a second approval path. | After-read guards `not_self_field` (`requestedBy.id`) and `require_read_value` (`canDecide = true`) on `ato_responses_approve` / `_reject` at proposal and again at confirm; the api's `403 ato_approval_self` stays the authority (`assistant-separation-of-duties.test.ts`, `security-operations.test.ts`, `assistant.e2e.test.ts`, Playwright `assistant.spec.ts`) |
+| I19 | **Platform tools never reach tenant principals.**                                                                                                                                           | `platformOnly` + `satisfiesRequirement`; override principals carry tenant permissions only; forced calls `denied_permission` without a loopback request (`security-operations.test.ts`, `assistant-tools.test.ts`)                                                                                                                                                    |
+| I20 | **Weakening detection needs re-authentication.**                                                                                                                                            | Base risk `high` (D2) or conditional escalation (D4) stored as the confirmation's risk; confirm recomputes it (`409 assistant_confirmation_tool_changed` on a difference)                                                                                                                                                                                             |
+| I21 | **No content to the model, no secret through chat.**                                                                                                                                        | Tool set (evidence, purge, export and credential operations are not applicable); `redactParams` on `dlp_patterns_test`                                                                                                                                                                                                                                                |
+
+### Weakening detection is `high` (I20)
+
+Base risk `high` (manifest `RISK_OVERRIDES`): `ato_accounts_add_trusted_context`, `bec_trusted_senders_create`, `dlp_exceptions_create`, `ato_settings_update`, `ato_providers_update` (the body carries the whole settings document, including which response actions the gateway may take in the tenant's identity provider). Deletions keep `high` even when they strengthen detection (A4-8). Escalation table (fixed English warnings, appended to the card):
+
+| Tool                                                   | Condition                                                                                                                                                                | Risk   |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| `ato_accounts_update`                                  | `body.protected = true`                                                                                                                                                  | high   |
+| `ato_accounts_set_override`                            | `body.verdict = 'benign'`                                                                                                                                                | high   |
+| `ato_providers_create`                                 | `body.settings` present                                                                                                                                                  | high   |
+| `incidents_update`                                     | `body.status = 'resolved'`                                                                                                                                               | medium |
+| `incidents_update`                                     | `body.status = 'false_positive'`, or `body.categoryFeedback` present                                                                                                     | high   |
+| `bec_message_feedback_record`                          | `body.suppress` present                                                                                                                                                  | high   |
+| `bec_trusted_senders_update`                           | `body.expiresAt` present                                                                                                                                                 | high   |
+| `bec_executives_update`                                | `body.enabled = false`, or `body.knownAddresses` present                                                                                                                 | high   |
+| `bec_vendors_update`                                   | `body.enabled = false`, `body.knownSenders` or `body.domains` present, or `body.paymentChangeSensitive = false`                                                          | high   |
+| `bec_executives_create`                                | `body.knownAddresses` present                                                                                                                                            | high   |
+| `bec_vendors_create`                                   | `body.knownSenders` or `body.domains` present, or `body.paymentChangeSensitive = false` (`domains` is required on create, so every vendor create through chat is `high`) | high   |
+| `dlp_policies_update`                                  | `body.enabled = false` or `body.mode = 'monitor'`                                                                                                                        | high   |
+| `dlp_policies_create_rule`, `dlp_policies_update_rule` | `body.action = 'allow'` (update also `body.enabled = false`)                                                                                                             | high   |
+| `dlp_patterns_update`, `dlp_dictionaries_update`       | `body.enabled = false`                                                                                                                                                   | high   |
+| `dlp_patterns_update`                                  | `body.pattern` present                                                                                                                                                   | medium |
+| `dlp_exceptions_update`                                | `body.enabled = true`, `body.expiresAt` or `body.filters` present                                                                                                        | high   |
+
+A prompt-injected model can at most propose such a change; the user then sees a `high` card with the warning and must enter the password and the authenticator code.
+
+### DLP sample redaction (D9)
+
+`POST /dlp/patterns/test` promises that the sample and the pattern are never logged, audited or echoed. Through chat (`dlp_patterns_test`) both are replaced by `[redacted]` in `ai_chat_tool_executions.params_redacted`, in the `assistant.tool_executed` / `assistant.tool_denied` audit params and in log output (tested: the stored row, the audit row, the execution view and the captured logger never contain them; the loopback body does). Limitation: the user's typed text and the model's tool call are conversation content and stay until retention purges them (A4-4). Prompt rule 14 tells the model to test only the sample the user typed, never message content.
+
+### What stays portal-only
+
+Provider connection creation, credential upload and OAuth consent (AI-5 / portal), DLP evidence read and purge, BEC history purge and feedback export (critical or content), file exports, and every `critical` operation. ATO responses are decided only through the existing approval model (approve/reject/cancel/rollback with the user's own token, MFA session and `ato:respond`); low-impact gateway actions (alert, notify, escalate, record manual action) run without a second person as in the portal (A4-9), but through chat they still need the card and re-authentication.
+
+### Untrusted fields added in AI-4
+
+Response `requestReason`, `decisionReason`, `rollbackReason`, `params.description` (another user's or an API key's text); mailbox `items[].targetDomain` and `identities[].userPrincipalName`; dry-run explanation text, parameters and unmapped codes; suppression `senderValue`; threat indicator `value`. Card values from these fields are marked untrusted and never appear in a title, action sentence, impact line or warning.
+
+## Not verified in AI-1, AI-2, AI-3, AI-R and AI-4
 
 A real provider call (Anthropic, OpenAI, Azure OpenAI) has not been made (so whether a real model respects the AI-3 prompt rules is untested; the server-side controls above do not depend on it): the provider adapters are tested against recorded synthetic fixtures through an injected `fetch`. Egress restrictions for the provider endpoint (Kubernetes NetworkPolicy) are an AI-6 item. See [CHAT_TESTING_REPORT.md](CHAT_TESTING_REPORT.md).
 
 Not verified for AI-R: how real mail clients render the HTML body and the attachment (Gmail and Outlook desktop are known not to render inline SVG; every chart has a data table and the attachment opens in a browser), whether a real model follows prompt rule 13 (`assistant-system/4`), and the Kubernetes IAM policy of the notification-worker (`s3:GetObject` on `org/*/assistant/report/*` only).
+
+Not verified for AI-4: whether a real model follows prompt rule 14 (`assistant-system/5`), real Microsoft/Google identity-provider tenants behind the IdP integration tools (provider-fake and idp-simulator only), CI and Kubernetes.

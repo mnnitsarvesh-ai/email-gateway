@@ -11,6 +11,13 @@ import type { ConfirmationSpec } from './specs';
  * again (refusal `403 assistant_action_not_allowed`).
  *
  * Messages are fixed server-authored English and never contain an argument value.
+ *
+ * Step AI-4 (design 32 D3, ADR-0093 amendment AI-4 (q), (r); invariant I18 "four eyes stay four
+ * eyes") adds two `after_read` kinds that look at the precondition target instead of an argument:
+ * `not_self_field` (a user id of the read is not the caller) and `require_read_value` (a field of
+ * the read has the required value, fail closed). They make the ATO approval model's
+ * separation of duties visible before anything is stored; the api's `ato_self_approval` refusal
+ * stays the authority.
  */
 
 export const GUARD_MESSAGES = {
@@ -19,6 +26,8 @@ export const GUARD_MESSAGES = {
     'The assistant cannot turn itself on or off for an organization. Use the Organizations page in the portal.',
   assistant_configure:
     'The assistant cannot change who may configure it. Change roles that grant assistant:configure in the portal.',
+  ato_four_eyes:
+    'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.',
 } as const;
 export type GuardMessageKey = keyof typeof GUARD_MESSAGES;
 
@@ -38,7 +47,35 @@ export type ProposalGuard =
       beforeField?: 'permissions';
       permissions: readonly string[];
       message: GuardMessageKey;
+    }
+  /**
+   * The read's `field` (a user public id) must not be the caller (case-insensitive UUID
+   * compare), optionally only when the read's `when.field` equals `when.equals`. A missing field
+   * passes (the second guard and the api decide). An `after_read` guard (step AI-4 D3).
+   */
+  | {
+      kind: 'not_self_field';
+      field: string;
+      when?: ReadCondition;
+      message: GuardMessageKey;
+    }
+  /**
+   * The read's `field` must equal `equals`, optionally only when `when` holds; a missing or
+   * non-matching field refuses (fail closed). An `after_read` guard (step AI-4 D3).
+   */
+  | {
+      kind: 'require_read_value';
+      field: string;
+      equals: string | boolean;
+      when?: ReadCondition;
+      message: GuardMessageKey;
     };
+
+/** A condition on the precondition target: the field strictly equals the string. */
+export interface ReadCondition {
+  field: string;
+  equals: string;
+}
 
 export type GuardKind = ProposalGuard['kind'];
 
@@ -60,9 +97,15 @@ export type GuardPhase = 'before_read' | 'after_read';
 
 /** The phase a guard is evaluated in. */
 export function guardPhase(guard: ProposalGuard): GuardPhase {
+  if (guard.kind === 'not_self_field' || guard.kind === 'require_read_value') return 'after_read';
   return guard.kind === 'deny_permission_change' && guard.beforeField !== undefined
     ? 'after_read'
     : 'before_read';
+}
+
+/** Whether a guard's `when` holds for the read (no `when`: always). */
+function readConditionHolds(when: ReadCondition | undefined, read: unknown): boolean {
+  return when === undefined || valueAtPath(read, when.field) === when.equals;
 }
 
 const normalized = (value: unknown): string | null =>
@@ -103,13 +146,25 @@ function refuses(guard: ProposalGuard, input: GuardInput): boolean {
         (permission) => before.has(permission) !== after.has(permission),
       );
     }
+    case 'not_self_field': {
+      if (!readConditionHolds(guard.when, input.read)) return false;
+      const target = normalized(valueAtPath(input.read, guard.field));
+      const self = normalized(input.principalUserPublicId);
+      return target !== null && self !== null && target.length > 0 && target === self;
+    }
+    case 'require_read_value': {
+      if (!readConditionHolds(guard.when, input.read)) return false;
+      // Fail closed: a missing or different value refuses.
+      return valueAtPath(input.read, guard.field) !== guard.equals;
+    }
   }
 }
 
 /**
  * The first refusal of the spec's guards of the given phase, or null. `before_read` evaluates
  * `not_self_user`, `deny_values` and `deny_permission_change` without `beforeField` (no read
- * needed); `after_read` evaluates `deny_permission_change` with `beforeField` on `input.read`.
+ * needed); `after_read` evaluates `deny_permission_change` with `beforeField`, `not_self_field`
+ * and `require_read_value` on `input.read` (the precondition target).
  */
 export function guardRefusal(
   spec: Pick<ConfirmationSpec, 'guards'>,
@@ -143,6 +198,8 @@ export function guardMessageOf(spec: Pick<ConfirmationSpec, 'guards'> | undefine
 
 /** The argument paths a guard reads (registry consistency: each must exist in the write's schema). */
 export function guardArgumentPaths(guard: ProposalGuard): string[] {
+  // The after-read kinds of step AI-4 read the precondition target, never an argument.
+  if (guard.kind === 'not_self_field' || guard.kind === 'require_read_value') return [];
   return [guard.arg];
 }
 
@@ -155,5 +212,9 @@ export function guardNote(guard: ProposalGuard): string {
       return `guard: ${guard.arg} ≠ ${guard.values.join('/')}`;
     case 'deny_permission_change':
       return `guard: no change of ${guard.permissions.join('/')}`;
+    case 'not_self_field':
+      return 'guard: not requester';
+    case 'require_read_value':
+      return `guard: ${guard.field} = ${String(guard.equals)}`;
   }
 }

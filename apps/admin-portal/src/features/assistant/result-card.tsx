@@ -434,18 +434,49 @@ export function ErrorCard({ card, onNavigate }: { card: AssistantCard; onNavigat
   );
 }
 
+/**
+ * Portal pages that settle a guard refusal (step AI-4 D10): the four-eyes guard on an ATO response
+ * decision points to the Responses page, where another responder decides it.
+ */
+const GUARD_LINKS: Readonly<Record<string, CardLink>> = {
+  ato_responses_approve: { label: 'Responses', href: '/ato/responses' },
+  ato_responses_reject: { label: 'Responses', href: '/ato/responses' },
+};
+
+/** The page link a denied card offers for `tool` (allow-listed routes only), or `null`. */
+export function deniedLinkOf(
+  tool: string | undefined,
+  decision: Exclude<ExecutionDecision, 'allowed'>,
+): CardLink | null {
+  if (decision !== 'denied_guard' || !tool) return null;
+  const link = GUARD_LINKS[tool];
+  if (!link) return null;
+  const href = safePortalHref(link.href);
+  return href ? { ...link, href } : null;
+}
+
 /** A refused tool call (`tool.denied` or a stored denied execution). */
 export function DeniedCard({
   title,
   decision,
   message,
+  tool,
+  onNavigate,
 }: {
   title: string;
   decision: Exclude<ExecutionDecision, 'allowed'>;
   message: string;
+  /** The tool name: selects a page link for some guard refusals (step AI-4). */
+  tool?: string;
+  onNavigate?: () => void;
 }) {
+  const link = deniedLinkOf(tool, decision);
   return (
-    <CardFrame title={title} tone="muted">
+    <CardFrame
+      title={title}
+      tone="muted"
+      footer={link ? <PageLinks links={[link]} onNavigate={onNavigate} /> : undefined}
+    >
       <div className="flex items-start gap-2">
         <LockIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="grid gap-1">

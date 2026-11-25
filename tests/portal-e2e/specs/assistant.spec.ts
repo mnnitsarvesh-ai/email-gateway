@@ -1181,3 +1181,268 @@ test.describe('phone viewport (reports)', () => {
     await expectNoSeriousA11yViolations(page, 'report card on a phone');
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-4: security operations through chat (design 32 §9 item 6, D3, D10, D12; I18, I20).
+// ---------------------------------------------------------------------------------------------
+
+const FOUR_EYES =
+  'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it';
+const RESPONSE_REASON = 'E2E outbound burst from the account after a phishing report';
+
+/** The newest ATO response of delta (writer). */
+async function newestDeltaResponse() {
+  return writerDb().atoResponseAction.findFirst({
+    where: { organizationId: await deltaOrganizationId() },
+    select: {
+      publicId: true,
+      actionType: true,
+      status: true,
+      requestedByType: true,
+      requestedById: true,
+      approvedByUserId: true,
+    },
+    orderBy: { id: 'desc' },
+  });
+}
+
+async function deltaUserIds(email: string): Promise<{ id: bigint; publicId: string }> {
+  return writerDb().user.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId(), email },
+    select: { id: true, publicId: true },
+  });
+}
+
+/** Opens a new conversation on `/assistant` as `key` and returns the conversation region. */
+async function openAssistantPage(page: Page, key: 'deltaResponderA' | 'deltaResponderB') {
+  await signIn(page, key, { next: '/assistant' });
+  await expect(page.getByRole('heading', { level: 1, name: 'AI assistant' })).toBeVisible();
+  await page
+    .getByRole('complementary', { name: 'Conversation history' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+  return page.getByRole('region', { name: 'Conversation' });
+}
+
+/** Fills password and authenticator code of a high-risk card and confirms it. */
+async function confirmWithReauth(
+  card: ReturnType<Page['locator']>,
+  key: 'deltaResponderA' | 'deltaResponderB',
+): Promise<void> {
+  const identity = card.getByRole('group', { name: 'Confirm your identity' });
+  await identity.getByLabel('Your password (required)', { exact: true }).fill(user(key).password);
+  await identity
+    .getByLabel('Authenticator code (required)', { exact: true })
+    .fill(await nextTotp(key));
+  await card.getByRole('button', { name: 'Confirm', exact: true }).click();
+}
+
+test('security operations: four eyes for an ATO response in chat, and a DLP dictionary', async ({
+  page,
+  browser,
+}) => {
+  test.setTimeout(420_000);
+  const target = readState().assistant.delta.ato;
+  const tag = Date.now().toString(36);
+  const dictionary = `E2E terms ${tag}`;
+  const responderA = user('deltaResponderA');
+  const responderB = user('deltaResponderB');
+  expect(
+    await writerDb().atoResponseAction.count({
+      where: { organizationId: await deltaOrganizationId(), status: 'pending_approval' },
+    }),
+    'a fresh seed (no pending response in delta)',
+  ).toBe(0);
+
+  // (a) Analyst A requests a gateway response through chat: a high-risk card with the approval
+  // line; after the password and the authenticator code the response waits for approval.
+  const conversationA = await openAssistantPage(page, 'deltaResponderA');
+  await ask(
+    page,
+    conversationA,
+    `/tool ato_responses_request ${JSON.stringify({
+      incidentId: target.incidentId,
+      body: { actionType: 'restrict_smtp_sending', durationMinutes: 60, reason: RESPONSE_REASON },
+    })}`,
+  );
+  await expectTurnDone(conversationA);
+  const requestCard = confirmationCard(conversationA, 'Request ATO response');
+  await expect(requestCard).toBeVisible();
+  await expect(requestCard.getByText('High risk')).toBeVisible();
+  await expect(requestCard.getByRole('list', { name: 'Impact' })).toContainText(
+    "others wait for another responder's approval (you cannot approve your own request)",
+  );
+  await expectNoSeriousA11yViolations(page, 'ATO response request card (high risk)');
+  expect(await newestDeltaResponse()).toBeNull();
+  await confirmWithReauth(requestCard, 'deltaResponderA');
+  await expect(
+    requestCard.getByText(
+      'Requested. If this action needs approval, another responder must approve it before it runs (you cannot approve your own request).',
+    ),
+  ).toBeVisible({ timeout: 30_000 });
+  const requested = await newestDeltaResponse();
+  expect(requested).toMatchObject({
+    actionType: 'restrict_smtp_sending',
+    status: 'pending_approval',
+    requestedByType: 'user',
+    requestedById: (await deltaUserIds(responderA.email)).publicId,
+    approvedByUserId: null,
+  });
+  await expectNoSeriousA11yViolations(page, 'ATO response requested (outcome)');
+
+  // (b) The requester asks to approve it: the four-eyes guard refuses before anything is stored
+  // (I18): a "Not allowed in chat" card with the Responses link, no confirmation card.
+  const beforeSelf = await newestConfirmationId();
+  await ask(page, conversationA, 'approve the pending response');
+  await expectTurnDone(conversationA);
+  const denied = conversationA
+    .getByRole('region', { name: /^Result: / })
+    .filter({ hasText: 'Not allowed in chat' })
+    .last();
+  await expect(denied).toBeVisible();
+  await expect(denied).toContainText(FOUR_EYES);
+  await expect(denied).not.toContainText('denied_guard');
+  await expect(denied.getByRole('button')).toHaveCount(0);
+  await expect(denied.getByRole('link', { name: 'Open Responses in the portal' })).toHaveAttribute(
+    'href',
+    '/ato/responses',
+  );
+  await expect(confirmationCard(conversationA, 'Approve ATO response')).toHaveCount(0);
+  expect(await newestConfirmationId()).toBe(beforeSelf);
+  const refused = await writerDb().aiChatToolExecution.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId(), toolName: 'ato_responses_approve' },
+    select: { decision: true, httpStatus: true },
+    orderBy: { id: 'desc' },
+  });
+  expect(refused).toEqual({ decision: 'denied_guard', httpStatus: null });
+  expect((await newestDeltaResponse())?.status).toBe('pending_approval');
+  await expectNoSeriousA11yViolations(page, 'four-eyes refusal (not allowed in chat)');
+
+  // (c) Analyst B (another responder, MFA session) approves it through chat: a high-risk card
+  // with the action, the account, the requester type and the reason; password + code; it runs.
+  const contextB = await browser.newContext();
+  try {
+    const pageB = await contextB.newPage();
+    const conversationB = await openAssistantPage(pageB, 'deltaResponderB');
+    await ask(pageB, conversationB, 'approve the pending response');
+    await expectTurnDone(conversationB);
+    const approveCard = confirmationCard(conversationB, 'Approve ATO response');
+    await expect(approveCard).toBeVisible();
+    await expect(approveCard.getByText('High risk')).toBeVisible();
+    const applies = approveCard.getByRole('table', { name: 'What it applies to' });
+    await expect(applies).toContainText('block outbound SMTP sending');
+    await expect(applies).toContainText(target.accountId);
+    await expect(applies).toContainText('Requested by');
+    await expect(applies).toContainText('user');
+    await expect(applies).toContainText(RESPONSE_REASON);
+    await expect(approveCard.getByRole('list', { name: 'Warnings' })).toContainText(
+      'Approving runs the action on the account.',
+    );
+    await expectNoSeriousA11yViolations(pageB, 'ATO response approval card (high risk)');
+    expect((await newestDeltaResponse())?.status).toBe('pending_approval');
+    await confirmWithReauth(approveCard, 'deltaResponderB');
+    await expect(approveCard.getByText('Done: the action was applied.')).toBeVisible({
+      timeout: 30_000,
+    });
+    const approved = await newestDeltaResponse();
+    expect(approved?.publicId).toBe(requested?.publicId);
+    expect(approved?.approvedByUserId).toBe((await deltaUserIds(responderB.email)).id);
+    expect(['approved', 'executing', 'succeeded']).toContain(approved?.status);
+    const confirmation = await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+      where: { id: (await newestConfirmationId())! },
+      select: { status: true, reauthUsed: true, toolName: true, risk: true },
+    });
+    expect(confirmation).toEqual({
+      status: 'executed',
+      reauthUsed: true,
+      toolName: 'ato_responses_approve',
+      risk: 'high',
+    });
+    const responses = await contextB.newPage();
+    await expectListed(
+      responses,
+      '/ato/responses?tab=all',
+      'Responses',
+      'Restrict SMTP sending',
+      'Succeeded',
+    );
+    await expectNoSeriousA11yViolations(responses, 'Responses page after the chat approval');
+    await responses.close();
+
+    // (d) A DLP dictionary from the fake's plan: a low-risk card; Confirm creates it.
+    await pageB.bringToFront();
+    await ask(pageB, conversationB, `add dlp dictionary "${dictionary}" with terms alpha, beta`);
+    await expectTurnDone(conversationB);
+    const dictionaryCard = confirmationCard(conversationB, 'Create DLP dictionary');
+    await expect(dictionaryCard).toBeVisible();
+    await expect(dictionaryCard.getByText('Low risk')).toBeVisible();
+    await expect(dictionaryCard.getByRole('table', { name: 'Changes' })).toContainText(
+      '2 terms: alpha, beta',
+    );
+    await expect(dictionaryCard.getByRole('group', { name: 'Confirm your identity' })).toHaveCount(
+      0,
+    );
+    await expectNoSeriousA11yViolations(pageB, 'DLP dictionary card (low risk)');
+    expect(
+      await writerDb().dlpKeywordDictionary.count({
+        where: { organizationId: await deltaOrganizationId(), name: dictionary },
+      }),
+    ).toBe(0);
+    await dictionaryCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(dictionaryCard.getByText('Done: the action was applied.')).toBeVisible({
+      timeout: 30_000,
+    });
+    const dlp = await contextB.newPage();
+    await expect(async () => {
+      await dlp.goto('/policies?tab=dlp');
+      await dlp
+        .getByRole('tablist', { name: 'DLP sections' })
+        .getByRole('tab', { name: 'Dictionaries', exact: true })
+        .click();
+      const section = dlp.getByRole('tabpanel', { name: 'Dictionaries', exact: true });
+      await expect(section.getByRole('row').filter({ hasText: dictionary })).toBeVisible({
+        timeout: 3_000,
+      });
+    }).toPass({ timeout: 45_000 });
+    await dlp.close();
+  } finally {
+    await contextB.close();
+  }
+});
+
+test.describe('phone viewport (security operations)', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('a DLP dictionary card fits the full-screen sheet', async ({ page }) => {
+    const dictionary = `E2E phone terms ${Date.now().toString(36)}`;
+    await signIn(page, 'deltaResponderA');
+    await expectLanded(page);
+    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    const sheet = panel(page);
+    await expect(sheet).toBeVisible();
+    await ask(page, sheet, `add dlp dictionary "${dictionary}" with terms alpha, beta`);
+    await expectTurnDone(sheet);
+    const card = confirmationCard(sheet, 'Create DLP dictionary');
+    await expect(card).toBeVisible();
+    await expect(card.getByText('Low risk')).toBeVisible();
+    const confirmButton = card.getByRole('button', { name: 'Confirm', exact: true });
+    const cancelButton = card.getByRole('button', { name: 'Cancel', exact: true });
+    await confirmButton.scrollIntoViewIfNeeded();
+    await expect(confirmButton).toBeInViewport();
+    await expect(cancelButton).toBeInViewport();
+    const box = await card.boundingBox();
+    expect((box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 999) <= 390).toBe(true);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    await expectNoSeriousA11yViolations(page, 'DLP dictionary card on a phone');
+    await cancelButton.click();
+    await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
+    expect(
+      await writerDb().dlpKeywordDictionary.count({
+        where: { organizationId: await deltaOrganizationId(), name: dictionary },
+      }),
+    ).toBe(0);
+  });
+});

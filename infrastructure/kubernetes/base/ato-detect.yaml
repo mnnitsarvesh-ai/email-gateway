@@ -57,6 +57,14 @@ spec:
             - { name: ATO_EVENTS_PREFETCH, value: '32' }
             - { name: ATO_MAIL_PREFETCH, value: '32' }
             - { name: ATO_TX_TIMEOUT_MS, value: '120000' }
+            # Writer pool per replica (step AI-4 D14): the ATO workers at HPA maximum, sum of
+            # maxReplicas x (connection limit + 1 lock connection), stay <= 60 % of the 80 %
+            # MySQL max_connections budget (144 of 300), leaving the rest to the other services:
+            # 8 x 13 (ato-detect) + 1 x 33 (ato-respond) = 137. Detection handlers hold short
+            # writer transactions and wait for a connection up to the pool timeout (>= the 30 s
+            # transaction maxWait). Checked by apps/ato-worker/src/deployment/connection-budget.test.ts.
+            - { name: ATO_DATABASE_CONNECTION_LIMIT, value: '12' }
+            - { name: ATO_DATABASE_POOL_TIMEOUT_SECONDS, value: '30' }
             - { name: ATO_SETTINGS_CACHE_SECONDS, value: '30' }
             - { name: ATO_REPUTATION_TIMEOUT_MS, value: '1500' }
             # Exploited-host DNSBL zones only (never policy lists such as PBL); empty = T2 unavailable.

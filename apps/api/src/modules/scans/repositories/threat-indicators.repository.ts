@@ -54,6 +54,9 @@ export class InconsistentIndicatorReadError extends Error {
   }
 }
 
+/** The largest BigInt Prisma binds (signed 64-bit); `threat_indicators.id` never reaches it. */
+const PRISMA_MAX_BIGINT = 9_223_372_036_854_775_807n;
+
 /** Indicator types the API manages; `email` / `file_sha256` rows are never listed or touched. */
 const MANAGED_TYPES: ThreatIndicatorType[] = ['url', 'domain', 'ip'];
 
@@ -88,6 +91,19 @@ export class ThreatIndicatorsRepository {
       select: indicatorSelect,
       orderBy: { id: 'desc' },
       take: page.take,
+    });
+  }
+
+  /**
+   * A platform indicator of a managed type by id (replica, writer fallback above the lag
+   * threshold; expired indicators included). Tenant rows and other types are `null`, and so is
+   * an id above the signed 64-bit range Prisma can bind (the path accepts the unsigned range).
+   */
+  async findPlatform(id: bigint): Promise<ThreatIndicatorRow | null> {
+    if (id > PRISMA_MAX_BIGINT) return null;
+    return this.reader.client.threatIndicator.findFirst({
+      where: { id, organizationId: null, indicatorType: { in: MANAGED_TYPES } },
+      select: indicatorSelect,
     });
   }
 

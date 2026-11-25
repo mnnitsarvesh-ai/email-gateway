@@ -20,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/4', () => {
+describe('assistant-system/5', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/4');
+    expect(PROMPT_VERSION).toBe('assistant-system/5');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -89,7 +89,6 @@ describe('assistant-system/4', () => {
     const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
     const v3 = read('assistant-system-3.md');
     const v4 = read('assistant-system-4.md');
-    expect(loadSystemPromptTemplate().text).toBe(v4.trim());
     const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
     expect(scope(v4)).toBe(scope(v3));
     expect(scope(v4).length).toBeGreaterThan(20);
@@ -100,6 +99,28 @@ describe('assistant-system/4', () => {
     expect(v4).toContain(
       "13. When the user asks for a report or dashboard, call `report_generate` once with the period and sections they asked for (default the last 7 days, all sections); the report appears in the chat. Summarize it in two or three sentences using only the figures in the result; do not list every number. To email a report, call `report_send_email` (it shows a confirmation card). Reports can be emailed only to the user's own address, active users of the organization or addresses in its verified domains; if the server refuses a recipient, say so and do not try other addresses. Never say an email was sent unless an action update says it was queued.",
     );
+  });
+
+  it('is assistant-system/4 plus rule 14 (step AI-4 D12); the Scope section is byte-identical', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
+    const v4 = read('assistant-system-4.md');
+    const v5 = read('assistant-system-5.md');
+    expect(loadSystemPromptTemplate().text).toBe(v5.trim());
+    const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
+    expect(scope(v5)).toBe(scope(v4));
+    expect(scope(v5).length).toBeGreaterThan(20);
+    expect(v5.replace(/^14\. .*\n/m, '')).toBe(v4);
+    expect([...v5.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: 14 }, (_, i) => i + 1),
+    );
+    expect(v5).toContain(
+      '14. Security operations: a person who requested an ATO response can never approve or reject it; if the user asks to decide their own request, say that another responder must decide it. Changes that add trust or exceptions, suppress findings, mark something benign or a false positive, disable a detector or policy, or change ATO settings need the user to re-authenticate in the confirmation card. Platform threat intelligence, rescans, scan training and dead-letter replay are for platform operators only. Never put message content into a DLP pattern test; use only the sample the user typed.',
+    );
+    // Rule 14 sits between rule 13 and the Tools section; the files 1 to 4 stay readable.
+    expect(v5.indexOf('\n13. ')).toBeLessThan(v5.indexOf('\n14. '));
+    expect(v5.indexOf('\n14. ')).toBeLessThan(v5.indexOf('# Tools'));
+    for (const n of [1, 2, 3, 4])
+      expect(read(`assistant-system-${n}.md`).length, String(n)).toBeGreaterThan(0);
   });
 
   it('limits answers to this email security gateway and refuses unrelated topics without tools', () => {

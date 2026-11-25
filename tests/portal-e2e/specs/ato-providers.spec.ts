@@ -51,14 +51,66 @@ async function simPost(path: string, body: unknown): Promise<void> {
   if (response.status !== 204) throw new Error(`idp-simulator ${path}: ${response.status}`);
 }
 
-async function until<T>(what: string, check: () => Promise<T | undefined>, ms = 180_000) {
+/**
+ * Polls `check` until it returns a value. On a timeout the error names `what` and, when given,
+ * the output of `diagnose` (state read at that moment, never secrets), so the cause is visible.
+ */
+async function until<T>(
+  what: string,
+  check: () => Promise<T | undefined>,
+  ms = 180_000,
+  diagnose?: () => Promise<string>,
+) {
   const deadline = Date.now() + ms;
   for (;;) {
     const value = await check().catch(() => undefined);
     if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() > deadline) {
+      const detail = diagnose
+        ? await diagnose().catch((error: unknown) => `diagnostics unavailable: ${String(error)}`)
+        : '';
+      throw new Error(`timed out waiting for ${what}${detail ? `\n${detail}` : ''}`);
+    }
     await new Promise((r) => setTimeout(r, 2_000));
   }
+}
+
+/**
+ * Scheduling state of this run's integration and its streams (step AI-4 D14): status, health and
+ * the next probe; per stream the status, next poll, consecutive failures and last error code. No
+ * secrets, no provider payloads.
+ */
+async function integrationDiagnostics(): Promise<string> {
+  const row = await prisma.atoProviderIntegration.findFirst({
+    where: { organizationId: alphaId, publicId: integrationId },
+    select: {
+      id: true,
+      status: true,
+      healthStatus: true,
+      healthCheckedAt: true,
+      nextHealthAt: true,
+    },
+  });
+  if (!row) return `integration ${integrationId || '(unset)'}: not found`;
+  const streams = await prisma.atoProviderStream.findMany({
+    where: { organizationId: alphaId, integrationId: row.id },
+    orderBy: { id: 'asc' },
+    select: {
+      stream: true,
+      status: true,
+      nextPollAt: true,
+      consecutiveFailures: true,
+      lastErrorCode: true,
+    },
+  });
+  const iso = (d: Date | null) => d?.toISOString() ?? 'null';
+  return [
+    `now=${new Date().toISOString()} integration status=${row.status} health_status=${row.healthStatus} health_checked_at=${iso(row.healthCheckedAt)} next_health_at=${iso(row.nextHealthAt)}`,
+    ...streams.map(
+      (s) =>
+        `  stream=${s.stream} status=${s.status} next_poll_at=${iso(s.nextPollAt)} consecutive_failures=${s.consecutiveFailures} last_error_code=${s.lastErrorCode ?? 'null'}`,
+    ),
+  ].join('\n');
 }
 
 const ROLES = [
@@ -358,6 +410,9 @@ test('backfill request, pause and resume', async ({ page }) => {
 });
 
 test('mailbox changes: remove an external forwarding rule through approval', async ({ page }) => {
+  // Longer than the 300 s wait below, so a timeout reports the integration diagnostics instead of
+  // being cut off by the test timeout (AI-4 gate, 2026-11-25).
+  test.setTimeout(480_000);
   const alex = await until(
     'the alex mailbox account and its incident',
     async () => {
@@ -375,6 +430,7 @@ test('mailbox changes: remove an external forwarding rule through approval', asy
       return incident && item ? account : undefined;
     },
     300_000,
+    integrationDiagnostics,
   );
   await signIn(page, 'alphaAnalyst', { next: `/ato/accounts/${alex.publicId}?tab=mailbox` });
   const items = page.getByRole('table', { name: 'Mailbox items' });

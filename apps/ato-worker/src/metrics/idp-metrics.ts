@@ -47,6 +47,7 @@ export class IdpMetrics {
   readonly probes: Counter<'provider' | 'result'>;
   readonly actions: Counter<'provider' | 'action' | 'outcome'>;
   readonly cursorResets: Counter<'provider' | 'stream'>;
+  readonly transientDbErrors: Counter<'loop' | 'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.requests = metrics.counter(
@@ -110,6 +111,16 @@ export class IdpMetrics {
       'Stream cursors restarted at now minus overlap (malformed or of another adapter version), by provider and stream',
       ['provider', 'stream'],
     );
+    this.transientDbErrors = metrics.counter(
+      'ato_idp_transient_db_errors_total',
+      'Transient database errors (pool timeout, unreachable, lost connection, lock conflict) of the IdP stream and probe loops, by loop (stream, probe) and outcome (retried, deferred); never counted as provider failures',
+      ['loop', 'outcome'],
+    );
+  }
+
+  /** One transient database error of an IdP loop (step AI-4 D14). */
+  transientDbError(loop: 'stream' | 'probe', outcome: 'retried' | 'deferred'): void {
+    this.transientDbErrors.inc({ loop, outcome });
   }
 
   // ------------------------------------------------------------------ IdpMetricsSink

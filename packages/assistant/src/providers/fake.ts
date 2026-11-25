@@ -26,6 +26,12 @@ import type {
  *   exactly one row) and "add domain <name>" (`domains_create`). A step's arguments may depend on
  *   the message and on the previous result; a step without arguments ends the plan with the
  *   previous result's summary.
+ * - Plans of step AI-4 (design 32 D12): "approve the pending (ATO) response"
+ *   (`ato_responses_list { status: pending_approval, limit: 1 }` → `ato_responses_approve` on
+ *   `@r<seq>.1` when the list returned one row), "open an incident for the account <address>"
+ *   (`ato_accounts_list { q, limit: 1 }` → `incidents_create` only for exactly one row and no
+ *   further page) and `add dlp dictionary "<name>" with terms a, b` (`dlp_dictionaries_create`,
+ *   name and terms in the user's own case, at most 20 terms).
  * - Follow-ups (D8): "disable/enable the second one" (the newest `policy_management_list` result),
  *   "publish it" (the newest succeeded `policy_management_create` of the action updates) and, step
  *   AI-3, "verify it" / "verify the domain" (the newest succeeded `domains_create`).
@@ -160,6 +166,8 @@ export interface PlanContext {
   match: RegExpExecArray;
   /** The previous tool result's envelope (parsed), or null for the first step. */
   previous: Record<string, unknown> | null;
+  /** The current user message as typed (not lower-cased; step AI-4: names keep their case). */
+  message: string;
 }
 
 interface PlanStep {
@@ -177,6 +185,21 @@ interface Plan {
 const emailOf = (value: string | undefined): string => (value ?? '').replace(/[.,;:!?)]+$/, '');
 
 export const FAKE_DISABLED_REASON = 'Disabled with the AI assistant';
+export const FAKE_APPROVED_REASON = 'Approved with the AI assistant';
+export const FAKE_INCIDENT_REASON = 'Opened with the AI assistant after a user report';
+/** Most terms the dictionary plan sends (step AI-4 D12). */
+export const FAKE_DICTIONARY_MAX_TERMS = 20;
+export const FAKE_DICTIONARY_PATTERN =
+  /\badd\s+(?:a\s+)?dlp\s+dictionary\s+"([^"]{1,80})"\s+with\s+terms\s+(.+)$/i;
+
+/** The single row ref `@r<seq>.1` of a list result with exactly one row (and no further page). */
+function singleRowRef(previous: Record<string, unknown> | null, allowMore: boolean): string | null {
+  const rows = Array.isArray(previous?.data) ? previous.data : [];
+  const ref = typeof previous?.ref === 'string' ? previous.ref : '';
+  if (rows.length !== 1 || !/^r\d+$/.test(ref)) return null;
+  if (!allowMore && previous?.hasMore === true) return null;
+  return `@${ref}.1`;
+}
 
 /** Multi-step demo intents (D8; step AI-3 D11). Tool names are registry names (checked by tests). */
 export const FAKE_PLANS: readonly Plan[] = [
@@ -252,6 +275,69 @@ export const FAKE_PLANS: readonly Plan[] = [
   {
     pattern: /\badd\s+(?:the\s+)?domain\s+([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/,
     steps: [{ tool: 'domains_create', args: ({ match }) => ({ body: { name: match[1]! } }) }],
+  },
+  // --- step AI-4 (design 32 D12) ---
+  {
+    pattern: /\bapprove\s+(?:the\s+)?(?:pending|latest)\s+(?:ato\s+)?response\b/i,
+    steps: [
+      {
+        tool: 'ato_responses_list',
+        args: () => ({ status: 'pending_approval', limit: '1' }),
+      },
+      {
+        tool: 'ato_responses_approve',
+        // The newest pending response (the list is sorted by -createdAt); none: the summary.
+        args: ({ previous }) => {
+          const responseId = singleRowRef(previous, true);
+          return responseId ? { responseId, body: { reason: FAKE_APPROVED_REASON } } : null;
+        },
+      },
+    ],
+  },
+  {
+    pattern: /\bopen\s+an?\s+incident\s+for\s+(?:the\s+)?account\s+(\S+@\S+)/i,
+    steps: [
+      // `q` is the account address prefix filter of `GET /ato/accounts`.
+      { tool: 'ato_accounts_list', args: ({ match }) => ({ q: emailOf(match[1]), limit: '1' }) },
+      {
+        tool: 'incidents_create',
+        // Only an unambiguous match: exactly one row and no further page.
+        args: ({ previous }) => {
+          const id = singleRowRef(previous, false);
+          return id
+            ? {
+                body: {
+                  category: 'account_takeover',
+                  subject: { type: 'ato_account', id },
+                  severity: 'high',
+                  reason: FAKE_INCIDENT_REASON,
+                },
+              }
+            : null;
+        },
+      },
+    ],
+  },
+  {
+    pattern: FAKE_DICTIONARY_PATTERN,
+    steps: [
+      {
+        tool: 'dlp_dictionaries_create',
+        args: ({ message }) => {
+          const found = FAKE_DICTIONARY_PATTERN.exec(message);
+          if (!found) return null;
+          const terms = found[2]!
+            .split(',')
+            .map((term) => term.trim().replace(/[.!?]+$/, ''))
+            .filter((term) => term.length > 0)
+            .slice(0, FAKE_DICTIONARY_MAX_TERMS);
+          if (terms.length === 0) return null;
+          return {
+            body: { name: found[1]!.trim(), category: 'custom', terms, severity: 'medium' },
+          };
+        },
+      },
+    ],
   },
 ];
 
@@ -627,7 +713,11 @@ export class FakeProvider implements LlmProvider {
       }
       if (plan && match && tail.every((result) => planMayContinue(result.content))) {
         const next = nextPlanStep(plan, transcript.slice(lastUserIndex + 1), inCatalogue);
-        const args = next?.args({ match, previous: parseRecord(tail[tail.length - 1]!.content) });
+        const args = next?.args({
+          match,
+          previous: parseRecord(tail[tail.length - 1]!.content),
+          message,
+        });
         if (next && args) return Promise.resolve(call(next.tool, args));
       }
       const text = tail.map((result) => summarizeResult(result.content)).join(' ');
@@ -660,7 +750,7 @@ export class FakeProvider implements LlmProvider {
 
     if (plan && match) {
       const first = nextPlanStep(plan, [], inCatalogue);
-      const args = first?.args({ match, previous: null });
+      const args = first?.args({ match, previous: null, message });
       return Promise.resolve(
         first && args
           ? call(first.tool, args)

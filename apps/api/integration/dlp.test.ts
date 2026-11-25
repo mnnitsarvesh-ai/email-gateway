@@ -26,6 +26,7 @@
 // @covers get /api/v1/dlp/dictionaries
 // @covers get /api/v1/dlp/dictionaries/:id
 // @covers get /api/v1/dlp/exceptions
+// @covers get /api/v1/dlp/exceptions/:id
 // @covers get /api/v1/dlp/incidents
 // @covers get /api/v1/dlp/policies
 // @covers get /api/v1/dlp/policies/:id
@@ -667,6 +668,31 @@ describe('exceptions (D12)', () => {
         return (res.body.data as { id: string }[] | undefined)?.map((e) => e.id);
       }, POLL)
       .toEqual([created.body.id]);
+    // Step AI-4 D8: the single read (replica) answers the list item's view, also for an API key
+    // with dlp:read, a disabled and an expired entry; 404 for another tenant or an unknown id.
+    const exceptionUrl = `/api/v1/dlp/exceptions/${created.body.id}`;
+    const one = await ctx.http.get(exceptionUrl).set(headers(readerKeyA)).expect(200);
+    expect(one.body).toEqual(updated.body);
+    await ctx.prisma.dlpException.updateMany({
+      where: { organizationId: orgA.id, publicId: created.body.id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await expect
+      .poll(
+        async () =>
+          ((await ctx.http.get(exceptionUrl).set(headers(analystA))).body as { expired?: boolean })
+            .expired,
+        POLL,
+      )
+      .toBe(true);
+    const foreignGet = await ctx.http.get(exceptionUrl).set(headers(adminB)).expect(404);
+    expect(foreignGet.body.code).toBe('dlp_exception_not_found');
+    const unknownGet = await ctx.http
+      .get(`/api/v1/dlp/exceptions/${randomUUID()}`)
+      .set(headers(analystA))
+      .expect(404);
+    expect(unknownGet.body.code).toBe('dlp_exception_not_found');
+    await ctx.http.get('/api/v1/dlp/exceptions/not-a-uuid').set(headers(analystA)).expect(400);
     await ctx.http
       .delete(`/api/v1/dlp/exceptions/${created.body.id}`)
       .set(headers(adminB))

@@ -61,11 +61,19 @@ function confirmCell(tool: OperationTool): string {
   return cell([tool.confirm, ...(spec?.escalate ?? []).map(escalationNote)].join(' '));
 }
 
-/** The chat tool cell: the name plus its proposal guards (step AI-3 D3), e.g. `(guard: not self)`. */
+/**
+ * The chat tool cell: the name plus its proposal guards (step AI-3 D3), e.g. `(guard: not self)`,
+ * and its redacted inputs (step AI-4 D9), e.g. `(redacted: body.sample, …)`.
+ */
 function toolCell(tool: OperationTool): string {
   const spec = tool.access === 'write' ? confirmationSpecOf(tool.operationId) : undefined;
-  const guards = [...new Set((spec?.guards ?? []).map(guardNote))];
-  return `\`${tool.name}\`${guards.length > 0 ? ` (${cell(guards.join('; '))})` : ''}`;
+  const notes = [...new Set((spec?.guards ?? []).map(guardNote))];
+  const redacted = tool.redactParams;
+  if (redacted.length > 0)
+    notes.push(
+      `redacted: ${redacted.join(', ')}, stored as [redacted] in execution and audit rows; the values stay in the conversation until retention purges it`,
+    );
+  return `\`${tool.name}\`${notes.length > 0 ? ` (${cell(notes.join('; '))})` : ''}`;
 }
 
 function toolRow(tool: OperationTool): MatrixRow {
@@ -149,7 +157,7 @@ export function renderMatrix(
         : 'writes need the confirmation manager of AI-2'
     }).`,
     '',
-    'Every portal action is an API operation (ADR-0063), so this operation-level table is the complete UI-to-chat matrix. Confirm `↑ <risk> when <argument>` marks a conditional risk escalation (the stored confirmation risk is raised when the final arguments touch that field); `(guard: …)` after a chat tool marks a proposal guard (for example `not self`: the tool refuses the signed-in user’s own account). Statuses: `IMPLEMENTED` (an enabled chat tool with test coverage), `PARTIALLY_IMPLEMENTED` (enabled with limitations), `MISSING` (classified, planned for the phase shown), `NOT_APPLICABLE` (never a chat tool; the reason is given and the chat links to the portal page). Columns: R/W access; risk `read`, `read_audited`, `low`, `medium`, `high`, `critical`; confirm `none`, `confirm`, `confirm+impact`, `confirm+impact+reauth`; Idem = `x-eg-idempotency`; Permission = `x-eg-permissions` (`a \\| b` any of, `a + b` all of).',
+    'Every portal action is an API operation (ADR-0063), so this operation-level table is the complete UI-to-chat matrix. Confirm `↑ <risk> when <argument>` marks a conditional risk escalation (the stored confirmation risk is raised when the final arguments touch that field); `(guard: …)` after a chat tool marks a proposal guard (for example `not self`: the tool refuses the signed-in user’s own account; `not requester`: the person who requested an ATO response cannot decide it); `(redacted: …)` marks inputs the platform stores as `[redacted]` in execution and audit rows. Statuses: `IMPLEMENTED` (an enabled chat tool with test coverage), `PARTIALLY_IMPLEMENTED` (enabled with limitations), `MISSING` (classified, planned for the phase shown), `NOT_APPLICABLE` (never a chat tool; the reason is given and the chat links to the portal page). Columns: R/W access; risk `read`, `read_audited`, `low`, `medium`, `high`, `critical`; confirm `none`, `confirm`, `confirm+impact`, `confirm+impact+reauth`; Idem = `x-eg-idempotency`; Permission = `x-eg-permissions` (`a \\| b` any of, `a + b` all of).',
     '',
     '## Totals',
     '',

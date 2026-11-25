@@ -201,11 +201,17 @@ describe('Policy version page (/policies/[id]/versions/[n], design B6–B9)', ()
     const { user } = renderWithProviders(ui, { route });
     await setPriority(user, '11');
     await user.click(screen.getByRole('button', { name: 'Save' }));
-    const row = await screen.findByRole('group', { name: /^Condition 2 of 2/ });
-    expect(await within(row).findByText('Not a domain')).toBeInTheDocument();
+    // Wait for the server verdict first (the condition row exists before the save); under a
+    // loaded parallel run the save round trip can exceed the default 1 s find timeout.
     expect(
-      screen.getByRole('heading', { name: 'The server reported 1 problem' }),
+      await screen.findByRole(
+        'heading',
+        { name: 'The server reported 1 problem' },
+        { timeout: 10_000 },
+      ),
     ).toBeInTheDocument();
+    const row = screen.getByRole('group', { name: /^Condition 2 of 2/ });
+    expect(within(row).getByText('Not a domain')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(
       await screen.findByText(

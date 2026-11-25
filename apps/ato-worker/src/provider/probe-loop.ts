@@ -22,6 +22,13 @@ import { IDP_FEATURE_OFF_RETRY_MS } from './stream-runner';
 import { big, orgFilter, type AtoDb, type Tx } from '../shared/db';
 import { errorCode, errorFields } from '../shared/errors';
 import { bindingSettingsOf, type IdpRuntime } from './idp-runtime';
+import {
+  deferDelayMs,
+  IDP_WRITE_ATTEMPTS,
+  isTransientDbFailure,
+  withTransientRetry,
+  type RetrySleep,
+} from './transient';
 
 /** Integrations probed per pass. */
 export const IDP_PROBE_BATCH = 10;
@@ -42,6 +49,8 @@ export const AUTO_PAUSE_REASONS = [
   'directory_changed',
   'directory_in_use',
 ] as const;
+/** Re-schedule cap after an unexpected (non-transient) probe exception (the "failed" cap). */
+export const IDP_PROBE_ERROR_RETRY_MS = 300_000;
 /** Probe codes that mean the integration cannot reach the provider at all (D6 "unhealthy"). */
 const PASSING_CODES = new Set([undefined, 'stream_unavailable']);
 
@@ -86,6 +95,11 @@ type Transition =
  */
 export class IdpProbeLoop {
   private lastStatusAt = 0;
+  /**
+   * Consecutive deferrals per integration id after transient database errors (step AI-4 D14);
+   * reset when a probe completes. In-process only.
+   */
+  private readonly deferrals = new Map<string, number>();
 
   constructor(
     private readonly deps: {
@@ -99,20 +113,32 @@ export class IdpProbeLoop {
       now: () => Date;
       config: IdpProbeConfig;
       organizationIds?: readonly bigint[];
+      /** Test seam: the wait between transient retries (default: a timer). */
+      retrySleep?: RetrySleep;
     },
   ) {}
 
   /** One pass; true when more integrations may be due. */
   async runOnce(): Promise<boolean> {
     const rows = await this.claim();
+    let rescheduleError: Error | undefined;
     for (const row of rows) {
       try {
         await this.probe(row);
+        this.deferrals.delete(row.id.toString());
       } catch (error) {
-        this.deps.logger.warn(
-          { integrationId: row.id.toString(), ...errorFields(error) },
-          'ato idp probe failed',
-        );
+        // The claim leased the integration for a whole health interval: a probe that threw is
+        // re-scheduled instead (D14), so a database outage costs seconds, not 15 minutes.
+        try {
+          await this.reschedule(row, error);
+        } catch (writeError) {
+          this.deps.logger.warn(
+            { integrationId: row.id.toString(), ...errorFields(writeError) },
+            'ato idp probe re-schedule failed',
+          );
+          rescheduleError ??=
+            writeError instanceof Error ? writeError : new Error('probe_reschedule_failed');
+        }
       }
     }
     const now = this.deps.now().getTime();
@@ -120,13 +146,82 @@ export class IdpProbeLoop {
       this.lastStatusAt = now;
       await this.reportStatus().catch(() => undefined);
     }
+    // The pass failed to hand an integration back: the Periodic loop's own back-off applies.
+    if (rescheduleError !== undefined) throw rescheduleError;
     return rows.length === IDP_PROBE_BATCH;
+  }
+
+  /**
+   * After a probe exception: a transient database error re-schedules `next_health_at` by
+   * 5–60 s (k-th deferral) without touching `health_status` or `last_error_code`; any other
+   * exception re-schedules after min(health interval, 300 s).
+   */
+  private async reschedule(row: AtoProviderIntegration, error: unknown): Promise<void> {
+    const key = row.id.toString();
+    let delayMs: number;
+    if (isTransientDbFailure(error)) {
+      const k = (this.deferrals.get(key) ?? 0) + 1;
+      this.deferrals.set(key, k);
+      delayMs = deferDelayMs(k);
+      this.deps.idpMetrics?.transientDbError('probe', 'deferred');
+      this.deps.logger.warn(
+        { integrationId: key, deferMs: delayMs, ...errorFields(error) },
+        'ato idp probe deferred after a transient database error',
+      );
+    } else {
+      delayMs = Math.min(this.deps.config.healthIntervalSeconds * 1000, IDP_PROBE_ERROR_RETRY_MS);
+      this.deps.logger.warn(
+        { integrationId: key, deferMs: delayMs, ...errorFields(error) },
+        'ato idp probe failed',
+      );
+    }
+    await this.write(() =>
+      this.deps.prisma.atoProviderIntegration.updateMany({
+        where: { id: row.id, organizationId: row.organizationId },
+        data: { nextHealthAt: new Date(this.deps.now().getTime() + delayMs) },
+      }),
+    );
+  }
+
+  /** A bounded retry of one idempotent write or read of the loop (transient errors only). */
+  private write<T>(fn: () => Promise<T>): Promise<T> {
+    return withTransientRetry(fn, {
+      attempts: IDP_WRITE_ATTEMPTS,
+      ...(this.deps.retrySleep ? { sleep: this.deps.retrySleep } : {}),
+      onRetry: () => this.deps.idpMetrics?.transientDbError('probe', 'retried'),
+    });
   }
 
   private async claim(): Promise<AtoProviderIntegration[]> {
     const now = this.deps.now();
     const lease = new Date(now.getTime() + this.deps.config.healthIntervalSeconds * 1000);
-    const ids = await this.deps.db.transaction(async (tx) => {
+    const ids = await this.write(() => this.claimIds(now, lease));
+    if (ids.length === 0) return [];
+    try {
+      return await this.write(() =>
+        this.deps.prisma.atoProviderIntegration.findMany({
+          where: { id: { in: ids } },
+          orderBy: { id: 'asc' },
+        }),
+      );
+    } catch (error) {
+      // The claim committed but its rows could not be read: hand them back after a short
+      // deferral instead of a whole health interval (best effort; D14).
+      if (isTransientDbFailure(error)) {
+        await this.deps.prisma.atoProviderIntegration
+          .updateMany({
+            where: { id: { in: ids } },
+            data: { nextHealthAt: new Date(this.deps.now().getTime() + deferDelayMs(1)) },
+          })
+          .catch(() => undefined);
+        this.deps.idpMetrics?.transientDbError('probe', 'deferred');
+      }
+      throw error;
+    }
+  }
+
+  private claimIds(now: Date, lease: Date): Promise<bigint[]> {
+    return this.deps.db.transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ id: bigint | number }>>`
         SELECT id FROM ato_provider_integrations
         WHERE status IN ('active', 'error', 'paused')
@@ -143,11 +238,6 @@ export class IdpProbeLoop {
         data: { nextHealthAt: lease },
       });
       return claimed;
-    });
-    if (ids.length === 0) return [];
-    return this.deps.prisma.atoProviderIntegration.findMany({
-      where: { id: { in: ids } },
-      orderBy: { id: 'asc' },
     });
   }
 
@@ -181,6 +271,8 @@ export class IdpProbeLoop {
         signal,
       );
     } catch (error) {
+      // The connection is read from the worker's database: an outage defers the probe (D14).
+      if (isTransientDbFailure(error)) throw error;
       return { kind: 'failed', code: errorCode(error, 'connection_read_failed') };
     }
     if (
@@ -208,6 +300,8 @@ export class IdpProbeLoop {
     try {
       report = await adapter.probe(signal);
     } catch (error) {
+      // A database error of the adapter's own stores defers; provider errors are recorded.
+      if (isTransientDbFailure(error, 'adapter')) throw error;
       return { kind: 'failed', code: errorCode(error, 'probe_failed') };
     }
     if (report.code === 'directory_changed') {

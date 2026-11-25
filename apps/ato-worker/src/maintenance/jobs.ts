@@ -29,6 +29,7 @@ import {
   RESPONSE_STALE_AFTER_MS,
 } from '../respond/respond.consumer';
 import { IDP_KINDS } from '../provider/provider-context';
+import { isTransientDbFailure } from '../provider/transient';
 import type { IdpActionExecutor, IdpCallOutcome } from '../respond/idp-actions';
 import { big, LEDGERS, orgFilter, readCursor, writeCursor, type AtoDb } from '../shared/db';
 import { errorFields } from '../shared/errors';
@@ -390,6 +391,8 @@ export class AtoMaintenance {
             AbortSignal.timeout(PROVIDER_CALL_TIMEOUT_MS),
           );
         } catch (error) {
+          // D14: a database outage is retried by the loop's back-off, never an attempt.
+          if (isTransientDbFailure(error, 'adapter')) throw error;
           result = failedResult(error);
         }
         this.deps.metrics?.providerOperations.inc({

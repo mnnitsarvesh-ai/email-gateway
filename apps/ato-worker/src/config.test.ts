@@ -121,6 +121,39 @@ describe('ato-worker config (§4.2)', () => {
     ).toEqual(['192.0.2.53', '[2001:db8::53]:5353']);
   });
 
+  it('sizes the writer pool (step AI-4 D14): defaults, bounds and the pool-timeout rule', () => {
+    expect(loadWorkerConfig(base)).toMatchObject({
+      ATO_DATABASE_CONNECTION_LIMIT: 32,
+      ATO_DATABASE_POOL_TIMEOUT_SECONDS: 30,
+    });
+    expect(
+      loadWorkerConfig({
+        ...base,
+        ATO_DATABASE_CONNECTION_LIMIT: '4',
+        ATO_DATABASE_POOL_TIMEOUT_SECONDS: '300',
+      }),
+    ).toMatchObject({ ATO_DATABASE_CONNECTION_LIMIT: 4, ATO_DATABASE_POOL_TIMEOUT_SECONDS: 300 });
+    expect(loadWorkerConfig({ ...base, ATO_DATABASE_CONNECTION_LIMIT: '200' })).toMatchObject({
+      ATO_DATABASE_CONNECTION_LIMIT: 200,
+    });
+    for (const value of ['3', '201', '2.5', 'many']) {
+      expect(() => loadWorkerConfig({ ...base, ATO_DATABASE_CONNECTION_LIMIT: value })).toThrow(
+        /ATO_DATABASE_CONNECTION_LIMIT/,
+      );
+    }
+    for (const value of ['4', '301', '30.5']) {
+      expect(() => loadWorkerConfig({ ...base, ATO_DATABASE_POOL_TIMEOUT_SECONDS: value })).toThrow(
+        /ATO_DATABASE_POOL_TIMEOUT_SECONDS/,
+      );
+    }
+    // In range (5–300) but shorter than the transaction maxWait of 30 s: refused, with the reason.
+    for (const value of ['5', '29']) {
+      expect(() => loadWorkerConfig({ ...base, ATO_DATABASE_POOL_TIMEOUT_SECONDS: value })).toThrow(
+        /ATO_DATABASE_POOL_TIMEOUT_SECONDS.*at least 30/s,
+      );
+    }
+  });
+
   it('never echoes a secret value in an error', () => {
     const secret = `x${'s'.repeat(10)}`;
     try {

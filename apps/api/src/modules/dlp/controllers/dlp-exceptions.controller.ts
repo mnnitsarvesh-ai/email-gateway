@@ -39,6 +39,7 @@ import {
   ApiReferenceInvalid,
   ApiVersionConflict,
   DLP_APPLY_NOTE,
+  DLP_EXCEPTION_EXAMPLE,
   DLP_MANAGE,
   DLP_READ,
   DlpController,
@@ -84,6 +85,28 @@ export class DlpExceptionsController {
     @Query(new ZodValidationPipe(DlpExceptionListQuerySchema)) query: DlpExceptionListQuery,
   ): Promise<DlpExceptionPage> {
     return this.exceptions.list(scope, query);
+  }
+
+  @Get(':id')
+  @RequirePermissions(DLP_READ)
+  @ApiOperation({
+    summary: 'Get a DLP exception',
+    description:
+      'The entry as the list shows it; an expired entry is returned with `expired: true` ' +
+      '(never applied), a disabled one with `enabled: false`. Another organization’s id is a ' +
+      '404. From the read replica.',
+  })
+  @ApiDlpId('id', 'Exception public id')
+  @ApiOkResponse({
+    schema: { ...zodToOpenApi(DlpExceptionViewSchema), example: DLP_EXCEPTION_EXAMPLE },
+  })
+  @ApiErrors(400, 401, 403, 503)
+  @ApiExceptionNotFound()
+  get(
+    @CurrentScope() scope: TenantScope,
+    @Param('id', dlpIdPipe) id: string,
+  ): Promise<DlpExceptionView> {
+    return this.exceptions.get(scope, id);
   }
 
   @Post()

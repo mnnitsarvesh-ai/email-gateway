@@ -94,6 +94,12 @@ export interface OperationTool {
   /** Response paths (`data[].subject`, `headers[].value`) holding mail-derived or attacker text. */
   untrustedFields: string[];
   bind: Record<string, ParamBinding>;
+  /**
+   * Argument paths (`body.sample`) the api stores as `[redacted]` in execution rows, audit
+   * params and logs (step AI-4 D9); the loopback request still carries the real value. Only
+   * side-effect-free reads may have them (a write's stored request stays exact for its digest).
+   */
+  redactParams: string[];
   limitations: string | null;
   testedBy: string | null;
 }
@@ -131,6 +137,8 @@ export interface OperationOverride {
   display?: DisplayHints;
   untrustedFields?: string[];
   bind?: Record<string, ParamBinding>;
+  /** Argument paths stored as `[redacted]` (step AI-4 D9; reads only, paths of the input schema). */
+  redactParams?: string[];
   limitations?: string;
   testedBy?: string;
 }

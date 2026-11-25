@@ -25,6 +25,16 @@ export interface DatabaseModuleOptions {
    * else 0 (none; why 0 is the default: `@email-gateway/database` `client-url.ts`).
    */
   socketTimeoutSeconds?: number;
+  /**
+   * `connection_limit` (1–500) of the writer client's pool (step AI-4 D14). Unset: the URL's own
+   * value, else Prisma's default (`2 × CPUs + 1`). Only services that size their pool pass it.
+   */
+  connectionLimit?: number;
+  /**
+   * `pool_timeout` (seconds, 1–600) of the writer client: how long a query waits for a pool
+   * connection (`P2024` after it). Unset: the URL's own value, else Prisma's default 10 s.
+   */
+  poolTimeoutSeconds?: number;
   /** Registers PrismaReadService. Data-plane services must not set this. */
   read?: DatabaseReadOptions;
 }

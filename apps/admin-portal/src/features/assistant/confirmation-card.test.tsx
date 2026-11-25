@@ -12,7 +12,9 @@ import {
 } from '@/test';
 import { ApiError } from '@/lib/api/errors';
 import {
+  ATO_RESPONSE_REQUESTED_TEXT,
   ConfirmationCard,
+  QUEUED_202_TOOLS,
   awaitsApproval,
   confirmationRefusal,
   formatRemaining,
@@ -800,6 +802,53 @@ describe('awaitsApproval', () => {
     expect(awaitsApproval(executed('quarantine_release', 200))).toBe(false);
     expect(awaitsApproval(executed('report_send_email', 202))).toBe(false);
     expect(outcomeText(executed('report_send_email', 202), null)).toBe(
+      'Done: the action was applied.',
+    );
+  });
+
+  it('mirrors the package list of queued 202 tools (step AI-4 D10)', () => {
+    expect([...QUEUED_202_TOOLS].sort()).toEqual(
+      [
+        'report_send_email',
+        'ato_providers_health_check',
+        'ato_providers_backfill',
+        'ato_account_mailbox_refresh',
+        'attachment_rescans_request',
+        'message_lifecycle_rescan',
+        'users_resend_invitation',
+        'webhooks_test',
+        'webhook_deliveries_replay',
+        'webhook_deliveries_create_replay',
+      ].sort(),
+    );
+    const executed = (tool: string, httpStatus: number) => ({
+      ...confirmationView(),
+      tool,
+      status: 'executed' as const,
+      result: { httpStatus, error: null },
+    });
+    for (const tool of QUEUED_202_TOOLS) {
+      expect(awaitsApproval(executed(tool, 202))).toBe(false);
+      expect(outcomeText(executed(tool, 202), null)).toBe('Done: the action was applied.');
+    }
+    expect(awaitsApproval(executed('quarantine_legacy_release', 202))).toBe(true);
+  });
+
+  it('says an executed ATO response request may wait for another responder (step AI-4 D10)', () => {
+    const view = (httpStatus: number | null, status: ConfirmationView['status'] = 'executed') => ({
+      ...confirmationView(),
+      tool: 'ato_responses_request',
+      status,
+      result: httpStatus === null ? null : { httpStatus, error: null },
+    });
+    expect(ATO_RESPONSE_REQUESTED_TEXT).toBe(
+      'Requested. If this action needs approval, another responder must approve it before it runs (you cannot approve your own request).',
+    );
+    expect(outcomeText(view(201), null)).toBe(ATO_RESPONSE_REQUESTED_TEXT);
+    expect(outcomeText(view(null), null)).toBe(ATO_RESPONSE_REQUESTED_TEXT);
+    expect(outcomeText(view(200), null)).toBe('Done: the action was applied.');
+    expect(outcomeText(view(null, 'cancelled'), null)).toBe('Cancelled. Nothing changed.');
+    expect(outcomeText({ ...view(201), tool: 'ato_responses_approve' }, null)).toBe(
       'Done: the action was applied.',
     );
   });

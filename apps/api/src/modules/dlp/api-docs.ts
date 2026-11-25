@@ -33,7 +33,7 @@ import {
   EVIDENCE_UNREADABLE,
   INCONSISTENT_READ,
 } from './dlp.errors';
-import { DlpIdSchema, DlpScanIdSchema } from './dto/dlp.schemas';
+import { type DlpExceptionView, DlpIdSchema, DlpScanIdSchema } from './dto/dlp.schemas';
 
 /** Permissions of the DLP routes (seed catalog, step 4.5 D21). */
 export const DLP_READ = 'dlp:read';
@@ -185,3 +185,22 @@ export const ApiInconsistentRead = (): MethodDecorator =>
   ApiCodedError(503, 'The database returned an inconsistent read twice; retry the request', [
     INCONSISTENT_READ,
   ]);
+
+/** Response example of the step AI-4 single-item read (D8; synthetic values only). */
+export const DLP_EXCEPTION_EXAMPLE = {
+  id: '0190f0f0-0000-7000-8000-0000000000d1',
+  scope: 'recipient_domain',
+  value: 'auditor.example',
+  policyId: '0190f0f0-0000-7000-8000-0000000000d2',
+  ruleId: null,
+  filters: { categories: ['payment_card'] },
+  reason: 'Statutory auditor receives card reconciliations',
+  expiresAt: '2026-12-31T00:00:00.000Z',
+  expired: false,
+  enabled: true,
+  version: 1,
+  createdByUserId: '0190f0f0-0000-7000-8000-0000000000a1',
+  updatedByUserId: null,
+  createdAt: '2026-11-20T09:30:00.000Z',
+  updatedAt: '2026-11-20T09:30:00.000Z',
+} satisfies DlpExceptionView;

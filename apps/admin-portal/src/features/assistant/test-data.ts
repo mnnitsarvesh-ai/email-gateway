@@ -701,3 +701,7 @@ export const REPORT_SEND_SUMMARY: ConfirmationSummary = {
   portalRoute: `/assistant/reports/${REPORT_ID}`,
   request: { method: 'POST', path: 'native:report_send_email' },
 };
+
+/** The four-eyes guard message of an ATO response decision (packages/assistant `ato_four_eyes`, step AI-4 D3). */
+export const ATO_FOUR_EYES_MESSAGE =
+  'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.';

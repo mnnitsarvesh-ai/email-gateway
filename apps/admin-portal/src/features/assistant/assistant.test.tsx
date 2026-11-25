@@ -26,6 +26,7 @@ import {
   EXECUTION_ID,
   GUARD_TOOL_TITLE,
   SELF_GUARD_MESSAGE,
+  ATO_FOUR_EYES_MESSAGE,
   STATUS_AVAILABLE,
   TABLE_CARD,
   TOOLS,
@@ -437,6 +438,35 @@ describe('/assistant conversation', () => {
     expect(screen.getAllByText(GUARD_TOOL_TITLE).length).toBeGreaterThan(0);
     expect(screen.queryByText('denied_guard')).not.toBeInTheDocument();
     expect(screen.queryByText('users_replace_roles')).not.toBeInTheDocument();
+  });
+
+  it('links a stored four-eyes refusal of an ATO approval to the Responses page (step AI-4)', async () => {
+    mockApi({
+      AssistantMessagesController_list_v1: () =>
+        okJson({
+          data: storedExchange({
+            answer: 'Another responder must decide it.',
+            executions: [
+              {
+                ...deniedGuardExecution(),
+                tool: 'ato_responses_approve',
+                title: 'Approve an ATO response',
+                message: ATO_FOUR_EYES_MESSAGE,
+              },
+            ],
+          }),
+          nextCursor: null,
+        }),
+    });
+    const { container } = renderPage(`/assistant?conversation=${CONVERSATION_ID}`);
+    const card = await screen.findByRole('region', { name: 'Result: Approve an ATO response' });
+    expect(within(card).getByText('Not allowed in chat')).toBeInTheDocument();
+    expect(within(card).getByText(ATO_FOUR_EYES_MESSAGE)).toBeInTheDocument();
+    expect(
+      within(card).getByRole('link', { name: 'Open Responses in the portal' }),
+    ).toHaveAttribute('href', '/ato/responses');
+    expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
   });
 
   it('shows the unavailable reason on the page', async () => {

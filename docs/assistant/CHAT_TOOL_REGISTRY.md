@@ -185,9 +185,9 @@ AI-3 adds 47 specs (78 in all) and three spec features ([design note 30 D3–D6]
 
 An enabled write needs a named integration suite that proposes it through a turn, confirms it and asserts the api's state change and audit: policy writes → `apps/api/integration/assistant-writes-policies.test.ts`; quarantine, message, recipient-suppression and saved-view writes → `apps/api/integration/assistant-writes-mail-ops.test.ts`; (AI-3) users, roles, departments and API key writes → `assistant-writes-identity.test.ts`; domain writes → `assistant-writes-domains.test.ts`; notifications, organizations, scan settings, SMTP connectors and webhooks → `assistant-writes-tenant-admin.test.ts`. The tool sweep (`assistant-tools.test.ts`) additionally proposes every enabled write without confirming it and asserts that no request reaches the write route ("no write without confirmation").
 
-## Current counts
+## Counts after AI-3
 
-From the generated matrix (registry version `b031a24c9868f02c`, program phase AI-3):
+Historical (registry version `b031a24c9868f02c`, program phase AI-3); the current counts are under [Security operations tools (AI-4)](#security-operations-tools-ai-4):
 
 | Measure                     | Count                                                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -218,3 +218,38 @@ A later native tool needs the same: a record in `native.ts` with a strict `input
 ### Counts after AI-R
 
 From the generated matrix (registry version `3606658c6a83a58b`, program phase AI-R): 423 OpenAPI operations (AI-R added `GET /assistant/reports/{reportId}`, not applicable as an assistant route); 349 operation tools, of which 257 enabled (179 reads, 78 writes); 74 not applicable (9 critical); **2 native tools** (1 read, 1 write); **259 enabled chat tools in all (180 reads, 79 writes)**; confirmation specs and impact templates 79. The `Current counts` table above is the AI-3 state of the operation tools and stays valid for them.
+
+## Security operations tools (AI-4)
+
+Design [note 32](../plan/steps/32-ai-chat-security-operations.md) D1–D12, ADR-0093 "Amendment AI-4" (q)–(u), contracts §35.4. `ASSISTANT_PROGRAM_PHASE = 'AI-4'`.
+
+### Current counts
+
+From the generated matrix (registry version `b399d786f91ccdd0`, program phase AI-4; `registry:check` "up to date"):
+
+| Measure                                          | Count                                                                                                                                                                       |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAPI operations                               | 427 (423 after AI-R + the four new reads `GET /bec/trusted-senders/{id}`, `GET /bec/suppressions/{id}`, `GET /dlp/exceptions/{id}`, `GET /platform/threat-indicators/{id}`) |
+| Operation tools                                  | 353, of which 327 enabled (185 reads, 142 writes)                                                                                                                           |
+| Native tools (AI-R)                              | 2 (1 read, 1 write)                                                                                                                                                         |
+| Enabled chat tools in all                        | **329 (186 reads, 143 writes)**                                                                                                                                             |
+| Not applicable                                   | 74 (19 assistant routes, 20 credential/session ceremony, 2 identity/override, 9 secret-returning, 12 content/preview/download/reveal, 2 consent, 1 file export, 9 critical) |
+| By status                                        | `IMPLEMENTED` 327, `PARTIALLY_IMPLEMENTED` 0, `MISSING` 26 (all AI-5: 1 side-effect-free read, 25 writes), `NOT_APPLICABLE` 74                                              |
+| By phase                                         | AI-1 174, AI-2 35, AI-3 48, AI-4 70, AI-5 26                                                                                                                                |
+| By risk (tools)                                  | `read` 179, `read_audited` 7, `low` 46, `medium` 52, `high` 69                                                                                                              |
+| AI-4 writes by registry risk (before escalation) | 64: low 23, medium 11, high 30                                                                                                                                              |
+| Confirmation specs                               | 143 (one per enabled write; AI-4 64: 2 with guards, 14 with escalations, 5 with `select`, 27 with CAS injection, 13 without a precondition read); impact templates 143      |
+| Platform-only enabled tools                      | 22 (7 AI-1 reads, 6 AI-3 writes, 8 AI-4 writes, `threat_indicators_get`)                                                                                                    |
+
+### What AI-4 added to the registry and the confirmations
+
+- **Phase and risk.** The 66 AI-4 operations of the program plan and the four new reads are enabled. `RISK_OVERRIDES` (D2): `ato_accounts_add_trusted_context`, `bec_trusted_senders_create`, `dlp_exceptions_create`, `ato_settings_update`, `ato_providers_update` → `high`; `ato_providers_create` → `medium` (escalates); `ato_providers_health_check`, `ato_account_mailbox_refresh` → `low`.
+- **`testedBy`.** `ATO_WRITES_TESTED_BY` (19 ATO + 3 incident writes → `apps/api/integration/assistant-writes-ato.test.ts`), `DETECTION_WRITES_TESTED_BY` (11 BEC + 17 DLP + 6 risk-scoring → `assistant-writes-detection.test.ts`), `PLATFORM_OPS_WRITES_TESTED_BY` (8 → `assistant-writes-platform-ops.test.ts`), merged as `AI4_WRITES_TESTED_BY` (64); reads → the tool sweep.
+- **Guard kinds** `not_self_field` and `require_read_value` (after-read; a consistency rule requires a `single` precondition): the four-eyes guard on `ato_responses_approve` / `_reject` with the message key `ato_four_eyes`; notes in the matrix `guard: not requester; guard: canDecide = true`.
+- **Escalations** (D4): 14 specs with fixed warnings (`AI4_ESCALATION_WARNINGS`); see [AI_SECURITY_STANDARDS.md](AI_SECURITY_STANDARDS.md#weakening-detection-is-high-i20).
+- **CAS injection** may target `version`, `rowVersion` and `expectedProfileVersion` besides `expectedRowVersion` / `expectedVersion` (body or query; the field must exist in the write's schema). The ATO settings and DLP compliance CAS minimum is 0.
+- **`redactParams`** (`OperationOverride.redactParams` → `OperationTool.redactParams`, default `[]`): reads only, every path must exist; set for `dlp_patterns_test` (`body.sample`, `body.pattern`).
+- **Single preconditions** may map read query parameters in addition to all path parameters (`threat_hashes_list` filtered by `sha256` with `select`).
+- **Credential-key exceptions.** Five AI-4 input keys match the credential-key pattern but are not credentials (`body.settings.actions.require_password_reset`, `body.settings.automation.require_password_reset`, `body.reasonCodes`, `body.suppress.codes`, `body.resolution.code`); they are listed in `CREDENTIAL_KEY_EXCEPTIONS` with a reason, and the api's credential scrub still drops them from stored parameters (`exact` false).
+- **Outcome wording** (`updates.ts`): `QUEUED_202_TOOLS` (10 tools) get "it was queued (HTTP 202)"; `ato_responses_request` gets the "requested; another responder must approve it" line. The portal mirrors the same list in `confirmation-card.tsx` (`awaitsApproval`, unit-tested against the list).
+- **Prompt** `assistant-system/5` (rule 14) and three fake plans (approve the pending response, open an incident for an account, add a DLP dictionary).

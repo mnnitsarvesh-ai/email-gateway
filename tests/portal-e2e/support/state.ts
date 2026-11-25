@@ -37,6 +37,10 @@ export const USER_KEYS = [
   // Step AI-2: an organization admin of delta who signs in with MFA (high-risk confirmations ask
   // for the password and the authenticator code).
   'deltaMfaAdmin',
+  // Step AI-4: two security analysts of delta with MFA and ato:respond (four eyes in chat: one
+  // requests an ATO response, the other approves it; the requester is refused).
+  'deltaResponderA',
+  'deltaResponderB',
   'epsilonAdmin',
   'platformAdmin',
 ] as const;
@@ -169,6 +173,8 @@ export interface E2eState {
       mfaAdminUserId: string;
       /** Step AI-3: a seeded read-only delta user that only the assistant spec uses (disabled). */
       offboardUser: { id: string; email: string };
+      /** Step AI-4: delta's ATO account with an open incident (seed/ato.ts DELTA_ATO_PLAN). */
+      ato: { accountId: string; address: string; incidentId: string };
     };
   };
   archive: {

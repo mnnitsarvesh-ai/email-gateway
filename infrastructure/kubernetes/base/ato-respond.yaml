@@ -48,6 +48,12 @@ spec:
             - { name: ATO_WORKER_ROLES, value: 'respond,maintenance,provider' }
             - { name: ATO_RESPONSES_PREFETCH, value: '4' }
             - { name: ATO_TX_TIMEOUT_MS, value: '120000' }
+            # Writer pool per replica (step AI-4 D14): one replica with the full default pool (the
+            # leader-elected jobs, IdP polls and probes share it); the ATO budget at HPA maximum
+            # (see ato-detect.yaml) stays <= 144 connections. Pool timeout >= the 30 s
+            # transaction maxWait. Checked by apps/ato-worker/src/deployment/connection-budget.test.ts.
+            - { name: ATO_DATABASE_CONNECTION_LIMIT, value: '32' }
+            - { name: ATO_DATABASE_POOL_TIMEOUT_SECONDS, value: '30' }
             - { name: ATO_SETTINGS_CACHE_SECONDS, value: '30' }
             - { name: ATO_AUTOMATED_RESPONSES_ENABLED, value: 'true' }
             - { name: ATO_MAX_AUTOMATED_RESPONSES_PER_ORG_PER_HOUR, value: '10' }

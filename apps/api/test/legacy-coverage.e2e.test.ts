@@ -21,10 +21,13 @@
 // @covers get /api/v1/auth/sessions
 // @covers get /api/v1/bec/feedback
 // @covers get /api/v1/bec/suppressions
+// @covers get /api/v1/bec/suppressions/:id
 // @covers get /api/v1/bec/trusted-senders
+// @covers get /api/v1/bec/trusted-senders/:id
 // @covers get /api/v1/bec/vendors
 // @covers get /api/v1/bec/vendors/:id
 // @covers get /api/v1/dlp/dictionaries/:id
+// @covers get /api/v1/dlp/exceptions/:id
 // @covers get /api/v1/dlp/patterns/:id
 // @covers get /api/v1/organizations/:id/features
 // @covers get /api/v1/permissions
@@ -356,6 +359,17 @@ const CASES: Case[] = [
     result: page,
   },
   {
+    // Step AI-4 D8: one trusted sender by id (the assistant's confirmation card names it).
+    route: 'get /api/v1/bec/trusted-senders/:id',
+    method: 'get',
+    url: `/api/v1/bec/trusted-senders/${ID}`,
+    status: 200,
+    service: BecTrustedSendersService,
+    call: 'get',
+    result: { id: ID, kind: 'domain', value: 'partner.example', version: 1 },
+    input: [1, ID],
+  },
+  {
     route: 'patch /api/v1/bec/trusted-senders/:id',
     method: 'patch',
     url: `/api/v1/bec/trusted-senders/${ID}`,
@@ -394,6 +408,17 @@ const CASES: Case[] = [
     service: BecFeedbackService,
     call: 'listSuppressions',
     result: page,
+  },
+  {
+    // Step AI-4 D8: one suppression rule by id.
+    route: 'get /api/v1/bec/suppressions/:id',
+    method: 'get',
+    url: `/api/v1/bec/suppressions/${ID}`,
+    status: 200,
+    service: BecFeedbackService,
+    call: 'getSuppression',
+    result: { id: ID, reasonCode: 'bec.reply_to.freemail', expired: false },
+    input: [1, ID],
   },
   {
     route: 'delete /api/v1/bec/suppressions/:id',
@@ -443,6 +468,17 @@ const CASES: Case[] = [
     service: DlpExceptionsService,
     call: 'create',
     result: { id: ID, version: 1 },
+  },
+  {
+    // Step AI-4 D8: one exception by id.
+    route: 'get /api/v1/dlp/exceptions/:id',
+    method: 'get',
+    url: `/api/v1/dlp/exceptions/${ID}`,
+    status: 200,
+    service: DlpExceptionsService,
+    call: 'get',
+    result: { id: ID, scope: 'recipient_domain', version: 1 },
+    input: [1, ID],
   },
   {
     route: 'patch /api/v1/dlp/exceptions/:id',

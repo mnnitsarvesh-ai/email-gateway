@@ -136,6 +136,14 @@ export class ThreatIndicatorsService {
     return toPage(rows, query.limit, threatIndicatorView);
   }
 
+  /** `GET /platform/threat-indicators/{id}` (replica; expired indicators included), or `404`. */
+  async get(principal: UserPrincipal, id: bigint): Promise<ThreatIndicatorView> {
+    assertPlatformUser(principal);
+    const row = await this.repository.findPlatform(id);
+    if (!row) throw threatIndicatorNotFound();
+    return threatIndicatorView(row);
+  }
+
   /** `POST /platform/threat-indicators`: `201`, or `409 indicator_exists`. */
   async add(
     principal: UserPrincipal,

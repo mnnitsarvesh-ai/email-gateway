@@ -226,3 +226,42 @@ export function compileValidator(tool: OperationTool): ArgumentValidator {
     return { ok: false, issues: (fn.errors ?? []).slice(0, MAX_ISSUES).map(toIssue) };
   };
 }
+
+/** The value stored in place of a redacted argument (step AI-4 D9). */
+export const REDACTED_PARAM = '[redacted]';
+
+/**
+ * The arguments with every present `tool.redactParams` path (`body.sample`) replaced by
+ * `[redacted]` (step AI-4 D9): what the api stores in `ai_chat_tool_executions.params_redacted`,
+ * the audit params and logs, before its credential scrub. A copy: the loopback request keeps the
+ * real values. `redacted` is true when at least one value was replaced (the stored params are
+ * then not exact).
+ */
+export function redactToolArguments(
+  tool: Pick<OperationTool, 'redactParams'>,
+  args: Readonly<Record<string, unknown>>,
+): { args: Record<string, unknown>; redacted: boolean } {
+  const out = structuredClone(args) as Record<string, unknown>;
+  let redacted = false;
+  for (const path of tool.redactParams) {
+    const segments = path.split('.');
+    let node: unknown = out;
+    for (const segment of segments.slice(0, -1)) {
+      node =
+        node !== null && typeof node === 'object' && !Array.isArray(node)
+          ? (node as Record<string, unknown>)[segment]
+          : undefined;
+    }
+    const last = segments[segments.length - 1]!;
+    if (
+      node !== null &&
+      typeof node === 'object' &&
+      !Array.isArray(node) &&
+      Object.prototype.hasOwnProperty.call(node, last)
+    ) {
+      (node as Record<string, unknown>)[last] = REDACTED_PARAM;
+      redacted = true;
+    }
+  }
+  return { args: out, redacted };
+}

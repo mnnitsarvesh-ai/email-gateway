@@ -49,6 +49,15 @@ import type { OperationTool, ProgramPhase } from './types';
  * - a generated tool never has `native` set or a `native:` path;
  * - every enabled native write has a confirmation spec with `native` set (and an impact
  *   template, as every enabled write); a spec of an OpenAPI write never sets `native`.
+ *
+ * Step AI-4 (design 32 D3, D5, D9, §4.4) adds:
+ *
+ * - `not_self_field` and `require_read_value` guards (they read the precondition target) need a
+ *   single precondition;
+ * - a single precondition maps exactly the read's path parameters plus, optionally, some of its
+ *   query parameters (`threat_hashes_list { sha256 }`, an exact filter used with `select`);
+ * - `redactParams` only on read tools (a write's stored request stays exact for its digest), and
+ *   every listed path exists in the tool's input schema.
  */
 
 export interface ConsistencyOptions {
@@ -149,6 +158,13 @@ export function registryConsistencyIssues(
       issues.push(`${tool.name}: a native confirmation spec on an OpenAPI write`);
     if ((tool.risk as string) === 'critical')
       issues.push(`${tool.name}: a critical operation must be not_applicable (portal only)`);
+    // Step AI-4 D9: redacted inputs only on side-effect-free reads, only existing paths.
+    const redacted = tool.redactParams;
+    if (redacted.length > 0 && tool.access !== 'read')
+      issues.push(`${tool.name}: redactParams is only allowed on read tools`);
+    for (const path of redacted)
+      if (!argumentSchema(tool, path))
+        issues.push(`${tool.name}: redactParams names the missing argument ${path}`);
     if (!tool.enabled) continue;
     if (phaseIndex(tool.phase) > program)
       issues.push(
@@ -204,6 +220,11 @@ export function registryConsistencyIssues(
         issues.push(
           `${owner}: deny_permission_change with beforeField needs a single precondition`,
         );
+      if (
+        (guard.kind === 'not_self_field' || guard.kind === 'require_read_value') &&
+        pre?.kind !== 'single'
+      )
+        issues.push(`${owner}: ${guard.kind} needs a single precondition`);
     }
     // Step AI-3 D12: a stored `denied_guard` execution shows the message derived from its spec
     // (`guardMessageOf`), which is only exact when all guards of the spec share one message.
@@ -217,7 +238,10 @@ export function registryConsistencyIssues(
     if (pre?.kind === 'single') {
       const read = enabledRead(pre.tool, owner);
       if (read) {
-        const mapped = Object.keys(pre.params).sort();
+        // Every path parameter, plus optionally query parameters (step AI-4: exact filters).
+        const mapped = Object.keys(pre.params)
+          .filter((param) => !read.queryParams.includes(param) || read.pathParams.includes(param))
+          .sort();
         if (JSON.stringify(mapped) !== JSON.stringify([...read.pathParams].sort()))
           issues.push(
             `${owner}: precondition params [${mapped.join(', ')}] must map exactly the path parameters [${read.pathParams.join(', ')}] of ${read.name}`,

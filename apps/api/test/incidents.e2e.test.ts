@@ -110,7 +110,9 @@ describe('security incident routes (e2e, dependencies stubbed)', () => {
       { override: (b) => idempotency.override(fixtures.overrideAto(b, world, recording, [FAKE])) },
     );
     org = api.principals.organizationId;
-  });
+    // The dynamic imports build the whole stubbed api; under a loaded parallel turbo run this
+    // took longer than the default 10 s hook timeout (a recurring flake, steps AI-4 WP1 / 12.1).
+  }, 60_000);
 
   afterAll(async () => {
     await api?.close();

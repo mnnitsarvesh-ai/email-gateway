@@ -225,18 +225,41 @@ export function confirmationRefusal(error: unknown): ConfirmationRefusal {
 }
 
 /**
- * Whether an executed write is waiting for a second approver: a 202 from an approval-gated route.
- * Some tools answer 202 for queued work instead (a report email goes out asynchronously).
+ * Tools whose 202 means queued work, not "waiting for approval" (a report email goes out
+ * asynchronously, a health check or a backfill is queued). Mirrors `QUEUED_202_TOOLS` of
+ * `packages/assistant/src/confirmations/updates.ts` (step AI-4 D10); the unit test pins the list.
  */
-const QUEUED_202_TOOLS: ReadonlySet<string> = new Set(['report_send_email']);
+export const QUEUED_202_TOOLS: ReadonlySet<string> = new Set([
+  'report_send_email',
+  'ato_providers_health_check',
+  'ato_providers_backfill',
+  'ato_account_mailbox_refresh',
+  'attachment_rescans_request',
+  'message_lifecycle_rescan',
+  'users_resend_invitation',
+  'webhooks_test',
+  'webhook_deliveries_replay',
+  'webhook_deliveries_create_replay',
+]);
+
+/** Whether an executed write is waiting for a second approver: a 202 from an approval-gated route. */
 export function awaitsApproval(view: ConfirmationView): boolean {
   return view.result?.httpStatus === 202 && !QUEUED_202_TOOLS.has(view.tool);
 }
+
+/** Step AI-4 D10: an ATO response request may wait for another responder (four eyes, I18). */
+export const ATO_RESPONSE_REQUESTED_TEXT =
+  'Requested. If this action needs approval, another responder must approve it before it runs (you cannot approve your own request).';
 
 /** The outcome line of a decided confirmation. */
 export function outcomeText(view: ConfirmationView, resultCard: AssistantCard | null): string {
   switch (view.status) {
     case 'executed':
+      if (
+        view.tool === 'ato_responses_request' &&
+        (view.result?.httpStatus == null || view.result.httpStatus === 201)
+      )
+        return ATO_RESPONSE_REQUESTED_TEXT;
       return awaitsApproval(view)
         ? 'Submitted for approval: another person must approve it before it takes effect.'
         : 'Done: the action was applied.';

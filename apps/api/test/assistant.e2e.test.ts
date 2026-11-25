@@ -8,8 +8,11 @@
  * pages and the availability gates; step AI-2 (docs/plan/steps/29-ai-chat-confirmations-mail-
  * writes.md §4.1, §9 item 3): a write proposal in a turn, then get, confirm and cancel of its
  * confirmation over HTTP; step AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1, §9 item 3): a
- * report generated in a turn, its view with the HTML, and an emailed report confirmed over HTTP.
- * Synthetic data only.
+ * report generated in a turn, its view with the HTML, and an emailed report confirmed over HTTP;
+ * step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md §9 item 2): an ATO response approved
+ * by another user (high confirmation, re-authentication, executed through the loopback), the
+ * requester's own approval refused before any card (four-eyes guard), and the DLP pattern test
+ * whose sample and pattern never reach a stored or audited row. Synthetic data only.
  */
 // @covers get /api/v1/assistant/status
 // @covers get /api/v1/assistant/settings
@@ -33,7 +36,13 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ASSISTANT_EXAMPLES } from '../src/modules/assistant/dto/assistant.schemas';
-import { findTool, REPORT_SOURCE_DEFS, type ReportSourceKey } from '@email-gateway/assistant';
+import {
+  findTool,
+  GUARD_MESSAGES,
+  REDACTED_PARAM,
+  REPORT_SOURCE_DEFS,
+  type ReportSourceKey,
+} from '@email-gateway/assistant';
 import { createStubbedApiApp, type StubbedApiApp } from './support/api-test-app';
 import { reportSourceBodies } from './support/assistant-report-fixtures';
 import {
@@ -41,6 +50,8 @@ import {
   FakeLoopback,
   overrideAssistant,
   policyPage,
+  REAUTH_PASSWORD,
+  REAUTH_TOTP,
   RecordingAssistantAudit,
 } from './support/assistant-fixtures';
 
@@ -682,6 +693,186 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
         tool: 'report_send_email',
         decision: 'denied_guard',
       });
+    });
+  });
+
+  describe('security operations (step AI-4 §9 item 2)', () => {
+    const RESPONSE = '0193c400-0000-7000-8000-0000000e2e01';
+    const ACCOUNT = '0193c400-0000-7000-8000-0000000e2e02';
+    const OTHER_ANALYST = '0193b000-0000-7000-8000-0000000e2e03';
+    const RESPONDERS = [USE, 'ato:read', 'ato:respond'];
+    const DLP_MANAGERS = [USE, 'dlp:read', 'dlp:manage'];
+    const SAMPLE = 'Synthetic e2e sample: ticket QJV-90817263 for the it-dlp check';
+    const PATTERN = 'QJV-[0-9]{8}';
+    const writes: string[] = [];
+    let requestedBy = { type: 'user', id: OTHER_ANALYST };
+
+    const responseBody = () => ({
+      id: RESPONSE,
+      actionType: 'restrict_smtp_sending',
+      provider: 'gateway',
+      impact: 'high',
+      status: 'pending_approval',
+      account: { id: ACCOUNT, kind: 'mailbox' },
+      target: { scope: 'mailbox', connectorId: null, cidr: null },
+      params: { durationMinutes: 60, mode: 'reject', description: null },
+      requestedBy,
+      requestReason: 'Outbound spam from the mailbox',
+      approvalExpiresAt: '2026-11-26T18:00:00.000Z',
+      executedAt: null,
+      effectiveUntil: null,
+      // The api's view: never the requester (nor the creator of a requesting key).
+      canDecide: requestedBy.id !== api.principals.ids.user,
+      createdAt: '2026-11-25T09:00:00.000Z',
+    });
+
+    beforeEach(() => {
+      writes.length = 0;
+      requestedBy = { type: 'user', id: OTHER_ANALYST };
+      loopback.on('GET /api/v1/ato/responses', () => ({
+        kind: 'response',
+        status: 200,
+        body: { data: [responseBody()], nextCursor: null },
+      }));
+      loopback.on(`GET /api/v1/ato/responses/${RESPONSE}`, () => ({
+        kind: 'response',
+        status: 200,
+        body: responseBody(),
+      }));
+      loopback.on(`POST /api/v1/ato/responses/${RESPONSE}/approve`, (call) => {
+        writes.push(`${call.method} ${call.path} ${call.idempotencyKey ?? '-'}`);
+        return {
+          kind: 'response',
+          status: 200,
+          body: { ...responseBody(), status: 'succeeded', canDecide: false },
+        };
+      });
+      loopback.on('POST /api/v1/dlp/patterns/test', () => ({
+        kind: 'response',
+        status: 200,
+        body: {
+          valid: true,
+          matches: [{ start: 30, end: 42, masked: '********7263', validator: null }],
+          truncated: false,
+        },
+      }));
+    });
+
+    const turn = async (conversationId: string, message: string, permissions: string[]) => {
+      const res = await send(
+        'post',
+        `${BASE}/conversations/${conversationId}/turns`,
+        { clientTurnId: randomUUID(), message },
+        permissions,
+      );
+      expect(res.status).toBe(200);
+      return res;
+    };
+
+    it('another responder approves the pending response: high card, re-auth, executed through the loopback', async () => {
+      const id = await newConversation();
+      const res = await turn(id, 'approve the pending ato response', RESPONDERS);
+      const tools = res.body.executions.map((e: { tool: string }) => e.tool);
+      expect(tools).toEqual(['ato_responses_list', 'ato_responses_approve']);
+      expect(res.body.executions[1]).toMatchObject({
+        status: 'pending_confirmation',
+        confirmation: { status: 'pending', risk: 'high', requiresReauth: true },
+      });
+      const { confirmation, token } = res.body.confirmations[0] as {
+        confirmation: { id: string; actionDigest: string; summary: { request: unknown } };
+        token: string;
+      };
+      expect(confirmation.summary.request).toMatchObject({
+        method: 'POST',
+        path: `/api/v1/ato/responses/${RESPONSE}/approve`,
+      });
+      expect(writes).toEqual([]);
+      const url = `${BASE}/confirmations/${confirmation.id}/confirm`;
+      const body = { token, actionDigest: confirmation.actionDigest };
+      const noReauth = await send('post', url, body, RESPONDERS);
+      expect(noReauth.status).toBe(401);
+      expect(noReauth.body.code).toBe('assistant_reauth_required');
+      const ok = await send(
+        'post',
+        url,
+        { ...body, reauth: { password: REAUTH_PASSWORD, totpCode: REAUTH_TOTP } },
+        RESPONDERS,
+      );
+      expect(ok.status).toBe(200);
+      expect(ok.body.confirmation).toMatchObject({
+        status: 'executed',
+        result: { httpStatus: 200 },
+      });
+      expect(writes).toEqual([`POST /api/v1/ato/responses/${RESPONSE}/approve ${confirmation.id}`]);
+      expect(audit.entries.map((e) => e.action)).toContain('assistant.confirmation_executed');
+    });
+
+    it('the requester approving their own response is denied_guard: no confirmation, no request to approve', async () => {
+      requestedBy = { type: 'user', id: api.principals.ids.user };
+      const id = await newConversation();
+      const res = await turn(
+        id,
+        `/tool ato_responses_approve {"responseId":"${RESPONSE}","body":{"reason":"Looks right to me"}}`,
+        RESPONDERS,
+      );
+      expect(res.body.executions[0]).toMatchObject({
+        tool: 'ato_responses_approve',
+        decision: 'denied_guard',
+        status: 'refused',
+        message: GUARD_MESSAGES.ato_four_eyes,
+        confirmation: null,
+      });
+      expect(res.body.confirmations).toEqual([]);
+      expect(world.confirmations).toHaveLength(0);
+      expect(writes).toEqual([]);
+      // Only the precondition read (an internal read: no execution id), never the approval.
+      expect(
+        loopback.calls
+          .filter((c) => c.path.startsWith('/api/v1/ato/'))
+          .map((c) => `${c.method} ${c.path}`),
+      ).toEqual([`GET /api/v1/ato/responses/${RESPONSE}`]);
+      const view = await send(
+        'get',
+        `${BASE}/executions/${res.body.executions[0].id}`,
+        undefined,
+        RESPONDERS,
+      );
+      expect(view.status).toBe(200);
+      expect(view.body.message).toBe(GUARD_MESSAGES.ato_four_eyes);
+      expect(
+        audit.entries.find((e) => e.action === 'assistant.tool_denied')?.metadata,
+      ).toMatchObject({ decision: 'denied_guard', guard: 'not_self_field' });
+    });
+
+    it('dlp_patterns_test: the loopback gets the sample; execution rows, audit and the view never hold it', async () => {
+      const id = await newConversation();
+      const args = { body: { pattern: PATTERN, sample: SAMPLE, maskStyle: 'last4' } };
+      const res = await turn(id, `/tool dlp_patterns_test ${JSON.stringify(args)}`, DLP_MANAGERS);
+      const execution = res.body.executions[0];
+      expect(execution).toMatchObject({
+        tool: 'dlp_patterns_test',
+        decision: 'allowed',
+        status: 'succeeded',
+        httpStatus: 200,
+      });
+      expect(loopback.toolCalls.find((c) => c.path === '/api/v1/dlp/patterns/test')!.body).toEqual(
+        args.body,
+      );
+      const stored = world.executions.find((e) => e.publicId === execution.id)!;
+      expect(stored.paramsRedacted).toEqual({
+        body: { pattern: REDACTED_PARAM, sample: REDACTED_PARAM, maskStyle: 'last4' },
+      });
+      const view = await send('get', `${BASE}/executions/${execution.id}`, undefined, DLP_MANAGERS);
+      expect(view.status).toBe(200);
+      expect(view.body).toMatchObject({ id: execution.id, status: 'succeeded' });
+      const serialized = (value: unknown) =>
+        JSON.stringify(value, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+      for (const value of [SAMPLE, PATTERN]) {
+        expect(serialized(view.body)).not.toContain(value);
+        expect(serialized(execution)).not.toContain(value);
+        expect(serialized(world.executions)).not.toContain(value);
+        expect(serialized(audit.entries)).not.toContain(value);
+      }
     });
   });
 });

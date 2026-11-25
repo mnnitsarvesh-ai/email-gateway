@@ -370,6 +370,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'patch /api/v1/bec/vendors/:id': ['bec:manage'],
       'delete /api/v1/bec/vendors/:id': ['bec:manage'],
       'get /api/v1/bec/trusted-senders': ['bec:read'],
+      'get /api/v1/bec/trusted-senders/:id': ['bec:read'],
       'post /api/v1/bec/trusted-senders': ['bec:manage'],
       'patch /api/v1/bec/trusted-senders/:id': ['bec:manage'],
       'delete /api/v1/bec/trusted-senders/:id': ['bec:manage'],
@@ -380,6 +381,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'get /api/v1/bec/feedback': ['bec:read'],
       'get /api/v1/bec/feedback/export': ['bec:feedback_export', { mfa: true }],
       'get /api/v1/bec/suppressions': ['bec:read'],
+      'get /api/v1/bec/suppressions/:id': ['bec:read'],
       'delete /api/v1/bec/suppressions/:id': ['bec:manage'],
       'delete /api/v1/bec/history': ['bec:manage', { mfa: true }],
     };
@@ -410,6 +412,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'patch /api/v1/dlp/policies/:id/rules/:ruleId': ['dlp:manage'],
       'delete /api/v1/dlp/policies/:id/rules/:ruleId': ['dlp:manage'],
       'get /api/v1/dlp/exceptions': ['dlp:read'],
+      'get /api/v1/dlp/exceptions/:id': ['dlp:read'],
       'post /api/v1/dlp/exceptions': ['dlp:manage'],
       'patch /api/v1/dlp/exceptions/:id': ['dlp:manage'],
       'delete /api/v1/dlp/exceptions/:id': ['dlp:manage'],
@@ -1320,6 +1323,46 @@ describe('route security (e2e, dependencies stubbed)', () => {
     const list = routes.find((r) => `${r.method} ${r.path}` === 'get /api/v1/api-keys');
     expect(list?.requirement).toEqual(route?.requirement);
     expect(list?.userOnly).toBe(false);
+  });
+
+  it('the step AI-4 single-item reads keep the flags of their lists and are no cursor lists (D8)', () => {
+    const pairs: Array<[string, string, string]> = [
+      ['get /api/v1/bec/trusted-senders/:id', 'get /api/v1/bec/trusted-senders', 'bec:read'],
+      ['get /api/v1/bec/suppressions/:id', 'get /api/v1/bec/suppressions', 'bec:read'],
+      ['get /api/v1/dlp/exceptions/:id', 'get /api/v1/dlp/exceptions', 'dlp:read'],
+      [
+        'get /api/v1/platform/threat-indicators/:id',
+        'get /api/v1/platform/threat-indicators',
+        'platform:threat_intel_manage',
+      ],
+    ];
+    for (const [key, listKey, permission] of pairs) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      const list = routes.find((r) => `${r.method} ${r.path}` === listKey);
+      expect(route?.isPublic, key).toBe(false);
+      expect(route?.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
+      expect(route?.requirement, key).toEqual(list?.requirement);
+      expect(route?.requireMfa, key).toBe(list?.requireMfa);
+      expect(route?.userOnly, key).toBe(list?.userOnly);
+      expect(route?.returnsSecret, key).toBe(false);
+      expect(route?.cursor ?? null, key).toBeNull();
+      expect(route?.idempotency ?? null, key).toBeNull();
+    }
+    // BEC and DLP: API keys allowed, no MFA; the platform catalog: users only with MFA.
+    const indicator = routes.find(
+      (r) => `${r.method} ${r.path}` === 'get /api/v1/platform/threat-indicators/:id',
+    );
+    expect(indicator?.userOnly).toBe(true);
+    expect(indicator?.requireMfa).toBe(true);
+    for (const key of [
+      'get /api/v1/bec/trusted-senders/:id',
+      'get /api/v1/bec/suppressions/:id',
+      'get /api/v1/dlp/exceptions/:id',
+    ]) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key);
+      expect(route?.userOnly, key).toBe(false);
+      expect(route?.requireMfa, key).toBe(false);
+    }
   });
 
   it('every body and query schema of the legacy routes is strict at every object node (D1)', () => {

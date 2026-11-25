@@ -14,11 +14,13 @@
 // @covers delete /api/v1/bec/history
 // @covers delete /api/v1/bec/suppressions/:id
 // @covers delete /api/v1/bec/trusted-senders/:id
+// @covers get /api/v1/bec/trusted-senders/:id
 // @covers get /api/v1/bec/executives
 // @covers get /api/v1/bec/executives/:id
 // @covers get /api/v1/bec/feedback
 // @covers get /api/v1/bec/feedback/export
 // @covers get /api/v1/bec/suppressions
+// @covers get /api/v1/bec/suppressions/:id
 // @covers get /api/v1/bec/vendors/:id
 // @covers patch /api/v1/bec/executives/:id
 // @covers patch /api/v1/bec/trusted-senders/:id
@@ -441,6 +443,47 @@ describe('vendor profiles and trusted senders (B7, B18)', () => {
       .set(headers(analystA))
       .send({ version: 1, reason: 'Partner (renewed)' })
       .expect(200);
+    // Step AI-4 D8: the single read (replica) answers the list item's view, also for an API key
+    // with bec:read and for an expired entry; 404 for another tenant or an unknown id.
+    const trustedUrl = `/api/v1/bec/trusted-senders/${id}`;
+    await expect
+      .poll(
+        async () =>
+          ((await ctx.http.get(trustedUrl).set(headers(readerKeyA))).body as { version?: number })
+            .version,
+        POLL,
+      )
+      .toBe(2);
+    const one = await ctx.http.get(trustedUrl).set(headers(analystA)).expect(200);
+    expect(one.body).toMatchObject({
+      id,
+      kind: 'domain',
+      value: 'partner.example',
+      reason: 'Partner (renewed)',
+      expiresAt: null,
+      expired: false,
+      version: 2,
+    });
+    await ctx.prisma.becTrustedSender.updateMany({
+      where: { organizationId: orgA.id, publicId: id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await expect
+      .poll(
+        async () =>
+          ((await ctx.http.get(trustedUrl).set(headers(analystA))).body as { expired?: boolean })
+            .expired,
+        POLL,
+      )
+      .toBe(true);
+    const foreignGet = await ctx.http.get(trustedUrl).set(headers(adminB)).expect(404);
+    expect(foreignGet.body.code).toBe('bec_trusted_sender_not_found');
+    const unknownGet = await ctx.http
+      .get(`/api/v1/bec/trusted-senders/${randomUUID()}`)
+      .set(headers(analystA))
+      .expect(404);
+    expect(unknownGet.body.code).toBe('bec_trusted_sender_not_found');
+    await ctx.http.get('/api/v1/bec/trusted-senders/12345').set(headers(analystA)).expect(400);
     await ctx.http.delete(`/api/v1/bec/trusted-senders/${id}`).set(headers(adminB)).expect(404);
     await ctx.http.delete(`/api/v1/bec/trusted-senders/${id}`).set(headers(analystA)).expect(204);
     expect((await auditOf('bec_trusted_sender.deleted', id))?.metadata).toMatchObject({
@@ -631,6 +674,34 @@ describe('feedback, suppressions, export and the scans read API (B11, B15)', () 
     expect(suppressions.body.data).toHaveLength(1);
     const id = suppressions.body.data[0].id as string;
     expect(suppressions.body.data[0].feedbackId).toBe(list.body.data[0].id);
+    // Step AI-4 D8: the single read (replica, API key with bec:read) answers the list item's
+    // view, an expired rule too; 404 for another tenant or an unknown id; 400 for a non-uuid.
+    const suppressionUrl = `/api/v1/bec/suppressions/${id}`;
+    const one = await ctx.http.get(suppressionUrl).set(headers(readerKeyA)).expect(200);
+    expect(one.body).toEqual(suppressions.body.data[0]);
+    await ctx.prisma.becSuppressionRule.updateMany({
+      where: { organizationId: orgA.id, publicId: id },
+      data: { expiresAt: new Date(Date.now() - 60_000) },
+    });
+    await expect
+      .poll(
+        async () =>
+          (
+            (await ctx.http.get(suppressionUrl).set(headers(readerKeyA))).body as {
+              expired?: boolean;
+            }
+          ).expired,
+        POLL,
+      )
+      .toBe(true);
+    const foreignGet = await ctx.http.get(suppressionUrl).set(headers(adminB)).expect(404);
+    expect(foreignGet.body.code).toBe('bec_suppression_not_found');
+    const unknownGet = await ctx.http
+      .get(`/api/v1/bec/suppressions/${randomUUID()}`)
+      .set(headers(readerKeyA))
+      .expect(404);
+    expect(unknownGet.body.code).toBe('bec_suppression_not_found');
+    await ctx.http.get('/api/v1/bec/suppressions/history').set(headers(readerKeyA)).expect(400);
     await ctx.http.delete(`/api/v1/bec/suppressions/${id}`).set(headers(adminB)).expect(404);
     await ctx.http.delete(`/api/v1/bec/suppressions/${id}`).set(headers(analystA)).expect(204);
     expect((await auditOf('bec_suppression.deleted', id))?.metadata).toMatchObject({

@@ -462,6 +462,14 @@ export class BecFeedbackRepository {
     return row;
   }
 
+  /** One suppression rule of the scope by public id (replica; expired rules included). */
+  findSuppression(scope: TenantScope, publicId: string): Promise<SuppressionRow | null> {
+    return this.db.becSuppressionRule.findFirst({
+      where: tenantWhere(scope, { publicId }),
+      select: suppressionSelect,
+    });
+  }
+
   async findSuppressionForUpdate(
     tx: Client,
     scope: TenantScope,

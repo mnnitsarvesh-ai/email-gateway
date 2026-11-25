@@ -79,6 +79,13 @@ export class BecTrustedSendersService {
     return toPage(rows, query.limit, (row) => trustedSenderView(row, now));
   }
 
+  /** `GET /bec/trusted-senders/{id}` (replica; expired entries included), or `404`. */
+  async get(scope: TenantScope, id: string): Promise<BecTrustedSenderView> {
+    const row = await this.repository.findTrusted(scope, id);
+    if (!row) throw becNotFound('trusted_sender');
+    return trustedSenderView(row, new Date());
+  }
+
   async create(
     principal: Principal,
     scope: TenantScope,

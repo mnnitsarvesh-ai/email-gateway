@@ -21,9 +21,25 @@ export const DEFAULT_DATABASE_SOCKET_TIMEOUT_SECONDS = 0;
 /** Largest accepted socket timeout. */
 export const MAX_DATABASE_SOCKET_TIMEOUT_SECONDS = 3600;
 
+/** Largest accepted `connection_limit` (pool size of one client). */
+export const MAX_DATABASE_CONNECTION_LIMIT = 500;
+/** Largest accepted `pool_timeout` (seconds a query waits for a free pool connection). */
+export const MAX_DATABASE_POOL_TIMEOUT_SECONDS = 600;
+
 export interface DatabaseClientUrlOptions {
   /** `socket_timeout` in seconds; 0 or undefined leaves the URL's own value (normally none). */
   socketTimeoutSeconds?: number;
+  /**
+   * `connection_limit` (1–500): the client's pool size. Undefined leaves the URL's own value
+   * (else Prisma's default `2 × CPUs + 1`); a given value replaces one already in the URL.
+   */
+  connectionLimit?: number;
+  /**
+   * `pool_timeout` in seconds (1–600): how long a query waits for a pool connection before it
+   * fails with `P2024`. Undefined leaves the URL's own value (else Prisma's default 10 s); a given
+   * value replaces one already in the URL.
+   */
+  poolTimeoutSeconds?: number;
 }
 
 function assertSocketTimeout(value: number, name: string): void {
@@ -34,21 +50,48 @@ function assertSocketTimeout(value: number, name: string): void {
   }
 }
 
+function assertIntegerRange(value: number, name: string, max: number, unit: string): void {
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new RangeError(`${name} must be an integer from 1 to ${max}${unit}`);
+  }
+}
+
 /**
  * The client URL of a writer or replica endpoint with the shared driver parameters. Errors
- * never contain the URL (it carries credentials).
+ * never contain the URL (it carries credentials). Without options (or with only a 0 socket
+ * timeout) the URL is returned unchanged.
  */
 export function databaseClientUrl(url: string, options: DatabaseClientUrlOptions = {}): string {
   const seconds = options.socketTimeoutSeconds ?? DEFAULT_DATABASE_SOCKET_TIMEOUT_SECONDS;
   assertSocketTimeout(seconds, 'socketTimeoutSeconds');
-  if (seconds === 0) return url;
+  const { connectionLimit, poolTimeoutSeconds } = options;
+  if (connectionLimit !== undefined) {
+    assertIntegerRange(connectionLimit, 'connectionLimit', MAX_DATABASE_CONNECTION_LIMIT, '');
+  }
+  if (poolTimeoutSeconds !== undefined) {
+    assertIntegerRange(
+      poolTimeoutSeconds,
+      'poolTimeoutSeconds',
+      MAX_DATABASE_POOL_TIMEOUT_SECONDS,
+      ' (seconds)',
+    );
+  }
+  if (seconds === 0 && connectionLimit === undefined && poolTimeoutSeconds === undefined) {
+    return url;
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     throw new TypeError('The database URL is not a valid URL');
   }
-  parsed.searchParams.set('socket_timeout', String(seconds));
+  if (seconds !== 0) parsed.searchParams.set('socket_timeout', String(seconds));
+  if (connectionLimit !== undefined) {
+    parsed.searchParams.set('connection_limit', String(connectionLimit));
+  }
+  if (poolTimeoutSeconds !== undefined) {
+    parsed.searchParams.set('pool_timeout', String(poolTimeoutSeconds));
+  }
   return parsed.toString();
 }
 

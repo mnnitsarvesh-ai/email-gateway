@@ -5,15 +5,15 @@ Pure package of the AI chat management assistant (step AI-1, design
 business logic and touches no database: the api's `assistant` module (the only dependent, enforced by a test) runs turns
 and executes tools through its own HTTP pipeline.
 
-| Area      | Files                                                                                                             | What                                                                                                                                                                                                                                                                                                                                                              |
-| --------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Providers | `src/providers/*`                                                                                                 | `LlmProvider` (D6): Anthropic (`@anthropic-ai/sdk` 1.1.0, streaming, strict meta tools, server-side refusal fallback, preserved thinking), OpenAI and Azure OpenAI (plain HTTPS, bounded SSE, zod), the deterministic `FakeProvider` (refused in production), factory, retry, breaker, prices                                                                     |
-| Prompt    | `prompts/assistant-system-4.md`, `src/prompt/system.ts`                                                           | `assistant-system/4` (step AI-2: writes are proposals confirmed in a card; step AI-3: rule 12, no self-service of authority and no credentials in chat; step AI-R: rule 13, reports through `report_generate` / `report_send_email`; `assistant-system-1.md` to `-3.md` are kept for stored turns): prompt text, catalogue index, then the volatile context block |
-| Confirm   | `src/confirmations/*`                                                                                             | Step AI-2 (design 29 D3–D6): canonical JSON, action/state digests and the single-use token, the confirmation spec of every enabled write, the server-authored impact summaries (`assistant-confirmation/1`) and the action-updates block; step AI-3 (design 30 D3–D7): proposal guards, risk escalation, selected-item preconditions                              |
-| Context   | `src/context/window.ts`                                                                                           | Token estimate (chars / 3.5), segment window, deterministic recap (D7)                                                                                                                                                                                                                                                                                            |
-| Results   | `src/results/*`                                                                                                   | Sanitizer, minimizer (`assistant-tool-result/1`, refs, `untrusted_text`), cards (`assistant-card/1`), stream events (`assistant-stream/1`)                                                                                                                                                                                                                        |
-| Registry  | `src/registry/manifest.ts`, `operations.generated.ts`, `native.ts`, `registry.ts`, `scripts/generate-registry.ts` | Classification rules and overrides, the generated tool records, the native tools of step AI-R, `ALL_TOOLS`, `enabledTools`, `renderCatalogueIndex`, `describeTool`, `compileValidator` (Ajv 8 strict)                                                                                                                                                             |
-| Reports   | `src/reports/*`                                                                                                   | Step AI-R (design [31](../../docs/plan/steps/31-ai-chat-reports.md) D2–D5, ADR-0095): the source plan and response parsers, `buildReportModel`, static SVG charts, the inert HTML renderer (`assistant-report/1`) and the recipient rule                                                                                                                          |
+| Area      | Files                                                                                                             | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Providers | `src/providers/*`                                                                                                 | `LlmProvider` (D6): Anthropic (`@anthropic-ai/sdk` 1.1.0, streaming, strict meta tools, server-side refusal fallback, preserved thinking), OpenAI and Azure OpenAI (plain HTTPS, bounded SSE, zod), the deterministic `FakeProvider` (refused in production), factory, retry, breaker, prices                                                                                                                                                                             |
+| Prompt    | `prompts/assistant-system-5.md`, `src/prompt/system.ts`                                                           | `assistant-system/5` (step AI-2: writes are proposals confirmed in a card; step AI-3: rule 12, no self-service of authority and no credentials in chat; step AI-R: rule 13, reports through `report_generate` / `report_send_email`; step AI-4: rule 14, ATO four eyes, re-authentication for weakening detection, platform-only operations; `assistant-system-1.md` to `-4.md` are kept for stored turns): prompt text, catalogue index, then the volatile context block |
+| Confirm   | `src/confirmations/*`                                                                                             | Step AI-2 (design 29 D3–D6): canonical JSON, action/state digests and the single-use token, the confirmation spec of every enabled write, the server-authored impact summaries (`assistant-confirmation/1`) and the action-updates block; step AI-3 (design 30 D3–D7): proposal guards, risk escalation, selected-item preconditions; step AI-4 (design 32 D3–D6, D10): four-eyes guards, new CAS fields, queued-work lines                                               |
+| Context   | `src/context/window.ts`                                                                                           | Token estimate (chars / 3.5), segment window, deterministic recap (D7)                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Results   | `src/results/*`                                                                                                   | Sanitizer, minimizer (`assistant-tool-result/1`, refs, `untrusted_text`), cards (`assistant-card/1`), stream events (`assistant-stream/1`)                                                                                                                                                                                                                                                                                                                                |
+| Registry  | `src/registry/manifest.ts`, `operations.generated.ts`, `native.ts`, `registry.ts`, `scripts/generate-registry.ts` | Classification rules and overrides, the generated tool records, the native tools of step AI-R, `ALL_TOOLS`, `enabledTools`, `renderCatalogueIndex`, `describeTool`, `compileValidator` (Ajv 8 strict)                                                                                                                                                                                                                                                                     |
+| Reports   | `src/reports/*`                                                                                                   | Step AI-R (design [31](../../docs/plan/steps/31-ai-chat-reports.md) D2–D5, ADR-0095): the source plan and response parsers, `buildReportModel`, static SVG charts, the inert HTML renderer (`assistant-report/1`) and the recipient rule                                                                                                                                                                                                                                  |
 
 ## Registry
 
@@ -30,7 +30,7 @@ phase in `MODULE_WRITE_PHASE`; mail-derived or attacker-influenced typed string 
 
 ## Program phase and confirmations (steps AI-2, AI-3)
 
-`ASSISTANT_PROGRAM_PHASE` is `AI-R` (which adds only the native tools below): reads of every phase up to AI-3 and the 78 OpenAPI writes of AI-2 (policies, quarantine,
+At AI-R (which added only the native tools below) reads of every phase up to AI-3 and the 78 OpenAPI writes of AI-2 (policies, quarantine,
 mail operations) and AI-3 (identity and tenant administration, design
 [`30-ai-chat-identity-tenant-admin.md`](../../docs/plan/steps/30-ai-chat-identity-tenant-admin.md)) are enabled. A write is
 enabled only with a `testedBy` integration suite, a confirmation spec (`src/confirmations/specs.ts`) and an impact
@@ -52,13 +52,36 @@ functions the api's executor, proposer and confirm route call:
   apply to `targetOf(...)`. A missing required item is treated like a `404` read; a missing optional item is `{}`.
 
 The registry check also refuses an enabled write whose input schema has a credential-pattern key (`isCredentialKey`;
-named exceptions in `CREDENTIAL_KEY_EXCEPTIONS`: role keys) and an access override other than `'write'`.
+named exceptions in `CREDENTIAL_KEY_EXCEPTIONS`: role keys and, step AI-4, the `require_password_reset` action
+setting and BEC/incident reason codes) and an access override other than `'write'`.
+
+## Security operations (step AI-4)
+
+Design [`32-ai-chat-security-operations.md`](../../docs/plan/steps/32-ai-chat-security-operations.md) (I18–I21,
+D1–D12). `ASSISTANT_PROGRAM_PHASE` is `AI-4`: 70 more tools are enabled (64 writes of DLP, BEC, risk scoring, incidents,
+ATO triage, responses, settings and IdP integrations, the 8 platform operations; the reads `dlp_patterns_test`,
+`risk_dry_run_dry_run` and the four single reads `bec_trusted_senders_get`, `bec_feedback_get_suppression`,
+`dlp_exceptions_get`, `threat_indicators_get`). Their suites are `ATO_WRITES_TESTED_BY`,
+`DETECTION_WRITES_TESTED_BY` and `PLATFORM_OPS_WRITES_TESTED_BY` (`AI4_WRITES_TESTED_BY`).
+
+- **Four eyes (I18)**: the after-read guard kinds `not_self_field` (a user id of the target is not the caller, optionally
+  gated by `when`) and `require_read_value` (a target field has the required value, fail closed) refuse an
+  `ato_responses_approve` / `_reject` proposal by the requester, by the creator of the requesting API key or without MFA
+  (`canDecide` false) with the message `ato_four_eyes`. The api's `ato_self_approval` stays the authority.
+- **Weakening detection is high (I20)**: risk overrides for trust and exception creates, ATO settings and IdP settings;
+  the escalations of D4 (`AI4_ESCALATION_WARNINGS`).
+- **CAS fields**: `CasInjection.field` also takes `version`, `rowVersion` and `expectedProfileVersion`.
+- **Redacted read inputs (D9)**: `OperationTool.redactParams` (`dlp_patterns_test`: `body.sample`, `body.pattern`);
+  `redactToolArguments(tool, args)` gives the copy with `[redacted]` the api stores; only reads may have them.
+- **Outcomes (D10)**: `QUEUED_202_TOOLS` (queued work answers "it was queued (HTTP 202)"); `ato_responses_request`
+  answers "the response was requested (HTTP 201) …".
+- **Fake provider**: plans "approve the pending response", "open an incident for the account <address>" and
+  `add dlp dictionary "<name>" with terms …`.
 
 ## Reports and native tools (step AI-R)
 
 Design [`31-ai-chat-reports.md`](../../docs/plan/steps/31-ai-chat-reports.md) (I15–I17, D1–D5, D10), ADR-0095.
-`ASSISTANT_PROGRAM_PHASE` is `AI-R` (`PROGRAM_PHASES` = AI-1, AI-2, AI-3, AI-R, AI-4, AI-5, AI-6); AI-R adds no
-OpenAPI tool.
+`PROGRAM_PHASES` = AI-1, AI-2, AI-3, AI-R, AI-4, AI-5, AI-6; AI-R adds no OpenAPI tool.
 
 - **Native tools** (`src/registry/native.ts`, `NATIVE_TOOLS`): `report_generate` (`AssistantNative_reportGenerate`,
   read, `read_audited`) and `report_send_email` (`AssistantNative_reportSendEmail`, write, `medium`,

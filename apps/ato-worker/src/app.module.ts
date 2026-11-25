@@ -153,7 +153,14 @@ export class AppModule {
       module: AppModule,
       imports: [
         CorrelationModule,
-        DatabaseModule.forRoot({ url: config.DATABASE_URL }),
+        // Step AI-4 D14: the writer pool is sized for the queue handlers, IdP polls/probes and
+        // maintenance jobs, with a pool timeout ≥ the transaction maxWait (AdvisoryLocks keeps
+        // its own connection_limit=1 client).
+        DatabaseModule.forRoot({
+          url: config.DATABASE_URL,
+          connectionLimit: config.ATO_DATABASE_CONNECTION_LIMIT,
+          poolTimeoutSeconds: config.ATO_DATABASE_POOL_TIMEOUT_SECONDS,
+        }),
         RedisModule.forRoot({ url: config.REDIS_URL }),
         MetricsModule.forRoot({ service: SERVICE_NAME }),
         ...(broker

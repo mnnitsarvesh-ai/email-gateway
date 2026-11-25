@@ -6,6 +6,7 @@ import { credentialKeyPaths, registryConsistencyIssues } from '../registry/consi
 import {
   AI2_WRITES_TESTED_BY,
   AI3_WRITES_TESTED_BY,
+  AI4_WRITES_TESTED_BY,
   CREDENTIAL_KEY_EXCEPTIONS,
 } from '../registry/manifest';
 import { ALL_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
@@ -34,13 +35,15 @@ const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(opera
 const POLICY = '0193aaaa-0000-7000-8000-000000000002';
 
 describe('confirmation specs (D4)', () => {
-  it('one spec per AI-2, AI-3 and native AI-R write, every one an enabled write of the registry', () => {
-    expect(CONFIRMATION_SPECS).toHaveLength(79);
+  it('one spec per AI-2, AI-3, native AI-R and AI-4 write, every one an enabled write of the registry', () => {
+    expect(CONFIRMATION_SPECS).toHaveLength(143);
+    expect(Object.keys(AI4_WRITES_TESTED_BY)).toHaveLength(64);
     expect(CONFIRMATION_SPECS.map((s) => s.operationId).sort()).toEqual(
       [
         ...Object.keys(AI2_WRITES_TESTED_BY),
         ...Object.keys(AI3_WRITES_TESTED_BY),
         'AssistantNative_reportSendEmail',
+        ...Object.keys(AI4_WRITES_TESTED_BY),
       ].sort(),
     );
     expect(confirmationSpecOf('AssistantNative_reportSendEmail')).toEqual({
@@ -283,11 +286,11 @@ describe('registry consistency rules (synthetic breaks)', () => {
       'policy_management_disable: enabled write without a confirmation spec',
     ]);
     const extra: ConfirmationSpec = {
-      operationId: 'AtoAccountsController_update_v1',
+      operationId: 'ArchiveRetentionController_create_v1',
       precondition: null,
     };
     expect(registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, extra] })).toEqual([
-      'AtoAccountsController_update_v1: confirmation spec without an enabled write tool',
+      'ArchiveRetentionController_create_v1: confirmation spec without an enabled write tool',
     ]);
     expect(
       registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, CONFIRMATION_SPECS[0]!] }),
@@ -295,17 +298,17 @@ describe('registry consistency rules (synthetic breaks)', () => {
   });
 
   it('no tool after the program phase is enabled; no write before the confirmation phase', () => {
-    const invite = findTool('ato_accounts_update')!;
-    expect(invite.enabled).toBe(false);
-    expect(invite.phase).toBe('AI-4');
+    const later = findTool('archive_retention_create')!;
+    expect(later.enabled).toBe(false);
+    expect(later.phase).toBe('AI-5');
     const issues = registryConsistencyIssues(
-      replace('ato_accounts_update', { enabled: true, testedBy: 'x.test.ts' }),
+      replace('archive_retention_create', { enabled: true, testedBy: 'x.test.ts' }),
     );
     expect(issues).toEqual(
       expect.arrayContaining([
-        'ato_accounts_update: enabled although its phase AI-4 is after the program phase',
-        'ato_accounts_update: enabled write without a confirmation spec',
-        'ato_accounts_update: enabled write without an impact template',
+        'archive_retention_create: enabled although its phase AI-5 is after the program phase',
+        'archive_retention_create: enabled write without a confirmation spec',
+        'archive_retention_create: enabled write without an impact template',
       ]),
     );
     expect(registryConsistencyIssues(tools, { programPhase: 'AI-1' })).toEqual(
@@ -574,6 +577,14 @@ function schemaAt(schema: unknown, path: string): Record<string, unknown> | null
   return nodes[0] ?? null;
 }
 
+/**
+ * Display paths under a free-form object of the read's response (step AI-4): the ATO settings
+ * read's `effective` document is typed as an open object, its `mode` is the documented setting.
+ */
+const FREE_FORM_DISPLAY: Readonly<Record<string, { parent: string; path: string }>> = {
+  AtoSettingsController_update_v1: { parent: 'effective', path: 'effective.mode' },
+};
+
 describe('AI-3 specs (design 30 D6)', () => {
   const AI3 = CONFIRMATION_SPECS.filter((s) => s.operationId in AI3_WRITES_TESTED_BY);
   const nameOf = (operationId: string) => (findOperation(operationId) as OperationTool).name;
@@ -728,8 +739,15 @@ describe('AI-3 specs (design 30 D6)', () => {
         ...pre.stateFields,
         ...(pre.rowVersionField ? [pre.rowVersionField] : []),
         ...(pre.displayFields ?? []),
-      ])
+      ]) {
+        // A display path under a free-form object of the response (named, display only).
+        const freeForm = FREE_FORM_DISPLAY[s.operationId];
+        if (freeForm?.path === path && !pre.stateFields.includes(path)) {
+          expect(schemaAt(schema, freeForm.parent), `${s.operationId}: ${path}`).not.toBeNull();
+          continue;
+        }
         expect(schemaAt(schema, path), `${s.operationId}: ${path}`).not.toBeNull();
+      }
     }
   });
 
@@ -993,15 +1011,472 @@ describe('AI-3 registry consistency rules (synthetic breaks)', () => {
     expect(credentialKeyPaths(findTool('roles_create')!.inputSchema)).toEqual(['body.key']);
     expect(credentialKeyPaths(findTool('roles_update')!.inputSchema)).toEqual(['key']);
     expect(Object.keys(CREDENTIAL_KEY_EXCEPTIONS).sort()).toEqual([
+      'AtoProvidersController_create_v1',
+      'AtoProvidersController_update_v1',
+      'AtoSettingsController_update_v1',
+      'BecMessageFeedbackController_record_v1',
+      'IncidentsController_update_v1',
       'RolesController_create_v1',
       'RolesController_remove_v1',
       'RolesController_update_v1',
     ]);
+    // Step AI-4: action names and reason/resolution codes, never credentials.
+    expect(credentialKeyPaths(findTool('ato_settings_update')!.inputSchema)).toEqual([
+      'body.settings.automation.require_password_reset',
+    ]);
+    expect(credentialKeyPaths(findTool('bec_message_feedback_record')!.inputSchema)).toEqual([
+      'body.reasonCodes',
+      'body.suppress.codes',
+    ]);
+    expect(credentialKeyPaths(findTool('incidents_update')!.inputSchema)).toEqual([
+      'body.resolution.code',
+    ]);
+    for (const [operationId, paths] of Object.entries(CREDENTIAL_KEY_EXCEPTIONS)) {
+      const t = findOperation(operationId) as OperationTool;
+      expect(credentialKeyPaths(t.inputSchema).sort(), operationId).toEqual(
+        Object.keys(paths).sort(),
+      );
+    }
     // A disabled tool's schema is not checked (secret-returning operations are N/A anyway).
     expect(
       registryConsistencyIssues(
         withSecret.map((t) => (t.name === 'webhooks_update' ? { ...t, enabled: false } : t)),
       ),
     ).toEqual(['WebhooksController_update_v1: confirmation spec without an enabled write tool']);
+  });
+});
+
+describe('AI-4 specs (design 32 D5)', () => {
+  const AI4 = CONFIRMATION_SPECS.filter((s) => s.operationId in AI4_WRITES_TESTED_BY);
+  const nameOf = (operationId: string) => (findOperation(operationId) as OperationTool).name;
+
+  it('covers the 64 AI-4 writes; 143 enabled writes have one spec each', () => {
+    expect(AI4).toHaveLength(64);
+    const enabledWrites = ALL_TOOLS.filter((t) => t.enabled && t.access === 'write');
+    expect(enabledWrites).toHaveLength(143);
+    for (const write of enabledWrites)
+      expect(confirmationSpecOf(write.operationId), write.name).toBeDefined();
+  });
+
+  it('names the design D5 preconditions, selects, state fields and CAS injections', () => {
+    const table = Object.fromEntries(
+      AI4.map((s) => {
+        const pre = s.precondition;
+        const read =
+          pre?.kind === 'single'
+            ? `${pre.tool}{${Object.entries(pre.params)
+                .map(([k, v]) => (k === v ? k : `${k}=${v}`))
+                .join(
+                  ',',
+                )}}${pre.select ? ` select ${pre.select.array}[${pre.select.field}=${pre.select.arg}]` : ''}`
+            : null;
+        return [
+          nameOf(s.operationId),
+          [
+            read,
+            pre?.stateFields.join(',') ?? null,
+            s.inject ? `${s.inject.in}.${s.inject.field}>=${s.inject.min}` : null,
+          ],
+        ];
+      }),
+    );
+    const account = 'ato_accounts_get{accountId}';
+    const response = 'ato_responses_get{responseId}';
+    const provider = 'ato_providers_get{integrationId}';
+    const v = (tool: string, inject: string | null) => [`${tool}{id}`, 'version', inject];
+    expect(table).toEqual({
+      ato_accounts_update: [
+        account,
+        'rowVersion,protection.protected',
+        'body.expectedRowVersion>=1',
+      ],
+      ato_account_mailbox_refresh: [account, 'status', null],
+      ato_accounts_set_override: [account, 'overrideDetail.id,overrideDetail.verdict', null],
+      ato_accounts_clear_override: [account, 'overrideDetail.id', null],
+      ato_accounts_add_trusted_context: [account, 'status', null],
+      ato_accounts_remove_trusted_context: [
+        `${account} select trustedContexts[id=contextId]`,
+        'id,expiresAt',
+        null,
+      ],
+      ato_responses_request: ['incidents_get{incidentId}', 'status', null],
+      ato_responses_approve: [response, 'status,approvalExpiresAt', null],
+      ato_responses_reject: [response, 'status', null],
+      ato_responses_cancel: [response, 'status', null],
+      ato_responses_rollback: [response, 'status', null],
+      ato_settings_update: ['ato_settings_get{}', 'rowVersion', 'body.expectedRowVersion>=0'],
+      ato_providers_create: [
+        'ato_providers_connections{} select data[id=body.connectionId]',
+        'status',
+        null,
+      ],
+      ato_providers_update: [provider, 'rowVersion,status', 'body.rowVersion>=1'],
+      ato_providers_remove: [provider, 'status', null],
+      ato_providers_backfill: [provider, 'status', null],
+      ato_providers_health_check: [provider, 'status', null],
+      ato_providers_pause: [provider, 'status', null],
+      ato_providers_resume: [provider, 'status', null],
+      incidents_create: ['ato_accounts_get{accountId=body.subject.id}', 'status', null],
+      incidents_update: [
+        'incidents_get{incidentId}',
+        'rowVersion,status',
+        'body.expectedRowVersion>=1',
+      ],
+      incidents_add_note: ['incidents_get{incidentId}', 'status', null],
+      bec_executives_create: [null, null, null],
+      bec_executives_update: v('bec_executives_get', 'body.version>=1'),
+      bec_executives_remove: v('bec_executives_get', 'query.version>=1'),
+      bec_trusted_senders_create: [null, null, null],
+      bec_trusted_senders_update: v('bec_trusted_senders_get', 'body.version>=1'),
+      bec_trusted_senders_remove: v('bec_trusted_senders_get', 'query.version>=1'),
+      bec_vendors_create: [null, null, null],
+      bec_vendors_update: v('bec_vendors_get', 'body.version>=1'),
+      bec_vendors_remove: v('bec_vendors_get', 'query.version>=1'),
+      bec_feedback_delete_suppression: ['bec_feedback_get_suppression{id}', 'expiresAt', null],
+      bec_message_feedback_record: ['messages_detail{messageId}', 'status', null],
+      dlp_compliance_enable: [
+        'dlp_compliance_get{}',
+        'version,aadhaar.enabled',
+        'body.expectedVersion>=0',
+      ],
+      dlp_compliance_disable: [
+        'dlp_compliance_get{}',
+        'version,aadhaar.enabled',
+        'query.expectedVersion>=0',
+      ],
+      dlp_dictionaries_create: [null, null, null],
+      dlp_dictionaries_update: v('dlp_dictionaries_get', 'body.version>=1'),
+      dlp_dictionaries_remove: v('dlp_dictionaries_get', 'query.version>=1'),
+      dlp_exceptions_create: [null, null, null],
+      dlp_exceptions_update: v('dlp_exceptions_get', 'body.version>=1'),
+      dlp_exceptions_remove: v('dlp_exceptions_get', 'query.version>=1'),
+      dlp_patterns_create: [null, null, null],
+      dlp_patterns_update: v('dlp_patterns_get', 'body.version>=1'),
+      dlp_patterns_remove: v('dlp_patterns_get', 'query.version>=1'),
+      dlp_policies_create: [null, null, null],
+      dlp_policies_update: v('dlp_policies_get', 'body.version>=1'),
+      dlp_policies_remove: v('dlp_policies_get', 'query.version>=1'),
+      dlp_policies_create_rule: ['dlp_policies_get{id}', 'version', null],
+      dlp_policies_update_rule: [
+        'dlp_policies_get{id} select rules[id=ruleId]',
+        'version',
+        'body.version>=1',
+      ],
+      dlp_policies_remove_rule: [
+        'dlp_policies_get{id} select rules[id=ruleId]',
+        'version',
+        'query.version>=1',
+      ],
+      risk_profiles_create_draft: [null, null, null],
+      risk_profiles_update_draft: [
+        'risk_profiles_get_version{versionId}',
+        'rowVersion,status',
+        'body.expectedRowVersion>=1',
+      ],
+      risk_profiles_delete_draft: [
+        'risk_profiles_get_version{versionId}',
+        'rowVersion,status',
+        'query.expectedRowVersion>=1',
+      ],
+      risk_profiles_publish: [
+        'risk_profiles_get_version{versionId}',
+        'rowVersion,status',
+        'body.expectedRowVersion>=1',
+      ],
+      risk_profiles_activate: [
+        'risk_profiles_profile{}',
+        'profileVersion',
+        'body.expectedProfileVersion>=0',
+      ],
+      risk_profiles_reset: [
+        'risk_profiles_profile{}',
+        'profileVersion',
+        'body.expectedProfileVersion>=0',
+      ],
+      attachment_rescans_request: [null, null, null],
+      attachment_rescans_cancel: ['attachment_rescans_get{jobId}', 'status', null],
+      dead_letters_replay: [null, null, null],
+      scan_training_train: [null, null, null],
+      threat_hashes_add: [null, null, null],
+      threat_hashes_remove: [
+        'threat_hashes_list{sha256} select data[sha256=sha256]',
+        'severity,expiresAt',
+        null,
+      ],
+      threat_indicators_add: [null, null, null],
+      threat_indicators_remove: ['threat_indicators_get{id}', 'severity,expiresAt', null],
+    });
+  });
+
+  it('state fields are stable: an ATO account rowVersion only where the write CAS-checks it', () => {
+    for (const s of CONFIRMATION_SPECS) {
+      const pre = s.precondition;
+      if (pre?.kind !== 'single' || pre.tool !== 'ato_accounts_get') continue;
+      if (pre.stateFields.includes('rowVersion') && !pre.select)
+        expect(s.inject?.field, s.operationId).toBe('expectedRowVersion');
+    }
+    expect(spec('AtoAccountsController_update_v1').inject).toEqual({
+      in: 'body',
+      field: 'expectedRowVersion',
+      min: 1,
+    });
+    // Moving risk figures are display only.
+    for (const operationId of [
+      'AtoAccountsController_setOverride_v1',
+      'AtoAccountsController_clearOverride_v1',
+      'AtoAccountsController_addTrustedContext_v1',
+      'IncidentsController_create_v1',
+    ]) {
+      const pre = spec(operationId).precondition as SinglePrecondition;
+      expect(pre.stateFields, operationId).not.toContain('riskScore');
+      expect(pre.stateFields, operationId).not.toContain('riskLevel');
+      expect(pre.stateFields, operationId).not.toContain('rowVersion');
+    }
+  });
+
+  it('never shows the DLP pattern text and never binds platform tools to an organization', () => {
+    for (const operationId of [
+      'DlpPatternsController_update_v1',
+      'DlpPatternsController_remove_v1',
+    ]) {
+      const pre = spec(operationId).precondition as SinglePrecondition;
+      expect([...pre.stateFields, ...(pre.displayFields ?? [])], operationId).not.toContain(
+        'pattern',
+      );
+    }
+    for (const operationId of Object.keys(AI4_WRITES_TESTED_BY))
+      expect((findOperation(operationId) as OperationTool).bind, operationId).toEqual({});
+  });
+
+  it('CAS injection with the new field names (body and query)', () => {
+    const ID = '0193aaaa-0000-7000-8000-000000000301';
+    // body.version
+    const exec = spec('BecExecutivesController_update_v1');
+    expect(withCasPlaceholder({ id: ID, body: { title: 'CFO' } }, exec)).toEqual({
+      id: ID,
+      body: { title: 'CFO', version: 1 },
+    });
+    expect(withInjectedCas({ id: ID, body: { title: 'CFO', version: 99 } }, exec, 4)).toEqual({
+      id: ID,
+      body: { title: 'CFO', version: 4 },
+    });
+    // query version
+    const remove = spec('DlpPoliciesController_remove_v1');
+    expect(withCasPlaceholder({ id: ID }, remove)).toEqual({ id: ID, version: 1 });
+    expect(withInjectedCas({ id: ID, version: 7 }, remove, 3)).toEqual({ id: ID, version: 3 });
+    // body.rowVersion (IdP integration settings)
+    const provider = spec('AtoProvidersController_update_v1');
+    expect(
+      withInjectedCas({ integrationId: ID, body: { settings: {}, rowVersion: 1 } }, provider, 6),
+    ).toEqual({ integrationId: ID, body: { settings: {}, rowVersion: 6 } });
+    // body.expectedProfileVersion (the body itself is optional: it is created)
+    const activate = spec('RiskProfilesController_activate_v1');
+    expect(withCasPlaceholder({ versionId: ID }, activate)).toEqual({
+      versionId: ID,
+      body: { expectedProfileVersion: 0 },
+    });
+    expect(withInjectedCas({ versionId: ID }, activate, 5)).toEqual({
+      versionId: ID,
+      body: { expectedProfileVersion: 5 },
+    });
+    expect(withInjectedCas({}, spec('RiskProfilesController_reset_v1'), 0)).toEqual({
+      body: { expectedProfileVersion: 0 },
+    });
+    // query expectedVersion (Aadhaar compliance disable); the read's version 0 is valid (min 0)
+    const disable = spec('DlpComplianceController_disable_v1');
+    expect(withInjectedCas({}, disable, 0)).toEqual({ expectedVersion: 0 });
+    expect(
+      rowVersionOf(
+        { version: 0, aadhaar: { enabled: true } },
+        disable.precondition as SinglePrecondition,
+      ),
+    ).toBe(0);
+    // Every injected value passes the write's schema.
+    for (const operationId of [
+      'BecExecutivesController_update_v1',
+      'DlpPoliciesController_remove_v1',
+      'RiskProfilesController_activate_v1',
+      'DlpComplianceController_disable_v1',
+    ]) {
+      const s = spec(operationId);
+      const t = findOperation(operationId) as OperationTool;
+      const base = operationId.startsWith('Risk') ? { versionId: ID } : { id: ID };
+      const args = withInjectedCas(
+        operationId === 'BecExecutivesController_update_v1' ? { ...base, body: {} } : base,
+        s,
+        s.inject!.min === 0 ? 0 : 2,
+      );
+      const cleaned =
+        operationId === 'DlpComplianceController_disable_v1' ? { expectedVersion: 0 } : args;
+      expect(compileValidator(t)(cleaned), operationId).toEqual({ ok: true });
+    }
+  });
+
+  it('select: ATO trusted contexts, DLP rules (row version from the rule) and threat hashes', () => {
+    const ACCOUNT = '0193aaaa-0000-7000-8000-000000000302';
+    const CONTEXT = '0193aaaa-0000-7000-8000-000000000303';
+    const contexts = spec('AtoAccountsController_removeTrustedContext_v1')
+      .precondition as SinglePrecondition;
+    const accountRead = {
+      id: ACCOUNT,
+      rowVersion: 40,
+      trustedContexts: [
+        {
+          id: 'other',
+          kind: 'asn',
+          value: '64500',
+          reason: 'r',
+          source: 'analyst',
+          expiresAt: 'x',
+        },
+        {
+          id: CONTEXT,
+          kind: 'ip_cidr',
+          value: '203.0.113.0/24',
+          reason: 'Office VPN',
+          source: 'analyst',
+          expiresAt: '2027-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    const args = { accountId: ACCOUNT, contextId: CONTEXT };
+    expect(preconditionArgs(contexts, args)).toEqual({ accountId: ACCOUNT });
+    const item = targetOf(accountRead, contexts, args) as Record<string, unknown>;
+    expect(item.value).toBe('203.0.113.0/24');
+    expect(stateDigest(item, contexts.stateFields)).toBe(
+      stateDigest({ id: CONTEXT, expiresAt: '2027-01-01T00:00:00.000Z' }, contexts.stateFields),
+    );
+    expect(buildSnapshot(item, contexts)).toMatchObject({ kind: 'ip_cidr', reason: 'Office VPN' });
+    expect(selectTarget(accountRead, contexts, { ...args, contextId: 'missing' })).toEqual({
+      found: false,
+      item: null,
+    });
+    // A rescoring (account rowVersion) does not change the selected item's digest.
+    expect(
+      stateDigest(
+        targetOf({ ...accountRead, rowVersion: 41 }, contexts, args),
+        contexts.stateFields,
+      ),
+    ).toBe(stateDigest(item, contexts.stateFields));
+
+    const rule = spec('DlpPoliciesController_updateRule_v1').precondition as SinglePrecondition;
+    const POLICY_ID = '0193aaaa-0000-7000-8000-000000000304';
+    const RULE = '0193aaaa-0000-7000-8000-000000000305';
+    const policyRead = {
+      id: POLICY_ID,
+      version: 9,
+      rules: [
+        { id: 'r0', name: 'Other', version: 2 },
+        {
+          id: RULE,
+          name: 'Card numbers',
+          enabled: true,
+          priority: 10,
+          action: 'block',
+          version: 3,
+        },
+      ],
+    };
+    const ruleArgs = { id: POLICY_ID, ruleId: RULE, body: { enabled: false } };
+    const ruleItem = targetOf(policyRead, rule, ruleArgs);
+    expect(rowVersionOf(ruleItem, rule)).toBe(3);
+    expect(withInjectedCas(ruleArgs, spec('DlpPoliciesController_updateRule_v1'), 3).body).toEqual({
+      enabled: false,
+      version: 3,
+    });
+    expect(buildSnapshot(ruleItem, rule)).toEqual({
+      version: 3,
+      name: 'Card numbers',
+      enabled: true,
+      priority: 10,
+      action: 'block',
+    });
+
+    const hashes = spec('ThreatHashesController_remove_v1').precondition as SinglePrecondition;
+    const SHA = 'a'.repeat(64);
+    expect(preconditionArgs(hashes, { sha256: SHA, reason: 'r' })).toEqual({ sha256: SHA });
+    const hashRead = {
+      data: [{ sha256: SHA, severity: 'high', family: 'Test', source: 'manual', expiresAt: null }],
+      nextCursor: null,
+    };
+    expect(selectTarget(hashRead, hashes, { sha256: SHA }).found).toBe(true);
+    expect(selectTarget(hashRead, hashes, { sha256: 'b'.repeat(64) }).found).toBe(false);
+    expect(hashes.select?.required).toBe(true);
+  });
+});
+
+describe('AI-4 registry consistency rules (synthetic breaks)', () => {
+  const tools = ALL_TOOLS;
+  const patch = (operationId: string, change: Partial<ConfirmationSpec>) =>
+    CONFIRMATION_SPECS.map((s) => (s.operationId === operationId ? { ...s, ...change } : s));
+  const issues = (operationId: string, change: Partial<ConfirmationSpec>) =>
+    registryConsistencyIssues(tools, { specs: patch(operationId, change) });
+
+  it('not_self_field and require_read_value need a single precondition', () => {
+    const approve = spec('AtoResponsesController_approve_v1');
+    expect(issues('DlpPoliciesController_create_v1', { guards: approve.guards })).toEqual([
+      'dlp_policies_create: not_self_field needs a single precondition',
+      'dlp_policies_create: require_read_value needs a single precondition',
+    ]);
+    // On a spec with a single precondition they are fine (no argument is read).
+    expect(issues('AtoResponsesController_cancel_v1', { guards: approve.guards })).toEqual([]);
+  });
+
+  it('CAS injection fields exist (body or query) with the schema minimum', () => {
+    expect(
+      issues('BecExecutivesController_update_v1', {
+        inject: { in: 'query', field: 'version', min: 1 },
+      }),
+    ).toEqual([
+      'bec_executives_update: injected field version is not in the input schema',
+      'bec_executives_update: injected query field version is not a query parameter',
+    ]);
+    expect(
+      issues('RiskProfilesController_activate_v1', {
+        inject: { in: 'body', field: 'expectedProfileVersion', min: 1 },
+      }),
+    ).toEqual([
+      'risk_profiles_activate: injected field body.expectedProfileVersion has minimum 0, spec says 1',
+    ]);
+    expect(
+      issues('AtoProvidersController_update_v1', {
+        inject: { in: 'body', field: 'expectedRowVersion', min: 1 },
+      }),
+    ).toEqual([
+      'ato_providers_update: injected field body.expectedRowVersion is not in the input schema',
+    ]);
+  });
+
+  it('query parameters may be mapped in addition to the path parameters, nothing else', () => {
+    const hashes = spec('ThreatHashesController_remove_v1').precondition as SinglePrecondition;
+    expect(
+      issues('ThreatHashesController_remove_v1', {
+        precondition: { ...hashes, params: { sha256: 'sha256', family: 'sha256' } },
+      }),
+    ).toEqual([
+      'threat_hashes_remove: precondition params [family] must map exactly the path parameters [] of threat_hashes_list',
+    ]);
+    const policy = spec('DlpPoliciesController_createRule_v1').precondition as SinglePrecondition;
+    expect(
+      issues('DlpPoliciesController_createRule_v1', { precondition: { ...policy, params: {} } }),
+    ).toEqual([
+      'dlp_policies_create_rule: precondition params [] must map exactly the path parameters [id] of dlp_policies_get',
+    ]);
+  });
+
+  it('redactParams only on read tools and only existing paths (D9)', () => {
+    const replace = (name: string, redactParams: string[]) =>
+      tools.map((t) => (t.name === name ? { ...t, redactParams } : t));
+    expect(findTool('dlp_patterns_test')!.redactParams).toEqual(['body.sample', 'body.pattern']);
+    expect(tools.filter((t) => t.redactParams.length > 0).map((t) => t.name)).toEqual([
+      'dlp_patterns_test',
+    ]);
+    expect(registryConsistencyIssues(replace('dlp_patterns_create', ['body.pattern']))).toEqual([
+      'dlp_patterns_create: redactParams is only allowed on read tools',
+    ]);
+    expect(registryConsistencyIssues(replace('dlp_patterns_test', ['body.text']))).toEqual([
+      'dlp_patterns_test: redactParams names the missing argument body.text',
+    ]);
+    expect(registryConsistencyIssues(tools)).toEqual([]);
   });
 });

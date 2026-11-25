@@ -761,6 +761,16 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     },
   },
   {
+    // Step AI-4 D8: one platform indicator by id (the assistant's removal card names it).
+    route: 'get /api/v1/platform/threat-indicators/:id',
+    e2e: `${E2E}/scans.e2e.test.ts`,
+    integration: `${INT}/url-protection.test.ts`,
+    crossTenant: {
+      na: 'platform-only',
+      why: 'Platform permission only (platform organization users; tenants get 403)',
+    },
+  },
+  {
     route: 'delete /api/v1/platform/threat-indicators/:id',
     e2e: `${E2E}/scans.e2e.test.ts`,
     integration: `${INT}/url-protection.test.ts`,
@@ -882,6 +892,13 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     crossTenant: `${INT}/tenant-isolation-legacy.test.ts`,
   },
   {
+    // Step AI-4 D8: one trusted sender by id (the assistant's confirmation card names it).
+    route: 'get /api/v1/bec/trusted-senders/:id',
+    e2e: `${E2E}/legacy-coverage.e2e.test.ts`,
+    integration: `${INT}/bec.test.ts`,
+    crossTenant: `${INT}/tenant-isolation-legacy.test.ts`,
+  },
+  {
     route: 'patch /api/v1/bec/trusted-senders/:id',
     e2e: `${E2E}/legacy-coverage.e2e.test.ts`,
     integration: `${INT}/bec.test.ts`,
@@ -912,6 +929,13 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
     integration: `${INT}/bec.test.ts`,
     crossTenant: `${INT}/bec.test.ts`,
     cursor: 'v0',
+  },
+  {
+    // Step AI-4 D8: one suppression rule by id.
+    route: 'get /api/v1/bec/suppressions/:id',
+    e2e: `${E2E}/legacy-coverage.e2e.test.ts`,
+    integration: `${INT}/bec.test.ts`,
+    crossTenant: `${INT}/bec.test.ts`,
   },
   {
     route: 'delete /api/v1/bec/suppressions/:id',
@@ -989,6 +1013,13 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   },
   {
     route: 'post /api/v1/dlp/exceptions',
+    e2e: `${E2E}/legacy-coverage.e2e.test.ts`,
+    integration: `${INT}/dlp.test.ts`,
+    crossTenant: `${INT}/tenant-isolation-legacy.test.ts`,
+  },
+  {
+    // Step AI-4 D8: one exception by id.
+    route: 'get /api/v1/dlp/exceptions/:id',
     e2e: `${E2E}/legacy-coverage.e2e.test.ts`,
     integration: `${INT}/dlp.test.ts`,
     crossTenant: `${INT}/tenant-isolation-legacy.test.ts`,

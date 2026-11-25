@@ -21,6 +21,13 @@ export function subEventId(...parts: readonly string[]): string {
 }
 
 /**
+ * Longest wait of an interactive transaction for a pool connection (`maxWait`). The client's
+ * `pool_timeout` (`ATO_DATABASE_POOL_TIMEOUT_SECONDS`) must not be shorter, or plain queries fail
+ * with `P2024` while transactions still wait (step AI-4 D14).
+ */
+export const ATO_TX_MAX_WAIT_MS = 30_000;
+
+/**
  * Writer transactions of the worker: every interactive transaction runs with
  * `ATO_TX_TIMEOUT_MS` (≥ 120 s, the 4.2 §6 wrong-read rule) at READ COMMITTED
  * (`ATO_TRANSACTION_ISOLATION`: the store's lock-then-read patterns), and `once` runs a handler under a
@@ -35,7 +42,7 @@ export class AtoDb {
   ) {
     this.tx = withTransactionDefaults(prisma, {
       timeoutMs,
-      maxWaitMs: Math.min(timeoutMs, 30_000),
+      maxWaitMs: Math.min(timeoutMs, ATO_TX_MAX_WAIT_MS),
       isolationLevel: ATO_TRANSACTION_ISOLATION,
     });
   }

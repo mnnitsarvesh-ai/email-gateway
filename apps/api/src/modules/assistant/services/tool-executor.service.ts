@@ -11,6 +11,7 @@ import {
   guardRefusal,
   isNativeTool,
   type OperationTool,
+  redactToolArguments,
   reportCard,
   reportEnvelope,
   reportRefs,
@@ -218,16 +219,28 @@ const byteLength = (value: unknown): number => Buffer.byteLength(JSON.stringify(
 
 export { executionCorrelationId } from '../domain/correlation';
 
+/** What `redactParams` needs of a tool: its redacted argument paths (step AI-4 D9). */
+export type RedactSource = { readonly redactParams?: readonly string[] } | null;
+
 /**
- * Credential-scrubbed parameters capped at `maxBytes` (the audit pattern drops credential keys
- * at any depth). `exact` = nothing was dropped or truncated, so the parameters can be re-sent.
+ * The parameters as stored and audited: first every `redactParams` path of the tool replaced by
+ * `[redacted]` (step AI-4 D9: e.g. the DLP pattern-test sample and pattern), then the credential
+ * scrub (the audit pattern drops credential keys at any depth), capped at `maxBytes`. `exact` =
+ * nothing was redacted, dropped or truncated, so the parameters can be re-sent. The loopback
+ * request always carries the real arguments; only the stored copy is redacted.
  */
 export function redactParams(
   args: Readonly<Record<string, unknown>>,
   maxBytes: number,
+  tool: RedactSource,
 ): { value: Prisma.InputJsonValue; exact: boolean } {
-  const scrubbed = scrubMetadata(args) ?? {};
-  const exact = JSON.stringify(scrubbed) === JSON.stringify(args);
+  const paths = tool?.redactParams ?? [];
+  const redacted =
+    paths.length > 0
+      ? redactToolArguments({ redactParams: [...paths] }, args)
+      : { args, redacted: false };
+  const scrubbed = scrubMetadata(redacted.args) ?? {};
+  const exact = !redacted.redacted && JSON.stringify(scrubbed) === JSON.stringify(args);
   if (byteLength(scrubbed) <= maxBytes) return { value: scrubbed, exact };
   const keys = Object.keys(args)
     .slice(0, 32)
@@ -565,7 +578,7 @@ export class ToolExecutorService {
       tool,
       {
         correlationId,
-        params: redactParams(plan.finalArgs, PARAMS_REDACTED_MAX_BYTES).value,
+        params: redactParams(plan.finalArgs, PARAMS_REDACTED_MAX_BYTES, tool).value,
         args: plan.finalArgs,
         refs: null,
         nextCursor: null,
@@ -705,7 +718,7 @@ export class ToolExecutorService {
       tool,
       {
         correlationId: executionCorrelationId(ctx.correlationBase, seq),
-        params: redactParams(args, PARAMS_REDACTED_MAX_BYTES).value,
+        params: redactParams(args, PARAMS_REDACTED_MAX_BYTES, tool).value,
         args,
         refs: refs as unknown as Prisma.InputJsonValue,
         nextCursor: null,
@@ -737,7 +750,7 @@ export class ToolExecutorService {
     const native = options.native;
     const correlationId = executionCorrelationId(ctx.correlationBase, seq);
     const started = Date.now();
-    const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES).value;
+    const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES, tool).value;
     const outcome = await this.runner.run(async (tx) => {
       const result = await this.native.execute(
         tool,
@@ -883,7 +896,7 @@ export class ToolExecutorService {
   ): { outcome: ExecutionOutcome; extra: PersistExtra } {
     const { ctx, seq, executionId } = base;
     const correlationId = executionCorrelationId(ctx.correlationBase, seq);
-    const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES);
+    const params = redactParams(args, PARAMS_REDACTED_MAX_BYTES, tool);
     const { envelope, refs } = toToolResultEnvelope(tool, answer.httpStatus, answer.body, {
       maxRows: this.config.ASSISTANT_TOOL_RESULT_MAX_ROWS,
       maxBytes: this.config.ASSISTANT_TOOL_RESULT_MAX_BYTES,
@@ -1005,7 +1018,7 @@ export class ToolExecutorService {
 
   private async deny(
     base: Base,
-    tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk' | 'module'> | null,
+    tool: DeniedTool | null,
     decision: Exclude<ExecutionDecision, 'allowed'>,
     message: string,
     args: Record<string, unknown>,
@@ -1055,7 +1068,7 @@ export class ToolExecutorService {
     };
     await this.persist(ctx, outcome, tool, {
       correlationId: executionCorrelationId(ctx.correlationBase, seq),
-      params: redactParams(args, PARAMS_REDACTED_MAX_BYTES).value,
+      params: redactParams(args, PARAMS_REDACTED_MAX_BYTES, tool).value,
       args,
       refs: null,
       nextCursor: null,
@@ -1123,7 +1136,7 @@ export class ToolExecutorService {
   private async persist(
     ctx: ExecutionContext,
     outcome: ExecutionOutcome,
-    tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk'> | null,
+    tool: StoredTool | null,
     extra: PersistExtra,
     also?: (tx: Prisma.TransactionClient, executionRowId: bigint) => Promise<void>,
   ): Promise<void> {
@@ -1138,11 +1151,11 @@ export class ToolExecutorService {
     tx: Prisma.TransactionClient,
     ctx: ExecutionContext,
     outcome: ExecutionOutcome,
-    tool: Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk'> | null,
+    tool: StoredTool | null,
     extra: PersistExtra,
   ): Promise<bigint> {
     const resourceRef = resourceRefOf(tool, extra.args);
-    const auditParams = redactParams(extra.args, AUDIT_PARAMS_MAX_BYTES).value;
+    const auditParams = redactParams(extra.args, AUDIT_PARAMS_MAX_BYTES, tool).value;
     const rowId = await this.executions.create(
       ctx.owner,
       {
@@ -1205,6 +1218,14 @@ export class ToolExecutorService {
     return rowId;
   }
 }
+
+/** The tool facts an execution row and its audit need (a not-applicable operation has no tool). */
+type StoredTool = Pick<OperationTool, 'operationId' | 'method' | 'access' | 'risk'> & {
+  readonly redactParams?: readonly string[];
+};
+
+/** A refused call's tool (with the module for the metric). */
+type DeniedTool = StoredTool & Pick<OperationTool, 'module'>;
 
 /** What the execution row stores besides the outcome. */
 interface PersistExtra {

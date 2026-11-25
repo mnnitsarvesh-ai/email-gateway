@@ -102,3 +102,42 @@ Design [note 31](../plan/steps/31-ai-chat-reports.md) D1, D2, D5, R-11. No new p
 | Platform principals                          | an active platform override of the target organization                                   | Without an override `report_generate` is `denied_guard` (`report_needs_organization`); under an override the report is stored under the target organization with `platform_override_id`, private to the operator in that override; `self` is the operator's own address |
 
 Every source read is the user's own loopback request: the reports module's, quarantine's and ATO's own guards, RBAC, tenant scope and rate limits apply exactly as for the portal's Reports and Dashboard pages.
+
+## Security operations (step AI-4)
+
+Design [note 32](../plan/steps/32-ai-chat-security-operations.md) D2–D4, D11, I18–I20. No new permission and no grant change: every AI-4 tool requires the permission of its operation (`x-eg-permissions`).
+
+| Area                           | Tools                                                                                                                                        | Permission                                                                                                         |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| DLP                            | policies, rules, patterns (incl. `dlp_patterns_test`), dictionaries, exceptions (17 writes, 2 reads)                                         | `dlp:manage` (writes and the pattern test), `dlp:read` (`dlp_exceptions_get`)                                      |
+| DLP compliance                 | `dlp_compliance_enable`, `dlp_compliance_disable`                                                                                            | `dlp:compliance_manage` (an MFA session, as in the portal)                                                         |
+| BEC                            | executives, vendors, trusted senders, suppression delete (10 writes); `bec_trusted_senders_get`, `bec_feedback_get_suppression`              | `bec:manage`; reads `bec:read`                                                                                     |
+| BEC feedback                   | `bec_message_feedback_record`                                                                                                                | `bec:feedback`                                                                                                     |
+| ATO triage                     | account protection, overrides, trusted contexts, mailbox refresh; incidents create, update, note                                             | `ato:manage`                                                                                                       |
+| ATO responses                  | request, approve, reject, cancel, rollback                                                                                                   | `ato:respond`; approve, reject and rollback are users only with an MFA session (the api's `@UserOnly @RequireMfa`) |
+| ATO configuration              | `ato_settings_update`, IdP integrations (create, update, pause, resume, backfill, health check, remove; non-secret fields only)              | `ato:configure`                                                                                                    |
+| Risk scoring                   | profile drafts (create, update, delete)                                                                                                      | `policy:manage`                                                                                                    |
+| Risk scoring                   | publish, activate, reset                                                                                                                     | `policy:publish`                                                                                                   |
+| Risk scoring                   | `risk_dry_run_dry_run` (read)                                                                                                                | `policy:manage` + `message:read`                                                                                   |
+| Platform (platform users only) | threat hashes and indicators (add, remove, `threat_indicators_get`), attachment rescans (request, cancel), scan training, dead-letter replay | `platform:threat_intel_manage`, `platform:scan_rescan`, `platform:scan_training`, `platform:dead_letter_replay`    |
+
+**Reach per system role after AI-4** (computed with `enabledTools` from the seed catalog's role permissions and the generated registry `b399d786f91ccdd0`, program phase AI-4, 329 enabled tools incl. the 2 native report tools; platform-only tools only for platform roles; write columns by **registry** risk):
+
+| System role           | Enabled tools reachable (of 329) | Writes (of 143) | Writes low / medium / high | AI-4 writes (of 64) | AI-4 low / medium / high |
+| --------------------- | -------------------------------: | --------------: | -------------------------: | ------------------: | -----------------------: |
+| `super_admin`         |                              329 |             143 |               39 / 42 / 62 |                  64 |             23 / 11 / 30 |
+| `platform_admin`      |                              155 |              21 |                 3 / 6 / 12 |                   8 |                0 / 0 / 8 |
+| `organization_admin`  |                              294 |             129 |               39 / 40 / 50 |                  56 |             23 / 11 / 22 |
+| `domain_admin`        |                              109 |              19 |                  5 / 6 / 8 |                   0 |                        — |
+| `security_analyst`    |                              214 |              65 |               29 / 15 / 21 |                  43 |              22 / 5 / 16 |
+| `quarantine_reviewer` |                               58 |              14 |                  3 / 9 / 2 |                   0 |                        — |
+| `compliance_auditor`  |                              170 |               5 |                  3 / 2 / 0 |                   0 |                        — |
+| `read_only_user`      |                              104 |               5 |                  3 / 2 / 0 |                   0 |                        — |
+| `mailbox_user`        |                      0 (no chat) |     0 (no chat) |                          — |                   — |                        — |
+| `compliance_officer`  |                               60 |               2 |                  1 / 1 / 0 |                   0 |                        — |
+
+`organization_admin` reaches every tenant AI-4 write (56 = 64 − the 8 platform writes); `security_analyst` reaches the DLP, BEC, ATO triage and response writes and the risk-profile drafts (43; not `ato:configure`, `dlp:compliance_manage` or `policy:publish`). The tables above for AI-2/AI-3 keep their historical counts.
+
+**Four eyes in chat (I18).** Approving or rejecting an ATO response needs a different person from the requester (and from the creator of a requesting API key) and an MFA session: the chat refuses such a proposal before anything is stored (`denied_guard`, "Not allowed in chat", with a link to the Responses page) and again at confirm (`403 assistant_action_not_allowed`); the api's `403 ato_approval_self` stays the authority. Cancel (requester or another responder) and rollback (any responder with MFA) follow the api's rules and have no extra chat guard.
+
+**Platform-only tools after AI-4.** 22 enabled tools are `platformOnly`: the seven AI-1 reads, the six AI-3 organization writes, and in AI-4 the eight platform writes (`attachment_rescans_request`, `attachment_rescans_cancel`, `dead_letters_replay`, `scan_training_train`, `threat_hashes_add`, `threat_hashes_remove`, `threat_indicators_add`, `threat_indicators_remove`) and the read `threat_indicators_get`. A customer user holding every tenant permission and a platform user under an override (permissions stripped to tenant permissions) never see them (I19); a forced call is `denied_permission` with no loopback request.
