@@ -7,6 +7,7 @@ import {
   AI2_WRITES_TESTED_BY,
   AI3_WRITES_TESTED_BY,
   AI4_WRITES_TESTED_BY,
+  AI5_WRITES_TESTED_BY,
   CREDENTIAL_KEY_EXCEPTIONS,
 } from '../registry/manifest';
 import { ALL_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
@@ -35,15 +36,17 @@ const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(opera
 const POLICY = '0193aaaa-0000-7000-8000-000000000002';
 
 describe('confirmation specs (D4)', () => {
-  it('one spec per AI-2, AI-3, native AI-R and AI-4 write, every one an enabled write of the registry', () => {
-    expect(CONFIRMATION_SPECS).toHaveLength(143);
+  it('one spec per AI-2, AI-3, native AI-R, AI-4 and AI-5 write, every one an enabled write of the registry', () => {
+    expect(CONFIRMATION_SPECS).toHaveLength(168);
     expect(Object.keys(AI4_WRITES_TESTED_BY)).toHaveLength(64);
+    expect(Object.keys(AI5_WRITES_TESTED_BY)).toHaveLength(25);
     expect(CONFIRMATION_SPECS.map((s) => s.operationId).sort()).toEqual(
       [
         ...Object.keys(AI2_WRITES_TESTED_BY),
         ...Object.keys(AI3_WRITES_TESTED_BY),
         'AssistantNative_reportSendEmail',
         ...Object.keys(AI4_WRITES_TESTED_BY),
+        ...Object.keys(AI5_WRITES_TESTED_BY),
       ].sort(),
     );
     expect(confirmationSpecOf('AssistantNative_reportSendEmail')).toEqual({
@@ -285,12 +288,13 @@ describe('registry consistency rules (synthetic breaks)', () => {
     expect(registryConsistencyIssues(tools, { specs: withoutSpec })).toEqual([
       'policy_management_disable: enabled write without a confirmation spec',
     ]);
+    // A critical operation is never a tool (portal only), so its spec has no enabled write.
     const extra: ConfirmationSpec = {
-      operationId: 'ArchiveRetentionController_create_v1',
+      operationId: 'LegalHoldsController_release_v1',
       precondition: null,
     };
     expect(registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, extra] })).toEqual([
-      'ArchiveRetentionController_create_v1: confirmation spec without an enabled write tool',
+      'LegalHoldsController_release_v1: confirmation spec without an enabled write tool',
     ]);
     expect(
       registryConsistencyIssues(tools, { specs: [...CONFIRMATION_SPECS, CONFIRMATION_SPECS[0]!] }),
@@ -298,15 +302,22 @@ describe('registry consistency rules (synthetic breaks)', () => {
   });
 
   it('no tool after the program phase is enabled; no write before the confirmation phase', () => {
+    // Every planned tool is enabled since AI-5: check against an earlier program phase.
     const later = findTool('archive_retention_create')!;
-    expect(later.enabled).toBe(false);
+    expect(later.enabled).toBe(true);
     expect(later.phase).toBe('AI-5');
-    const issues = registryConsistencyIssues(
-      replace('archive_retention_create', { enabled: true, testedBy: 'x.test.ts' }),
-    );
+    const issues = registryConsistencyIssues(tools, { programPhase: 'AI-4' });
     expect(issues).toEqual(
       expect.arrayContaining([
         'archive_retention_create: enabled although its phase AI-5 is after the program phase',
+        'archive_admin_capture_issue: enabled although its phase AI-5 is after the program phase',
+      ]),
+    );
+    const withoutTemplate = registryConsistencyIssues(
+      replace('archive_retention_create', { operationId: 'ArchiveRetentionController_x_v1' }),
+    );
+    expect(withoutTemplate).toEqual(
+      expect.arrayContaining([
         'archive_retention_create: enabled write without a confirmation spec',
         'archive_retention_create: enabled write without an impact template',
       ]),
@@ -746,6 +757,18 @@ describe('AI-3 specs (design 30 D6)', () => {
           expect(schemaAt(schema, freeForm.parent), `${s.operationId}: ${path}`).not.toBeNull();
           continue;
         }
+        // Step AI-5 D5: `preview.<path>` addresses the impact preview's response.
+        if (s.impactToken && path.startsWith('preview.')) {
+          const preview = normalizeSchema(
+            successResponseSchema(operationOf(findTool(s.impactToken.previewTool)!.operationId)),
+            openapi.components?.schemas ?? {},
+          );
+          expect(
+            schemaAt(preview, path.slice('preview.'.length)),
+            `${s.operationId}: ${path}`,
+          ).not.toBeNull();
+          continue;
+        }
         expect(schemaAt(schema, path), `${s.operationId}: ${path}`).not.toBeNull();
       }
     }
@@ -1016,6 +1039,8 @@ describe('AI-3 registry consistency rules (synthetic breaks)', () => {
       'AtoSettingsController_update_v1',
       'BecMessageFeedbackController_record_v1',
       'IncidentsController_update_v1',
+      'IntakeSourcesController_attest_v1',
+      'ProviderAttestationsController_record_v1',
       'RolesController_create_v1',
       'RolesController_remove_v1',
       'RolesController_update_v1',
@@ -1050,10 +1075,10 @@ describe('AI-4 specs (design 32 D5)', () => {
   const AI4 = CONFIRMATION_SPECS.filter((s) => s.operationId in AI4_WRITES_TESTED_BY);
   const nameOf = (operationId: string) => (findOperation(operationId) as OperationTool).name;
 
-  it('covers the 64 AI-4 writes; 143 enabled writes have one spec each', () => {
+  it('covers the 64 AI-4 writes; 168 enabled writes have one spec each', () => {
     expect(AI4).toHaveLength(64);
     const enabledWrites = ALL_TOOLS.filter((t) => t.enabled && t.access === 'write');
-    expect(enabledWrites).toHaveLength(143);
+    expect(enabledWrites).toHaveLength(168);
     for (const write of enabledWrites)
       expect(confirmationSpecOf(write.operationId), write.name).toBeDefined();
   });

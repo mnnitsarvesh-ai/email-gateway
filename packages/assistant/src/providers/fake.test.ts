@@ -4,11 +4,16 @@ import {
   OPERATION_TOOLS,
   compileValidator,
   enabledTools,
+  findOperation,
   findTool,
   renderCatalogueIndex,
 } from '../registry/registry';
 import {
   FAKE_APPROVED_REASON,
+  FAKE_CASE_PATTERN,
+  FAKE_HOLD_RELEASE_REASON,
+  FAKE_RETENTION_LIST_LIMIT,
+  FAKE_RETENTION_PATTERN,
   FAKE_DEMO_INTENTS,
   FAKE_DICTIONARY_MAX_TERMS,
   FAKE_EXECUTABLES_DEFINITION,
@@ -25,6 +30,15 @@ import { META_TOOLS, parseMetaToolInput } from './meta-tools';
 import type { LlmRequest, LlmResponse } from './types';
 
 const NOW = new Date('2026-11-20T14:30:00.000Z');
+const HOLD_RELEASE_PATTERN = FAKE_PLANS.find((plan) =>
+  plan.steps.some((step) => step.tool === 'legal_holds_release'),
+)!.pattern;
+const AI5_PLAN_PATTERNS: readonly RegExp[] = [
+  FAKE_CASE_PATTERN,
+  FAKE_RETENTION_PATTERN,
+  HOLD_RELEASE_PATTERN,
+];
+const POLICY_ID = '0193aaaa-0000-7000-8000-000000000101';
 
 /** Every permission any tool requires (a synthetic all-permission principal). */
 function allPermissions(): string[] {
@@ -346,9 +360,17 @@ describe('FakeProvider AI-2 plans and follow-ups', () => {
       'approve the pending response',
       'open an incident for the account alex@it-ato.example',
       'add dlp dictionary "Project names" with terms alpha, beta',
+      // step AI-5 (design 33 D11; their arguments depend on earlier results, tested below)
+      'create ediscovery case "Matter 42"',
+      'set retention policy "Finance" to 30 days',
+      'release the legal hold',
     ];
     for (const plan of FAKE_PLANS) {
       const sample = SAMPLES.find((text) => plan.pattern.test(text))!;
+      if (AI5_PLAN_PATTERNS.includes(plan.pattern)) {
+        expect(sample, String(plan.pattern)).toBeDefined();
+        continue;
+      }
       expect(sample, String(plan.pattern)).toBeDefined();
       const match = plan.pattern.exec(sample)!;
       const previous = { status: 'ok', ref: 'r1', data: [{ ref: 'r1.1' }], hasMore: false };
@@ -1033,6 +1055,238 @@ describe('FakeProvider AI-4 plans (design 32 D12)', () => {
     expect(callOf(follow)).toEqual({
       name: 'ato_responses_approve',
       arguments: { responseId: '0193aaaa-0000-7000-8000-000000000009', body: {} },
+    });
+  });
+});
+
+describe('FakeProvider AI-5 plans (design 33 D11)', () => {
+  const envelope = (tool: string, ref: string, data: unknown, extra: object = {}) =>
+    JSON.stringify({
+      kind: 'tool_result/1',
+      tool,
+      status: 'ok',
+      httpStatus: 200,
+      ref,
+      hasMore: false,
+      truncated: false,
+      data,
+      ...extra,
+    });
+  /** The args after the server resolved refs, validated against the tool's input schema. */
+  const valid = (tool: string, args: Record<string, unknown>) =>
+    compileValidator(findTool(tool)!)(
+      JSON.parse(JSON.stringify(args).replace(/"@r\d+\.\d+"/g, `"${POLICY_ID}"`)) as Record<
+        string,
+        unknown
+      >,
+    );
+
+  it('names enabled registry tools, and the hold release is the critical N/A operation', () => {
+    const tools = FAKE_PLANS.filter((plan) => AI5_PLAN_PATTERNS.includes(plan.pattern)).flatMap(
+      (plan) => plan.steps.map((step) => [step.tool, step.uncatalogued === true] as const),
+    );
+    expect(tools).toEqual([
+      ['ediscovery_cases_create', false],
+      ['archive_retention_list', false],
+      ['archive_retention_get', false],
+      ['archive_retention_update', false],
+      ['legal_holds_list', false],
+      ['legal_holds_release', true],
+    ]);
+    for (const [tool, uncatalogued] of tools)
+      if (!uncatalogued) expect(findTool(tool)?.enabled, tool).toBe(true);
+    // Critical and portal only: a registry operation, never a tool.
+    expect(findTool('legal_holds_release')).toBeUndefined();
+    expect(findOperation('LegalHoldsController_release_v1')).toMatchObject({ risk: 'critical' });
+    expect(fullCatalogue).not.toContain('\nlegal_holds_release(');
+  });
+
+  it('create ediscovery case "<name>": one create with the name as typed', async () => {
+    const provider = fake();
+    const start = provider.userEntry('Please create an eDiscovery case "Matter 42 – Acme".');
+    const create = await ask(provider, start);
+    expect(callOf(create)).toEqual({
+      name: 'ediscovery_cases_create',
+      arguments: { body: { name: 'Matter 42 – Acme' } },
+    });
+    expect(valid('ediscovery_cases_create', callOf(create).arguments)).toEqual({ ok: true });
+    expect(
+      await ask(
+        provider,
+        withResult(provider, start, create, pendingEnvelope('ediscovery_cases_create')),
+      ),
+    ).toMatchObject({ toolCalls: [], text: FAKE_PENDING_TEXT });
+  });
+
+  it('set retention policy: list → get of the only name match → update copying the read fields', async () => {
+    const provider = fake();
+    const start = provider.userEntry('Set the retention policy "E2E Finance" to 30 days');
+    const list = await ask(provider, start);
+    expect(callOf(list)).toEqual({
+      name: 'archive_retention_list',
+      arguments: { limit: FAKE_RETENTION_LIST_LIMIT },
+    });
+    const rows = [
+      { ref: 'r3.1', name: { untrusted_text: 'Default' }, retentionDays: 365 },
+      { ref: 'r3.2', name: { untrusted_text: 'E2E Finance' }, retentionDays: 365 },
+      { ref: 'r3.3', name: { untrusted_text: 'e2e finance' }, retentionDays: 90 },
+    ];
+    const listed = withResult(
+      provider,
+      start,
+      list,
+      envelope('archive_retention_list', 'r3', rows),
+    );
+    const get = await ask(provider, listed);
+    expect(callOf(get)).toEqual({
+      name: 'archive_retention_get',
+      arguments: { policyId: '@r3.2' },
+    });
+    const read = {
+      ref: 'r4.1',
+      id: POLICY_ID,
+      name: { untrusted_text: 'E2E Finance' },
+      retentionDays: 365,
+      onExpiry: 'review',
+      priority: 20,
+      criteria: {
+        directions: [{ untrusted_text: 'inbound' }],
+        sources: [{ untrusted_text: 'journal' }],
+      },
+      isDefault: false,
+    };
+    const got = withResult(provider, listed, get, envelope('archive_retention_get', 'r4', read));
+    const update = await ask(provider, got);
+    expect(callOf(update)).toEqual({
+      name: 'archive_retention_update',
+      arguments: {
+        policyId: '@r4.1',
+        body: {
+          name: 'E2E Finance',
+          retentionDays: 30,
+          onExpiry: 'review',
+          priority: 20,
+          criteria: { directions: ['inbound'], sources: ['journal'] },
+        },
+      },
+    });
+    // The CAS field is injected by the server (its placeholder fills the required field).
+    expect(
+      valid('archive_retention_update', {
+        ...callOf(update).arguments,
+        body: { ...(callOf(update).arguments.body as object), expectedRowVersion: 1 },
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      await ask(
+        provider,
+        withResult(provider, got, update, pendingEnvelope('archive_retention_update')),
+      ),
+    ).toMatchObject({ toolCalls: [], text: FAKE_PENDING_TEXT });
+  });
+
+  it('set retention policy: no, two or an incomplete list of matches end with the summary', async () => {
+    const provider = fake();
+    const start = provider.userEntry('set retention policy "Finance" to 30 days');
+    const list = await ask(provider, start);
+    const summaryAfter = (rows: unknown[], extra: object = {}) =>
+      ask(
+        provider,
+        withResult(provider, start, list, envelope('archive_retention_list', 'r3', rows, extra)),
+      );
+    expect(await summaryAfter([])).toMatchObject({ toolCalls: [], text: 'Found 0 records.' });
+    const two = [
+      { ref: 'r3.1', name: { untrusted_text: 'Finance' } },
+      { ref: 'r3.2', name: { untrusted_text: 'Finance' } },
+    ];
+    expect((await summaryAfter(two)).toolCalls).toEqual([]);
+    const one = [{ ref: 'r3.1', name: { untrusted_text: 'Finance' } }];
+    expect((await summaryAfter(one, { hasMore: true })).toolCalls).toEqual([]);
+    expect((await summaryAfter(one, { truncated: true })).toolCalls).toEqual([]);
+    expect(callOf(await summaryAfter(one)).name).toBe('archive_retention_get');
+  });
+
+  it('set retention policy: a read with cut criteria is not copied (no update)', async () => {
+    const provider = fake();
+    const start = provider.userEntry('set retention policy "Finance" to 30 days');
+    const list = await ask(provider, start);
+    const listed = withResult(
+      provider,
+      start,
+      list,
+      envelope('archive_retention_list', 'r3', [
+        { ref: 'r3.1', name: { untrusted_text: 'Finance' } },
+      ]),
+    );
+    const get = await ask(provider, listed);
+    const cut = {
+      ref: 'r4.1',
+      name: { untrusted_text: 'Finance' },
+      onExpiry: 'delete',
+      priority: 100,
+      criteria: { domainIds: [{ untrusted_text: 'x' }, { omitted_items: 80 }] },
+    };
+    const after = await ask(
+      provider,
+      withResult(provider, listed, get, envelope('archive_retention_get', 'r4', cut)),
+    );
+    expect(after).toMatchObject({ toolCalls: [], text: 'Here is the result.' });
+  });
+
+  it('release the legal hold: legal_holds_list (active, 1) → legal_holds_release → the denial summary', async () => {
+    const provider = fake();
+    const start = provider.userEntry('Release the legal hold, please');
+    const list = await ask(provider, start);
+    expect(callOf(list)).toEqual({
+      name: 'legal_holds_list',
+      arguments: { status: 'active', limit: '1' },
+    });
+    const listed = withResult(
+      provider,
+      start,
+      list,
+      envelope('legal_holds_list', 'r2', [{ ref: 'r2.1', name: { untrusted_text: 'Hold A' } }], {
+        hasMore: true,
+      }),
+    );
+    const release = await ask(provider, listed);
+    // Called although it is not in the catalogue: the executor refuses it (critical, N/A).
+    expect(callOf(release)).toEqual({
+      name: 'legal_holds_release',
+      arguments: { holdId: '@r2.1', body: { reason: FAKE_HOLD_RELEASE_REASON } },
+    });
+    const denied = await ask(
+      provider,
+      withResult(
+        provider,
+        listed,
+        release,
+        JSON.stringify({
+          kind: 'tool_result/1',
+          tool: 'legal_holds_release',
+          status: 'denied',
+          code: 'denied_not_applicable',
+        }),
+      ),
+    );
+    expect(denied).toMatchObject({
+      toolCalls: [],
+      text: 'The request was not allowed: denied_not_applicable.',
+    });
+    // No active hold: the list summary.
+    expect(
+      await ask(
+        provider,
+        withResult(provider, start, list, envelope('legal_holds_list', 'r2', [])),
+      ),
+    ).toMatchObject({ toolCalls: [], text: 'Found 0 records.' });
+    // Without the list tool in the catalogue, the plan is unavailable.
+    const withoutHolds = renderCatalogueIndex(
+      enabledTools(allPermissions(), false).filter((t) => t.name !== 'legal_holds_list'),
+    );
+    expect(await ask(provider, start, withoutHolds)).toMatchObject({
+      toolCalls: [],
+      text: FAKE_UNAVAILABLE_TEXT,
     });
   });
 });

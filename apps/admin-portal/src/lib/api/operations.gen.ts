@@ -3,8 +3,8 @@
 
 import type { OperationMeta, RouteMatcher } from './operation-types';
 
-/** Snapshot facts: 427 operations, OpenAPI 3.0.0, API v1. */
-export const OPERATION_COUNT = 427;
+/** Snapshot facts: 428 operations, OpenAPI 3.0.0, API v1. */
+export const OPERATION_COUNT = 428;
 
 export const operations = {
   ApiKeysController_create_v1: {
@@ -61,6 +61,22 @@ export const operations = {
     path: '/api/v1/api-keys/{id}',
     tag: 'api-keys',
     permissions: [{ mode: 'all', permissions: ['apikey:manage'] }],
+    public: false,
+    idempotency: null,
+    cursor: null,
+    rateClass: null,
+    returnsSecret: false,
+    secretReplay: null,
+    listKey: null,
+    sort: null,
+    bffOnly: false,
+  },
+  ArchiveAdminController_captureIssue_v1: {
+    operationId: 'ArchiveAdminController_captureIssue_v1',
+    method: 'GET',
+    path: '/api/v1/archive/capture-issues/{messageId}',
+    tag: 'archive',
+    permissions: [{ mode: 'any', permissions: ['journal:manage', 'archive:manage'] }],
     public: false,
     idempotency: null,
     cursor: null,
@@ -6883,6 +6899,11 @@ export const routeMatchers: readonly RouteMatcher<OperationId>[] = [
     method: 'POST',
     segments: ['archive', 'capture-issues', { param: 'messageId' }, 'retry'],
     operationId: 'ArchiveAdminController_retry_v1',
+  },
+  {
+    method: 'GET',
+    segments: ['archive', 'capture-issues', { param: 'messageId' }],
+    operationId: 'ArchiveAdminController_captureIssue_v1',
   },
   {
     method: 'GET',

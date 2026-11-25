@@ -174,6 +174,11 @@ interface PlanStep {
   tool: string;
   /** The step's arguments, or null: the plan ends with the previous result's summary. */
   args: (ctx: PlanContext) => Record<string, unknown> | null;
+  /**
+   * Called even though the tool is not in the catalogue index (step AI-5 D11): a not-applicable
+   * operation the executor must refuse (`denied_not_applicable`), proving the portal-only path.
+   */
+  uncatalogued?: true;
 }
 
 interface Plan {
@@ -199,6 +204,47 @@ function singleRowRef(previous: Record<string, unknown> | null, allowMore: boole
   if (rows.length !== 1 || !/^r\d+$/.test(ref)) return null;
   if (!allowMore && previous?.hasMore === true) return null;
   return `@${ref}.1`;
+}
+
+export const FAKE_HOLD_RELEASE_REASON = 'Released with the AI assistant';
+/** Most retention policies the retention plan lists (one page; an unambiguous match only). */
+export const FAKE_RETENTION_LIST_LIMIT = '100';
+export const FAKE_CASE_PATTERN = /\bcreate\s+(?:an?\s+)?ediscovery\s+case\s+"([^"]{1,120})"/i;
+export const FAKE_RETENTION_PATTERN =
+  /\bset\s+(?:the\s+)?retention\s+policy\s+"([^"]{1,128})"\s+to\s+(\d{1,5})\s+days\b/i;
+
+/** A value of an envelope with `{ untrusted_text }` wrappers removed (fields the fake copies). */
+function unwrapUntrusted(value: unknown, depth = 0): unknown {
+  if (depth > 8) return null;
+  if (Array.isArray(value)) return value.map((item) => unwrapUntrusted(item, depth + 1));
+  const record = asRecord(value);
+  if (!record) return value;
+  if (Object.keys(record).length === 1 && typeof record.untrusted_text === 'string')
+    return record.untrusted_text;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [key, unwrapUntrusted(item, depth + 1)]),
+  );
+}
+
+/** True when a value still holds an `{ omitted_items }` marker (a list cut by the envelope). */
+function hasOmittedItems(value: unknown, depth = 0): boolean {
+  if (depth > 8) return false;
+  if (Array.isArray(value)) return value.some((item) => hasOmittedItems(item, depth + 1));
+  const record = asRecord(value);
+  if (!record) return false;
+  if ('omitted_items' in record) return true;
+  return Object.values(record).some((item) => hasOmittedItems(item, depth + 1));
+}
+
+/** The row ref of the only row of a complete list whose (unwrapped) `name` equals `name`. */
+function uniqueNamedRowRef(previous: Record<string, unknown> | null, name: string): string | null {
+  const rows = Array.isArray(previous?.data) ? (previous.data as unknown[]) : [];
+  if (previous?.hasMore === true || previous?.truncated === true) return null;
+  const matches = rows
+    .map(asRecord)
+    .filter((row) => row !== null && unwrapUntrusted(row.name) === name);
+  const ref = matches.length === 1 ? matches[0]!.ref : null;
+  return typeof ref === 'string' && /^r\d+\.\d+$/.test(ref) ? `@${ref}` : null;
 }
 
 /** Multi-step demo intents (D8; step AI-3 D11). Tool names are registry names (checked by tests). */
@@ -335,6 +381,73 @@ export const FAKE_PLANS: readonly Plan[] = [
           return {
             body: { name: found[1]!.trim(), category: 'custom', terms, severity: 'medium' },
           };
+        },
+      },
+    ],
+  },
+  // --- step AI-5 (design 33 D11) ---
+  {
+    pattern: FAKE_CASE_PATTERN,
+    steps: [
+      {
+        tool: 'ediscovery_cases_create',
+        args: ({ message }) => {
+          const found = FAKE_CASE_PATTERN.exec(message);
+          const name = found?.[1]?.trim();
+          return name ? { body: { name } } : null;
+        },
+      },
+    ],
+  },
+  {
+    pattern: FAKE_RETENTION_PATTERN,
+    steps: [
+      { tool: 'archive_retention_list', args: () => ({ limit: FAKE_RETENTION_LIST_LIMIT }) },
+      {
+        tool: 'archive_retention_get',
+        // Only an unambiguous match: exactly one row of the complete list has that name.
+        args: ({ previous, message }) => {
+          const name = FAKE_RETENTION_PATTERN.exec(message)?.[1];
+          const policyId = name ? uniqueNamedRowRef(previous, name) : null;
+          return policyId ? { policyId } : null;
+        },
+      },
+      {
+        tool: 'archive_retention_update',
+        // The PUT replaces the whole policy: copy onExpiry, priority and criteria from the read.
+        args: ({ previous, message }) => {
+          const found = FAKE_RETENTION_PATTERN.exec(message);
+          const data = asRecord(previous?.data);
+          const ref = typeof data?.ref === 'string' ? data.ref : '';
+          if (!found || !data || !/^r\d+\.1$/.test(ref) || hasOmittedItems(data.criteria))
+            return null;
+          const criteria = unwrapUntrusted(data.criteria);
+          if (typeof data.priority !== 'number' || asRecord(criteria) === null) return null;
+          return {
+            policyId: `@${ref}`,
+            body: {
+              name: found[1]!,
+              retentionDays: Number(found[2]),
+              onExpiry: unwrapUntrusted(data.onExpiry),
+              priority: data.priority,
+              criteria,
+            },
+          };
+        },
+      },
+    ],
+  },
+  {
+    pattern: /\brelease\s+(?:the\s+)?(?:latest\s+)?legal\s+hold\b/i,
+    steps: [
+      { tool: 'legal_holds_list', args: () => ({ status: 'active', limit: '1' }) },
+      {
+        // Critical (portal only): the executor always refuses it (`denied_not_applicable`).
+        tool: 'legal_holds_release',
+        uncatalogued: true,
+        args: ({ previous }) => {
+          const holdId = singleRowRef(previous, true);
+          return holdId ? { holdId, body: { reason: FAKE_HOLD_RELEASE_REASON } } : null;
         },
       },
     ],
@@ -586,8 +699,10 @@ function nextPlanStep(
     const found = plan.steps.findIndex((step, i) => i > index && step.tool === tool);
     if (found >= 0) index = found;
   }
-  for (let i = index + 1; i < plan.steps.length; i += 1)
-    if (inCatalogue(plan.steps[i]!.tool)) return plan.steps[i]!;
+  for (let i = index + 1; i < plan.steps.length; i += 1) {
+    const step = plan.steps[i]!;
+    if (step.uncatalogued || inCatalogue(step.tool)) return step;
+  }
   return null;
 }
 

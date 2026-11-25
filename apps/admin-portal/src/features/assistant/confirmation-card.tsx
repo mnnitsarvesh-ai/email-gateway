@@ -240,6 +240,11 @@ export const QUEUED_202_TOOLS: ReadonlySet<string> = new Set([
   'webhooks_test',
   'webhook_deliveries_replay',
   'webhook_deliveries_create_replay',
+  // step AI-5 (design 33 D11): an eDiscovery search or export is built by the archive-worker, a
+  // provider health check is queued for the integration-worker
+  'ediscovery_searches_create',
+  'ediscovery_exports_create',
+  'provider_health_check_now',
 ]);
 
 /** Whether an executed write is waiting for a second approver: a 202 from an approval-gated route. */
@@ -251,6 +256,27 @@ export function awaitsApproval(view: ConfirmationView): boolean {
 export const ATO_RESPONSE_REQUESTED_TEXT =
   'Requested. If this action needs approval, another responder must approve it before it runs (you cannot approve your own request).';
 
+/** Step AI-5 D11: the eDiscovery export write; its file is downloaded only on the case page. */
+export const EDISCOVERY_EXPORT_TOOL = 'ediscovery_exports_create';
+
+/** Step AI-5 D11: the outcome of an executed (queued) eDiscovery export. */
+export const EXPORT_QUEUED_TEXT =
+  'Export queued. Download it on the case page when it is ready; downloads never go through chat.';
+
+const EXPORT_REQUEST_PATH = /^\/api\/v1\/ediscovery\/cases\/([^/?#]+)\/exports$/;
+
+/**
+ * The case page of an eDiscovery export confirmation (`/ediscovery/{caseId}`, step AI-5 D11), from
+ * the stored summary's request path; `null` for any other tool or a path that is not an
+ * allow-listed portal route.
+ */
+export function exportCaseHref(view: ConfirmationView): string | null {
+  if (view.tool !== EDISCOVERY_EXPORT_TOOL || !view.summary) return null;
+  const match = EXPORT_REQUEST_PATH.exec(view.summary.request.path);
+  if (!match?.[1]) return null;
+  return safePortalHref(`/ediscovery/${match[1]}`);
+}
+
 /** The outcome line of a decided confirmation. */
 export function outcomeText(view: ConfirmationView, resultCard: AssistantCard | null): string {
   switch (view.status) {
@@ -260,6 +286,11 @@ export function outcomeText(view: ConfirmationView, resultCard: AssistantCard | 
         (view.result?.httpStatus == null || view.result.httpStatus === 201)
       )
         return ATO_RESPONSE_REQUESTED_TEXT;
+      if (
+        view.tool === EDISCOVERY_EXPORT_TOOL &&
+        (view.result?.httpStatus == null || view.result.httpStatus === 202)
+      )
+        return EXPORT_QUEUED_TEXT;
       return awaitsApproval(view)
         ? 'Submitted for approval: another person must approve it before it takes effect.'
         : 'Done: the action was applied.';
@@ -455,6 +486,13 @@ function Outcome({
 }) {
   const ok = view.status === 'executed';
   const failed = view.status === 'failed';
+  // Step AI-5 D11: an executed export links to its case, where the file is downloaded.
+  const caseHref = ok ? exportCaseHref(view) : null;
+  const link = caseHref
+    ? { href: caseHref, label: 'Open the case' }
+    : (ok || failed) && portalHref
+      ? { href: portalHref, label: 'Open it in the portal' }
+      : null;
   const Icon = ok
     ? awaitsApproval(view)
       ? ClockIcon
@@ -480,14 +518,14 @@ function Outcome({
         />
         <span>{outcomeText(view, resultCard)}</span>
       </p>
-      {(ok || failed) && portalHref ? (
+      {link ? (
         <Link
-          href={portalHref}
+          href={link.href}
           onClick={onNavigate}
           className="inline-flex items-center gap-1 text-xs text-primary underline underline-offset-2 hover:no-underline"
         >
           <ExternalLinkIcon className="size-3" aria-hidden />
-          Open it in the portal
+          {link.label}
         </Link>
       ) : null}
       {resultCard ? <ResultCard card={resultCard} onNavigate={onNavigate} /> : null}

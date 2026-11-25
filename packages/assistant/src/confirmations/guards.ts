@@ -28,6 +28,13 @@ export const GUARD_MESSAGES = {
     'The assistant cannot change who may configure it. Change roles that grant assistant:configure in the portal.',
   ato_four_eyes:
     'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.',
+  // Step AI-5 (design 33 D4).
+  retention_default_policy:
+    'The default retention policy cannot be deleted. Choose another default in the archive settings first (Retention and lock in the portal).',
+  capture_not_retryable:
+    'Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive.',
+  case_active_holds:
+    'This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that.',
 } as const;
 export type GuardMessageKey = keyof typeof GUARD_MESSAGES;
 
@@ -60,13 +67,14 @@ export type ProposalGuard =
       message: GuardMessageKey;
     }
   /**
-   * The read's `field` must equal `equals`, optionally only when `when` holds; a missing or
-   * non-matching field refuses (fail closed). An `after_read` guard (step AI-4 D3).
+   * The read's `field` must strictly equal `equals`, optionally only when `when` holds; a missing
+   * or non-matching field refuses (fail closed). An `after_read` guard (step AI-4 D3; step AI-5
+   * D4 adds numbers, e.g. `counts.activeHolds = 0`).
    */
   | {
       kind: 'require_read_value';
       field: string;
-      equals: string | boolean;
+      equals: string | boolean | number;
       when?: ReadCondition;
       message: GuardMessageKey;
     };

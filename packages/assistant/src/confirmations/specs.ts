@@ -89,10 +89,50 @@ export interface CasInjection {
   min: 0 | 1;
 }
 
+/**
+ * The allow-listed side-effect-free POST reads whose `impactToken` the proposer may inject into
+ * a write (step AI-5 D5, ADR-0093 amendment AI-5 (w)). The api's precondition `get()` keeps
+ * refusing every non-GET tool; only its separate preview path accepts these.
+ */
+export const IMPACT_PREVIEW_TOOLS = ['provider_mail_flow_preview'] as const;
+export type ImpactPreviewTool = (typeof IMPACT_PREVIEW_TOOLS)[number];
+
+/** The key under which the api merges the preview response into the precondition target. */
+export const IMPACT_PREVIEW_KEY = 'preview';
+
+/**
+ * The value `body.impactToken` holds before the preview ran (the first schema check of the
+ * executor; valid against the write's schema: a 1–128 character string). Never sent to a route:
+ * the proposer always replaces it with the preview's token before the final schema check.
+ */
+export const IMPACT_TOKEN_PLACEHOLDER = 'pending-preview';
+
+/** Longest impact token the writes accept (`impactToken` `maxLength`). */
+export const IMPACT_TOKEN_MAX_CHARS = 128;
+
+/**
+ * A server-filled impact token (step AI-5 D5): after the single precondition read the proposer
+ * sends the preview through the loopback (`POST`, the caller's token), merges its response under
+ * `preview` into the precondition target (state and display fields address it as
+ * `preview.<path>`), and sets `body.impactToken` from the preview and `body.confirm = true`,
+ * always replacing any model value. The confirm route re-runs the read and the preview and
+ * compares the state digest (the preview's change set is part of the state fields).
+ */
+export interface ImpactTokenInjection {
+  /** The allow-listed side-effect-free POST read (`IMPACT_PREVIEW_TOOLS`). */
+  previewTool: ImpactPreviewTool;
+  /** Path parameters of the preview from the write's arguments (`{ id: 'id' }`). */
+  params: Readonly<Record<string, string>>;
+  /** The preview body's `change`: the write's `body.change`, or a constant change. */
+  change: { from: 'body.change' } | { constant: Readonly<Record<string, unknown>> };
+}
+
 export interface ConfirmationSpec {
   operationId: string;
   precondition: ConfirmationPrecondition | null;
   inject?: CasInjection;
+  /** A server-filled impact token (step AI-5 D5); requires a `single` precondition. */
+  impactToken?: ImpactTokenInjection;
   validateDefinition?: 'body.definition';
   /** Proposal guards (step AI-3 D3), evaluated by `guardRefusal` at proposal and at confirm. */
   guards?: readonly ProposalGuard[];
@@ -536,10 +576,151 @@ const high = (when: RiskEscalation['when'], warning: string): RiskEscalation => 
 });
 const disabled = (path = 'body.enabled') => ({ equals: { path, value: false } });
 
+// --- step AI-5 (design 33 D3–D6) ---
+
+/** Escalation warnings of step AI-5 (design 33 D3, I22; fixed English). */
+export const AI5_ESCALATION_WARNINGS = {
+  retentionShortened:
+    'Shortens retention: mail captured from now on that this policy matches is kept for fewer days (records already archived keep their stored dates).',
+  expiryDelete: 'Expired records are deleted without a review step.',
+  retentionScope:
+    'Changes which new captures this policy applies to; mail that no longer matches falls to another policy, possibly with a shorter retention.',
+  archiveOff: 'Archiving stops: mail received from now on is not captured.',
+  archiveSettings:
+    'Replaces the whole archive settings document (directions, included outcomes, scope, policy archiving, access, intake scanning); keys you leave out return to their defaults.',
+  archiveImmutability:
+    'Changes the S3 Object Lock mode of new captures; compliance mode can never be weakened afterwards.',
+  archiveDefaultPolicy: 'Changes the retention of every new capture that no other policy matches.',
+  journalingOff: 'Journaling stops: mail received from now on is not captured.',
+  journalingSettings:
+    'Replaces the given journaling sections (directions, included outcomes, scope, policy archiving, intake scanning); keys left out inside a given section return to their defaults.',
+  intakePaused:
+    'Journal intake stops: senders get a temporary failure and retry; nothing is captured from this source while it is paused.',
+  intakeNetworks: 'Changes which networks may deliver journal mail to this source.',
+  intakeTls: 'Journal mail may then arrive without TLS.',
+  intakeCertificates: 'Changes which client certificates this source accepts.',
+  intakeSize:
+    'Lowers the largest journal message this source accepts: larger messages are refused permanently and are not captured.',
+  intakeSilenceOff:
+    'Turns the silence alert off: a source that stops delivering journal mail is no longer reported.',
+  caseCustodians:
+    'Replaces the case custodians; later searches and holds that use the case custodians change (existing holds keep theirs).',
+  exportMalicious: 'The export includes messages flagged as malicious.',
+} as const;
+const W5 = AI5_ESCALATION_WARNINGS;
+
+/** The PUT defaults of a retention policy (`onExpiry`, `priority`, `criteria`; design 23). */
+const RETENTION_DEFAULTS = { onExpiry: 'delete', priority: 100, criteria: {} } as const;
+
+const retentionPolicy = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+  cas: boolean,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'archive_retention_get',
+  params: { policyId: 'policyId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+
+const SETTINGS_SECTIONS_DISPLAY = [
+  'settings.directions.inbound',
+  'settings.directions.outbound',
+  'settings.directions.internal',
+  'settings.include.rejected',
+  'settings.include.quarantined',
+  'settings.include.failed',
+  'settings.scope.mode',
+  'settings.policyArchive.enabled',
+  'settings.intake.scanEnabled',
+] as const;
+const BODY_ROW_VERSION_0: CasInjection = { in: 'body', field: 'expectedRowVersion', min: 0 };
+
+/** A journal intake source read: never `reveal` (D7; the tool has no such input any more). */
+const intakeSource = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+  cas = false,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'intake_sources_get',
+  params: { sourceId: 'sourceId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+const INTAKE_DISPLAY = ['displayName', 'kind', 'status'] as const;
+
+const ediscoveryCase = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+  cas = false,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'ediscovery_cases_get',
+  params: { caseId: 'caseId' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+const SEARCH_DISPLAY = ['status', 'hitCount', 'truncated', 'indexComplete'] as const;
+
+const PROVIDER_DISPLAY = ['displayName', 'provider', 'status'] as const;
+/** A provider connection read. Health columns move without `rowVersion` (never state fields). */
+const providerConnection = (
+  stateFields: readonly string[],
+  displayFields: readonly string[] = PROVIDER_DISPLAY,
+  cas = false,
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'provider_connections_get',
+  params: { id: 'id' },
+  stateFields,
+  ...(cas ? { rowVersionField: 'rowVersion' } : {}),
+  displayFields,
+});
+const providerGrant = (): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'provider_connections_get',
+  params: { id: 'id' },
+  select: { array: 'grants', field: 'profile', arg: 'profile', required: true },
+  stateFields: ['status'],
+  displayFields: ['profile', 'status', 'authMethod'],
+});
+
 /**
- * The 143 enabled writes: the 31 of step AI-2 (design 29 D4), the 47 of step AI-3 (design 30
- * D6), the native report_send_email of step AI-R (design 31 D5) and the 64 of step AI-4 (design
- * 32 D5). Field names checked against
+ * The preview's change set and warning codes (`POST …/mail-flow/preview`, merged under
+ * `preview`): the whole change set and the warnings bind the confirmation (state digest); the
+ * card shows its parts. Never `preview.impactToken` (a credential-pattern key).
+ */
+export const MAIL_FLOW_PREVIEW_STATE = ['preview.changeSet', 'preview.warnings'] as const;
+export const MAIL_FLOW_PREVIEW_DISPLAY = [
+  'preview.changeSet.kind',
+  'preview.changeSet.domains[].name',
+  'preview.changeSet.domains[].changed',
+  'preview.changeSet.domains[].current.provider',
+  'preview.changeSet.domains[].proposed.provider',
+  'preview.changeSet.domains[].current.servers',
+  'preview.changeSet.domains[].proposed.servers',
+  'preview.changeSet.connector.action',
+  'preview.changeSet.connection[].field',
+  'preview.changeSet.connection[].from',
+  'preview.changeSet.connection[].to',
+  'preview.changeSet.grantsRevoked',
+  'preview.warnings',
+] as const;
+const mailFlow = (): SinglePrecondition =>
+  providerConnection(
+    ['rowVersion', 'status', ...MAIL_FLOW_PREVIEW_STATE],
+    [...PROVIDER_DISPLAY, 'outboundMode', 'internalRouting', ...MAIL_FLOW_PREVIEW_DISPLAY],
+  );
+
+/**
+ * The 168 enabled writes: the 31 of step AI-2 (design 29 D4), the 47 of step AI-3 (design 30
+ * D6), the native report_send_email of step AI-R (design 31 D5), the 64 of step AI-4 (design
+ * 32 D5) and the 25 of step AI-5 (design 33 D6). Field names checked against
  * docs/api/openapi.json (request and response schemas; the
  * package tests resolve every state, row-version, display and select path).
  */
@@ -1451,6 +1632,290 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
       displayFields: ['type', 'value', 'severity', 'category', 'source'],
     },
   },
+  // ===== step AI-5 (25; design 33 D6) =====
+  // --- archive (5) ---
+  // A new policy can take precedence over the default: always high (D2, A5-1).
+  { operationId: 'ArchiveRetentionController_create_v1', precondition: null },
+  {
+    operationId: 'ArchiveRetentionController_update_v1',
+    precondition: retentionPolicy(
+      ['rowVersion', 'retentionDays', 'onExpiry', 'priority', 'criteria', 'isDefault'],
+      ['name', 'retentionDays', 'onExpiry', 'priority', 'isDefault'],
+      true,
+    ),
+    inject: BODY_ROW_VERSION,
+    // The PUT replaces the whole policy: an omitted field returns to its default (`absentAs`).
+    escalate: [
+      high(
+        { below: { path: 'body.retentionDays', field: 'retentionDays' } },
+        W5.retentionShortened,
+      ),
+      high(
+        {
+          becomes: {
+            path: 'body.onExpiry',
+            field: 'onExpiry',
+            value: 'delete',
+            absentAs: RETENTION_DEFAULTS.onExpiry,
+          },
+        },
+        W5.expiryDelete,
+      ),
+      high(
+        {
+          differs: {
+            path: 'body.criteria',
+            field: 'criteria',
+            absentAs: RETENTION_DEFAULTS.criteria,
+          },
+        },
+        W5.retentionScope,
+      ),
+      high(
+        {
+          differs: {
+            path: 'body.priority',
+            field: 'priority',
+            absentAs: RETENTION_DEFAULTS.priority,
+          },
+        },
+        W5.retentionScope,
+      ),
+    ],
+  },
+  {
+    operationId: 'ArchiveRetentionController_delete_v1',
+    precondition: retentionPolicy(
+      ['rowVersion', 'isDefault'],
+      ['name', 'retentionDays', 'onExpiry', 'isDefault'],
+      false,
+    ),
+    guards: [
+      {
+        kind: 'require_read_value',
+        field: 'isDefault',
+        equals: false,
+        message: 'retention_default_policy',
+      },
+    ],
+  },
+  {
+    operationId: 'ArchiveAdminController_retry_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'archive_admin_capture_issue',
+      params: { messageId: 'messageId' },
+      stateFields: ['status', 'attempts'],
+      displayFields: [
+        'receivedAt',
+        'status',
+        'code',
+        'attempts',
+        'sources.journal',
+        'sources.policy',
+      ],
+    },
+    guards: [
+      {
+        kind: 'require_read_value',
+        field: 'status',
+        equals: 'failed',
+        message: 'capture_not_retryable',
+      },
+    ],
+  },
+  {
+    operationId: 'ArchiveAdminController_update_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'archive_admin_get',
+      params: {},
+      stateFields: ['rowVersion', 'enabled', 'immutability', 'defaultRetentionPolicyId'],
+      rowVersionField: 'rowVersion',
+      displayFields: [
+        'enabled',
+        'entitled',
+        'immutability',
+        'objectLockAvailable',
+        'defaultRetentionPolicyId',
+        ...SETTINGS_SECTIONS_DISPLAY,
+        'settings.access.previewEnabled',
+        'settings.access.downloadEnabled',
+      ],
+    },
+    inject: BODY_ROW_VERSION_0,
+    escalate: [
+      high(disabled(), W5.archiveOff),
+      high({ present: 'body.settings' }, W5.archiveSettings),
+      high(
+        { differs: { path: 'body.immutability', field: 'immutability' } },
+        W5.archiveImmutability,
+      ),
+      high(
+        { differs: { path: 'body.defaultRetentionPolicyId', field: 'defaultRetentionPolicyId' } },
+        W5.archiveDefaultPolicy,
+      ),
+    ],
+  },
+  // --- journaling (4) ---
+  {
+    operationId: 'JournalingController_update_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'journaling_get',
+      params: {},
+      stateFields: ['rowVersion', 'enabled'],
+      rowVersionField: 'rowVersion',
+      displayFields: ['enabled', 'entitled', ...SETTINGS_SECTIONS_DISPLAY],
+    },
+    inject: BODY_ROW_VERSION_0,
+    escalate: [
+      high(disabled(), W5.journalingOff),
+      high({ present: 'body.settings' }, W5.journalingSettings),
+    ],
+  },
+  {
+    operationId: 'IntakeSourcesController_update_v1',
+    precondition: intakeSource(
+      ['rowVersion', 'status', 'maxMessageBytes'],
+      [
+        ...INTAKE_DISPLAY,
+        'requireTls',
+        'health.status',
+        'networks',
+        'clientCertFingerprints',
+        'maxMessageBytes',
+        'silenceAlertMinutes',
+      ],
+      true,
+    ),
+    inject: BODY_ROW_VERSION,
+    escalate: [
+      high({ equals: { path: 'body.status', value: 'paused' } }, W5.intakePaused),
+      high({ present: 'body.networks' }, W5.intakeNetworks),
+      high(disabled('body.requireTls'), W5.intakeTls),
+      high({ present: 'body.clientCertFingerprints' }, W5.intakeCertificates),
+      // A lower size limit refuses larger journal messages permanently (`552 5.3.4`, design 27
+      // §D step 7), stronger than a pause. Fail closed: a read without a source limit (`null`,
+      // the platform limit applies) or clearing the limit (`null` argument) also matches.
+      high({ below: { path: 'body.maxMessageBytes', field: 'maxMessageBytes' } }, W5.intakeSize),
+      high({ equals: { path: 'body.silenceAlertMinutes', value: null } }, W5.intakeSilenceOff),
+    ],
+  },
+  {
+    operationId: 'IntakeSourcesController_disable_v1',
+    precondition: intakeSource(['status'], INTAKE_DISPLAY),
+  },
+  {
+    operationId: 'IntakeSourcesController_attest_v1',
+    precondition: intakeSource(['status'], INTAKE_DISPLAY),
+  },
+  // --- eDiscovery (7) ---
+  { operationId: 'EdiscoveryCasesController_create_v1', precondition: null },
+  {
+    operationId: 'EdiscoveryCasesController_update_v1',
+    precondition: ediscoveryCase(
+      ['rowVersion', 'status'],
+      ['name', 'matterReference', 'status', 'counts.custodians'],
+      true,
+    ),
+    inject: BODY_ROW_VERSION,
+    escalate: [
+      { when: { present: 'body.custodians' }, risk: 'medium', warning: W5.caseCustodians },
+    ],
+  },
+  {
+    operationId: 'EdiscoveryCasesController_close_v1',
+    precondition: ediscoveryCase(
+      ['status', 'counts.activeHolds'],
+      ['name', 'status', 'counts.activeHolds', 'counts.searches', 'counts.exports'],
+    ),
+    guards: [
+      {
+        kind: 'require_read_value',
+        field: 'counts.activeHolds',
+        equals: 0,
+        message: 'case_active_holds',
+      },
+    ],
+  },
+  {
+    operationId: 'EdiscoveryCasesController_createHold_v1',
+    precondition: ediscoveryCase(
+      ['status'],
+      ['name', 'status', 'counts.custodians', 'counts.activeHolds'],
+    ),
+  },
+  {
+    operationId: 'EdiscoverySearchesController_create_v1',
+    precondition: ediscoveryCase(['status'], ['name', 'status']),
+  },
+  {
+    operationId: 'EdiscoverySearchesController_review_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'ediscovery_searches_get',
+      params: { caseId: 'caseId', searchId: 'searchId' },
+      stateFields: ['status'],
+      displayFields: SEARCH_DISPLAY,
+    },
+  },
+  {
+    operationId: 'EdiscoveryExportsController_create_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'ediscovery_searches_get',
+      params: { caseId: 'caseId', searchId: 'body.searchId' },
+      stateFields: ['status', 'hitCount'],
+      displayFields: [...SEARCH_DISPLAY, 'incompleteReason'],
+    },
+    escalate: [
+      high({ equals: { path: 'body.acknowledgeMalicious', value: true } }, W5.exportMalicious),
+    ],
+  },
+  // --- provider connections (9) ---
+  { operationId: 'ProviderConnectionsController_create_v1', precondition: null },
+  {
+    operationId: 'ProviderConnectionsController_update_v1',
+    precondition: providerConnection(['rowVersion'], PROVIDER_DISPLAY, true),
+    inject: { in: 'body', field: 'rowVersion', min: 1 },
+  },
+  {
+    operationId: 'ProviderConnectionsController_disconnect_v1',
+    precondition: mailFlow(),
+    impactToken: {
+      previewTool: 'provider_mail_flow_preview',
+      params: { id: 'id' },
+      change: { constant: { kind: 'disable' } },
+    },
+  },
+  {
+    operationId: 'ProviderAttestationsController_record_v1',
+    precondition: providerConnection(['status']),
+  },
+  {
+    operationId: 'ProviderDomainsController_replace_v1',
+    precondition: providerConnection(
+      ['rowVersion', 'status'],
+      [...PROVIDER_DISPLAY, 'domains[].name'],
+    ),
+  },
+  { operationId: 'ProviderGrantsController_revoke_v1', precondition: providerGrant() },
+  // `body.subjectEmail` is omitted from the tool (D7): chat only re-verifies a set-up grant.
+  { operationId: 'ProviderGrantsController_verify_v1', precondition: providerGrant() },
+  {
+    operationId: 'ProviderHealthController_checkNow_v1',
+    precondition: providerConnection(['status'], [...PROVIDER_DISPLAY, 'health']),
+  },
+  {
+    operationId: 'ProviderMailFlowController_apply_v1',
+    precondition: mailFlow(),
+    impactToken: {
+      previewTool: 'provider_mail_flow_preview',
+      params: { id: 'id' },
+      change: { from: 'body.change' },
+    },
+  },
   // --- native (step AI-R D5) ---
   {
     operationId: 'AssistantNative_reportSendEmail',
@@ -1561,6 +2026,82 @@ export function withInjectedCas(
   if (!Number.isSafeInteger(rowVersion) || rowVersion < 0)
     throw new TypeError('withInjectedCas: the row version must be a non-negative integer');
   return setCas(args, spec.inject, rowVersion, false);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Server-filled impact tokens (step AI-5 D5; pure, the api's executor and proposer use them)
+// ---------------------------------------------------------------------------------------------
+
+const asBody = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+/**
+ * Arguments for the executor's first schema check (D5 step 1): when the spec has `impactToken`,
+ * `body.impactToken` is set to `IMPACT_TOKEN_PLACEHOLDER` and `body.confirm` to `true` when they
+ * are absent, so the write's required fields never block a proposal. Other specs: a copy.
+ */
+export function withImpactTokenPlaceholder(
+  args: Readonly<Record<string, unknown>>,
+  spec: Pick<ConfirmationSpec, 'impactToken'>,
+): Record<string, unknown> {
+  const out = cloneArgs(args);
+  if (!spec.impactToken) return out;
+  const body = asBody(out.body);
+  if (body.impactToken === undefined) body.impactToken = IMPACT_TOKEN_PLACEHOLDER;
+  if (body.confirm === undefined) body.confirm = true;
+  out.body = body;
+  return out;
+}
+
+/**
+ * The preview call's arguments from the write's arguments (D5 step 2): the mapped path
+ * parameters and `body: { change }` (the write's `body.change`, or the spec's constant change).
+ */
+export function impactPreviewArgs(
+  injection: ImpactTokenInjection,
+  args: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [param, path] of Object.entries(injection.params))
+    out[param] = readArgPath(args, path);
+  const change =
+    'constant' in injection.change
+      ? structuredClone(injection.change.constant)
+      : structuredClone(readArgPath(args, injection.change.from));
+  out.body = change === undefined ? {} : { change };
+  return out;
+}
+
+/** The precondition target with the preview response merged under `preview` (D5 step 2). */
+export function withImpactPreview(target: unknown, preview: unknown): Record<string, unknown> {
+  return { ...asBody(target), [IMPACT_PREVIEW_KEY]: preview };
+}
+
+export type ImpactTokenInjectionResult =
+  | { ok: true; args: Record<string, unknown> }
+  /** The preview answered without a usable `impactToken` (absent, not a string, empty or too long). */
+  | { ok: false; reason: 'impact_token_missing' };
+
+/**
+ * Arguments with `body.impactToken` set from the preview response's `impactToken` and
+ * `body.confirm` set to `true`, always replacing the model's values (D5 step 2). A preview
+ * without a usable token fails (the api fails the proposal like a failed read).
+ */
+export function withInjectedImpactToken(
+  args: Readonly<Record<string, unknown>>,
+  previewBody: unknown,
+): ImpactTokenInjectionResult {
+  const token = asBody(previewBody).impactToken;
+  if (typeof token !== 'string' || token.length === 0 || token.length > IMPACT_TOKEN_MAX_CHARS)
+    return { ok: false, reason: 'impact_token_missing' };
+  const out = cloneArgs(args);
+  const body = asBody(out.body);
+  body.impactToken = token;
+  body.confirm = true;
+  out.body = body;
+  return { ok: true, args: out };
 }
 
 // ---------------------------------------------------------------------------------------------

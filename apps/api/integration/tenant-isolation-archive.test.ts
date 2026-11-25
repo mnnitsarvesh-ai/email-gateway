@@ -18,6 +18,7 @@
 // @covers post /api/v1/archive/keys/rotate
 // @covers get /api/v1/archive/status
 // @covers get /api/v1/archive/capture-issues
+// @covers get /api/v1/archive/capture-issues/:messageId
 // @covers post /api/v1/archive/capture-issues/:messageId/retry
 // @covers get /api/v1/archive/disposals
 // @covers get /api/v1/archive/messages
@@ -52,7 +53,13 @@ import { tenantAliasName } from '@email-gateway/archive';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SeededRecord } from '../test/support/archive-seed';
 import { createIntegrationApp, type IntegrationApp } from './support/app';
-import { ArchiveFixtures, archiveHttp, type ArchiveHttp, testIndexPrefix } from './support/archive';
+import {
+  ARCHIVE_POLL,
+  ArchiveFixtures,
+  archiveHttp,
+  type ArchiveHttp,
+  testIndexPrefix,
+} from './support/archive';
 import {
   createFixtures,
   type FixtureOrganization,
@@ -201,6 +208,7 @@ describe('another organization’s ids answer 404 on every id route', () => {
           ),
       ],
       ['policy delete', () => a.http.delete(`${A}/retention-policies/${b.policy}`, key())],
+      ['capture issue get', () => a.http.get(`${A}/capture-issues/${m}`)],
       ['retry', () => a.http.post(`${A}/capture-issues/${m}/retry`, undefined, key())],
       ['detail', () => a.http.get(`${A}/messages/${m}`)],
       ['journal', () => a.http.get(`${A}/messages/${m}/journal`)],
@@ -229,6 +237,26 @@ describe('another organization’s ids answer 404 on every id route', () => {
       const res = await call();
       expect(res.status, `${name} ${JSON.stringify(res.body)}`).toBe(404);
     }
+  });
+
+  it('the capture issue read (AI-5 D8): A reads its own intent, B’s answers the coded 404', async () => {
+    // Replica reads: wait until A's own intent (written in the setup) is visible.
+    await expect
+      .poll(
+        async () =>
+          (await a.http.get(`${A}/capture-issues/${a.record.row.messagePublicId}`)).status,
+        ARCHIVE_POLL,
+      )
+      .toBe(200);
+    const own = await a.http.get(`${A}/capture-issues/${a.record.row.messagePublicId}`);
+    expect(own.body).toMatchObject({ messageId: a.record.row.messagePublicId, status: 'failed' });
+    const foreign = await a.http.get(`${A}/capture-issues/${b.record.row.messagePublicId}`);
+    expect(foreign.status).toBe(404);
+    expect(foreign.body.code).toBe('archive_capture_issue_not_found');
+    // B still sees its own intent, unchanged by A's calls (failed, never retried).
+    const mine = await b.http.get(`${A}/capture-issues/${b.record.row.messagePublicId}`);
+    expect(mine.status).toBe(200);
+    expect(mine.body).toMatchObject({ messageId: b.record.row.messagePublicId, status: 'failed' });
   });
 
   it('legal hold and eDiscovery routes', async () => {

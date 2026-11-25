@@ -42,6 +42,7 @@ export const ARCHIVE_OPERATIONS = [
   'ArchiveAdminController_rotate_v1',
   'ArchiveAdminController_status_v1',
   'ArchiveAdminController_captureIssues_v1',
+  'ArchiveAdminController_captureIssue_v1',
   'ArchiveAdminController_retry_v1',
   'ArchiveAdminController_disposals_v1',
   'ArchiveAdminController_signingKeys_v1',
@@ -1321,6 +1322,12 @@ export const fixtures: FixtureHandlers = {
     const statuses = listOf(request.query, 'status');
     const rows = org.issues.filter((i) => statuses.length === 0 || statuses.includes(i.status));
     return { status: 200, body: paginate(rows, request.query) };
+  }),
+  ArchiveAdminController_captureIssue_v1: route((request, org) => {
+    const issue = org.issues.find((i) => i.messageId === request.params.messageId);
+    return issue
+      ? ok('ArchiveAdminController_captureIssue_v1', issue)
+      : apiError(404, 'archive_capture_issue_not_found', 'Capture issue not found');
   }),
   ArchiveAdminController_retry_v1: route((request, org) =>
     idempotent(request, org, () => {

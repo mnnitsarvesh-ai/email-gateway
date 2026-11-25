@@ -12,7 +12,11 @@
  * ATO figures are asserted by ato.spec, which runs after this file).
  */
 import type { PrismaClient } from '@email-gateway/database';
-import { defaultBindingSettings } from '@email-gateway/idp-adapters';
+import {
+  decodeCursor,
+  defaultBindingSettings,
+  MICROSOFT_ADAPTER_VERSION,
+} from '@email-gateway/idp-adapters';
 import { MS_DOMAIN, MS_TENANT_ID, microsoftDirectory } from '@email-gateway/idp-adapters/testing';
 import type { Page } from '@playwright/test';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -101,16 +105,108 @@ async function integrationDiagnostics(): Promise<string> {
       nextPollAt: true,
       consecutiveFailures: true,
       lastErrorCode: true,
+      lastSuccessAt: true,
+      backfillRequestedAt: true,
+      backfillCompletedAt: true,
+      cursor: true,
+      cursorSeq: true,
+      watermarkAt: true,
+      eventsTotal: true,
+      pagesTotal: true,
     },
   });
   const iso = (d: Date | null) => d?.toISOString() ?? 'null';
-  return [
+  // The snapshot sweep state of the cursor (timestamps and flags only, no continuation token).
+  const sweep = (cursor: string | null) => {
+    if (cursor === null) return 'null';
+    const decoded = decodeCursor(cursor, MICROSOFT_ADAPTER_VERSION);
+    if (!decoded.ok) return 'n/a';
+    const { sw, ws, we, wm } = decoded.cursor;
+    return `{at=${sw?.at ?? '-'} next=${sw?.next ? 'yes' : 'no'} alt=${String(sw?.alt ?? '-')}} window=${ws ?? '-'}..${we ?? '-'} wm=${wm ?? '-'}`;
+  };
+  const lines = [
     `now=${new Date().toISOString()} integration status=${row.status} health_status=${row.healthStatus} health_checked_at=${iso(row.healthCheckedAt)} next_health_at=${iso(row.nextHealthAt)}`,
     ...streams.map(
       (s) =>
-        `  stream=${s.stream} status=${s.status} next_poll_at=${iso(s.nextPollAt)} consecutive_failures=${s.consecutiveFailures} last_error_code=${s.lastErrorCode ?? 'null'}`,
+        `  stream=${s.stream} status=${s.status} next_poll_at=${iso(s.nextPollAt)} consecutive_failures=${s.consecutiveFailures} last_error_code=${s.lastErrorCode ?? 'null'} last_success_at=${iso(s.lastSuccessAt)} backfill_requested_at=${iso(s.backfillRequestedAt)} backfill_completed_at=${iso(s.backfillCompletedAt)} seq=${s.cursorSeq} pages=${s.pagesTotal} events=${s.eventsTotal} watermark_at=${iso(s.watermarkAt)} sweep=${s.stream === 'mailbox_audit' ? sweep(s.cursor) : '-'}`,
     ),
-  ].join('\n');
+  ];
+  // The alex account: identity, signals (rule codes and status; `informational` = historical or
+  // learning), score, mailbox items and incidents.
+  const account = await prisma.atoAccount.findFirst({
+    where: { organizationId: alphaId, kind: 'mailbox', address: `alex@${domainName}` },
+    select: { id: true },
+  });
+  if (!account) {
+    lines.push('  alex account: not found');
+  } else {
+    const byAccount = { organizationId: alphaId, accountId: account.id };
+    const [identities, signals, score, items, incidents] = await Promise.all([
+      prisma.atoAccountIdentity.count({ where: byAccount }),
+      prisma.atoRiskSignal.findMany({
+        where: byAccount,
+        orderBy: { detectedAt: 'asc' },
+        select: {
+          ruleCode: true,
+          status: true,
+          strength: true,
+          sourceKind: true,
+          detectedAt: true,
+          incidentId: true,
+        },
+      }),
+      prisma.atoRiskScore.findFirst({
+        where: byAccount,
+        orderBy: { computedAt: 'desc' },
+        select: { score: true, level: true },
+      }),
+      prisma.atoProviderMailboxItem.findMany({
+        where: { organizationId: alphaId, integrationId: row.id },
+        select: {
+          accountId: true,
+          itemKind: true,
+          state: true,
+          source: true,
+          targetDomain: true,
+          emittedSeq: true,
+          firstSeenAt: true,
+        },
+      }),
+      prisma.securityIncident.findMany({
+        where: { organizationId: alphaId, subjectRefId: account.id },
+        select: { id: true, status: true, activeMarker: true, severity: true },
+      }),
+    ]);
+    lines.push(
+      `  alex account=${account.id} identities=${identities} score=${score ? `${score.score}/${score.level}` : 'none'} incidents=${JSON.stringify(incidents.map((i) => ({ id: String(i.id), status: i.status, active: i.activeMarker, severity: i.severity })))}`,
+      ...signals.map(
+        (s) =>
+          `    signal ${s.ruleCode} status=${s.status} strength=${s.strength} source=${s.sourceKind} at=${s.detectedAt.toISOString()} incident=${s.incidentId ?? 'null'}`,
+      ),
+      ...items.map(
+        (i) =>
+          `    item ${i.itemKind} account=${i.accountId === account.id ? 'alex' : String(i.accountId)} state=${i.state} source=${i.source} target=${i.targetDomain ?? '-'} emitted_seq=${i.emittedSeq} first_seen=${i.firstSeenAt.toISOString()}`,
+      ),
+    );
+  }
+  // The idp-simulator call log of this run's directory (paths and counts only; ids masked).
+  const calls = await fetch(`${SIM()}/admin/calls`)
+    .then((r) => r.json() as Promise<{ calls: Array<Record<string, unknown>> }>)
+    .catch(() => ({ calls: [] }));
+  const counts = new Map<string, number>();
+  for (const call of calls.calls) {
+    const key = `${String(call.simulator)} ${String(call.method)} ${String(call.path)
+      .split(tenantId)
+      .join('{tenant}')
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '{id}')
+      .replace(/\/audit\/[^/]+$/, '/audit/{blob}')} ${String(call.status)}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  lines.push(
+    `  simulator calls=${calls.calls.length}`,
+    ...[...counts].map(([key, n]) => `    ${key} x${n}`),
+  );
+  return lines.join('\n');
 }
 
 const ROLES = [
@@ -432,6 +528,10 @@ test('mailbox changes: remove an external forwarding rule through approval', asy
     300_000,
     integrationDiagnostics,
   );
+  // E2E_ATO_DIAGNOSTICS=1 prints the same state after a successful wait (timing comparisons).
+  if (process.env.E2E_ATO_DIAGNOSTICS === '1') {
+    process.stdout.write(`${await integrationDiagnostics()}\n`);
+  }
   await signIn(page, 'alphaAnalyst', { next: `/ato/accounts/${alex.publicId}?tab=mailbox` });
   const items = page.getByRole('table', { name: 'Mailbox items' });
   const rule = items.getByRole('row', { name: /Inbox rule or filter/ }).filter({

@@ -254,7 +254,7 @@ export function untrustedFieldsOf(
   return fields;
 }
 
-interface InputSchemaParts {
+export interface InputSchemaParts {
   inputSchema: Record<string, unknown>;
   pathParams: string[];
   queryParams: string[];
@@ -297,6 +297,52 @@ export function buildInputSchema(
   };
   if (required.length > 0) inputSchema.required = required;
   return { inputSchema, pathParams, queryParams, hasBody };
+}
+
+/**
+ * Removes the manifest's `omitInputs` (step AI-5 D7) from the generated input parts: a query
+ * parameter from `properties`, `required` and `queryParams`; `body.<property>` from the body's
+ * `properties` and `required`. Throws (the generator refuses) for a path that is not an optional
+ * input of the operation: a path parameter, a required query parameter or body property, a
+ * nested body path, or a name the operation does not have.
+ */
+export function omitInputs(
+  operationId: string,
+  parts: InputSchemaParts,
+  omit: readonly string[],
+): InputSchemaParts {
+  if (omit.length === 0) return parts;
+  const inputSchema = structuredClone(parts.inputSchema);
+  const properties = inputSchema.properties as Record<string, unknown>;
+  const required = new Set((inputSchema.required as string[] | undefined) ?? []);
+  let queryParams = [...parts.queryParams];
+  for (const path of omit) {
+    const fail = (why: string): never => {
+      throw new Error(`${operationId}: omitInputs ${path} ${why}`);
+    };
+    if (path.startsWith('body.')) {
+      const name = path.slice('body.'.length);
+      if (!parts.hasBody) fail('names a body property, but the operation has no body');
+      if (name.length === 0 || name.includes('.') || name.includes('[]'))
+        fail('must name a top-level body property');
+      const body = properties.body;
+      const bodyProperties = isObject(body) && isObject(body.properties) ? body.properties : null;
+      if (!bodyProperties || !(name in bodyProperties)) fail('is not a body property');
+      const bodySchema = body as Record<string, unknown>;
+      const bodyRequired = Array.isArray(bodySchema.required)
+        ? (bodySchema.required as string[])
+        : [];
+      if (bodyRequired.includes(name)) fail('is a required body property (only optional inputs)');
+      delete bodyProperties![name];
+    } else {
+      if (parts.pathParams.includes(path)) fail('is a path parameter (only optional inputs)');
+      if (!queryParams.includes(path)) fail('is not a query parameter of the operation');
+      if (required.has(path)) fail('is a required query parameter (only optional inputs)');
+      delete properties[path];
+      queryParams = queryParams.filter((name) => name !== path);
+    }
+  }
+  return { ...parts, inputSchema, queryParams };
 }
 
 function portalPagesOf(operationId: string, usage: PortalUsage): string[] {
@@ -388,7 +434,11 @@ export function buildRegistry(document: OpenApiDocument, usage: PortalUsage): Re
       const risk = override.risk ?? classification.risk;
       const phase = override.phase ?? classification.phase;
       const bind = { ...(override.bind ?? {}) };
-      const parts = buildInputSchema(op, components, new Set(Object.keys(bind)));
+      const parts = omitInputs(
+        operationId,
+        buildInputSchema(op, components, new Set(Object.keys(bind))),
+        override.omitInputs ?? [],
+      );
       const enabled =
         phaseIndex(phase) <= currentPhase &&
         (access === 'read' || (confirmationsBuilt && Boolean(override.testedBy)));

@@ -11,7 +11,8 @@ import { toJsonSchema } from '@/test/contract';
 import { ARCHIVE_OPERATIONS, FIXTURE_JOB_DELAY_MS, resetArchiveFixtures } from './archive';
 
 /**
- * Dev fixtures of the step 8.1 compliance pages (WP5): every one of the 41 operations answers
+ * Dev fixtures of the step 8.1 compliance pages (WP5): every one of the 42 operations (41 of step 8.1 plus the
+ * AI-5 single capture-issue read) answers
  * with a body that matches its OpenAPI response, and the rules the pages rely on hold (masking,
  * reveal and hold filter gates, MFA, override refusal, CAS, Idempotency-Key replay, jobs).
  */
@@ -91,9 +92,9 @@ const range = () => {
 beforeEach(() => resetArchiveFixtures());
 
 describe('archive dev fixtures (step 8.1 WP5)', () => {
-  it('cover all 41 operations of §4.4', () => {
+  it('cover all 42 operations (§4.4 plus AI-5)', () => {
     const handlers = mergedFixtures();
-    expect(ARCHIVE_OPERATIONS).toHaveLength(41);
+    expect(ARCHIVE_OPERATIONS).toHaveLength(42);
     for (const op of ARCHIVE_OPERATIONS) expect(handlers[op], op).toBeDefined();
     const fromSpec = Object.keys(operations).filter((id) =>
       /^(Archive|LegalHolds|Ediscovery)/.test(id),
@@ -131,6 +132,13 @@ describe('archive dev fixtures (step 8.1 WP5)', () => {
     const issues = await call(t, 'GET', '/archive/capture-issues');
     check('ArchiveAdminController_captureIssues_v1', issues);
     const failed = issues.body.data.find((i: { status: string }) => i.status === 'failed');
+    check(
+      'ArchiveAdminController_captureIssue_v1',
+      await call(t, 'GET', `/archive/capture-issues/${failed.messageId}`),
+    );
+    expect(
+      (await call(t, 'GET', '/archive/capture-issues/00000000-0000-4000-8000-000000000000')).status,
+    ).toBe(404);
     check(
       'ArchiveAdminController_retry_v1',
       await call(t, 'POST', `/archive/capture-issues/${failed.messageId}/retry`, undefined, k()),

@@ -139,6 +139,14 @@ export interface OperationOverride {
   bind?: Record<string, ParamBinding>;
   /** Argument paths stored as `[redacted]` (step AI-4 D9; reads only, paths of the input schema). */
   redactParams?: string[];
+  /**
+   * Optional inputs never offered to the model (step AI-5 D7, ADR-0091 amendment (z)): a query
+   * parameter name (`reveal`) or a body property (`body.subjectEmail`). The generator removes
+   * each from the generated input schema (and `queryParams` / the body's `required`), so
+   * `describe_tool` and the catalogue line never show it and a forced value is `denied_schema`.
+   * Only optional inputs that exist in the OpenAPI operation (the generator refuses others).
+   */
+  omitInputs?: string[];
   limitations?: string;
   testedBy?: string;
 }

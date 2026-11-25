@@ -12,6 +12,13 @@
  * - `epsilon` (enterprise plan): feature `ai_assistant` enabled, tenant setting never turned on:
  *   its organization admin sees "turned off for your organization" with the settings link.
  *
+ * - Step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md §9 item 6): delta (enterprise
+ *   plan, so the `archiving` plan feature is on) gets a default retention policy and its archive
+ *   settings (capture stays off, like alpha's), a 365-day retention policy the spec shortens
+ *   through chat, and an eDiscovery case with an active legal hold the spec asks chat to release.
+ *   All of it is written **through the api** by delta's compliance officer (MFA session: the
+ *   archive settings and the hold are MFA routes), like `prepareArchive` (seed/archive.ts).
+ *
  * The spec runs the deterministic fake provider only (`ASSISTANT_PROVIDER=fake`, the api's
  * assistant override); nothing here or in the spec reaches an LLM or the internet. Synthetic
  * `.test` values only.
@@ -53,7 +60,24 @@ export interface SeededAssistant {
     mfaAdminUserId: string;
     /** Step AI-3: the seeded user the assistant disables (DELTA_OFFBOARD_USER). */
     offboardUser: { id: string; email: string };
+    /** Step AI-5: delta's compliance rows (prepareAssistantCompliance). */
+    compliance: SeededAssistantCompliance;
   };
+}
+
+/** Step AI-5: the compliance officer of delta (MFA; archive, eDiscovery and legal holds). */
+export const DELTA_COMPLIANCE_EMAIL = `compliance@${DELTA_DOMAIN}`;
+/** Step AI-5: delta's default retention policy (the archive settings point at it). */
+export const DELTA_DEFAULT_RETENTION = 'E2E delta default seven years';
+
+export interface SeededAssistantCompliance {
+  /** The default policy (2555 days); never changed by the spec. */
+  defaultPolicyId: string;
+  /** "E2E retention <tag>": 365 days, `onExpiry` delete, priority and criteria defaults. */
+  retentionPolicy: { id: string; name: string; retentionDays: number };
+  /** An open case with one active legal hold (the custodian is the compliance officer). */
+  holdCase: { id: string; name: string };
+  hold: { id: string; name: string };
 }
 
 /** Delta's messages: four of the last hour, two of them held in quarantine. */
@@ -220,4 +244,79 @@ export async function prepareAssistant(
     policies.push({ id, name: spec.name, status: spec.activate ? 'active' : 'draft' });
   }
   return policies;
+}
+
+/**
+ * Step AI-5: delta's archive rows through the api as its compliance officer (an MFA session):
+ * a default retention policy and the archive settings pointing at it (capture disabled; the
+ * capture settings document stays at its defaults, since its scope needs `journal:manage`, which
+ * the compliance officer does not hold), the 365-day policy "E2E retention <tag>" with
+ * the route's defaults for priority and criteria, and an eDiscovery case with an active hold.
+ */
+export async function prepareAssistantCompliance(
+  compliance: ApiSession,
+  tag: string,
+): Promise<SeededAssistantCompliance> {
+  const defaultPolicy = await compliance.call<{ id: string }>(
+    'POST',
+    '/archive/retention-policies',
+    { name: DELTA_DEFAULT_RETENTION, retentionDays: 2555, onExpiry: 'delete', priority: 1000 },
+    { idempotent: true, expect: 201 },
+  );
+  const settings = await compliance.call<{ rowVersion: number }>(
+    'GET',
+    '/archive/settings',
+    undefined,
+    { expect: 200 },
+  );
+  await compliance.call(
+    'PUT',
+    '/archive/settings',
+    {
+      expectedRowVersion: settings.body.rowVersion,
+      enabled: false,
+      immutability: 'none',
+      defaultRetentionPolicyId: defaultPolicy.body.id,
+    },
+    { idempotent: true, expect: 200 },
+  );
+  const retentionName = `E2E retention ${tag}`;
+  const retention = await compliance.call<{ id: string; retentionDays: number }>(
+    'POST',
+    '/archive/retention-policies',
+    { name: retentionName, retentionDays: 365, onExpiry: 'delete' },
+    { idempotent: true, expect: 201 },
+  );
+  const caseName = `E2E hold case ${tag}`;
+  const created = await compliance.call<{ id: string }>(
+    'POST',
+    '/ediscovery/cases',
+    {
+      name: caseName,
+      description: 'Seeded by the portal end-to-end suite (assistant, step AI-5)',
+      custodians: [DELTA_COMPLIANCE_EMAIL],
+    },
+    { idempotent: true, expect: 201 },
+  );
+  const holdName = `E2E chat hold ${tag}`;
+  const hold = await compliance.call<{ id: string }>(
+    'POST',
+    `/ediscovery/cases/${created.body.id}/holds`,
+    {
+      name: holdName,
+      reason: 'E2E seed: preserve the custodian mailbox',
+      useCaseCustodians: true,
+    },
+    { idempotent: true, expect: 201 },
+  );
+  return {
+    defaultPolicyId: defaultPolicy.body.id,
+    retentionPolicy: {
+      id: retention.body.id,
+      name: retentionName,
+      retentionDays: retention.body.retentionDays,
+    },
+    holdCase: { id: created.body.id, name: caseName },
+    hold: { id: hold.body.id, name: holdName },
+  };
 }

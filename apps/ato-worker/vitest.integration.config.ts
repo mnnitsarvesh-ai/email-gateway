@@ -15,8 +15,9 @@ export default defineConfig({
   plugins: [swc.vite({ module: { type: 'es6' } })],
   test: {
     include: ['integration/**/*.test.ts'],
-    // Pauses a live ato-worker (container or host) while the suites run.
-    globalSetup: ['integration/support/live-worker.ts'],
+    // Pauses a live ato-worker (container or host) while the suites run, and afterwards removes
+    // the platform-wide IP windows and campaign flags of the documentation ranges the suites used.
+    globalSetup: ['integration/support/live-worker.ts', 'integration/support/ip-windows.ts'],
     fileParallelism: false,
     testTimeout: 600_000,
     hookTimeout: 600_000,

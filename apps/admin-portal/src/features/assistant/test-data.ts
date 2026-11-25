@@ -705,3 +705,32 @@ export const REPORT_SEND_SUMMARY: ConfirmationSummary = {
 /** The four-eyes guard message of an ATO response decision (packages/assistant `ato_four_eyes`, step AI-4 D3). */
 export const ATO_FOUR_EYES_MESSAGE =
   'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.';
+
+/** Step AI-5 (design 33): an eDiscovery case and its export confirmation (synthetic values). */
+export const CASE_ID = '0193aaaa-0000-7000-8000-000000000083';
+export const SEARCH_ID = '0193aaaa-0000-7000-8000-000000000084';
+
+export const EXPORT_SUMMARY: ConfirmationSummary = {
+  version: 'assistant-confirmation/1',
+  title: 'Export eDiscovery search',
+  action:
+    'Builds an encrypted export of the decrypted original messages of 12 hits; download it on the case page in the portal until it expires; chat never shows its content.',
+  target: [
+    { label: 'Search status', value: 'completed' },
+    { label: 'Hits', value: '12' },
+  ],
+  changes: [],
+  impact: ['The export is built in the background by the archive.'],
+  warnings: ['The export packages decrypted original messages.'],
+  reversible: false,
+  portalRoute: `/ediscovery/${CASE_ID}`,
+  request: { method: 'POST', path: `/api/v1/ediscovery/cases/${CASE_ID}/exports` },
+};
+
+/** The AI-5 guard messages (packages/assistant `GUARD_MESSAGES`, step AI-5 D4). */
+export const RETENTION_DEFAULT_POLICY_MESSAGE =
+  'The default retention policy cannot be deleted. Choose another default in the archive settings first (Retention and lock in the portal).';
+export const CAPTURE_NOT_RETRYABLE_MESSAGE =
+  'Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive.';
+export const CASE_ACTIVE_HOLDS_MESSAGE =
+  'This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that.';

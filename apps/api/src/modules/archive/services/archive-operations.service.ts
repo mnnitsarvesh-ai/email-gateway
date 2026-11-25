@@ -34,11 +34,15 @@ import {
   CAPTURE_ISSUE_STATUSES,
   type CaptureIssueListQuery,
   type CaptureIssuePage,
+  type CaptureIssueView,
   type CaptureRetryView,
   type DisposalListQuery,
   type DisposalPage,
 } from '../dto/archive.schemas';
-import { ArchiveRecordsRepository } from '../repositories/archive-records.repository';
+import {
+  ArchiveRecordsRepository,
+  type CaptureIssueRow,
+} from '../repositories/archive-records.repository';
 import { parsePublicId, requireArchiving } from './archive-common';
 
 /** A pending intent older than this is a capture issue (the `ArchiveCaptureBacklog` warning). */
@@ -46,6 +50,20 @@ export const CAPTURE_ISSUE_AGE_MS = 6 * 3_600_000;
 /** Default and longest range of the disposal log. */
 const DISPOSALS_DEFAULT_MS = 30 * 86_400_000;
 const DISPOSALS_MAX_DAYS = 366;
+
+/** The list item view of a capture intent (the list and the single read share it). */
+function captureIssueView(r: CaptureIssueRow, messageId: string): CaptureIssueView {
+  return {
+    messageId,
+    receivedAt: r.receivedAt.toISOString(),
+    status: r.status,
+    code: r.lastErrorCode ?? r.skipReason,
+    attempts: r.attempts,
+    sources: { journal: r.sourceJournal, policy: r.sourcePolicy },
+    nextCheckAt: r.nextCheckAt.toISOString(),
+    createdAt: r.createdAt.toISOString(),
+  };
+}
 
 /**
  * Capture issues and the disposal log (step 8.1 §4.4 #11–#13; A2, A14, A15): `failed`, `lost`
@@ -97,21 +115,25 @@ export class ArchiveOperationsService {
       data: rows
         .slice(0, decision.rows)
         .filter((r) => r.messagePublicId !== null)
-        .map((r) => ({
-          messageId: r.messagePublicId!,
-          receivedAt: r.receivedAt.toISOString(),
-          status: r.status,
-          code: r.lastErrorCode ?? r.skipReason,
-          attempts: r.attempts,
-          sources: { journal: r.sourceJournal, policy: r.sourcePolicy },
-          nextCheckAt: r.nextCheckAt.toISOString(),
-          createdAt: r.createdAt.toISOString(),
-        })),
+        .map((r) => captureIssueView(r, r.messagePublicId!)),
       nextCursor:
         decision.next === null
           ? null
           : encodeListCursor(this.codec, binding, timeIdKeys(decision.next)),
     };
+  }
+
+  /**
+   * `GET /archive/capture-issues/{messageId}` (step AI-5 D8): the capture intent of one message
+   * in the list item's view, for any intent status (pending, captured_open, closed, skipped,
+   * lost, failed). Unknown message, another organization's or one without an intent →
+   * `404 archive_capture_issue_not_found` (the retry's code). No plan gating (as the list).
+   */
+  async captureIssue(scope: TenantScope, rawId: unknown): Promise<CaptureIssueView> {
+    const id = parsePublicId(rawId, 'messageId');
+    const row = await this.records.captureIssue(scope, id);
+    if (row === null || row.messagePublicId === null) throw captureIssueNotFound();
+    return captureIssueView(row, row.messagePublicId);
   }
 
   /** `POST /archive/capture-issues/{messageId}/retry` (#12): `failed` → `pending`. */

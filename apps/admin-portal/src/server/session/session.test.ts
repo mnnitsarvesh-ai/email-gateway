@@ -47,7 +47,9 @@ describe('seal / unseal (AES-256-GCM, design P2)', () => {
   it('treats any tampering as logged out (null), never an exception', async () => {
     const sealed = await seal({ x: 1 }, TEST_KEY, SESSION_AAD);
     const [v, iv, data] = sealed.split('.') as [string, string, string];
-    const flipped = data.slice(0, -2) + (data.endsWith('A') ? 'B' : 'A') + data.slice(-1);
+    // Replace the second-to-last character (always fully significant in base64url) with a
+    // different one; comparing it, not the last character, keeps the tampering real every run.
+    const flipped = data.slice(0, -2) + (data.at(-2) === 'A' ? 'B' : 'A') + data.slice(-1);
     for (const bad of [
       `${v}.${iv}.${flipped}`,
       `v2.${iv}.${data}`,

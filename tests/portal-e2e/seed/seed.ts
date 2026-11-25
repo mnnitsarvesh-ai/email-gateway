@@ -38,12 +38,14 @@ import {
 } from './archive';
 import {
   DELTA,
+  DELTA_COMPLIANCE_EMAIL,
   DELTA_DOMAIN,
   DELTA_OFFBOARD_USER,
   EPSILON,
   EPSILON_DOMAIN,
   planDeltaMessages,
   prepareAssistant,
+  prepareAssistantCompliance,
 } from './assistant';
 import {
   ALPHA_ATO_PLAN,
@@ -725,6 +727,14 @@ export async function seed(): Promise<SeedSummary> {
         org: 'delta',
         name: 'Delta Responder B',
       },
+      // Step AI-5: a delta compliance officer with MFA (archive, eDiscovery and legal holds in
+      // chat; seed/assistant.ts prepareAssistantCompliance writes delta's archive rows as it).
+      deltaCompliance: {
+        email: DELTA_COMPLIANCE_EMAIL,
+        roles: ['compliance_officer'],
+        org: 'delta',
+        name: 'Delta Compliance Officer',
+      },
       epsilonAdmin: {
         email: `admin@${EPSILON_DOMAIN}`,
         roles: ['organization_admin'],
@@ -797,7 +807,8 @@ export async function seed(): Promise<SeedSummary> {
     });
     users.deltaMfaAdmin.totpSecret = deltaMfaSecret;
     // Step AI-4: both delta responders sign in with MFA (ATO decisions need an MFA session).
-    for (const key of ['deltaResponderA', 'deltaResponderB'] as const) {
+    // Step AI-5: the delta compliance officer too (MFA routes and high-risk confirmations).
+    for (const key of ['deltaResponderA', 'deltaResponderB', 'deltaCompliance'] as const) {
       const secret = base32Encode(randomBytes(20));
       const id = userIds.get(spec[key].email)!;
       await p.user.update({
@@ -1131,6 +1142,24 @@ export async function seed(): Promise<SeedSummary> {
     } finally {
       await deltaApi.logout();
     }
+    // Step AI-5: delta's retention policies, archive settings and a case with an active hold,
+    // through the api as its compliance officer (MFA session; seed/assistant.ts).
+    const deltaCompliance = await freshTotp(users.deltaCompliance.totpSecret!, undefined);
+    users.deltaCompliance.lastTotpStep = deltaCompliance.step;
+    const complianceApi = await apiSession(
+      users.deltaCompliance.email,
+      users.deltaCompliance.password,
+      { code: deltaCompliance.code },
+    );
+    let deltaComplianceRows: Awaited<ReturnType<typeof prepareAssistantCompliance>>;
+    try {
+      deltaComplianceRows = await prepareAssistantCompliance(
+        complianceApi,
+        randomUUID().slice(0, 8),
+      );
+    } finally {
+      await complianceApi.logout();
+    }
 
     // Step 8.4: account takeover accounts, signals and incidents of both tenants (seed/ato.ts).
     const ato = await seedAto(p, {
@@ -1168,6 +1197,8 @@ export async function seed(): Promise<SeedSummary> {
         deltaSettings,
         deltaEntries,
         deltaAtoAccounts,
+        deltaRetention,
+        deltaHolds,
       ] = await Promise.all([
         r.emailMessage.count({ where: { organizationId: alpha.id } }),
         r.auditLog.count({
@@ -1182,6 +1213,8 @@ export async function seed(): Promise<SeedSummary> {
         r.aiChatSettings.count({ where: { organizationId: delta.id, enabled: true } }),
         r.quarantineMessage.count({ where: { organizationId: delta.id } }),
         r.atoAccount.count({ where: { organizationId: delta.id } }),
+        r.archiveRetentionPolicy.count({ where: { organizationId: delta.id } }),
+        r.archiveLegalHold.count({ where: { organizationId: delta.id, status: 'active' } }),
       ]);
       return (
         messages === alphaMessages.length &&
@@ -1194,7 +1227,9 @@ export async function seed(): Promise<SeedSummary> {
         deltaPolicyRows === deltaPolicies.length &&
         deltaSettings === 1 &&
         deltaEntries === deltaPlans.filter((m) => m.quarantine).length &&
-        deltaAtoAccounts >= DELTA_ATO_PLAN.length
+        deltaAtoAccounts >= DELTA_ATO_PLAN.length &&
+        deltaRetention === 2 &&
+        deltaHolds === 1
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -1276,6 +1311,7 @@ export async function seed(): Promise<SeedSummary> {
           quarantinedSubjects: deltaPlans.filter((m) => m.quarantine).map((m) => m.subject),
           mfaAdminUserId: userPublicIds.get(spec.deltaMfaAdmin.email)!,
           offboardUser: { id: deltaOffboard.publicId, email: DELTA_OFFBOARD_USER.email },
+          compliance: deltaComplianceRows,
           ato: {
             accountId: deltaSuspect.accountId,
             address: deltaSuspect.address,

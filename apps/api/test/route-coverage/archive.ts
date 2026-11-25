@@ -1,6 +1,7 @@
 /**
  * Route coverage of step 8.1 (docs/plan/steps/23-journaling-archiving.md §4.4, §9.3): the 41
- * archive, legal hold and eDiscovery operations with the test files that carry their `@covers`
+ * archive, legal hold and eDiscovery operations (plus the capture-issue read of step AI-5 D8,
+ * docs/plan/steps/33-ai-chat-compliance-integrations.md) with the test files that carry their `@covers`
  * marker, their cross-tenant assertion (another organization's messages, policies, holds,
  * cases, searches, exports and download tokens answer like unknown ids; searches only ever run
  * through the caller's tenant alias) and their cursor encoding (every list is a signed v1 list).
@@ -25,7 +26,7 @@ const entry = (route: string, e2e: string, integration: string, cursor?: 'v1'): 
   ...(cursor && { cursor }),
 });
 
-/** The routes of `NEW_IN_8_1` (route inventory), in §4.4 order. */
+/** The routes of `NEW_IN_8_1` and `NEW_IN_AI_5` (route inventory), in §4.4 order. */
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   entry('get /api/v1/archive/settings', ARCHIVE_E2E, ADMIN_INT),
   entry('put /api/v1/archive/settings', ARCHIVE_E2E, ADMIN_INT),
@@ -38,6 +39,8 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   entry('post /api/v1/archive/keys/rotate', ARCHIVE_E2E, ADMIN_INT),
   entry('get /api/v1/archive/status', ARCHIVE_E2E, ADMIN_INT),
   entry('get /api/v1/archive/capture-issues', ARCHIVE_E2E, ADMIN_INT, 'v1'),
+  // Step AI-5 D8: the capture intent of one message (any status).
+  entry('get /api/v1/archive/capture-issues/:messageId', ARCHIVE_E2E, ADMIN_INT),
   entry('post /api/v1/archive/capture-issues/:messageId/retry', ARCHIVE_E2E, ADMIN_INT),
   entry('get /api/v1/archive/disposals', ARCHIVE_E2E, ADMIN_INT, 'v1'),
   {

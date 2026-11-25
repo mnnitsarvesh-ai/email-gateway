@@ -1,7 +1,11 @@
 import { escalationNote } from '../confirmations/escalation';
 import { guardNote } from '../confirmations/guards';
 import { confirmationSpecOf } from '../confirmations/specs';
-import { ASSISTANT_PROGRAM_PHASE, CONFIRMATION_SUPPORT_PHASE } from './manifest';
+import {
+  ASSISTANT_PROGRAM_PHASE,
+  CONFIRMATION_SUPPORT_PHASE,
+  OPERATION_OVERRIDES,
+} from './manifest';
 import { API_PREFIX, phaseIndex, type RegistryBuild } from './build';
 import { NATIVE_TOOLS } from './native';
 import {
@@ -63,11 +67,14 @@ function confirmCell(tool: OperationTool): string {
 
 /**
  * The chat tool cell: the name plus its proposal guards (step AI-3 D3), e.g. `(guard: not self)`,
- * and its redacted inputs (step AI-4 D9), e.g. `(redacted: body.sample, …)`.
+ * its redacted inputs (step AI-4 D9), e.g. `(redacted: body.sample, …)`, and its omitted inputs
+ * (step AI-5 D7), e.g. `(omitted: reveal)`.
  */
 function toolCell(tool: OperationTool): string {
   const spec = tool.access === 'write' ? confirmationSpecOf(tool.operationId) : undefined;
   const notes = [...new Set((spec?.guards ?? []).map(guardNote))];
+  const omitted = tool.native ? [] : (OPERATION_OVERRIDES[tool.operationId]?.omitInputs ?? []);
+  if (omitted.length > 0) notes.push(`omitted: ${omitted.join(', ')}`);
   const redacted = tool.redactParams;
   if (redacted.length > 0)
     notes.push(
@@ -157,7 +164,7 @@ export function renderMatrix(
         : 'writes need the confirmation manager of AI-2'
     }).`,
     '',
-    'Every portal action is an API operation (ADR-0063), so this operation-level table is the complete UI-to-chat matrix. Confirm `↑ <risk> when <argument>` marks a conditional risk escalation (the stored confirmation risk is raised when the final arguments touch that field); `(guard: …)` after a chat tool marks a proposal guard (for example `not self`: the tool refuses the signed-in user’s own account; `not requester`: the person who requested an ATO response cannot decide it); `(redacted: …)` marks inputs the platform stores as `[redacted]` in execution and audit rows. Statuses: `IMPLEMENTED` (an enabled chat tool with test coverage), `PARTIALLY_IMPLEMENTED` (enabled with limitations), `MISSING` (classified, planned for the phase shown), `NOT_APPLICABLE` (never a chat tool; the reason is given and the chat links to the portal page). Columns: R/W access; risk `read`, `read_audited`, `low`, `medium`, `high`, `critical`; confirm `none`, `confirm`, `confirm+impact`, `confirm+impact+reauth`; Idem = `x-eg-idempotency`; Permission = `x-eg-permissions` (`a \\| b` any of, `a + b` all of).',
+    'Every portal action is an API operation (ADR-0063), so this operation-level table is the complete UI-to-chat matrix. Confirm `↑ <risk> when <argument>` marks a conditional risk escalation (the stored confirmation risk is raised when the final arguments touch that field; `<argument> < <field>`, `<argument> → <value>` and `<argument> ≠ <field>` compare the argument with the current value read before the proposal, failing closed when that value is unknown); `(guard: …)` after a chat tool marks a proposal guard (for example `not self`: the tool refuses the signed-in user’s own account; `not requester`: the person who requested an ATO response cannot decide it); `(redacted: …)` marks inputs the platform stores as `[redacted]` in execution and audit rows; `(omitted: …)` marks optional inputs of the operation that are never offered to the model (unmasking and consent inputs stay in the portal); `impactToken` of a confirmed mail-flow change or disconnect is filled by the server from a fresh preview. Statuses: `IMPLEMENTED` (an enabled chat tool with test coverage), `PARTIALLY_IMPLEMENTED` (enabled with limitations), `MISSING` (classified, planned for the phase shown), `NOT_APPLICABLE` (never a chat tool; the reason is given and the chat links to the portal page). Columns: R/W access; risk `read`, `read_audited`, `low`, `medium`, `high`, `critical`; confirm `none`, `confirm`, `confirm+impact`, `confirm+impact+reauth`; Idem = `x-eg-idempotency`; Permission = `x-eg-permissions` (`a \\| b` any of, `a + b` all of).',
     '',
     '## Totals',
     '',

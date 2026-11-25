@@ -16,7 +16,10 @@ import {
   type GuardKind,
   guardRefusal,
   hashConfirmationToken,
+  IMPACT_PREVIEW_TOOLS,
   impactOf,
+  impactPreviewArgs,
+  type ImpactTokenInjection,
   newConfirmationToken,
   type OperationTool,
   preconditionArgs,
@@ -25,7 +28,9 @@ import {
   sanitizeText,
   selectTarget,
   stateDigest,
+  withImpactPreview,
   withInjectedCas,
+  withInjectedImpactToken,
 } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
@@ -75,7 +80,15 @@ export interface PreconditionState {
    * digested, logged or audited.
    */
   raw?: unknown;
+  /**
+   * The response of the impact preview (step AI-5 D5; only for a spec with `impactToken`): its
+   * `impactToken` is injected into the write's body. In memory only, like `raw`: never stored
+   * (except the token inside the stored request), digested, logged or audited.
+   */
+  impactPreview?: unknown;
 }
+
+const UNAVAILABLE: LoopbackResult = { kind: 'unavailable' };
 
 /** A required selected item that is not in the list read answers like a `404` read (D5). */
 export const TARGET_NOT_FOUND: LoopbackResult = {
@@ -186,6 +199,11 @@ export function definitionInvalidMessage(violations: readonly Violation[]): stri
  * the after-read proposal guards run on that target (`denied_guard`); the stored risk is the
  * effective risk (`effectiveRisk`: registry risk raised by the spec's escalations on the final
  * arguments), whose warnings the summary appends.
+ *
+ * Step AI-5 (design 33 D3, D5): the effective risk also compares read-relative escalations with
+ * the precondition snapshot; a write with a server-filled impact token gets a fresh preview after
+ * the precondition read (`preview()`, allow-listed POST reads only), merged under `preview` into
+ * the target, and the preview's token injected into the write's body (never the model's).
  */
 @Injectable()
 export class ConfirmationProposer {
@@ -276,8 +294,24 @@ export class ConfirmationProposer {
       };
     }
 
-    // 5. CAS injection (server-authoritative) and the schema check of the final arguments.
+    // 5. The server-filled impact token (step AI-5 D5: the fresh preview's token and `confirm:
+    // true`, always replacing the model's values), the CAS injection (server-authoritative) and
+    // the schema check of the final arguments.
     let finalArgs = args;
+    if (spec.impactToken !== undefined) {
+      const injected = withInjectedImpactToken(finalArgs, state.impactPreview);
+      if (!injected.ok) {
+        return {
+          kind: 'failed_own',
+          failure: {
+            httpStatus: 502,
+            code: CONFIRMATION_ROW_CODES.preconditionUnavailable,
+            message: 'The impact preview of the change could not be read; try again.',
+          },
+        };
+      }
+      finalArgs = injected.args;
+    }
     if (spec.inject) {
       if (state.rowVersion === null) {
         return {
@@ -289,7 +323,9 @@ export class ConfirmationProposer {
           },
         };
       }
-      finalArgs = withInjectedCas(args, spec, state.rowVersion);
+      finalArgs = withInjectedCas(finalArgs, spec, state.rowVersion);
+    }
+    if (spec.inject || spec.impactToken !== undefined) {
       const check = compileValidator(tool)(finalArgs);
       if (!check.ok) {
         return {
@@ -349,8 +385,10 @@ export class ConfirmationProposer {
     }
 
     // 7. The effective risk (step AI-3 D4: the registry risk raised by the spec's escalations on
-    // the final arguments) and the impact summary (server-authored, with the escalation warnings).
-    const effective = effectiveRisk(tool, spec, finalArgs);
+    // the final arguments; step AI-5 D3: read-relative ones compared with the precondition
+    // snapshot, null without a precondition) and the impact summary (server-authored, with the
+    // escalation warnings).
+    const effective = effectiveRisk(tool, spec, finalArgs, state.snapshot);
     const risk = effective.risk;
     const summary = impactOf(tool.operationId, {
       args: finalArgs,
@@ -418,7 +456,8 @@ export class ConfirmationProposer {
         },
       };
     }
-    const effective = effectiveRisk(tool, spec, prepared.finalArgs);
+    // A native write has no precondition snapshot (read-relative conditions would fail closed).
+    const effective = effectiveRisk(tool, spec, prepared.finalArgs, null);
     const summary = impactOf(tool.operationId, {
       args: prepared.finalArgs,
       snapshot: null,
@@ -563,6 +602,11 @@ export class ConfirmationProposer {
    * (GET, the caller's credential), on the MySQL writer (`readPrimary`): a change committed
    * inside the replica-lag window is never invisible to the proposal or the confirm-time re-read.
    * A non-2xx answer (or a transport failure) is returned as is.
+   *
+   * Step AI-5 D5: for a spec with `impactToken` the single read is followed by the impact
+   * preview (`preview()`), whose response is merged under `preview` into the target before the
+   * state digest, row version, snapshot and raw target are taken, so the confirm-time re-read
+   * compares the preview's change set too.
    */
   async readPreconditions(
     call: ReadCall,
@@ -570,6 +614,11 @@ export class ConfirmationProposer {
     args: Readonly<Record<string, unknown>>,
   ): Promise<PreconditionRead> {
     const precondition = spec.precondition;
+    // A server-filled impact token needs a single precondition (registry consistency rule):
+    // anything else fails closed.
+    if (spec.impactToken !== undefined && precondition?.kind !== 'single') {
+      return { ok: false, result: UNAVAILABLE };
+    }
     if (precondition === null) {
       return { ok: true, state: { stateDigest: null, rowVersion: null, snapshot: null } };
     }
@@ -582,7 +631,14 @@ export class ConfirmationProposer {
       if (!selected.found && precondition.select?.required === true) {
         return { ok: false, result: TARGET_NOT_FOUND };
       }
-      const target: unknown = selected.found ? selected.item : {};
+      let target: unknown = selected.found ? selected.item : {};
+      let impactPreview: unknown;
+      if (spec.impactToken !== undefined) {
+        const preview = await this.preview(call, spec.impactToken, args);
+        if (!preview.ok) return preview;
+        impactPreview = preview.body;
+        target = withImpactPreview(target, preview.body);
+      }
       return {
         ok: true,
         state: {
@@ -590,6 +646,7 @@ export class ConfirmationProposer {
           rowVersion: rowVersionOf(target, precondition),
           snapshot: buildSnapshot(target, precondition),
           raw: target,
+          ...(spec.impactToken !== undefined ? { impactPreview } : {}),
         },
       };
     }
@@ -611,6 +668,50 @@ export class ConfirmationProposer {
         action: plan.action,
       },
     };
+  }
+
+  /**
+   * Step AI-5 D5 (ADR-0093 amendment AI-5 (w)): the impact preview of a write with a
+   * server-filled impact token. Only the allow-listed side-effect-free POST reads of
+   * `IMPACT_PREVIEW_TOOLS` (enabled, access `read`) are sent; `get()` keeps refusing every
+   * non-GET tool. The body is `{ change }` from the write's arguments or the spec's constant;
+   * the caller's credential, client IP, correlation id and signal are used, never an execution
+   * id. The preview route reads the MySQL writer itself (its connection aggregate and change set
+   * are computed on the writer), so no read-primary header is needed (the loopback allows that
+   * header on GET only). A non-2xx answer (or a transport failure) is returned as is: the
+   * proposal fails like a failed precondition read.
+   */
+  async preview(
+    call: ReadCall,
+    injection: ImpactTokenInjection,
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<{ ok: true; body: unknown } | { ok: false; result: LoopbackResult }> {
+    const allowed = (IMPACT_PREVIEW_TOOLS as readonly string[]).includes(injection.previewTool);
+    const tool = allowed ? findTool(injection.previewTool) : undefined;
+    if (!tool || !tool.enabled || tool.access !== 'read' || tool.method !== 'POST') {
+      return { ok: false, result: UNAVAILABLE };
+    }
+    let request: ReturnType<typeof buildLoopbackRequest>;
+    try {
+      request = buildLoopbackRequest(tool, impactPreviewArgs(injection, args));
+    } catch {
+      // A path parameter the write's arguments did not carry: nothing to preview.
+      return { ok: false, result: TARGET_NOT_FOUND };
+    }
+    const result = await this.loopback.send({
+      method: 'POST',
+      path: request.path,
+      body: request.body ?? {},
+      authorization: call.authorization,
+      correlationId: call.correlationId,
+      clientIp: call.clientIp,
+      executionId: null,
+      signal: call.signal,
+    });
+    if (result.kind === 'response' && result.status >= 200 && result.status < 300) {
+      return { ok: true, body: result.body };
+    }
+    return { ok: false, result };
   }
 
   private async get(

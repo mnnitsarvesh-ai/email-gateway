@@ -48,6 +48,16 @@
  * card's email list shows the delivery queued (sent once the stack's notification-worker ran);
  * "send the report to someone@outside.test" → the "Not allowed in chat" card and no confirmation.
  * The card on a phone; axe on every new state (including the frame's content).
+ *
+ * Step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md §9 item 6, D3, D11; I22): as
+ * delta's compliance officer (MFA), "set retention policy "E2E retention <tag>" to 30 days" on the
+ * seeded 365-day policy (the fake's plan list → get → update) is a high-risk card with the
+ * shortening warning that runs after the password and the authenticator code, and the Retention
+ * page then lists 30 days; "create ediscovery case "E2E chat case <tag>"" is a low-risk card and
+ * the eDiscovery page lists the case after Confirm; "release the legal hold" (list → release, a
+ * critical operation) is refused as "Not available in chat" with the Legal holds link, no
+ * confirmation is stored and the hold stays active. An eDiscovery case card on a phone; axe on
+ * every new state.
  */
 import type { Page, Response } from '@playwright/test';
 import { nextTotp, signIn, user } from '../support/auth';
@@ -1214,7 +1224,10 @@ async function deltaUserIds(email: string): Promise<{ id: bigint; publicId: stri
 }
 
 /** Opens a new conversation on `/assistant` as `key` and returns the conversation region. */
-async function openAssistantPage(page: Page, key: 'deltaResponderA' | 'deltaResponderB') {
+async function openAssistantPage(
+  page: Page,
+  key: 'deltaResponderA' | 'deltaResponderB' | 'deltaCompliance',
+) {
   await signIn(page, key, { next: '/assistant' });
   await expect(page.getByRole('heading', { level: 1, name: 'AI assistant' })).toBeVisible();
   await page
@@ -1227,7 +1240,7 @@ async function openAssistantPage(page: Page, key: 'deltaResponderA' | 'deltaResp
 /** Fills password and authenticator code of a high-risk card and confirms it. */
 async function confirmWithReauth(
   card: ReturnType<Page['locator']>,
-  key: 'deltaResponderA' | 'deltaResponderB',
+  key: 'deltaResponderA' | 'deltaResponderB' | 'deltaCompliance',
 ): Promise<void> {
   const identity = card.getByRole('group', { name: 'Confirm your identity' });
   await identity.getByLabel('Your password (required)', { exact: true }).fill(user(key).password);
@@ -1444,5 +1457,171 @@ test.describe('phone viewport (security operations)', () => {
         where: { organizationId: await deltaOrganizationId(), name: dictionary },
       }),
     ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-5: compliance through chat (design 33 §9 item 6, D3, D11; I22). Delta's compliance
+// officer (MFA) on the rows prepareAssistantCompliance seeded through the api.
+// ---------------------------------------------------------------------------------------------
+
+const SHORTENING_WARNING =
+  'Shortens retention: mail captured from now on that this policy matches is kept for fewer days (records already archived keep their stored dates).';
+
+/** Delta's retention policy by name (writer). */
+async function deltaRetentionPolicy(name: string) {
+  return writerDb().archiveRetentionPolicy.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId(), name, deletedAt: null },
+    select: { retentionDays: true, onExpiry: true, priority: true, rowVersion: true },
+  });
+}
+
+/** Delta's eDiscovery cases with this name (writer). */
+async function deltaCaseCount(name: string): Promise<number> {
+  return writerDb().ediscoveryCase.count({
+    where: { organizationId: await deltaOrganizationId(), name },
+  });
+}
+
+test('compliance: shorten a retention policy with re-authentication, create an eDiscovery case; a legal-hold release stays in the portal', async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  const seeded = readState().assistant.delta.compliance;
+  const policy = seeded.retentionPolicy;
+  const caseName = `E2E chat case ${Date.now().toString(36)}`;
+  expect(await deltaRetentionPolicy(policy.name), 'a fresh seed (365 days)').toMatchObject({
+    retentionDays: 365,
+    onExpiry: 'delete',
+    priority: 100,
+  });
+
+  // (a) Shortening a retention policy escalates to high (read-relative `below`): the card shows
+  // the days before → after and the shortening warning, and runs after password + code.
+  const conversation = await openAssistantPage(page, 'deltaCompliance');
+  await ask(page, conversation, `set retention policy "${policy.name}" to 30 days`);
+  await expectTurnDone(conversation);
+  const retentionCard = confirmationCard(conversation, 'Change retention policy');
+  await expect(retentionCard).toBeVisible();
+  await expect(retentionCard.getByText('High risk')).toBeVisible();
+  const days = retentionCard
+    .getByRole('table', { name: 'Changes' })
+    .getByRole('row')
+    .filter({ has: page.getByRole('rowheader', { name: 'Retention (days)', exact: true }) });
+  await expect(days).toContainText('365');
+  await expect(days).toContainText('30');
+  await expect(retentionCard.getByRole('list', { name: 'Warnings' })).toContainText(
+    SHORTENING_WARNING,
+  );
+  await expect(retentionCard.getByRole('group', { name: 'Confirm your identity' })).toBeVisible();
+  await expectNoSeriousA11yViolations(page, 'retention shortening card (high risk)');
+  expect((await deltaRetentionPolicy(policy.name)).retentionDays).toBe(365);
+  await confirmWithReauth(retentionCard, 'deltaCompliance');
+  await expect(retentionCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect(await deltaRetentionPolicy(policy.name)).toMatchObject({
+    retentionDays: 30,
+    onExpiry: 'delete',
+    priority: 100,
+  });
+  const retentionConfirmation = await writerDb().aiChatActionConfirmation.findUniqueOrThrow({
+    where: { id: (await newestConfirmationId())! },
+    select: { status: true, reauthUsed: true, toolName: true, risk: true },
+  });
+  expect(retentionConfirmation).toEqual({
+    status: 'executed',
+    reauthUsed: true,
+    toolName: 'archive_retention_update',
+    risk: 'high',
+  });
+  await expectNoSeriousA11yViolations(page, 'retention shortened (outcome)');
+  const retention = await page.context().newPage();
+  await expectListed(retention, '/archive/retention', 'Retention and lock', policy.name, '30 days');
+  await expectNoSeriousA11yViolations(retention, 'Retention page after the chat change');
+  await retention.close();
+
+  // (b) An eDiscovery case from the fake's plan: a low-risk card; Confirm creates it.
+  await page.bringToFront();
+  await ask(page, conversation, `create ediscovery case "${caseName}"`);
+  await expectTurnDone(conversation);
+  const caseCard = confirmationCard(conversation, 'Create eDiscovery case');
+  await expect(caseCard).toBeVisible();
+  await expect(caseCard.getByText('Low risk')).toBeVisible();
+  await expect(caseCard.getByRole('table', { name: 'What it applies to' })).toContainText(caseName);
+  await expect(caseCard.getByRole('group', { name: 'Confirm your identity' })).toHaveCount(0);
+  await expectNoSeriousA11yViolations(page, 'eDiscovery case card (low risk)');
+  expect(await deltaCaseCount(caseName)).toBe(0);
+  await caseCard.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await expect(caseCard.getByText('Done: the action was applied.')).toBeVisible({
+    timeout: 30_000,
+  });
+  expect(await deltaCaseCount(caseName)).toBe(1);
+  const cases = await page.context().newPage();
+  await expectListed(cases, '/ediscovery', 'eDiscovery', caseName, 'Open');
+  await expectNoSeriousA11yViolations(cases, 'eDiscovery page after the chat case');
+  await cases.close();
+
+  // (c) Releasing a legal hold is critical (portal only, I22): the release call is refused as
+  // "Not available in chat" with the Legal holds link; nothing is stored, the hold stays active.
+  await page.bringToFront();
+  const beforeRelease = await newestConfirmationId();
+  await ask(page, conversation, 'release the legal hold');
+  await expectTurnDone(conversation);
+  const notAvailable = conversation
+    .getByRole('region', { name: /^Result: / })
+    .filter({ hasText: 'Not available in chat' })
+    .last();
+  await expect(notAvailable).toBeVisible();
+  await expect(notAvailable).not.toContainText('denied_not_applicable');
+  await expect(notAvailable.getByRole('button')).toHaveCount(0);
+  await expect(
+    notAvailable.getByRole('link', { name: 'Open Legal holds in the portal' }),
+  ).toHaveAttribute('href', '/legal-holds');
+  expect(await newestConfirmationId()).toBe(beforeRelease);
+  const refused = await writerDb().aiChatToolExecution.findFirstOrThrow({
+    where: { organizationId: await deltaOrganizationId(), toolName: 'legal_holds_release' },
+    select: { decision: true, httpStatus: true },
+    orderBy: { id: 'desc' },
+  });
+  expect(refused).toEqual({ decision: 'denied_not_applicable', httpStatus: null });
+  const hold = await writerDb().archiveLegalHold.findUniqueOrThrow({
+    where: { publicId: seeded.hold.id },
+    select: { status: true, releasedAt: true },
+  });
+  expect(hold).toEqual({ status: 'active', releasedAt: null });
+  await expectNoSeriousA11yViolations(page, 'legal-hold release refused (not available in chat)');
+});
+
+test.describe('phone viewport (compliance)', () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test('an eDiscovery case card fits the full-screen sheet', async ({ page }) => {
+    const caseName = `E2E phone case ${Date.now().toString(36)}`;
+    await signIn(page, 'deltaCompliance');
+    await expectLanded(page);
+    await page.getByRole('button', { name: 'Ask AI', exact: true }).click();
+    const sheet = panel(page);
+    await expect(sheet).toBeVisible();
+    await ask(page, sheet, `create ediscovery case "${caseName}"`);
+    await expectTurnDone(sheet);
+    const card = confirmationCard(sheet, 'Create eDiscovery case');
+    await expect(card).toBeVisible();
+    await expect(card.getByText('Low risk')).toBeVisible();
+    const confirmButton = card.getByRole('button', { name: 'Confirm', exact: true });
+    const cancelButton = card.getByRole('button', { name: 'Cancel', exact: true });
+    await confirmButton.scrollIntoViewIfNeeded();
+    await expect(confirmButton).toBeInViewport();
+    await expect(cancelButton).toBeInViewport();
+    const box = await card.boundingBox();
+    expect((box?.x ?? -1) >= 0 && (box?.x ?? 0) + (box?.width ?? 999) <= 390).toBe(true);
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    await expectNoSeriousA11yViolations(page, 'eDiscovery case card on a phone');
+    await cancelButton.click();
+    await expect(card.getByText('Cancelled. Nothing changed.')).toBeVisible();
+    expect(await deltaCaseCount(caseName)).toBe(0);
   });
 });

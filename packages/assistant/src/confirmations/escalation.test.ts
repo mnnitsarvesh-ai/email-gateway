@@ -6,10 +6,11 @@ import {
   effectiveRisk,
   escalationMatches,
   escalationNote,
+  escalationPath,
   maxRisk,
   type RiskEscalation,
 } from './escalation';
-import { AI4_WRITES_TESTED_BY } from '../registry/manifest';
+import { AI4_WRITES_TESTED_BY, AI5_WRITES_TESTED_BY } from '../registry/manifest';
 import {
   AI4_ESCALATION_WARNINGS,
   CONFIRMATION_SPECS,
@@ -26,7 +27,10 @@ const ORDER: Record<ConfirmationRisk, number> = { low: 0, medium: 1, high: 2 };
 describe('conditional risk escalation (design 30 D4)', () => {
   it('has the escalations of the design table', () => {
     const table = CONFIRMATION_SPECS.filter(
-      (s) => s.escalate && !(s.operationId in AI4_WRITES_TESTED_BY),
+      (s) =>
+        s.escalate &&
+        !(s.operationId in AI4_WRITES_TESTED_BY) &&
+        !(s.operationId in AI5_WRITES_TESTED_BY),
     ).flatMap((s) => s.escalate!.map((e) => [s.operationId, escalationNote(e), e.warning]));
     expect(table).toEqual([
       ['UsersController_update_v1', '↑ high when body.email', ESCALATION_WARNINGS.userEmail],
@@ -158,7 +162,14 @@ describe('conditional risk escalation (design 30 D4)', () => {
   });
 
   it('property: never below the registry risk; adding an escalating field never lowers it', () => {
-    const escalated = CONFIRMATION_SPECS.filter((s) => s.escalate && s.escalate.length > 0);
+    // Argument-only conditions (`present`, `equals`); the read-relative kinds of step AI-5 have
+    // their own property test (`escalation-ai5.test.ts`).
+    const escalated = CONFIRMATION_SPECS.filter(
+      (s) =>
+        s.escalate &&
+        s.escalate.length > 0 &&
+        s.escalate.every((e) => 'present' in e.when || 'equals' in e.when),
+    );
     const arbValue = fc.oneof(
       fc.constant(false),
       fc.constant(true),
@@ -192,13 +203,12 @@ describe('conditional risk escalation (design 30 D4)', () => {
           const first = effectiveRisk(t, spec, { body });
           expect(ORDER[first.risk]).toBeGreaterThanOrEqual(ORDER[base]);
           const escalation = spec.escalate![pick % spec.escalate!.length]!;
-          const path =
-            'present' in escalation.when ? escalation.when.present : escalation.when.equals.path;
-          const key = path.replace(/^body\./, '');
+          const when = escalation.when;
+          const key = escalationPath(when).replace(/^body\./, '');
           const added = effectiveRisk(t, spec, {
             body: {
               ...body,
-              [key]: 'present' in escalation.when ? value : escalation.when.equals.value,
+              [key]: 'present' in when ? value : 'equals' in when ? when.equals.value : value,
             },
           });
           // Adding the field (with a matching value) reaches at least that escalation's risk and
@@ -431,9 +441,7 @@ describe('conditional risk escalation of step AI-4 (design 32 D4, I20)', () => {
     const paths = [
       ...new Set(
         specs.flatMap((s) =>
-          (s.escalate ?? []).map((e) =>
-            ('present' in e.when ? e.when.present : e.when.equals.path).replace(/^body\./, ''),
-          ),
+          (s.escalate ?? []).map((e) => escalationPath(e.when).replace(/^body\./, '')),
         ),
       ),
     ];

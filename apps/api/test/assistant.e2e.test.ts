@@ -12,7 +12,10 @@
  * step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md §9 item 2): an ATO response approved
  * by another user (high confirmation, re-authentication, executed through the loopback), the
  * requester's own approval refused before any card (four-eyes guard), and the DLP pattern test
- * whose sample and pattern never reach a stored or audited row. Synthetic data only.
+ * whose sample and pattern never reach a stored or audited row; step AI-5 (docs/plan/steps/
+ * 33-ai-chat-compliance-integrations.md §9 item 2): a retention shortening through the fake
+ * provider's retention plan (high, re-authentication) and a mail-flow apply whose impact token
+ * the server takes from a fresh preview (the model's value ignored). Synthetic data only.
  */
 // @covers get /api/v1/assistant/status
 // @covers get /api/v1/assistant/settings
@@ -37,6 +40,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ASSISTANT_EXAMPLES } from '../src/modules/assistant/dto/assistant.schemas';
 import {
+  AI5_ESCALATION_WARNINGS,
   findTool,
   GUARD_MESSAGES,
   REDACTED_PARAM,
@@ -873,6 +877,260 @@ describe('assistant routes (e2e, dependencies stubbed)', () => {
         expect(serialized(world.executions)).not.toContain(value);
         expect(serialized(audit.entries)).not.toContain(value);
       }
+    });
+  });
+
+  describe('compliance and integrations (step AI-5 §9 item 2)', () => {
+    const POLICY = '0193c500-0000-7000-8000-0000000e2e01';
+    const CONNECTION = '0193c500-0000-7000-8000-0000000e2e02';
+    const DOMAIN = '0193c500-0000-7000-8000-0000000e2e03';
+    const ARCHIVE_ADMINS = [USE, 'archive:read', 'archive:manage'];
+    const INTEGRATION_ADMINS = [USE, 'integration:read', 'integration:manage'];
+    const SERVER_TOKEN = 'e2e-impact-token-server-1';
+    const MODEL_TOKEN = 'e2e-impact-token-from-model';
+    const CHANGE = { kind: 'inbound', domainIds: [DOMAIN] };
+    const writes: Array<{ route: string; body: unknown; key: string | undefined }> = [];
+    const previews: unknown[] = [];
+
+    const policyBody = () => ({
+      id: POLICY,
+      name: 'E2E retention finance',
+      retentionDays: 365,
+      onExpiry: 'review',
+      priority: 50,
+      criteria: { directions: ['inbound'] },
+      isDefault: false,
+      rowVersion: 4,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    beforeEach(() => {
+      writes.length = 0;
+      previews.length = 0;
+      loopback.on('GET /api/v1/archive/retention-policies', () => ({
+        kind: 'response',
+        status: 200,
+        body: { data: [policyBody()], nextCursor: null },
+      }));
+      loopback.on(`GET /api/v1/archive/retention-policies/${POLICY}`, () => ({
+        kind: 'response',
+        status: 200,
+        body: policyBody(),
+      }));
+      loopback.on(`PUT /api/v1/archive/retention-policies/${POLICY}`, (call) => {
+        writes.push({
+          route: `${call.method} ${call.path}`,
+          body: call.body,
+          key: call.idempotencyKey,
+        });
+        return {
+          kind: 'response',
+          status: 200,
+          body: { ...policyBody(), retentionDays: 30, rowVersion: 5 },
+        };
+      });
+      loopback.on(`GET /api/v1/provider-connections/${CONNECTION}`, () => ({
+        kind: 'response',
+        status: 200,
+        body: {
+          id: CONNECTION,
+          provider: 'microsoft_365',
+          displayName: 'E2E Contoso',
+          status: 'active',
+          outboundMode: 'off',
+          internalRouting: false,
+          grants: [],
+          domains: [{ id: DOMAIN, name: 'contoso.example', providerVerification: 'verified' }],
+          rowVersion: 3,
+        },
+      }));
+      loopback.on(`POST /api/v1/provider-connections/${CONNECTION}/mail-flow/preview`, (call) => {
+        previews.push(call.body);
+        return {
+          kind: 'response',
+          status: 200,
+          body: {
+            change: (call.body as { change: unknown }).change,
+            changeSet: {
+              kind: 'inbound',
+              domains: [
+                {
+                  domainId: DOMAIN,
+                  name: 'contoso.example',
+                  current: { provider: null, servers: [] },
+                  proposed: {
+                    provider: 'microsoft_365',
+                    servers: [
+                      {
+                        host: 'contoso-example.mail.protection.example',
+                        port: 25,
+                        priority: 0,
+                        tlsMode: 'required',
+                      },
+                    ],
+                  },
+                  changed: true,
+                },
+              ],
+              connector: null,
+              connection: [],
+              grantsRevoked: 0,
+            },
+            impactToken: SERVER_TOKEN,
+            expiresAt: '2026-11-25T12:15:00.000Z',
+            warnings: [],
+          },
+        };
+      });
+      loopback.on(`POST /api/v1/provider-connections/${CONNECTION}/mail-flow/apply`, (call) => {
+        writes.push({
+          route: `${call.method} ${call.path}`,
+          body: call.body,
+          key: call.idempotencyKey,
+        });
+        return { kind: 'response', status: 200, body: { id: CONNECTION, rowVersion: 4 } };
+      });
+    });
+
+    const turn = async (conversationId: string, message: string, permissions: string[]) => {
+      const res = await send(
+        'post',
+        `${BASE}/conversations/${conversationId}/turns`,
+        { clientTurnId: randomUUID(), message },
+        permissions,
+      );
+      expect(res.status).toBe(200);
+      return res;
+    };
+    const confirmOf = (res: { body: { confirmations: unknown[] } }) =>
+      res.body.confirmations[0] as {
+        confirmation: {
+          id: string;
+          actionDigest: string;
+          risk: string;
+          requiresReauth: boolean;
+          summary: { warnings?: string[]; request: unknown };
+        };
+        token: string;
+      };
+
+    it('set retention policy "…" to 30 days on a 365-day policy: high card with the shortening warning, re-auth, PUT', async () => {
+      const id = await newConversation();
+      const res = await turn(
+        id,
+        'set retention policy "E2E retention finance" to 30 days',
+        ARCHIVE_ADMINS,
+      );
+      expect(res.body.executions.map((e: { tool: string }) => e.tool)).toEqual([
+        'archive_retention_list',
+        'archive_retention_get',
+        'archive_retention_update',
+      ]);
+      expect(res.body.executions[2]).toMatchObject({
+        status: 'pending_confirmation',
+        confirmation: { status: 'pending', risk: 'high', requiresReauth: true },
+      });
+      const { confirmation, token } = confirmOf(res);
+      expect(confirmation.summary.warnings).toContain(AI5_ESCALATION_WARNINGS.retentionShortened);
+      expect(writes).toEqual([]);
+      const url = `${BASE}/confirmations/${confirmation.id}/confirm`;
+      const body = { token, actionDigest: confirmation.actionDigest };
+      const noReauth = await send('post', url, body, ARCHIVE_ADMINS);
+      expect(noReauth.status).toBe(401);
+      expect(noReauth.body.code).toBe('assistant_reauth_required');
+      const ok = await send(
+        'post',
+        url,
+        { ...body, reauth: { password: REAUTH_PASSWORD, totpCode: REAUTH_TOTP } },
+        ARCHIVE_ADMINS,
+      );
+      expect(ok.status).toBe(200);
+      expect(ok.body.confirmation).toMatchObject({
+        status: 'executed',
+        result: { httpStatus: 200 },
+      });
+      expect(writes).toHaveLength(1);
+      expect(writes[0]!.route).toBe(`PUT /api/v1/archive/retention-policies/${POLICY}`);
+      // The fields the plan copied from the read, the new days and the injected CAS.
+      expect(writes[0]!.body).toEqual({
+        name: 'E2E retention finance',
+        retentionDays: 30,
+        onExpiry: 'review',
+        priority: 50,
+        criteria: { directions: ['inbound'] },
+        expectedRowVersion: 4,
+      });
+      const requested = audit.entries.find((e) => e.action === 'assistant.confirmation_requested');
+      expect(requested?.metadata).toMatchObject({ risk: 'high', baseRisk: 'medium' });
+    });
+
+    it('provider_mail_flow_apply: preview called with the change, the server token injected (the model’s ignored), apply sent with it', async () => {
+      const id = await newConversation();
+      const args = {
+        id: CONNECTION,
+        body: { change: CHANGE, impactToken: MODEL_TOKEN, confirm: true },
+      };
+      const res = await turn(
+        id,
+        `/tool provider_mail_flow_apply ${JSON.stringify(args)}`,
+        INTEGRATION_ADMINS,
+      );
+      expect(res.body.executions[0]).toMatchObject({
+        tool: 'provider_mail_flow_apply',
+        status: 'pending_confirmation',
+        confirmation: { status: 'pending', risk: 'high', requiresReauth: true },
+      });
+      expect(previews).toEqual([{ change: CHANGE }]);
+      const stored = world.confirmations[0]!;
+      expect((stored.request as { body: unknown }).body).toEqual({
+        change: CHANGE,
+        impactToken: SERVER_TOKEN,
+        confirm: true,
+      });
+      const { confirmation, token } = confirmOf(res);
+      const view = await send(
+        'get',
+        `${BASE}/confirmations/${confirmation.id}`,
+        undefined,
+        INTEGRATION_ADMINS,
+      );
+      expect(view.status).toBe(200);
+      const serialized = (value: unknown) =>
+        JSON.stringify(value, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v));
+      for (const value of [SERVER_TOKEN, MODEL_TOKEN]) {
+        expect(serialized(res.body), value).not.toContain(value);
+        expect(serialized(view.body), value).not.toContain(value);
+        expect(serialized(world.executions), value).not.toContain(value);
+        expect(serialized(audit.entries), value).not.toContain(value);
+      }
+      const ok = await send(
+        'post',
+        `${BASE}/confirmations/${confirmation.id}/confirm`,
+        {
+          token,
+          actionDigest: confirmation.actionDigest,
+          reauth: { password: REAUTH_PASSWORD, totpCode: REAUTH_TOTP },
+        },
+        INTEGRATION_ADMINS,
+      );
+      expect(ok.status).toBe(200);
+      expect(ok.body.confirmation).toMatchObject({
+        status: 'executed',
+        result: { httpStatus: 200 },
+      });
+      // The confirm-time re-read ran the preview again; the apply carries the stored token.
+      expect(previews).toEqual([{ change: CHANGE }, { change: CHANGE }]);
+      expect(writes).toEqual([
+        {
+          route: `POST /api/v1/provider-connections/${CONNECTION}/mail-flow/apply`,
+          body: { change: CHANGE, impactToken: SERVER_TOKEN, confirm: true },
+          key: confirmation.id,
+        },
+      ]);
+      expect(serialized(ok.body)).not.toContain(SERVER_TOKEN);
+      expect(serialized(world.executions)).not.toContain(SERVER_TOKEN);
+      expect(serialized(audit.entries)).not.toContain(SERVER_TOKEN);
     });
   });
 });

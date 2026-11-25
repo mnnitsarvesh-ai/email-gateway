@@ -290,6 +290,7 @@ export class AtoComponents {
           metrics,
           idpMetrics,
           seen: deps.redis,
+          providers: this.providers,
           logger,
           config: {
             claimBatch: this.idp.config.claimBatch,

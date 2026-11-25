@@ -553,23 +553,25 @@ export async function clearAssistantCounters(
 
 /**
  * The enabled tools of the registry (the reads and the confirmable writes; AI-3: 257; step AI-R:
- * 259 with the two native tools `report_generate` and `report_send_email`, design 31 D1).
+ * 259 with the two native tools `report_generate` and `report_send_email`, design 31 D1; step
+ * AI-4: 329; step AI-5: 356, every planned tool of the program, design 33 D1).
  */
 export const ENABLED_TOOLS: readonly OperationTool[] = ALL_TOOLS.filter((t) => t.enabled);
-/** The enabled operation tools only (OpenAPI operations; AI-R: 257). */
+/** The enabled operation tools only (OpenAPI operations; AI-R: 257; step AI-5: 354). */
 export const ENABLED_OPERATION_TOOLS: readonly OperationTool[] = OPERATION_TOOLS.filter(
   (t) => t.enabled,
 );
 /**
  * The enabled read tools (step AI-2: 178; step AI-3: 179 with `api_keys_get`; step AI-R: 180
- * with `report_generate`).
+ * with `report_generate`; step AI-4: 186; step AI-5: 188 with `archive_admin_capture_issue` and
+ * `provider_mail_flow_preview`).
  */
 export const ENABLED_READS: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'read',
 );
 /**
  * The enabled write tools (step AI-2: 31; step AI-3: 78; step AI-R: 79 with
- * `report_send_email`), each behind a confirmation.
+ * `report_send_email`; step AI-4: 143; step AI-5: 168), each behind a confirmation.
  */
 export const ENABLED_WRITES: readonly OperationTool[] = ENABLED_TOOLS.filter(
   (t) => t.access === 'write',
@@ -587,6 +589,26 @@ const SPECIAL_VALUES: Readonly<Record<string, unknown>> = {
 };
 
 /**
+ * A required array: empty, or (step AI-5: the mail-flow preview's `domainIds`, `minItems: 1`)
+ * `minItems` synthetic items (UUIDs for UUID items, the first enum value, else a marker string).
+ */
+function minimalArray(schema: Record<string, unknown>): unknown[] {
+  const count = typeof schema.minItems === 'number' ? schema.minItems : 0;
+  const items = (schema.items ?? {}) as Record<string, unknown>;
+  const item = (): unknown =>
+    items.format === 'uuid'
+      ? randomUUID()
+      : Array.isArray(items.enum)
+        ? items.enum[0]
+        : items.type === 'integer' || items.type === 'number'
+          ? typeof items.minimum === 'number'
+            ? items.minimum
+            : 1
+          : 'it-unknown';
+  return Array.from({ length: count }, item);
+}
+
+/**
  * The required members of an object schema, recursively (the request bodies of the AI-2 tools:
  * an object member is built from its own required members, `{}` when it has none).
  */
@@ -594,17 +616,17 @@ function minimalObject(schema: Record<string, unknown>): Record<string, unknown>
   const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
   const out: Record<string, unknown> = {};
   for (const name of (schema.required as string[] | undefined) ?? []) {
-    // Step AI-4: a union member (the risk dry-run's `profile`) takes its first alternative.
+    // Step AI-4: a union member (the risk dry-run's `profile`) takes its first alternative;
+    // step AI-5: so does a `oneOf` member (the mail-flow preview's `change`).
     const declared = properties[name] ?? {};
-    const prop = Array.isArray(declared.anyOf)
-      ? ((declared.anyOf as Array<Record<string, unknown>>)[0] ?? {})
-      : declared;
+    const union = (declared.anyOf ?? declared.oneOf) as Array<Record<string, unknown>> | undefined;
+    const prop = Array.isArray(union) ? (union[0] ?? {}) : declared;
     if (prop.type === 'object') out[name] = minimalObject(prop);
     else if (Array.isArray(prop.enum)) out[name] = prop.enum[0];
     else if (prop.type === 'integer' || prop.type === 'number') {
       out[name] = typeof prop.minimum === 'number' ? prop.minimum : 1;
     } else if (prop.type === 'boolean') out[name] = false;
-    else if (prop.type === 'array') out[name] = [];
+    else if (prop.type === 'array') out[name] = minimalArray(prop);
     else out[name] = 'it-unknown';
   }
   return out;
@@ -1637,8 +1659,17 @@ export async function seedDeliveries(
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The side-effect-free POST reads a confirm may send besides the write: step AI-5 D5, the impact
+ * preview of the mail-flow apply and disconnect (`IMPACT_PREVIEW_TOOLS`, re-run at confirm).
+ */
+export const isImpactPreview = (c: Pick<RecordedCall, 'method' | 'path'>): boolean =>
+  c.method === 'POST' &&
+  /^\/api\/v1\/provider-connections\/[^/]+\/mail-flow\/preview$/.test(c.path);
+
+/**
  * Asserts a confirmed write executed with this HTTP status (confirmation `executed`, result
- * execution `succeeded`) and exactly one non-GET loopback request; returns that request.
+ * execution `succeeded`) and exactly one non-GET loopback request besides an impact preview
+ * (step AI-5); returns that request.
  */
 export function expectExecuted(result: ChatWrite, httpStatus: number): RecordedCall {
   if (result.res.status !== 200) {
@@ -1656,7 +1687,7 @@ export function expectExecuted(result: ChatWrite, httpStatus: number): RecordedC
       `expected executed ${httpStatus}: ${JSON.stringify({ confirmation: confirmation.result, status: confirmation.status, execution: execution && { status: execution.status, httpStatus: execution.httpStatus, errorCode: execution.errorCode } })}`,
     );
   }
-  const writes = result.calls.filter((c) => c.method !== 'GET');
+  const writes = result.calls.filter((c) => c.method !== 'GET' && !isImpactPreview(c));
   if (writes.length !== 1) throw new Error(`expected one write: ${JSON.stringify(result.calls)}`);
   return writes[0]!;
 }

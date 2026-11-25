@@ -62,7 +62,22 @@ export const QUEUED_202_TOOLS: ReadonlySet<string> = new Set([
   'webhooks_test',
   'webhook_deliveries_replay',
   'webhook_deliveries_create_replay',
+  // step AI-5 (design 33 D11; the only AI-5 writes whose OpenAPI success is 202)
+  'ediscovery_searches_create',
+  'ediscovery_exports_create',
+  'provider_health_check_now',
 ]);
+
+/**
+ * Executed lines of queued work that tells the model what to do next (step AI-5 D11); other
+ * `QUEUED_202_TOOLS` say "it was queued (HTTP 202)".
+ */
+export const QUEUED_202_LINES: Readonly<Record<string, string>> = {
+  ediscovery_exports_create:
+    'the export was queued (HTTP 202). It is downloaded only on the case page in the portal.',
+  ediscovery_searches_create:
+    'the search was queued (HTTP 202); follow it with `ediscovery_searches_get`.',
+};
 
 /** The ATO response request (step AI-4 D10): `201` with an action that may wait for approval. */
 const ATO_RESPONSE_REQUEST_TOOL = 'ato_responses_request';
@@ -99,7 +114,9 @@ export function actionUpdateLine(update: ActionUpdate): string {
         ? ` Result: ref r${result}${update.resultRowRef ? `, row ref r${result}.1` : ''}.`
         : '';
       if (http === 202 && QUEUED_202_TOOLS.has(update.tool))
-        return `${head} the user confirmed it; it was queued (HTTP 202).${refs}`;
+        return `${head} the user confirmed it; ${
+          QUEUED_202_LINES[update.tool] ?? 'it was queued (HTTP 202).'
+        }${refs}`;
       if (update.tool === ATO_RESPONSE_REQUEST_TOOL && (http === null || http === 201))
         return `${head} the user confirmed it; the response was requested (HTTP 201). If it needs approval, another responder must approve it; the requester cannot.${refs}`;
       const status =

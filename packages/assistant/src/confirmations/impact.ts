@@ -6,6 +6,7 @@ import { normalizeRecipient, recipientKindText, type RecipientKind } from '../re
 import type { OperationTool } from '../registry/types';
 import { valueAtPath } from './digest';
 import {
+  AI5_ESCALATION_WARNINGS,
   snapshotList,
   type ConfirmationSnapshot,
   type EachSnapshotItem,
@@ -27,6 +28,10 @@ import {
  * lines and warnings are fixed English; argument and record values are inserted as data,
  * sanitized and capped, and values that come from mail are marked `untrusted`. Policy
  * definitions are summarised rule by rule without depending on `@email-gateway/policy-dsl`.
+ *
+ * Step AI-5 (design 33 D9) adds the compliance and integrations templates: retention changes in
+ * words, settings before → after, custodian counts (never addresses), never an intake address
+ * or an impact token, the mail-flow preview's change set and warning codes.
  *
  * Step AI-4 (design 32 D6) adds the security-operations templates: weakening changes say what
  * stops being detected, ATO response approvals name the action and the requester, DLP pattern
@@ -79,6 +84,11 @@ export interface ImpactInput {
    * prepared them. The address is not mail-derived but is still normalized and sanitized.
    */
   native?: NativeImpactSnapshot | null;
+  /**
+   * `ARCHIVE_EXPORT_TTL_HOURS` of the api (step AI-5 D9): how long an eDiscovery export can be
+   * downloaded in the portal. Without it the export card says "until it expires".
+   */
+  archiveExportTtlHours?: number | null;
 }
 
 export interface NativeImpactSnapshot {
@@ -114,6 +124,7 @@ interface TemplateContext {
   items: readonly EachSnapshotItem[];
   validation: DefinitionValidation | null;
   native: NativeImpactSnapshot | null;
+  archiveExportTtlHours: number | null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2124,9 +2135,802 @@ const AI4_TEMPLATES: Readonly<Record<string, Template>> = {
   }),
 };
 
+// ---------------------------------------------------------------------------------------------
+// Step AI-5 helpers and templates (design 33 D9)
+// ---------------------------------------------------------------------------------------------
+
+/** A snapshot value kept as JSON text (an object or a list of objects), parsed; null when cut. */
+function snapJson(value: SnapshotValue | undefined): unknown {
+  if (typeof value !== 'string' || !/^[[{]/.test(value)) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** A count plus the first three values (`2 (10.0.0.0/8, 192.0.2.0/24)`), D9. */
+function countAndFirst(items: readonly string[] | null): string | null {
+  if (items === null) return null;
+  if (items.length === 0) return 'none';
+  const shown = items.slice(0, 3).map((item) => sanitizeText(item, 80));
+  return `${items.length} (${shown.join(', ')}${items.length > 3 ? ', …' : ''})`;
+}
+
+const ON_EXPIRY_WORDS: Readonly<Record<string, string>> = {
+  delete: 'deleted',
+  review: 'held for review before deletion',
+};
+const onExpiryText = (value: unknown): string | null => {
+  const key = text(value);
+  return key === null ? null : (ON_EXPIRY_WORDS[key] ?? sanitizeText(key, 32));
+};
+
+/** Retention criteria in words (directions, outcomes, sources; domain, department, rule counts). */
+function criteriaWords(criteria: unknown): string {
+  if (!isRecord(criteria)) return 'all mail';
+  const parts: string[] = [];
+  const named = (key: string, label: string) => {
+    const values = argStrings(criteria[key]);
+    if (values.length > 0) parts.push(`${label} ${cappedList(values, 4)}`);
+  };
+  const counted = (key: string, noun: string) => {
+    const values = argStrings(criteria[key]);
+    if (values.length > 0) parts.push(plural(values.length, noun));
+  };
+  named('directions', 'directions');
+  named('categories', 'outcomes');
+  named('sources', 'sources');
+  counted('domainIds', 'domain');
+  counted('departmentIds', 'department');
+  counted('policyRuleRefs', 'policy rule');
+  return parts.length > 0 ? parts.join('; ') : 'all mail';
+}
+
+const RETENTION_APPLIES =
+  'Applies to mail captured from now on; records already archived keep their stored dates (a longer retention extends them when they reach their date).';
+
+const retentionTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Retention policy', ctx.snap.name, true),
+  ...target('Policy id', ctx.args.policyId),
+  ...target('Default policy', yesNo(ctx.snap.isDefault)),
+];
+
+/** Archive / journaling settings fields: path under `settings`, label. */
+const SETTINGS_FIELDS: ReadonlyArray<{ section: string; key: string; label: string }> = [
+  { section: 'directions', key: 'inbound', label: 'Capture inbound mail' },
+  { section: 'directions', key: 'outbound', label: 'Capture outbound mail' },
+  { section: 'directions', key: 'internal', label: 'Capture internal mail' },
+  { section: 'include', key: 'rejected', label: 'Include rejected mail' },
+  { section: 'include', key: 'quarantined', label: 'Include quarantined mail' },
+  { section: 'include', key: 'failed', label: 'Include failed deliveries' },
+  { section: 'scope', key: 'mode', label: 'Scope' },
+  { section: 'policyArchive', key: 'enabled', label: 'Archive mail of archive policy actions' },
+  { section: 'access', key: 'previewEnabled', label: 'Previews in the portal' },
+  { section: 'access', key: 'downloadEnabled', label: 'Downloads in the portal' },
+  { section: 'intake', key: 'scanEnabled', label: 'Scan journal intake mail' },
+];
+const settingValue = (value: unknown): string | null =>
+  typeof value === 'boolean' ? onOff(value) : text(value);
+
 /**
- * The 143 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
- * AI-R, 64 of step AI-4), keyed by operation id.
+ * Before → after of a settings body. `wholeDocument` (archive): every section is replaced and an
+ * omitted key returns to its default; otherwise (journaling) only the given sections are
+ * replaced and an omitted key inside a given section returns to its default.
+ */
+function settingsChanges(
+  ctx: TemplateContext,
+  settings: unknown,
+  wholeDocument: boolean,
+): ConfirmationChange[] {
+  if (!isRecord(settings)) return [];
+  const out: ConfirmationChange[] = [];
+  for (const field of SETTINGS_FIELDS) {
+    const path = `settings.${field.section}.${field.key}`;
+    const section = settings[field.section];
+    if (!isRecord(section) && !wholeDocument) continue;
+    const given = isRecord(section) ? section[field.key] : undefined;
+    out.push(
+      ...change(
+        field.label,
+        settingValue(ctx.snap[path]),
+        given === undefined ? '(default)' : settingValue(given),
+      ),
+    );
+  }
+  const scope = isRecord(settings.scope) ? settings.scope : null;
+  if (scope) {
+    const counts = [
+      ['domainIds', 'domain'],
+      ['departmentIds', 'department'],
+      ['userIds', 'user'],
+      ['addresses', 'address'],
+    ]
+      .map(([key, noun]) => [argStrings(scope[key!]).length, noun!] as const)
+      .filter(([n]) => n > 0)
+      .map(([n, noun]) => plural(n, noun));
+    out.push(...change('Scope entries', undefined, counts.length > 0 ? counts.join(', ') : 'none'));
+  }
+  return out;
+}
+
+const NO_BACKFILL = 'Applies to mail received from now on (no backfill).';
+
+const IMMUTABILITY_WORDS: Readonly<Record<string, string>> = {
+  none: 'none (no Object Lock)',
+  governance: 'governance (Object Lock, can be lifted with special permission)',
+  compliance: 'compliance (Object Lock, can never be lifted or shortened)',
+};
+const immutabilityText = (value: unknown): string | null => {
+  const key = text(value);
+  return key === null ? null : (IMMUTABILITY_WORDS[key] ?? sanitizeText(key, 32));
+};
+
+const captureTarget = (ctx: TemplateContext): ConfirmationTarget[] => {
+  const sources = [
+    ctx.snap['sources.journal'] === true ? 'journal' : null,
+    ctx.snap['sources.policy'] === true ? 'policy' : null,
+  ].filter((s): s is string => s !== null);
+  return [
+    ...target('Message id', ctx.args.messageId),
+    ...target('Received at', ctx.snap.receivedAt),
+    ...target('Capture status', ctx.snap.status),
+    ...target('Failure code', ctx.snap.code),
+    ...target('Attempts', ctx.snap.attempts),
+    ...target('Sources', sources.length > 0 ? sources.join(', ') : null),
+  ];
+};
+
+/** Never the intake address (I23): name, kind, status, TLS and health only. */
+const intakeTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Intake source', ctx.snap.displayName, true),
+  ...target('Source id', ctx.args.sourceId),
+  ...target('Kind', ctx.snap.kind),
+  ...target('Status', ctx.snap.status),
+  ...target('TLS required', yesNo(ctx.snap.requireTls)),
+  ...target('Health', ctx.snap['health.status']),
+];
+
+const caseTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Case', ctx.snap.name, true),
+  ...target('Case id', ctx.args.caseId),
+  ...target('Matter reference', ctx.snap.matterReference, true),
+  ...target('Status', ctx.snap.status),
+  ...target('Custodians', ctx.snap['counts.custodians']),
+  ...target('Active legal holds', ctx.snap['counts.activeHolds']),
+];
+
+/** A list argument as a count (`3 senders`), or null when absent. */
+const countOf = (value: unknown, noun: string): string | null =>
+  value === undefined ? null : plural(argStrings(value).length, noun);
+/** Custodians are shown as a count only, never their addresses (D9). */
+const custodianCount = (value: unknown): string | null => countOf(value, 'custodian');
+
+const searchTarget = (ctx: TemplateContext, searchId: unknown): ConfirmationTarget[] => [
+  ...target('Case id', ctx.args.caseId),
+  ...target('Search id', searchId),
+  ...target('Search status', ctx.snap.status),
+  ...target('Hits', ctx.snap.hitCount),
+  ...target('Hits truncated', yesNo(ctx.snap.truncated)),
+  ...target('Index complete', yesNo(ctx.snap.indexComplete)),
+];
+
+const REVIEW_TAG_WORDS: Readonly<Record<string, string>> = {
+  untagged: 'untagged',
+  relevant: 'relevant',
+  not_relevant: 'not relevant',
+  privileged: 'privileged',
+};
+const reviewTagText = (value: unknown): string => {
+  const key = text(value);
+  return key === null ? '?' : (REVIEW_TAG_WORDS[key] ?? sanitizeText(key, 32));
+};
+
+const connectionTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Connection', ctx.snap.displayName, true),
+  ...target('Connection id', ctx.args.id),
+  ...target('Provider', ctx.snap.provider),
+  ...target('Status', ctx.snap.status),
+];
+const grantTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Connection id', ctx.args.id),
+  ...target('Grant profile', ctx.snap.profile ?? ctx.args.profile),
+  ...target('Grant status', ctx.snap.status),
+  ...target('Authentication', ctx.snap.authMethod),
+];
+
+const CHANGE_KIND_WORDS: Readonly<Record<string, string>> = {
+  inbound: 'route inbound mail of linked domains to the provider',
+  outbound: 'turn on outbound relay through the gateway (probes only)',
+  activate: 'activate outbound relay and internal routing as chosen',
+  proof: 'change the relay proof policy',
+  suspend: 'suspend outbound relay',
+  disable_outbound: 'turn outbound relay off',
+  disable: 'disconnect the connection',
+};
+
+/** `host:port` of preview servers (JSON from the snapshot), or null when cut. */
+function previewServers(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map((server) =>
+    isRecord(server) ? serverText(server.host, server.port, server.priority) : '?',
+  );
+}
+
+/**
+ * The preview's change set (D9): per domain current → proposed destination servers, the connector
+ * action, connection fields from → to, grants revoked. Never the impact token.
+ */
+function changeSetChanges(ctx: TemplateContext): ConfirmationChange[] {
+  const p = 'preview.changeSet';
+  const names = snapStrings(ctx.snap[`${p}.domains[].name`]) ?? [];
+  const changed = snapshotList(ctx.snap[`${p}.domains[].changed`]) ?? [];
+  const currentServers = snapJson(ctx.snap[`${p}.domains[].current.servers`]);
+  const proposedServers = snapJson(ctx.snap[`${p}.domains[].proposed.servers`]);
+  const currentProviders = snapshotList(ctx.snap[`${p}.domains[].current.provider`]) ?? [];
+  const proposedProviders = snapshotList(ctx.snap[`${p}.domains[].proposed.provider`]) ?? [];
+  const out: ConfirmationChange[] = [];
+  names.slice(0, 20).forEach((name, i) => {
+    const before = Array.isArray(currentServers) ? previewServers(currentServers[i]) : null;
+    const after = Array.isArray(proposedServers) ? previewServers(proposedServers[i]) : null;
+    const beforeText =
+      before !== null
+        ? cappedList(before, 3)
+        : (text(currentProviders[i]) ?? 'see the preview in the portal');
+    const afterText =
+      after !== null
+        ? cappedList(after, 3)
+        : (text(proposedProviders[i]) ?? 'see the preview in the portal');
+    out.push({
+      label: `Inbound destination of ${sanitizeText(name, 80)}${changed[i] === false ? ' (unchanged)' : ''}`,
+      before: beforeText,
+      after: afterText,
+    });
+  });
+  if (names.length > 20) out.push(...change('Further domains', undefined, names.length - 20));
+  out.push(...change('Relay connector', undefined, ctx.snap[`${p}.connector.action`]));
+  const fields = snapStrings(ctx.snap[`${p}.connection[].field`]) ?? [];
+  const from = snapshotList(ctx.snap[`${p}.connection[].from`]);
+  const to = snapshotList(ctx.snap[`${p}.connection[].to`]);
+  fields.forEach((field, i) => {
+    out.push({
+      label: `Connection ${sanitizeText(field, 32)}`,
+      before: from ? (text(from[i]) ?? 'null') : 'see the preview in the portal',
+      after: to ? (text(to[i]) ?? 'null') : 'see the preview in the portal',
+    });
+  });
+  const revoked = ctx.snap[`${p}.grantsRevoked`];
+  if (typeof revoked === 'number' && revoked > 0)
+    out.push(...change('Grants revoked', undefined, revoked));
+  return out;
+}
+
+/** The preview's warning codes as one impact line, or none. */
+const previewWarnings = (ctx: TemplateContext): string[] => {
+  const codes = snapStrings(ctx.snap['preview.warnings']);
+  return codes && codes.length > 0 ? [`Preview warnings: ${cappedList(codes, 5)}.`] : [];
+};
+
+const CHAT_NO_SECRETS =
+  'Credentials, OAuth consent and validation runs stay in the portal; chat never handles them.';
+
+const AI5_TEMPLATES: Readonly<Record<string, Template>> = {
+  // --- archive retention ---
+  ArchiveRetentionController_create_v1: (ctx) => {
+    const onExpiry = ctx.body.onExpiry ?? 'delete';
+    return {
+      title: 'Create retention policy',
+      action: `Creates the retention policy ${quoted(ctx.body.name, '(unnamed)')}: matching mail is kept for ${text(ctx.body.retentionDays) ?? '?'} days, then ${onExpiryText(onExpiry) ?? '?'}.`,
+      target: target('Retention policy', ctx.body.name),
+      changes: [
+        ...change('Name', undefined, ctx.body.name),
+        ...change('Retention (days)', undefined, ctx.body.retentionDays),
+        ...change('On expiry', undefined, onExpiryText(onExpiry)),
+        ...change('Priority', undefined, ctx.body.priority ?? 100),
+        ...change('Applies to', undefined, criteriaWords(ctx.body.criteria)),
+      ],
+      impact: [
+        RETENTION_APPLIES,
+        'Policies are ranked by priority: this policy can take precedence over the default policy for the mail it matches.',
+      ],
+      warnings: [
+        'The new policy can give the mail it matches a shorter retention than the default policy.',
+        ...(onExpiry === 'delete' ? [AI5_ESCALATION_WARNINGS.expiryDelete] : []),
+      ],
+      reversible: true,
+    };
+  },
+  ArchiveRetentionController_update_v1: (ctx) => {
+    const before = snapJson(ctx.snap.criteria);
+    return {
+      title: 'Change retention policy',
+      action: `Replaces this retention policy (the whole policy: fields you leave out return to their defaults).`,
+      target: retentionTarget(ctx),
+      changes: [
+        ...change('Name', undefined, ctx.body.name),
+        ...change('Retention (days)', ctx.snap.retentionDays, ctx.body.retentionDays),
+        ...change(
+          'On expiry',
+          onExpiryText(ctx.snap.onExpiry),
+          onExpiryText(ctx.body.onExpiry ?? 'delete'),
+        ),
+        ...change('Priority', ctx.snap.priority, ctx.body.priority ?? 100),
+        ...change(
+          'Applies to',
+          before === null ? 'see the policy in the portal' : criteriaWords(before),
+          criteriaWords(ctx.body.criteria ?? {}),
+        ),
+      ],
+      impact: [RETENTION_APPLIES],
+      reversible: true,
+    };
+  },
+  ArchiveRetentionController_delete_v1: (ctx) => ({
+    title: 'Delete retention policy',
+    action: 'Deletes this retention policy.',
+    target: [
+      ...retentionTarget(ctx),
+      ...target('Retention (days)', ctx.snap.retentionDays),
+      ...target('On expiry', onExpiryText(ctx.snap.onExpiry)),
+    ],
+    changes: change('Retention policy', 'active', 'deleted'),
+    impact: [
+      'Records captured under it keep their stored retention; new mail it would have matched falls to another policy.',
+    ],
+    warnings: [UNDO_DELETE],
+    reversible: false,
+  }),
+  // --- capture issues ---
+  ArchiveAdminController_retry_v1: (ctx) => ({
+    title: 'Retry archive capture',
+    action: 'The archive retries capturing this message now.',
+    target: captureTarget(ctx),
+    changes: change('Capture status', ctx.snap.status, 'pending'),
+    impact: [
+      'The archive retries capturing this message now.',
+      'The capture issues page shows the result.',
+    ],
+    reversible: false,
+  }),
+  // --- archive and journaling settings ---
+  ArchiveAdminController_update_v1: (ctx) => {
+    const off = ctx.body.enabled === false;
+    return {
+      title: 'Change archive settings',
+      action: off
+        ? 'Turns archiving off for the organization.'
+        : ctx.body.settings !== undefined
+          ? 'Replaces the archive settings of the organization.'
+          : 'Changes the archive settings of the organization.',
+      target: [
+        ...target('Archiving', onOff(ctx.snap.enabled)),
+        ...target('Entitled by plan', yesNo(ctx.snap.entitled)),
+        ...target('Immutability', immutabilityText(ctx.snap.immutability)),
+        ...target('Object Lock available', yesNo(ctx.snap.objectLockAvailable)),
+      ],
+      changes: [
+        ...(ctx.body.enabled !== undefined
+          ? change('Archiving', onOff(ctx.snap.enabled), onOff(ctx.body.enabled))
+          : []),
+        ...(ctx.body.immutability !== undefined
+          ? change(
+              'Immutability',
+              immutabilityText(ctx.snap.immutability),
+              immutabilityText(ctx.body.immutability),
+            )
+          : []),
+        ...(ctx.body.defaultRetentionPolicyId !== undefined
+          ? change(
+              'Default retention policy',
+              ctx.snap.defaultRetentionPolicyId ?? '(none)',
+              ctx.body.defaultRetentionPolicyId ?? '(none)',
+            )
+          : []),
+        ...settingsChanges(ctx, ctx.body.settings, true),
+      ],
+      impact: [
+        NO_BACKFILL,
+        ...(ctx.body.settings !== undefined
+          ? [
+              'The settings document is replaced as a whole; keys you leave out return to their defaults.',
+            ]
+          : []),
+      ],
+      warnings:
+        ctx.body.immutability === 'compliance'
+          ? ['Compliance mode can never be turned off or weakened afterwards.']
+          : [],
+      reversible: ctx.body.immutability !== 'compliance',
+    };
+  },
+  JournalingController_update_v1: (ctx) => {
+    const off = ctx.body.enabled === false;
+    return {
+      title: 'Change journaling settings',
+      action: off
+        ? 'Turns journaling off for the organization.'
+        : ctx.body.settings !== undefined
+          ? 'Replaces the given journaling sections of the organization.'
+          : 'Changes the journaling settings of the organization.',
+      target: [
+        ...target('Journaling', onOff(ctx.snap.enabled)),
+        ...target('Entitled by plan', yesNo(ctx.snap.entitled)),
+      ],
+      changes: [
+        ...(ctx.body.enabled !== undefined
+          ? change('Journaling', onOff(ctx.snap.enabled), onOff(ctx.body.enabled))
+          : []),
+        ...settingsChanges(ctx, ctx.body.settings, false),
+      ],
+      impact: [
+        NO_BACKFILL,
+        ...(ctx.body.settings !== undefined
+          ? [
+              'Only the given sections are replaced; keys left out inside a given section return to their defaults.',
+            ]
+          : []),
+      ],
+      reversible: true,
+    };
+  },
+  // --- journal intake sources (never the address, I23) ---
+  IntakeSourcesController_update_v1: (ctx) => {
+    const paused = ctx.body.status === 'paused';
+    return {
+      title: 'Update journal intake source',
+      action: paused
+        ? 'Pauses this journal intake source.'
+        : 'Changes the settings of this journal intake source.',
+      target: intakeTarget(ctx),
+      changes: [
+        ...change('Name', undefined, ctx.body.displayName),
+        ...change('Status', ctx.snap.status, ctx.body.status),
+        ...(ctx.body.networks !== undefined
+          ? change(
+              'Allowed networks',
+              countAndFirst(snapStrings(ctx.snap.networks)),
+              countAndFirst(argStrings(ctx.body.networks)),
+            )
+          : []),
+        ...change('TLS required', yesNo(ctx.snap.requireTls), yesNo(ctx.body.requireTls)),
+        ...(ctx.body.clientCertFingerprints !== undefined
+          ? change(
+              'Client certificates',
+              countAndFirst(snapStrings(ctx.snap.clientCertFingerprints)),
+              countAndFirst(argStrings(ctx.body.clientCertFingerprints)),
+            )
+          : []),
+        ...(ctx.body.maxMessageBytes !== undefined
+          ? change(
+              'Largest message (bytes)',
+              ctx.snap.maxMessageBytes ?? 'the platform limit',
+              ctx.body.maxMessageBytes ?? 'the platform limit',
+            )
+          : []),
+        ...(ctx.body.silenceAlertMinutes !== undefined
+          ? change(
+              'Silence alert (minutes)',
+              ctx.snap.silenceAlertMinutes ?? 'off',
+              ctx.body.silenceAlertMinutes ?? 'off',
+            )
+          : []),
+      ],
+      impact: [
+        paused
+          ? 'Nothing is captured from this source until it is resumed; senders get a temporary failure and retry.'
+          : 'Applies to journal mail this source receives from now on.',
+        'The intake address does not change.',
+      ],
+      reversible: true,
+    };
+  },
+  IntakeSourcesController_disable_v1: (ctx) => ({
+    title: 'Disable journal intake source',
+    action: 'Disables this journal intake source.',
+    target: intakeTarget(ctx),
+    changes: change('Status', ctx.snap.status, 'disabled'),
+    impact: [
+      "Terminal: the source's address is refused from now on; a new source needs a new address created in the portal.",
+    ],
+    warnings: ['Disabling a journal intake source cannot be undone.'],
+    reversible: false,
+  }),
+  IntakeSourcesController_attest_v1: (ctx) => ({
+    title: 'Record intake source attestation',
+    action: `Records the attestation ${quoted(ctx.body.code, '(none)')} as ${ctx.body.attested === false ? 'withdrawn' : 'done'} for this journal intake source.`,
+    target: intakeTarget(ctx),
+    changes: [
+      ...change('Attestation', undefined, ctx.body.code),
+      ...change('Attested', undefined, yesNo(ctx.body.attested)),
+    ],
+    impact: ['The setup of the source uses the attestation; it is recorded with your name.'],
+    reversible: true,
+  }),
+  // --- eDiscovery ---
+  EdiscoveryCasesController_create_v1: (ctx) => ({
+    title: 'Create eDiscovery case',
+    action: `Creates the eDiscovery case ${quoted(ctx.body.name, '(unnamed)')}.`,
+    target: target('Case', ctx.body.name),
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...change('Matter reference', undefined, ctx.body.matterReference),
+      ...change('Description', undefined, ctx.body.description),
+      ...change('Custodians', undefined, custodianCount(ctx.body.custodians) ?? 'none'),
+    ],
+    impact: ['The case is open; add searches, legal holds and exports on the case page.'],
+    reversible: true,
+  }),
+  EdiscoveryCasesController_update_v1: (ctx) => ({
+    title: 'Update eDiscovery case',
+    action: 'Changes this eDiscovery case.',
+    target: caseTarget(ctx),
+    changes: [
+      ...change('Name', undefined, ctx.body.name),
+      ...(ctx.body.description !== undefined
+        ? change('Description', undefined, ctx.body.description ?? '(none)')
+        : []),
+      ...(ctx.body.matterReference !== undefined
+        ? change('Matter reference', undefined, ctx.body.matterReference ?? '(none)')
+        : []),
+      ...(ctx.body.custodians !== undefined
+        ? change(
+            'Custodians',
+            typeof ctx.snap['counts.custodians'] === 'number'
+              ? plural(ctx.snap['counts.custodians'], 'custodian')
+              : null,
+            custodianCount(ctx.body.custodians),
+          )
+        : []),
+    ],
+    impact: [
+      ctx.body.custodians !== undefined
+        ? 'Later searches and holds that use the case custodians use the new list; existing holds keep theirs.'
+        : 'Searches, legal holds and exports of the case do not change.',
+    ],
+    reversible: true,
+  }),
+  EdiscoveryCasesController_close_v1: (ctx) => ({
+    title: 'Close eDiscovery case',
+    action: 'Closes this eDiscovery case; it is read-only afterwards.',
+    target: [
+      ...caseTarget(ctx),
+      ...target('Searches', ctx.snap['counts.searches']),
+      ...target('Exports', ctx.snap['counts.exports']),
+    ],
+    changes: change('Status', ctx.snap.status, 'closed'),
+    impact: ['The case becomes read-only: no new searches, legal holds or exports.'],
+    warnings: ['A closed case cannot be reopened.'],
+    reversible: false,
+  }),
+  EdiscoveryCasesController_createHold_v1: (ctx) => {
+    const criteria = isRecord(ctx.body.criteria) ? ctx.body.criteria : {};
+    return {
+      title: 'Place legal hold',
+      action: `Places the legal hold ${quoted(ctx.body.name, '(unnamed)')} for this eDiscovery case.`,
+      target: caseTarget(ctx),
+      changes: [
+        ...change('Hold name', undefined, ctx.body.name),
+        ...change('Reason', undefined, ctx.body.reason),
+        ...change(
+          'Custodians',
+          undefined,
+          ctx.body.useCaseCustodians === true
+            ? 'the case custodians'
+            : (custodianCount(criteria.custodians) ?? 'none'),
+        ),
+        ...change('From', undefined, criteria.from),
+        ...change('To', undefined, criteria.to),
+        ...change('Directions', undefined, argList(criteria.directions) ?? 'all'),
+      ],
+      impact: [
+        'Blocks every disposal of matching records (retention expiry, review, quarantine deletion, organization deletion) until it is released on the Legal holds page; chat cannot release it.',
+      ],
+      warnings: ['Only a person with the legal-hold permission can release it, in the portal.'],
+      reversible: false,
+    };
+  },
+  EdiscoverySearchesController_create_v1: (ctx) => {
+    const criteria = isRecord(ctx.body.criteria) ? ctx.body.criteria : {};
+    const custodians = criteria.custodians;
+    return {
+      title: 'Run eDiscovery search',
+      action: 'Starts a search of the archive for this eDiscovery case.',
+      target: caseTarget(ctx),
+      changes: [
+        ...change('From', undefined, criteria.from),
+        ...change('To', undefined, criteria.to),
+        ...change('Directions', undefined, argList(criteria.directions) ?? 'all'),
+        ...change(
+          'Custodians',
+          undefined,
+          custodians === 'case' ? 'the case custodians' : custodianCount(custodians),
+        ),
+        ...change('Senders', undefined, countOf(criteria.senders, 'sender')),
+        ...change('Recipients', undefined, countOf(criteria.recipients, 'recipient')),
+        ...change('Subject contains', undefined, criteria.subject),
+        ...change('Malicious only', undefined, yesNo(criteria.malicious)),
+      ],
+      impact: ['Runs in the background; follow it on the case page.'],
+      reversible: false,
+    };
+  },
+  EdiscoverySearchesController_review_v1: (ctx) => {
+    const count = argStrings(ctx.body.messageIds).length;
+    return {
+      title: 'Tag eDiscovery search hits',
+      action: `Tags ${plural(count, 'message')} of this search as ${reviewTagText(ctx.body.tag)}.`,
+      target: searchTarget(ctx, ctx.args.searchId),
+      changes: [
+        ...change('Review tag', undefined, reviewTagText(ctx.body.tag)),
+        ...change('Messages', undefined, count),
+      ],
+      impact: [
+        ctx.body.tag === 'not_relevant'
+          ? 'Messages tagged not relevant are left out of exports by default.'
+          : 'Exports can include or leave out messages by their review tag.',
+      ],
+      reversible: true,
+    };
+  },
+  EdiscoveryExportsController_create_v1: (ctx) => {
+    const tags = argStrings(ctx.body.reviewTags).map(reviewTagText);
+    const hours = ctx.archiveExportTtlHours;
+    return {
+      title: 'Export eDiscovery search',
+      action: `Builds an encrypted export of the decrypted original messages of ${text(ctx.snap.hitCount) ?? '?'} hits with the tags ${tags.length > 0 ? tags.join(', ') : 'the default selection (everything except not relevant)'}.`,
+      target: [
+        ...searchTarget(ctx, ctx.body.searchId),
+        ...target('Incomplete because', ctx.snap.incompleteReason),
+      ],
+      changes: [
+        ...change(
+          'Review tags',
+          undefined,
+          tags.length > 0 ? tags.join(', ') : 'default (all but not relevant)',
+        ),
+        ...change(
+          'Include malicious messages',
+          undefined,
+          yesNo(ctx.body.acknowledgeMalicious ?? false),
+        ),
+      ],
+      impact: [
+        `Download it on the case page in the portal ${
+          typeof hours === 'number' && Number.isFinite(hours) && hours > 0
+            ? `for ${Math.floor(hours)} hours`
+            : 'until it expires'
+        }; chat never shows its content.`,
+        'Runs in the background; the export appears on the case page when it is ready.',
+      ],
+      warnings: [
+        'The export contains the original messages, including attachments, readable by whoever downloads it.',
+      ],
+      reversible: false,
+    };
+  },
+  // --- provider connections ---
+  ProviderConnectionsController_create_v1: (ctx) => ({
+    title: 'Create provider connection',
+    action: `Creates the draft ${text(ctx.body.provider) ?? 'provider'} connection ${quoted(ctx.body.displayName, '(unnamed)')}.`,
+    target: [
+      ...target('Connection', ctx.body.displayName),
+      ...target('Provider', ctx.body.provider),
+    ],
+    changes: [
+      ...change('Name', undefined, ctx.body.displayName),
+      ...change('Status', undefined, 'draft'),
+    ],
+    impact: [
+      'A draft connection; grant access and enter credentials in the portal next.',
+      CHAT_NO_SECRETS,
+    ],
+    reversible: true,
+  }),
+  ProviderConnectionsController_update_v1: (ctx) => ({
+    title: 'Rename provider connection',
+    action: `Renames this provider connection to ${quoted(ctx.body.displayName, '(unnamed)')}.`,
+    target: connectionTarget(ctx),
+    changes: change('Name', undefined, ctx.body.displayName),
+    impact: ['Only the name changes.'],
+    reversible: true,
+  }),
+  ProviderConnectionsController_disconnect_v1: (ctx) => ({
+    title: 'Disconnect provider connection',
+    action: 'Disconnects this provider connection.',
+    target: connectionTarget(ctx),
+    changes: changeSetChanges(ctx),
+    impact: [
+      'Inbound destinations are kept; outbound and internal routing stop; grants are revoked and their credentials wiped.',
+      'The provider-side consent and connectors must be removed in the provider admin center (the result lists the steps).',
+      ...previewWarnings(ctx),
+    ],
+    warnings: ['Disconnecting cannot be undone; a new connection needs a new setup in the portal.'],
+    reversible: false,
+  }),
+  ProviderAttestationsController_record_v1: (ctx) => ({
+    title: 'Record provider attestation',
+    action: `Records the attestation ${quoted(ctx.body.code, '(none)')} as ${ctx.body.attested === false ? 'withdrawn' : 'done'} for this provider connection.`,
+    target: connectionTarget(ctx),
+    changes: [
+      ...change('Attestation', undefined, ctx.body.code),
+      ...change('Attested', undefined, yesNo(ctx.body.attested)),
+    ],
+    impact: ['The setup wizard uses the attestation; it is recorded with your name.'],
+    reversible: true,
+  }),
+  ProviderDomainsController_replace_v1: (ctx) => {
+    const before = snapStrings(ctx.snap['domains[].name']);
+    const count = argStrings(ctx.body.domainIds).length;
+    return {
+      title: 'Link domains to provider connection',
+      action: `Replaces the domains linked to this provider connection (${plural(count, 'domain')}).`,
+      target: connectionTarget(ctx),
+      changes: change(
+        'Linked domains',
+        before === null ? null : cappedList(before, 10),
+        plural(count, 'domain'),
+      ),
+      impact: [
+        'Linked domains can be routed through the provider in the next wizard steps; mail flow does not change until a mail-flow change is applied.',
+      ],
+      reversible: true,
+    };
+  },
+  ProviderGrantsController_revoke_v1: (ctx) => ({
+    title: 'Revoke provider grant',
+    action: `Revokes the ${text(ctx.args.profile) ?? '?'} grant of this provider connection.`,
+    target: grantTarget(ctx),
+    changes: change('Grant status', ctx.snap.status, 'revoked'),
+    impact: [
+      'The gateway stops using this access; its credentials are wiped.',
+      "The provider-side consent must be removed in the provider's admin center.",
+    ],
+    warnings: ['A revoked grant cannot be restored; granting access again happens in the portal.'],
+    reversible: false,
+  }),
+  ProviderGrantsController_verify_v1: (ctx) => ({
+    title: 'Verify provider grant',
+    action: `Verifies the ${text(ctx.args.profile) ?? '?'} grant of this provider connection again.`,
+    target: grantTarget(ctx),
+    changes: change('Grant status', ctx.snap.status, 'verifying'),
+    impact: [
+      'The gateway checks the granted permissions with the provider; the result appears on the connection page.',
+      'A first Google Workspace verification needs the delegation confirmation in the portal.',
+    ],
+    reversible: true,
+  }),
+  ProviderHealthController_checkNow_v1: (ctx) => ({
+    title: 'Check provider connection health',
+    action: 'Queues a read-only health check of this provider connection.',
+    target: [...connectionTarget(ctx), ...target('Health', ctx.snap.health)],
+    changes: change('Health', ctx.snap.health, 'check queued'),
+    impact: ['The result appears on the connection page when the check has run.'],
+    reversible: false,
+  }),
+  ProviderMailFlowController_apply_v1: (ctx) => {
+    const kind = text(ctx.snap['preview.changeSet.kind'] ?? null);
+    return {
+      title: 'Apply mail-flow change',
+      action: `Applies the previewed mail-flow change: ${kind !== null ? (CHANGE_KIND_WORDS[kind] ?? sanitizeText(kind, 32)) : 'see the changes'}.`,
+      target: [
+        ...connectionTarget(ctx),
+        ...target('Outbound mode', ctx.snap.outboundMode),
+        ...target('Internal routing', onOff(ctx.snap.internalRouting)),
+      ],
+      changes: changeSetChanges(ctx),
+      impact: [
+        'The gateway changes its own routing as shown; configuration in the provider is never changed by the gateway.',
+        ...previewWarnings(ctx),
+      ],
+      warnings: ['Mail flow of the linked domains changes as soon as this is applied.'],
+      reversible: true,
+    };
+  },
+};
+
+/**
+ * The 168 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
+ * AI-R, 64 of step AI-4, 25 of step AI-5), keyed by operation id.
  */
 export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
   // --- native (step AI-R D5) ---
@@ -3446,6 +4250,8 @@ export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
   },
   // --- step AI-4 (design 32 D6) ---
   ...AI4_TEMPLATES,
+  // --- step AI-5 (design 33 D9) ---
+  ...AI5_TEMPLATES,
 };
 
 /** Generic fallback (never used by an enabled tool: the registry check requires a template). */
@@ -3557,8 +4363,8 @@ function finalize(
 
 /**
  * The confirmation summary of a write (D5). `operationId` must be a registry tool; templates
- * exist for the 78 writes of AI-2 and AI-3, the native `report_send_email` of AI-R and the 64
- * writes of AI-4 (others get the generic fallback, which the registry check keeps away from
+ * exist for the 78 writes of AI-2 and AI-3, the native `report_send_email` of AI-R, the 64
+ * writes of AI-4 and the 25 of AI-5 (others get the generic fallback, which the registry check keeps away from
  * enabled tools).
  */
 export function impactOf(operationId: string, input: ImpactInput): ConfirmationSummary {
@@ -3575,6 +4381,7 @@ export function impactOf(operationId: string, input: ImpactInput): ConfirmationS
     items: input.items ?? [],
     validation: input.validation ?? null,
     native: input.native ?? null,
+    archiveExportTtlHours: input.archiveExportTtlHours ?? null,
   });
   const route = tool.portalRoute;
   const portalRoute =

@@ -58,7 +58,9 @@ describe('ToolExecutorService decisions (D5, in order; each recorded and audited
   });
 
   it('denied_unknown_tool, denied_not_applicable (with the portal page) and denied_disabled', async () => {
-    const { h, ctx } = setup();
+    // Since step AI-5 every planned operation write is enabled: the disabled write is the native
+    // `report_send_email` with its platform switch off (step AI-R D1).
+    const { h, ctx } = setup(testUser(), { ASSISTANT_REPORT_EMAIL_ENABLED: 'false' });
     expect(
       (await h.executor.execute(ctx(), { name: 'no_such_tool', arguments: {} }, 0)).decision,
     ).toBe('denied_unknown_tool');
@@ -70,10 +72,10 @@ describe('ToolExecutorService decisions (D5, in order; each recorded and audited
     );
     expect(denied.decision).toBe('denied_not_applicable');
     expect(denied.envelope).toMatchObject({ status: 'denied', portalRoute: na.portalRoute });
-    const write = OPERATION_TOOLS.find((t) => t.access === 'write' && !t.enabled)!;
-    expect((await h.executor.execute(ctx(), { name: write.name, arguments: {} }, 0)).decision).toBe(
-      'denied_disabled',
-    );
+    expect(OPERATION_TOOLS.filter((t) => t.access === 'write' && !t.enabled)).toEqual([]);
+    expect(
+      (await h.executor.execute(ctx(), { name: 'report_send_email', arguments: {} }, 0)).decision,
+    ).toBe('denied_disabled');
     expect(h.loopback.toolCalls).toHaveLength(0);
     expect(h.world.executions.map((e) => e.status)).toEqual(['refused', 'refused', 'refused']);
   });

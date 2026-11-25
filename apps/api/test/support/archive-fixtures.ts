@@ -971,6 +971,23 @@ export class ArchiveWorld {
           copy(rows.slice(0, page.take).map(({ organizationId: _o, ...r }) => r)),
         );
       },
+      // Step AI-5 D8: the intent of one message, any status (registry key first, as the repository).
+      captureIssue: (scope: TenantScope, publicId: string) => {
+        const key = w.registry.find(
+          (r) => r.organizationId === own(scope) && r.publicId === publicId,
+        );
+        const i =
+          key &&
+          w.intents.find(
+            (x) =>
+              x.organizationId === own(scope) &&
+              x.messageId === key.id &&
+              x.receivedAt.getTime() === key.receivedAt.getTime(),
+          );
+        if (!key || !i) return Promise.resolve(null);
+        const { organizationId: _o, ...row } = i;
+        return Promise.resolve(copy({ ...row, messagePublicId: key.publicId }));
+      },
       lockIntent: (_tx: unknown, scope: TenantScope, key: MessageKeyRow) => {
         const i = w.intents.find((x) => x.organizationId === own(scope) && x.messageId === key.id);
         return Promise.resolve(i ? { id: i.id, status: i.status } : null);

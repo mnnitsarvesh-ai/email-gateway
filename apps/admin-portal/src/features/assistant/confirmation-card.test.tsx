@@ -14,15 +14,19 @@ import { ApiError } from '@/lib/api/errors';
 import {
   ATO_RESPONSE_REQUESTED_TEXT,
   ConfirmationCard,
+  EXPORT_QUEUED_TEXT,
   QUEUED_202_TOOLS,
   awaitsApproval,
   confirmationRefusal,
+  exportCaseHref,
   formatRemaining,
   outcomeText,
 } from './confirmation-card';
 import {
+  CASE_ID,
   CONFIRMATION_ID,
   CONFIRMATION_TOKEN,
+  EXPORT_SUMMARY,
   FAILED_RESULT_CARD,
   HIGH_VIEW_OVERRIDES,
   MEDIUM_SUMMARY,
@@ -806,7 +810,7 @@ describe('awaitsApproval', () => {
     );
   });
 
-  it('mirrors the package list of queued 202 tools (step AI-4 D10)', () => {
+  it('mirrors the package list of queued 202 tools (steps AI-4 D10, AI-5 D11)', () => {
     expect([...QUEUED_202_TOOLS].sort()).toEqual(
       [
         'report_send_email',
@@ -819,6 +823,9 @@ describe('awaitsApproval', () => {
         'webhooks_test',
         'webhook_deliveries_replay',
         'webhook_deliveries_create_replay',
+        'ediscovery_searches_create',
+        'ediscovery_exports_create',
+        'provider_health_check_now',
       ].sort(),
     );
     const executed = (tool: string, httpStatus: number) => ({
@@ -829,7 +836,9 @@ describe('awaitsApproval', () => {
     });
     for (const tool of QUEUED_202_TOOLS) {
       expect(awaitsApproval(executed(tool, 202))).toBe(false);
-      expect(outcomeText(executed(tool, 202), null)).toBe('Done: the action was applied.');
+      expect(outcomeText(executed(tool, 202), null)).toBe(
+        tool === 'ediscovery_exports_create' ? EXPORT_QUEUED_TEXT : 'Done: the action was applied.',
+      );
     }
     expect(awaitsApproval(executed('quarantine_legacy_release', 202))).toBe(true);
   });
@@ -851,5 +860,92 @@ describe('awaitsApproval', () => {
     expect(outcomeText({ ...view(201), tool: 'ato_responses_approve' }, null)).toBe(
       'Done: the action was applied.',
     );
+  });
+});
+
+describe('ConfirmationCard: eDiscovery export (step AI-5 D11)', () => {
+  const exportView = (overrides: Partial<ConfirmationView> = {}) =>
+    executedView({
+      tool: 'ediscovery_exports_create',
+      operationId: 'ediscovery-exports.create',
+      risk: 'high',
+      requiresReauth: true,
+      summary: EXPORT_SUMMARY,
+      result: { httpStatus: 202, error: null },
+      ...overrides,
+    });
+
+  it('says an executed export is queued and links to its case, never to a download', async () => {
+    const onNavigate = vi.fn();
+    const { container } = renderWithProviders(
+      <ConfirmationCard
+        view={exportView()}
+        token={null}
+        phase="idle"
+        resultCard={null}
+        streaming={false}
+        dispatch={() => undefined}
+        onNavigate={onNavigate}
+      />,
+    );
+    const card = region('Export eDiscovery search');
+    expect(EXPORT_QUEUED_TEXT).toBe(
+      'Export queued. Download it on the case page when it is ready; downloads never go through chat.',
+    );
+    expect(card).toHaveTextContent(EXPORT_QUEUED_TEXT);
+    expect(card).not.toHaveTextContent('Submitted for approval');
+    const links = within(card).getAllByRole('link');
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAccessibleName('Open the case');
+    expect(links[0]).toHaveAttribute('href', `/ediscovery/${CASE_ID}`);
+    links[0]!.click();
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(within(card).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+    await expectNoAxeViolations(container);
+  });
+
+  it('keeps the generic outcome and link for a failed export', () => {
+    const failed = exportView({
+      status: 'failed',
+      result: { httpStatus: 409, error: 'ediscovery_search_not_completed' },
+    });
+    expect(outcomeText(failed, null)).toBe(
+      'The action failed (HTTP 409, ediscovery_search_not_completed).',
+    );
+    expect(exportCaseHref(failed)).toBe(`/ediscovery/${CASE_ID}`);
+    renderWithProviders(
+      <ConfirmationCard
+        view={failed}
+        token={null}
+        phase="idle"
+        resultCard={null}
+        streaming={false}
+        dispatch={() => undefined}
+      />,
+    );
+    const card = region('Export eDiscovery search');
+    expect(within(card).getByRole('link', { name: 'Open it in the portal' })).toHaveAttribute(
+      'href',
+      `/ediscovery/${CASE_ID}`,
+    );
+    expect(within(card).queryByRole('link', { name: 'Open the case' })).not.toBeInTheDocument();
+  });
+
+  it('derives the case link only from an export request path on an allow-listed route', () => {
+    expect(exportCaseHref(exportView())).toBe(`/ediscovery/${CASE_ID}`);
+    expect(exportCaseHref(exportView({ tool: 'ediscovery_searches_create' }))).toBeNull();
+    expect(exportCaseHref(exportView({ summary: null }))).toBeNull();
+    const withPath = (path: string) =>
+      exportCaseHref(
+        exportView({ summary: { ...EXPORT_SUMMARY, request: { method: 'POST', path } } }),
+      );
+    expect(withPath(`/api/v1/ediscovery/cases/${CASE_ID}/searches`)).toBeNull();
+    expect(withPath('/api/v1/ediscovery/cases/..%2F..%2Fadmin/exports')).toBeNull();
+    expect(withPath('https://example.test/api/v1/ediscovery/cases/x/exports')).toBeNull();
+    // An export answered with another success code is not described as queued.
+    expect(outcomeText(exportView({ result: { httpStatus: 200, error: null } }), null)).toBe(
+      'Done: the action was applied.',
+    );
+    expect(outcomeText(exportView({ result: null }), null)).toBe(EXPORT_QUEUED_TEXT);
   });
 });

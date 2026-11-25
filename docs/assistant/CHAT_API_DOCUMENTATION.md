@@ -468,3 +468,54 @@ Another organization's or an unknown id is `404` with the module's not-found cod
 ### Platform-only tools
 
 The nine platform tools of AI-4 (threat hashes and indicators, attachment rescans, scan training, dead-letter replay, `threat_indicators_get`) never appear in `GET /assistant/tools` for customer users or for platform users under an override; a forced call is `denied_permission` with no loopback request.
+
+## Compliance and integrations (step AI-5)
+
+Design: [note 33](../plan/steps/33-ai-chat-compliance-integrations.md) (D3–D5, D7, D8, D11), contracts §35.5. No assistant route changed and no confirm code was added; AI-5 adds tools, read-relative escalation, three guards, a server-filled impact token and outcome wording. Tools and risks: [CHAT_TOOL_REGISTRY.md](CHAT_TOOL_REGISTRY.md#compliance-and-integrations-tools-ai-5) and the generated [matrix](UI_TO_CHAT_CAPABILITY_MATRIX.md).
+
+### Confirm codes in AI-5
+
+| Code                                   | HTTP | When (AI-5)                                                                                                                                                                                                 |
+| -------------------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `assistant_action_not_allowed`         | 403  | One of the three new guards refused at confirm on the fresh read (the policy became the default, the capture is no longer `failed`, the case got an active hold)                                            |
+| `assistant_confirmation_state_changed` | 409  | A state field changed since the proposal; for mail-flow apply and disconnect also when the fresh preview's change set or warnings differ from the proposal's                                                |
+| `assistant_confirmation_tool_changed`  | 409  | The effective risk recomputed from the stored arguments **and the stored snapshot** differs from the stored risk                                                                                            |
+| route codes                            | 4xx  | A failed confirmed write keeps the route's code, e.g. `409 impact_changed` (the impact token expired or the connection changed), `422` of a first-time Google grant verify (no `subjectEmail` through chat) |
+
+### New denial messages (`denied_guard`)
+
+The proposal guards answer `denied_guard` with a fixed English message (no values), and nothing is stored but the refused execution; only the precondition read was sent:
+
+| Tool                       | Message key                | Message                                                                                                                                                                                                      |
+| -------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `archive_retention_delete` | `retention_default_policy` | "The default retention policy cannot be deleted. Choose another default in the archive settings first (Retention and lock in the portal)."                                                                   |
+| `archive_admin_retry`      | `capture_not_retryable`    | "Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive."                                                                         |
+| `ediscovery_cases_close`   | `case_active_holds`        | "This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that." |
+
+The portal's "Not allowed in chat" card links to the page that resolves each refusal: Retention and lock (`/archive/retention`), Legal holds (`/legal-holds`) and the Capture issues tab (`/archive/retention?tab=capture`). A `denied_not_applicable` card ("Not available in chat; use the portal page") for `legal_holds_release` links to Legal holds, for `archive_messages_dispose` and `archive_admin_rotate` to Retention and lock (review queue, immutability and keys), and for provider grant creation, credentials, consent completion and validation runs to Provider connections. The api's own refusals (`409 archive_retention_policy_is_default`, `409 archive_capture_retry_not_allowed`, `409 ediscovery_case_has_active_holds`) stay the authority when a request reaches them.
+
+### Server-filled impact token
+
+`provider_mail_flow_apply` (pass only `id` and `body.change`) and `provider_connections_disconnect` (pass only `id`) never take an impact token from the model: the proposal sends the user's own `POST /api/v1/provider-connections/{id}/mail-flow/preview` (`{ change }`, or `{ change: { kind: "disable" } }` for disconnect), shows the preview's change set and warning codes in the card, and stores the returned token in the confirmation request only; confirm previews again and compares. A non-2xx preview fails the proposal with its own code (for example `409 outbound_active`); a 2xx preview without a usable token fails it with `502`. The token never appears in the stream, the confirmation view, the execution view or the audit params.
+
+### Omitted inputs
+
+`intake_sources_get` has no `reveal` input and `provider_grants_verify` no `body.subjectEmail` (`omitInputs`); a forced value is `denied_schema` with no loopback request.
+
+### Outcome texts
+
+| Tool                                                                     | HTTP | Line to the model (next turn)                                                                                    |
+| ------------------------------------------------------------------------ | ---- | ---------------------------------------------------------------------------------------------------------------- |
+| `ediscovery_exports_create`                                              | 202  | "the user confirmed it; the export was queued (HTTP 202). It is downloaded only on the case page in the portal." |
+| `ediscovery_searches_create`                                             | 202  | "the user confirmed it; the search was queued (HTTP 202); follow it with `ediscovery_searches_get`."             |
+| `provider_health_check_now` (and the ten queued tools listed under AI-4) | 202  | "the user confirmed it; it was queued (HTTP 202)."                                                               |
+
+The portal card of an executed export says "Export queued. Download it on the case page when it is ready; downloads never go through chat." with the link "Open the case" (`/ediscovery/{caseId}`).
+
+### New read
+
+| Tool                          | Route                                            | Permission                                              |
+| ----------------------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| `archive_admin_capture_issue` | `GET /api/v1/archive/capture-issues/{messageId}` | `journal:manage` or `archive:manage` (API keys allowed) |
+
+The capture intent of the message in the capture-issue list's view, for any intent status; no intent, an unknown or another organization's message is `404 archive_capture_issue_not_found`, a non-uuid `400`. `provider_mail_flow_preview` (`POST …/mail-flow/preview`, `integration:manage`) is a side-effect-free read tool; its envelope and card never contain the impact token.

@@ -21,6 +21,7 @@
 // @covers post /api/v1/archive/keys/rotate
 // @covers get /api/v1/archive/status
 // @covers get /api/v1/archive/capture-issues
+// @covers get /api/v1/archive/capture-issues/:messageId
 // @covers post /api/v1/archive/capture-issues/:messageId/retry
 // @covers get /api/v1/archive/disposals
 // @covers get /api/v1/archive/export-signing-keys
@@ -300,6 +301,14 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
       ok: 200,
     },
     {
+      // Step AI-5 D8: the single read (any intent status; as the list's permissions).
+      id: '#11b',
+      method: 'get',
+      path: (c) => `${BASE}/capture-issues/${c.failed}`,
+      any: [JMANAGE, MANAGE],
+      ok: 200,
+    },
+    {
       id: '#12',
       method: 'post',
       path: (c) => `${BASE}/capture-issues/${c.failed}/retry`,
@@ -491,7 +500,11 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
 
     it('path ids must be UUIDs (400) and lists refuse unknown parameters (400)', async () => {
       const auth = await asUser(ALL);
-      for (const path of [`${BASE}/messages/nope`, `${BASE}/retention-policies/nope`]) {
+      for (const path of [
+        `${BASE}/messages/nope`,
+        `${BASE}/retention-policies/nope`,
+        `${BASE}/capture-issues/nope`,
+      ]) {
         const res = await api.http().get(path).set(auth);
         expect(res.status, path).toBe(400);
       }
@@ -543,6 +556,12 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
           `${BASE}/retention-policies/${ctx.foreignPolicy}`,
           undefined,
           'archive_retention_policy_not_found',
+        ],
+        [
+          'get',
+          `${BASE}/capture-issues/${ctx.foreignRecord}`,
+          undefined,
+          'archive_capture_issue_not_found',
         ],
       ];
       for (const [method, path, body, code] of checks) {
@@ -1009,6 +1028,51 @@ describe('archive routes (e2e, dependencies stubbed)', () => {
           publicKey: api.config.ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY,
         }),
       ]);
+    });
+  });
+
+  describe('capture issue of one message (step AI-5 D8)', () => {
+    it('answers the list item view for any intent status', async () => {
+      const auth = await asUser([JMANAGE]);
+      const res = await api.http().get(`${BASE}/capture-issues/${ctx.failed}`).set(auth);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      const list = await api.http().get(`${BASE}/capture-issues`).set(auth);
+      expect(res.body).toEqual(list.body.data[0]);
+      expect(res.body).toMatchObject({
+        messageId: ctx.failed,
+        status: 'failed',
+        code: 'storage_error',
+        attempts: 3,
+        sources: { journal: true, policy: false },
+      });
+      // A captured intent is not a list item, but the single read still answers it.
+      Object.assign(world.intents[0]!, { status: 'captured_open', lastErrorCode: null });
+      const captured = await api.http().get(`${BASE}/capture-issues/${ctx.failed}`).set(auth);
+      expect(captured.status).toBe(200);
+      expect(captured.body).toMatchObject({ status: 'captured_open', code: null });
+      expect((await api.http().get(`${BASE}/capture-issues`).set(auth)).body.data).toEqual([]);
+    });
+
+    it('a message without an intent and an unknown id answer the coded 404; a non-uuid id 400', async () => {
+      const auth = await asUser([MANAGE]);
+      for (const id of [ctx.review, randomUUID()]) {
+        const res = await api.http().get(`${BASE}/capture-issues/${id}`).set(auth);
+        expect(res.status, id).toBe(404);
+        expect(res.body.code, id).toBe('archive_capture_issue_not_found');
+      }
+      const bad = await api.http().get(`${BASE}/capture-issues/not-a-uuid`).set(auth);
+      expect(bad.status).toBe(400);
+      expect(bad.body.code).toBe('validation_failed');
+    });
+
+    it('needs journal:manage or archive:manage (403 forbidden with read permissions only)', async () => {
+      const res = await api
+        .http()
+        .get(`${BASE}/capture-issues/${ctx.failed}`)
+        .set(await asUser([READ, JREAD, SEARCH]));
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('forbidden');
     });
   });
 

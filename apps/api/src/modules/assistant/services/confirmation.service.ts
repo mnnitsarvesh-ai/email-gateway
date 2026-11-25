@@ -336,14 +336,16 @@ export class ConfirmationService {
       this.metrics.confirmations.inc({ risk: row.risk, outcome: 'failed' });
       throw new CodedHttpException(HttpStatus.FORBIDDEN, 'forbidden', 'Forbidden');
     }
-    // 7a. Step AI-3 D4/D10: the effective risk of the stored arguments is the stored risk.
+    // 7a. Step AI-3 D4/D10: the effective risk of the stored arguments is the stored risk. Step
+    // AI-5 D3: read-relative escalations compare with the STORED precondition snapshot; the
+    // step-12 state digest proves the compared state fields are unchanged at execution.
     const spec = confirmationSpecOf(tool.operationId)!;
     // Step AI-R D5: a native write's arguments are its stored body (`POST native:<name>`).
     const args =
       spec.native !== undefined
         ? nativeArgsOf(stored.request)
         : argsOfStoredRequest(stored.request);
-    if (this.effectiveRiskOf(tool, spec, args) !== row.risk) {
+    if (this.effectiveRiskOf(tool, spec, args, stored.preconditions.snapshot) !== row.risk) {
       await this.failRow(
         principal,
         scope,
@@ -410,7 +412,9 @@ export class ConfirmationService {
       }
       this.observeDecision(row, decidedAt);
       const correlationBase = (getCorrelationId() ?? lock).slice(0, 128);
-      // 12. The precondition re-read with the confirm request's credential.
+      // 12. The precondition re-read with the confirm request's credential (step AI-5 D5: with
+      // the impact preview of the stored change merged under `preview`, so the state digest
+      // compares its change set; the stored request keeps the proposal's impact token).
       let target: unknown = null;
       if (spec.precondition !== null) {
         const read = await this.proposer.readPreconditions(
@@ -677,9 +681,10 @@ export class ConfirmationService {
     tool: OperationTool,
     spec: ConfirmationSpec,
     args: Readonly<Record<string, unknown>>,
+    snapshot: StoredPreconditions['snapshot'],
   ): ConfirmationRisk | null {
     try {
-      return effectiveRisk(tool, spec, args).risk;
+      return effectiveRisk(tool, spec, args, snapshot).risk;
     } catch {
       return null;
     }

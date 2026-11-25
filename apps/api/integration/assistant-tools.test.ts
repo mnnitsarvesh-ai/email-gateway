@@ -59,6 +59,15 @@
  *   platform `super_admin` under an override into an `it-*` organization gets the same; the same
  *   user without an override is offered every one of them.
  *
+ * - Step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D1, D7, §9 item 3): every
+ *   planned tool of the program is enabled. The read sweep covers 188 enabled reads (the new
+ *   single read `archive_admin_capture_issue` and the side-effect-free POST read
+ *   `provider_mail_flow_preview`; `intake_sources_get` without its omitted `reveal` input), the
+ *   write sweep all 168 enabled writes (the 25 archive, journaling, eDiscovery and
+ *   provider-connection writes through turns; the impact preview POST is the only other
+ *   side-effect-free request allowed), and a forced `intake_sources_get { reveal: 'true' }` is
+ *   `denied_schema` with no loopback request and no `journal_intake.address_revealed` audit row.
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers get /api/v1/assistant/tools
@@ -85,6 +94,7 @@ import {
   ENABLED_WRITES,
   enableAssistant,
   envelopesOf,
+  isImpactPreview,
   member,
   type Member,
   minimalArguments,
@@ -193,10 +203,11 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
   it('offers exactly the enabled tenant tools to a user with every tenant permission', async () => {
     // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes; step AI-R: 259 = 180
     // reads + 79 writes with the native `report_generate` and `report_send_email` (design 31 D1).
-    // Step AI-4 (design 32 D1): 329 = 186 reads + 143 writes.
-    expect(ENABLED_READS).toHaveLength(186);
-    expect(ENABLED_WRITES).toHaveLength(143);
-    expect(ENABLED_TOOLS).toHaveLength(329);
+    // Step AI-4 (design 32 D1): 329 = 186 reads + 143 writes; step AI-5 (design 33 D1): 356 =
+    // 188 reads + 168 writes (every planned tool of the program).
+    expect(ENABLED_READS).toHaveLength(188);
+    expect(ENABLED_WRITES).toHaveLength(168);
+    expect(ENABLED_TOOLS).toHaveLength(356);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -216,6 +227,9 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       'threat_indicators_get',
       'dlp_patterns_test',
       'risk_dry_run_dry_run',
+      // Step AI-5: the new single read and the side-effect-free mail-flow preview.
+      'archive_admin_capture_issue',
+      'provider_mail_flow_preview',
     ]) {
       expect(
         ENABLED_READS.map((t) => t.name),
@@ -660,6 +674,64 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
     },
   }),
   threat_indicators_remove: () => ({ id: '999999999999', reason: sweepReason }),
+  // --- step AI-5 (design 33 D1, D6): archive, journaling, eDiscovery, provider connections ---
+  archive_retention_create: () => ({ body: { name: `it sweep ${tag()}`, retentionDays: 30 } }),
+  archive_retention_update: () => ({
+    policyId: unknown(),
+    body: { expectedRowVersion: 1, name: 'it sweep', retentionDays: 30 },
+  }),
+  archive_retention_delete: () => ({ policyId: unknown() }),
+  archive_admin_retry: () => ({ messageId: unknown() }),
+  // The organization's own settings (no row yet: rowVersion 0): a pending proposal.
+  archive_admin_update: () => ({ body: { expectedRowVersion: 0, enabled: true } }),
+  journaling_update: () => ({ body: { expectedRowVersion: 0, enabled: true } }),
+  intake_sources_update: () => ({
+    sourceId: unknown(),
+    body: { expectedRowVersion: 1, displayName: 'it sweep' },
+  }),
+  intake_sources_disable: () => ({ sourceId: unknown() }),
+  intake_sources_attest: () => ({
+    sourceId: unknown(),
+    body: { code: 'journal.onprem.journal_recipient_created', attested: true },
+  }),
+  ediscovery_cases_create: () => ({ body: { name: `it sweep ${tag()}` } }),
+  ediscovery_cases_update: () => ({
+    caseId: unknown(),
+    body: { expectedRowVersion: 1, name: 'it sweep' },
+  }),
+  ediscovery_cases_close: () => ({ caseId: unknown() }),
+  ediscovery_cases_create_hold: () => ({
+    caseId: unknown(),
+    body: { name: 'it sweep', reason: sweepReason },
+  }),
+  ediscovery_searches_create: () => ({
+    caseId: unknown(),
+    body: { criteria: { from: inDays(-1), to: inDays(0) } },
+  }),
+  ediscovery_searches_review: () => ({
+    caseId: unknown(),
+    searchId: unknown(),
+    body: { tag: 'relevant', messageIds: [unknown()] },
+  }),
+  ediscovery_exports_create: () => ({ caseId: unknown(), body: { searchId: unknown() } }),
+  provider_connections_create: () => ({
+    body: { provider: 'microsoft_365', displayName: `it sweep ${tag()}` },
+  }),
+  provider_connections_update: () => ({
+    id: unknown(),
+    body: { displayName: 'it sweep', rowVersion: 1 },
+  }),
+  // The impact token and `confirm` are server-filled (D5): only the id.
+  provider_connections_disconnect: () => ({ id: unknown() }),
+  provider_attestations_record: () => ({
+    id: unknown(),
+    body: { code: 'm365.inbound_connector_created', attested: true },
+  }),
+  provider_domains_replace: () => ({ id: unknown(), body: { domainIds: [] } }),
+  provider_grants_revoke: () => ({ id: unknown(), profile: 'm365.mail_flow' }),
+  provider_grants_verify: () => ({ id: unknown(), profile: 'm365.mail_flow', body: {} }),
+  provider_health_check_now: () => ({ id: unknown() }),
+  provider_mail_flow_apply: () => ({ id: unknown(), body: { change: { kind: 'suspend' } } }),
 };
 
 /** Checksums of the tables an enabled write could change, for the sweep's organization. */
@@ -758,6 +830,18 @@ async function writeTargets(): Promise<Record<string, string>> {
     sweepOrganizations: String(
       await p.organization.count({ where: { slug: { startsWith: 'it-sweep-' } } }),
     ),
+    // Step AI-5: archive, journaling, eDiscovery and provider connections.
+    retentionPolicies: sha(await p.archiveRetentionPolicy.findMany({ where, orderBy })),
+    archiveSettings: sha(await p.archiveSetting.findMany({ where })),
+    captureIntents: sha(await p.archiveCaptureIntent.findMany({ where, orderBy })),
+    intakeSources: sha(await p.journalIntakeSource.findMany({ where, orderBy })),
+    cases: sha(await p.ediscoveryCase.findMany({ where, orderBy })),
+    legalHolds: sha(await p.archiveLegalHold.findMany({ where, orderBy })),
+    searches: sha(await p.ediscoverySearch.findMany({ where, orderBy })),
+    exports: sha(await p.ediscoveryExport.findMany({ where, orderBy })),
+    providerConnections: sha(await p.providerConnection.findMany({ where, orderBy })),
+    providerGrants: sha(await p.providerConnectionGrant.findMany({ where, orderBy })),
+    providerDomains: sha(await p.providerConnectionDomain.findMany({ where, orderBy })),
   };
 }
 
@@ -875,10 +959,15 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
     );
     expect(problems, JSON.stringify(problems, null, 1)).toEqual([]);
     expect(results).toHaveLength(ENABLED_WRITES.length);
-    // Only side-effect-free requests were sent: reads and the definition validation.
+    // Only side-effect-free requests were sent: reads, the definition validation and (step AI-5
+    // D5) the impact preview of a mail-flow apply or disconnect.
     const sent = recorder.calls.filter(
       (c) =>
-        !(c.method === 'GET' || (c.method === 'POST' && c.path === '/api/v1/policies/validate')),
+        !(
+          c.method === 'GET' ||
+          (c.method === 'POST' && c.path === '/api/v1/policies/validate') ||
+          isImpactPreview(c)
+        ),
     );
     expect(sent, JSON.stringify(sent)).toEqual([]);
     expect(recorder.calls.every((c) => c.idempotencyKey === null)).toBe(true);
@@ -948,6 +1037,12 @@ describe('no write without confirmation: every enabled write (§9 item 4)', () =
         'scan_training_train',
         'threat_hashes_add',
         'threat_indicators_add',
+        // Step AI-5: creates without a record to read and the organization's own settings.
+        'archive_retention_create',
+        'archive_admin_update',
+        'journaling_update',
+        'ediscovery_cases_create',
+        'provider_connections_create',
       ]),
     );
     expect(results.filter((r) => r.decision === 'denied_guard').map((r) => r.tool)).toEqual([
@@ -1166,4 +1261,57 @@ describe('step AI-4: platform-only tools never reach tenant principals (D11, I19
     const offered = new Set((home.body.tools as Array<{ name: string }>).map((t) => t.name));
     for (const tool of PLATFORM_ONLY_TOOLS) expect(offered.has(tool.name), tool.name).toBe(true);
   }, 300_000);
+});
+
+describe('step AI-5: omitted inputs (D7, I23)', () => {
+  it('a forced intake_sources_get { reveal: "true" } is denied_schema: no loopback request, no reveal audited', async () => {
+    const tool = ENABLED_READS.find((t) => t.name === 'intake_sources_get')!;
+    expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toEqual([
+      'sourceId',
+    ]);
+    const sourceId = unknown();
+    const conversation = await newConversation(ctx, sweepers[0]!);
+    const recorder = recordLoopback(ctx);
+    let forced: Response;
+    let plain: Response;
+    try {
+      forced = await turn(
+        ctx,
+        sweepers[0]!.headers,
+        conversation,
+        directive('intake_sources_get', { sourceId, reveal: 'true' }),
+      );
+      expect(recorder.calls.filter((c) => c.path.startsWith('/api/v1/journaling/'))).toEqual([]);
+      // Without the omitted input the same tool reaches the api (an unknown source: 404).
+      plain = await turn(
+        ctx,
+        sweepers[0]!.headers,
+        conversation,
+        directive('intake_sources_get', { sourceId }),
+      );
+    } finally {
+      recorder.restore();
+    }
+    expect(forced.body.executions[0]).toMatchObject({
+      tool: 'intake_sources_get',
+      decision: 'denied_schema',
+      status: 'refused',
+    });
+    expect(plain.body.executions[0]).toMatchObject({
+      tool: 'intake_sources_get',
+      decision: 'allowed',
+      status: 'failed',
+      httpStatus: 404,
+    });
+    expect(
+      recorder.calls
+        .filter((c) => c.path.startsWith('/api/v1/journaling/'))
+        .map((c) => `${c.method} ${c.path}`),
+    ).toEqual([`GET /api/v1/journaling/intake-sources/${sourceId}`]);
+    expect(
+      await ctx.prisma.auditLog.count({
+        where: { organizationId: org.id, action: 'journal_intake.address_revealed' },
+      }),
+    ).toBe(0);
+  });
 });

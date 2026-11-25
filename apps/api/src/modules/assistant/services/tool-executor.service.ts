@@ -23,6 +23,7 @@ import {
   type ToolResultEnvelope,
   toToolResultEnvelope,
   withCasPlaceholder,
+  withImpactTokenPlaceholder,
 } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
@@ -75,7 +76,8 @@ import type { GeneratedReport } from './reports/report-generator.service';
  * 5. refs `@r<seq>.<row>` → the public id stored for that ref in THIS conversation, else
  *    `denied_ref`;
  * 6. Ajv validation of the operation's input schema → `denied_schema` (paths, never values);
- *    for a write, the spec's CAS field is pre-filled with a placeholder when omitted;
+ *    for a write, the spec's CAS field is pre-filled with a placeholder when omitted, and so
+ *    are a server-filled impact token and `confirm` (step AI-5 D5);
  * 6a. a write's proposal guards that need no read (step AI-3 D3/D10: not the caller's own
  *    account, not the assistant's own feature, not `assistant:configure`) → `denied_guard`
  *    with the guard's fixed message, before any loopback call (not even the precondition read);
@@ -429,8 +431,12 @@ export class ToolExecutorService {
     }
 
     // D5 step 6: the operation's own input schema (Ajv 8 strict). A write's CAS field gets a
-    // placeholder when omitted (step AI-2 D1); the proposal injects the read's row version.
-    const checked = spec ? withCasPlaceholder(resolved, spec) : resolved;
+    // placeholder when omitted (step AI-2 D1); the proposal injects the read's row version. A
+    // server-filled impact token (step AI-5 D5) gets its placeholder too (`body.impactToken`,
+    // `body.confirm`); the proposal always replaces both with a fresh preview's values.
+    const checked = spec
+      ? withImpactTokenPlaceholder(withCasPlaceholder(resolved, spec), spec)
+      : resolved;
     const validation = compileValidator(found)(checked);
     if (!validation.ok) {
       const issues = validation.issues.map((issue) => `${issue.path} ${issue.message}`).join('; ');

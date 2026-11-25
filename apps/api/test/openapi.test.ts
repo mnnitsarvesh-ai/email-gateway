@@ -221,8 +221,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // §4.1): 421; plus the API key read of step AI-3
     // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422; plus the report read of step
     // AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1): 423; plus the four single-item reads of
-    // step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D8): 427, all under /api/v1.
-    expect(count).toBe(427);
+    // step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D8): 427; plus the capture-issue
+    // read of step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8): 428, all under
+    // /api/v1.
+    expect(count).toBe(428);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1184,12 +1186,14 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         op.key.includes(' /api/v1/legal-holds') ||
         op.key.includes(' /api/v1/ediscovery'),
     );
-    expect(ops).toHaveLength(41);
+    // 41 of step 8.1 plus the capture-issue read of step AI-5 (D8).
+    expect(ops).toHaveLength(42);
     // Step 8.6 D11: the settings and capture-issue operations are also in the journaling area.
     const alsoJournaling = [
       'GET /api/v1/archive/settings',
       'PUT /api/v1/archive/settings',
       'GET /api/v1/archive/capture-issues',
+      'GET /api/v1/archive/capture-issues/{messageId}',
       'POST /api/v1/archive/capture-issues/{messageId}/retry',
     ];
     for (const op of ops) {

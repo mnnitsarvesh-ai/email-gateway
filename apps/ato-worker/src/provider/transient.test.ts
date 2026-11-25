@@ -113,6 +113,8 @@ function streamHarness(options: {
 }) {
   const calls: Call[] = [];
   const sleeps: number[] = [];
+  /** Order of provider-context invalidations and adapter reads (step AI-5 D13). */
+  const order: string[] = [];
   let onceCalls = 0;
   const stream = streamRow(options.stream);
   const integration = integrationRow();
@@ -142,9 +144,12 @@ function streamHarness(options: {
   const adapter = {
     kind: 'microsoft_entra',
     version: MICROSOFT_ADAPTER_VERSION,
-    ingest:
-      options.ingest ??
-      (async () => ({ events: [], cursor: 'synthetic-cursor-1', hasMore: false })),
+    ingest: async (...args: unknown[]) => {
+      order.push('ingest');
+      return options.ingest
+        ? options.ingest(...(args as []))
+        : { events: [], cursor: 'synthetic-cursor-1', hasMore: false };
+    },
   };
   const runner = new IdpStreamRunner({
     db: {
@@ -171,6 +176,11 @@ function streamHarness(options: {
     metrics: null,
     idpMetrics: m.idp,
     seen: { mget: async () => [], set: async () => 'OK' },
+    providers: {
+      invalidate: (organizationId?: bigint) => {
+        order.push(`invalidate:${String(organizationId)}`);
+      },
+    },
     logger,
     now: () => NOW,
     config: {
@@ -188,6 +198,7 @@ function streamHarness(options: {
     runner,
     calls,
     sleeps,
+    order,
     warns,
     metricsText: m.text,
     onceCalls: () => onceCalls,
@@ -519,6 +530,28 @@ function rescheduledData(h: ReturnType<typeof probeHarness>): Record<string, unk
   expect(writes.length).toBeGreaterThanOrEqual(1);
   return (writes.at(-1)!.args as { data: Record<string, unknown> }).data;
 }
+
+describe('IdpStreamRunner: provider context of the organization (step AI-5 D13)', () => {
+  it('drops the organization’s cached provider context before reading the provider', async () => {
+    const h = streamHarness({});
+    await h.runner.runOnce();
+    expect(h.order).toEqual([`invalidate:${ORG}`, 'ingest']);
+  });
+
+  it('keeps the cache while the organization’s ATO feature is off (nothing is read)', async () => {
+    const h = streamHarness({
+      orgsGet: async () => ({
+        id: ORG,
+        exists: true,
+        active: true,
+        featureEnabled: false,
+        mode: 'enforce',
+      }),
+    });
+    await h.runner.runOnce();
+    expect(h.order).toEqual([]);
+  });
+});
 
 describe('IdpProbeLoop: transient database errors (D14)', () => {
   it('re-schedules a probe that throws P2024 within 60 s, health_status unchanged', async () => {

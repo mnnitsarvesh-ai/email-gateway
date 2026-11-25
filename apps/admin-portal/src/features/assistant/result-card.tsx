@@ -435,12 +435,42 @@ export function ErrorCard({ card, onNavigate }: { card: AssistantCard; onNavigat
 }
 
 /**
- * Portal pages that settle a guard refusal (step AI-4 D10): the four-eyes guard on an ATO response
- * decision points to the Responses page, where another responder decides it.
+ * Portal pages that settle a guard refusal. Step AI-4 D10: the four-eyes guard on an ATO response
+ * decision points to the Responses page, where another responder decides it. Step AI-5 D11 (each
+ * tool has one guard message): the default retention policy is changed under Retention and lock,
+ * a case's active holds are released on the Legal holds page, and capture issues are listed on
+ * the Capture issues tab of Retention and lock.
  */
 const GUARD_LINKS: Readonly<Record<string, CardLink>> = {
   ato_responses_approve: { label: 'Responses', href: '/ato/responses' },
   ato_responses_reject: { label: 'Responses', href: '/ato/responses' },
+  archive_retention_delete: { label: 'Retention and lock', href: '/archive/retention' },
+  ediscovery_cases_close: { label: 'Legal holds', href: '/legal-holds' },
+  archive_admin_retry: { label: 'Capture issues', href: '/archive/retention?tab=capture' },
+};
+
+/**
+ * Portal pages of operations that stay out of chat (step AI-5 D11, I22, I23): legal-hold release,
+ * record disposal and archive key rotation (critical), and provider credentials, consent and
+ * validation runs. The executor's `denied_not_applicable` names the tool the model called.
+ */
+const NOT_APPLICABLE_LINKS: Readonly<Record<string, CardLink>> = {
+  legal_holds_release: { label: 'Legal holds', href: '/legal-holds' },
+  archive_messages_dispose: { label: 'Retention and lock', href: '/archive/retention?tab=review' },
+  archive_admin_rotate: {
+    label: 'Retention and lock',
+    href: '/archive/retention?tab=immutability',
+  },
+  provider_grants_create: { label: 'Provider connections', href: '/integrations/providers' },
+  provider_grants_set_credentials: {
+    label: 'Provider connections',
+    href: '/integrations/providers',
+  },
+  provider_grants_complete_consent: {
+    label: 'Provider connections',
+    href: '/integrations/providers',
+  },
+  provider_validations_create: { label: 'Provider connections', href: '/integrations/providers' },
 };
 
 /** The page link a denied card offers for `tool` (allow-listed routes only), or `null`. */
@@ -448,8 +478,14 @@ export function deniedLinkOf(
   tool: string | undefined,
   decision: Exclude<ExecutionDecision, 'allowed'>,
 ): CardLink | null {
-  if (decision !== 'denied_guard' || !tool) return null;
-  const link = GUARD_LINKS[tool];
+  if (!tool) return null;
+  const links =
+    decision === 'denied_guard'
+      ? GUARD_LINKS
+      : decision === 'denied_not_applicable'
+        ? NOT_APPLICABLE_LINKS
+        : null;
+  const link = links && Object.prototype.hasOwnProperty.call(links, tool) ? links[tool] : undefined;
   if (!link) return null;
   const href = safePortalHref(link.href);
   return href ? { ...link, href } : null;
@@ -466,7 +502,7 @@ export function DeniedCard({
   title: string;
   decision: Exclude<ExecutionDecision, 'allowed'>;
   message: string;
-  /** The tool name: selects a page link for some guard refusals (step AI-4). */
+  /** The tool name: selects a page link for some refusals (steps AI-4, AI-5). */
   tool?: string;
   onNavigate?: () => void;
 }) {

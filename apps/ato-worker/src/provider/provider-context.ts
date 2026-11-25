@@ -82,8 +82,16 @@ export class ProviderContextCache {
     private readonly idpCapabilities = false,
   ) {}
 
-  invalidate(): void {
-    this.cache.clear();
+  /**
+   * Drops the cached context of one organization, or of every organization. The identity-provider
+   * stream runner drops its organization's entry before each poll (step AI-5 D13): an entry cached
+   * by another event shortly before the first probe stored the integration's capabilities would
+   * otherwise hide every provider stream from the rules for up to the TTL, and the events of that
+   * poll are remembered as processed, so their signals would never be raised.
+   */
+  invalidate(organizationId?: bigint): void {
+    if (organizationId === undefined) this.cache.clear();
+    else this.cache.delete(organizationId.toString());
   }
 
   async get(organizationId: bigint): Promise<ProviderContext> {

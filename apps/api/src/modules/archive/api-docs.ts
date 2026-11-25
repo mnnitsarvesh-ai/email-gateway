@@ -142,6 +142,12 @@ export const ApiArchiveMessageNotFound = (): MethodDecorator =>
     C.messageNotFound,
   ]);
 
+/** The coded 404 of the capture-issue routes (step AI-5 D8: the single read and the retry). */
+export const ApiCaptureIssueNotFound = (): MethodDecorator =>
+  ApiCodedError(404, 'No capture issue for this message in your organization', [
+    C.captureIssueNotFound,
+  ]);
+
 export const ApiContentGone = (): MethodDecorator =>
   ApiCodedError(
     410,

@@ -1,13 +1,19 @@
-import { escalationPath } from '../confirmations/escalation';
+import { escalationField, escalationPath } from '../confirmations/escalation';
 import { guardArgumentPaths, guardMessageKey } from '../confirmations/guards';
 import { hasImpactTemplate } from '../confirmations/impact';
-import { CONFIRMATION_SPECS, type ConfirmationSpec } from '../confirmations/specs';
+import {
+  CONFIRMATION_SPECS,
+  IMPACT_PREVIEW_TOOLS,
+  type ConfirmationSpec,
+} from '../confirmations/specs';
 import { isCredentialKey } from '../results/sanitize';
 import { phaseIndex } from './build';
 import {
   ASSISTANT_PROGRAM_PHASE,
   CONFIRMATION_SUPPORT_PHASE,
+  CREDENTIAL_FIELD_EXCEPTIONS,
   CREDENTIAL_KEY_EXCEPTIONS,
+  OPERATION_OVERRIDES,
 } from './manifest';
 import { NATIVE_OPERATION_ID, NATIVE_PATH_PREFIX } from './native';
 import type { OperationTool, ProgramPhase } from './types';
@@ -58,6 +64,21 @@ import type { OperationTool, ProgramPhase } from './types';
  *   query parameters (`threat_hashes_list { sha256 }`, an exact filter used with `select`);
  * - `redactParams` only on read tools (a write's stored request stays exact for its digest), and
  *   every listed path exists in the tool's input schema.
+ *
+ * Step AI-5 (design 33 D3, D5, D7, §4.3) adds:
+ *
+ * - a read-relative escalation (`below`, `becomes`, `differs`) needs a single precondition whose
+ *   `stateFields` include its `field` (the confirm-time state digest then proves the compared
+ *   value unchanged); its `path` exists in the write's input schema (as for every escalation);
+ * - `impactToken` only with a single precondition, only an `IMPACT_PREVIEW_TOOLS` tool that is an
+ *   enabled read, with params mapping exactly its path parameters to existing arguments, a
+ *   `change.from` that exists, and a write whose input schema has `body.impactToken` and
+ *   `body.confirm`; a server-filled `body.impactToken` satisfies the credential-key input rule
+ *   (no `CREDENTIAL_KEY_EXCEPTIONS` entry), no other credential-pattern input does;
+ * - no state, row-version or display field has a path segment matching the credential-key
+ *   pattern, except the named `CREDENTIAL_FIELD_EXCEPTIONS` (the preview's `impactToken` never is);
+ * - an `omitInputs` input (`OPERATION_OVERRIDES`) is absent from the tool's input schema and its
+ *   query parameters (the generator removes it and refuses required or missing inputs).
  */
 
 export interface ConsistencyOptions {
@@ -165,6 +186,11 @@ export function registryConsistencyIssues(
     for (const path of redacted)
       if (!argumentSchema(tool, path))
         issues.push(`${tool.name}: redactParams names the missing argument ${path}`);
+    // Step AI-5 D7: omitted inputs are never offered to the model.
+    if (!tool.native)
+      for (const path of OPERATION_OVERRIDES[tool.operationId]?.omitInputs ?? [])
+        if (argumentSchema(tool, path) || tool.queryParams.includes(path))
+          issues.push(`${tool.name}: the omitted input ${path} is still in the input schema`);
     if (!tool.enabled) continue;
     if (phaseIndex(tool.phase) > program)
       issues.push(
@@ -182,8 +208,12 @@ export function registryConsistencyIssues(
       issues.push(`${tool.name}: enabled write with the non-confirmable risk ${tool.risk}`);
     if (tool.native) continue; // credential keys of native inputs are checked above
     const allowed = CREDENTIAL_KEY_EXCEPTIONS[tool.operationId] ?? {};
+    // Step AI-5 D5: the server fills `body.impactToken` from a fresh preview (never the model).
+    const serverFilled = specByOperation.get(tool.operationId)?.impactToken
+      ? ['body.impactToken']
+      : [];
     for (const path of credentialKeyPaths(tool.inputSchema))
-      if (!Object.prototype.hasOwnProperty.call(allowed, path))
+      if (!Object.prototype.hasOwnProperty.call(allowed, path) && !serverFilled.includes(path))
         issues.push(`${tool.name}: input property ${path} matches the credential-key pattern`);
   }
 
@@ -234,6 +264,56 @@ export function registryConsistencyIssues(
       const path = escalationPath(escalation.when);
       if (!argumentSchema(write, path))
         issues.push(`${owner}: escalation reads the missing argument ${path}`);
+      // Step AI-5 D3: a read-relative condition compares with a state field of the single read.
+      const field = escalationField(escalation.when);
+      if (field !== null && (pre?.kind !== 'single' || !pre.stateFields.includes(field)))
+        issues.push(
+          `${owner}: read-relative escalation field ${field} must be a state field of a single precondition`,
+        );
+    }
+    // Step AI-5 §4.3: no state or display field holds a credential-pattern key.
+    if (pre) {
+      const fieldExceptions = CREDENTIAL_FIELD_EXCEPTIONS[spec.operationId] ?? {};
+      const fields = [
+        ...pre.stateFields,
+        ...(pre.rowVersionField ? [pre.rowVersionField] : []),
+        ...(pre.kind === 'single' ? (pre.displayFields ?? []) : []),
+      ];
+      for (const field of new Set(fields))
+        if (
+          field.split('.').some((segment) => isCredentialKey(segment.replace(/\[\]$/, ''))) &&
+          !Object.prototype.hasOwnProperty.call(fieldExceptions, field)
+        )
+          issues.push(
+            `${owner}: state or display field ${field} matches the credential-key pattern`,
+          );
+    }
+    // Step AI-5 D5: a server-filled impact token from an allow-listed preview.
+    if (spec.impactToken) {
+      const injection = spec.impactToken;
+      if (pre?.kind !== 'single') issues.push(`${owner}: impactToken needs a single precondition`);
+      if (!(IMPACT_PREVIEW_TOOLS as readonly string[]).includes(injection.previewTool))
+        issues.push(`${owner}: impactToken preview ${injection.previewTool} is not allow-listed`);
+      const preview = enabledRead(injection.previewTool, owner);
+      if (preview) {
+        const mapped = Object.keys(injection.params).sort();
+        if (JSON.stringify(mapped) !== JSON.stringify([...preview.pathParams].sort()))
+          issues.push(
+            `${owner}: impactToken params [${mapped.join(', ')}] must map exactly the path parameters [${preview.pathParams.join(', ')}] of ${preview.name}`,
+          );
+        if (!preview.hasBody || !argumentSchema(preview, 'body.change'))
+          issues.push(`${owner}: impactToken preview ${preview.name} takes no body.change`);
+      }
+      for (const [param, path] of Object.entries(injection.params))
+        if (!argumentSchema(write, path))
+          issues.push(`${owner}: impactToken param ${param} maps the missing argument ${path}`);
+      if ('from' in injection.change && !argumentSchema(write, injection.change.from))
+        issues.push(
+          `${owner}: impactToken change reads the missing argument ${injection.change.from}`,
+        );
+      for (const path of ['body.impactToken', 'body.confirm'])
+        if (!argumentSchema(write, path))
+          issues.push(`${owner}: impactToken needs ${path} in the write's input schema`);
     }
     if (pre?.kind === 'single') {
       const read = enabledRead(pre.tool, owner);

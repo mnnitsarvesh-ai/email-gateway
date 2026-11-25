@@ -34,6 +34,12 @@
  *   new single reads `bec_trusted_senders_get`, `bec_feedback_get_suppression` and
  *   `dlp_exceptions_get` answer `404` for A's ids, and `threat_indicators_get` answers `404` to
  *   a platform user for an organization's own indicator row (not the platform catalog).
+ * - step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md §9 item 3): the archive,
+ *   journaling, eDiscovery and provider-connection writes naming organization A's retention
+ *   policy, captured message, intake source, case, search or provider connection in
+ *   organization B's turn fail at the precondition read with the api's `404` and store no
+ *   confirmation; the new read `archive_admin_capture_issue` and the mail-flow preview answer
+ *   `404` for A's message and connection; nothing of A changes.
  *
  * Synthetic `it-*` organizations only.
  */
@@ -68,6 +74,13 @@
 // @covers get /api/v1/bec/suppressions/:id
 // @covers get /api/v1/dlp/exceptions/:id
 // @covers get /api/v1/platform/threat-indicators/:id
+// @covers get /api/v1/archive/capture-issues/:messageId
+// @covers get /api/v1/archive/retention-policies/:policyId
+// @covers get /api/v1/journaling/intake-sources/:sourceId
+// @covers get /api/v1/ediscovery/cases/:caseId
+// @covers get /api/v1/ediscovery/cases/:caseId/searches/:searchId
+// @covers get /api/v1/provider-connections/:id
+// @covers post /api/v1/provider-connections/:id/mail-flow/preview
 import { createHash, randomUUID } from 'node:crypto';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
@@ -77,6 +90,7 @@ import { systemScope } from '../src/auth-contracts/tenant-scope';
 import { IncidentStores } from '../src/modules/incidents/incident-stores';
 import { BecTenantDataRepository } from '../src/modules/tenant-data/bec-tenant-data.repository';
 import { DlpTenantDataRepository } from '../src/modules/tenant-data/dlp-tenant-data.repository';
+import { JournalIntakeTenantDataRepository } from '../src/modules/tenant-data/journal-intake-tenant-data.repository';
 import { PolicyTenantDataRepository } from '../src/modules/tenant-data/policy-tenant-data.repository';
 import { RiskTenantDataRepository } from '../src/modules/tenant-data/risk-tenant-data.repository';
 import type { IntegrationApp } from './support/app';
@@ -106,6 +120,7 @@ import {
   waitFor,
   waitForRead,
 } from './support/assistant';
+import { createCase, createHold, createIntakeSource } from './support/assistant-compliance';
 import { deleteAtoRows } from './support/ato';
 import { ProviderSeeder } from './support/ato-providers';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
@@ -1066,6 +1081,218 @@ describe('step AI-4 writes and reads naming another organization’s records (de
       id: indicator.id.toString(),
     });
     expect(read).toMatchObject({ decision: 'allowed', status: 'failed', httpStatus: 404 });
+    expect(await snapshot()).toEqual(before);
+  }, 300_000);
+});
+
+describe('step AI-5 writes and reads naming another organization’s records (design 33 §9 item 3)', () => {
+  it('fail at the precondition read with the api’s 404; nothing stored or changed', async () => {
+    const orgs = [orgA.id, orgB.id];
+    for (const organizationId of orgs) {
+      for (const featureKey of ['archiving', 'journal_intake']) {
+        await ctx.prisma.organizationFeature.upsert({
+          where: { organizationId_featureKey: { organizationId, featureKey } },
+          create: { organizationId, featureKey, enabled: true },
+          update: { enabled: true },
+        });
+      }
+    }
+    const identities: bigint[] = [];
+    fx.registerCleanup(async () => {
+      const where = { organizationId: { in: orgs } };
+      for (const id of orgs) {
+        await ctx.get(JournalIntakeTenantDataRepository).purgeOrganization(systemScope(id));
+      }
+      await ctx.prisma.ediscoverySearchHit.deleteMany({ where });
+      await ctx.prisma.ediscoveryExport.deleteMany({ where });
+      await ctx.prisma.ediscoverySearch.deleteMany({ where });
+      await ctx.prisma.ediscoveryCustodian.deleteMany({ where });
+      await ctx.prisma.archiveLegalHold.deleteMany({ where });
+      await ctx.prisma.ediscoveryCase.deleteMany({ where });
+      await ctx.prisma.archiveCaptureIntent.deleteMany({ where });
+      await ctx.prisma.archiveSetting.deleteMany({ where });
+      await ctx.prisma.archiveRetentionPolicy.deleteMany({ where });
+      await ctx.prisma.messageIdentity.deleteMany({ where: { id: { in: identities } } });
+    });
+
+    // Organization A's archive, journaling, eDiscovery and provider records.
+    const policy = await ctx.prisma.archiveRetentionPolicy.create({
+      data: {
+        organizationId: orgA.id,
+        name: 'Isolation default',
+        retentionDays: 365,
+        priority: 100,
+      },
+    });
+    await ctx.prisma.archiveSetting.create({
+      data: {
+        organizationId: orgA.id,
+        enabled: true,
+        defaultRetentionPolicyId: policy.id,
+        journalEnabledAt: new Date(),
+        generation: 1n,
+      },
+    });
+    await insertDomain(ctx, orgA, { label: 'iso-arch' });
+    const source = await createIntakeSource(ctx, adminA, 'Isolation intake');
+    const receivedAt = new Date(Date.now() - 3_600_000);
+    const identity = await ctx.prisma.messageIdentity.create({
+      data: {
+        organizationId: orgA.id,
+        ingestKey: `v2:it-iso-${randomUUID()}`,
+        receivedAt,
+      },
+      select: { id: true, publicId: true },
+    });
+    identities.push(identity.id);
+    await ctx.prisma.archiveCaptureIntent.create({
+      data: {
+        receivedAt,
+        organizationId: orgA.id,
+        messageId: identity.id,
+        direction: 'inbound',
+        sourceJournal: true,
+        status: 'failed',
+        lastErrorCode: 'storage_error',
+        attempts: 2,
+        nextCheckAt: new Date(Date.now() + 86_400_000),
+        settingsGeneration: 1n,
+      },
+    });
+    const caseId = await createCase(ctx, adminA);
+    await createHold(ctx, adminA, caseId);
+    const caseRow = await ctx.prisma.ediscoveryCase.findUniqueOrThrow({
+      where: { publicId: caseId },
+    });
+    // A completed search (the archive-worker's row, written on the writer).
+    const search = await ctx.prisma.ediscoverySearch.create({
+      data: {
+        caseId: caseRow.id,
+        organizationId: orgA.id,
+        criteria: {},
+        criteriaSha256: 'e'.repeat(64),
+        status: 'completed',
+        hitCount: 0,
+        indexComplete: true,
+        completedAt: new Date(),
+      },
+    });
+    const connection = await new ProviderSeeder(ctx, fx).connection(orgA);
+
+    const snapshot = async () => ({
+      policy: await ctx.prisma.archiveRetentionPolicy.findUniqueOrThrow({
+        where: { id: policy.id },
+        select: { rowVersion: true, retentionDays: true, deletedAt: true },
+      }),
+      intent: (
+        await ctx.prisma.archiveCaptureIntent.findFirstOrThrow({
+          where: { organizationId: orgA.id, messageId: identity.id },
+        })
+      ).status,
+      source: await ctx.prisma.journalIntakeSource.findUniqueOrThrow({
+        where: { publicId: source.id },
+        select: { status: true, rowVersion: true },
+      }),
+      case: await ctx.prisma.ediscoveryCase.findUniqueOrThrow({
+        where: { id: caseRow.id },
+        select: { status: true, rowVersion: true },
+      }),
+      holds: await ctx.prisma.archiveLegalHold.count({ where: { organizationId: orgA.id } }),
+      searches: await ctx.prisma.ediscoverySearch.count({ where: { organizationId: orgA.id } }),
+      exports: await ctx.prisma.ediscoveryExport.count({ where: { organizationId: orgA.id } }),
+      connection: await ctx.prisma.providerConnection.findUniqueOrThrow({
+        where: { id: connection.id },
+        select: { status: true, rowVersion: true, displayName: true },
+      }),
+      grants: await ctx.prisma.providerConnectionGrant.findMany({
+        where: { connectionId: connection.id },
+        select: { status: true, rowVersion: true },
+      }),
+    });
+    const before = await snapshot();
+
+    const id = connection.publicId;
+    const profile = 'm365.mail_flow';
+    const cases: Array<[string, Record<string, unknown>]> = [
+      [
+        'archive_retention_update',
+        {
+          policyId: policy.publicId,
+          body: { expectedRowVersion: 1, name: 'taken over', retentionDays: 1 },
+        },
+      ],
+      ['archive_retention_delete', { policyId: policy.publicId }],
+      ['archive_admin_retry', { messageId: identity.publicId }],
+      [
+        'intake_sources_update',
+        { sourceId: source.id, body: { expectedRowVersion: 1, status: 'paused' } },
+      ],
+      ['intake_sources_disable', { sourceId: source.id }],
+      [
+        'intake_sources_attest',
+        {
+          sourceId: source.id,
+          body: { code: 'journal.onprem.journal_recipient_created', attested: true },
+        },
+      ],
+      ['ediscovery_cases_update', { caseId, body: { expectedRowVersion: 1, name: 'taken over' } }],
+      ['ediscovery_cases_close', { caseId }],
+      [
+        'ediscovery_cases_create_hold',
+        { caseId, body: { name: 'taken over', reason: 'taken over' } },
+      ],
+      [
+        'ediscovery_searches_create',
+        { caseId, body: { criteria: { from: '2026-01-01', to: '2026-12-31' } } },
+      ],
+      [
+        'ediscovery_searches_review',
+        {
+          caseId,
+          searchId: search.publicId,
+          body: { tag: 'not_relevant', messageIds: [identity.publicId] },
+        },
+      ],
+      ['ediscovery_exports_create', { caseId, body: { searchId: search.publicId } }],
+      ['provider_connections_update', { id, body: { displayName: 'taken over', rowVersion: 1 } }],
+      ['provider_connections_disconnect', { id }],
+      [
+        'provider_attestations_record',
+        { id, body: { code: 'm365.inbound_connector_created', attested: true } },
+      ],
+      ['provider_domains_replace', { id, body: { domainIds: [] } }],
+      ['provider_grants_revoke', { id, profile }],
+      ['provider_grants_verify', { id, profile, body: {} }],
+      ['provider_health_check_now', { id }],
+      ['provider_mail_flow_apply', { id, body: { change: { kind: 'suspend' } } }],
+      // The new single read (D8) and the side-effect-free mail-flow preview (D5).
+      ['archive_admin_capture_issue', { messageId: identity.publicId }],
+      ['provider_mail_flow_preview', { id, body: { change: { kind: 'suspend' } } }],
+    ];
+    let conversation = '';
+    let turns = 0;
+    for (const [tool, args] of cases) {
+      if (turns++ % 5 === 0) conversation = await newConversation(ctx, adminB);
+      const res = await turn(ctx, adminB.headers, conversation, directive(tool, args));
+      expect(res.status, tool).toBe(200);
+      expect(res.body.executions[0], tool).toMatchObject({
+        tool,
+        decision: 'allowed',
+        status: 'failed',
+        httpStatus: 404,
+      });
+      expect(res.body.confirmations, tool).toEqual([]);
+    }
+    expect(
+      await ctx.prisma.aiChatActionConfirmation.count({ where: { organizationId: orgB.id } }),
+    ).toBe(0);
+    // A itself reads its own capture issue (the 404 above is the tenant boundary, not a gap).
+    const own = await waitForRead(
+      ctx,
+      adminA,
+      `/api/v1/archive/capture-issues/${identity.publicId}`,
+    );
+    expect(own).toMatchObject({ messageId: identity.publicId, status: 'failed' });
     expect(await snapshot()).toEqual(before);
   }, 300_000);
 });

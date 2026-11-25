@@ -23,7 +23,10 @@ import {
   AI2_WRITES_TESTED_BY,
   AI3_WRITES_TESTED_BY,
   AI4_WRITES_TESTED_BY,
+  AI5_WRITES_TESTED_BY,
   ASSISTANT_PROGRAM_PHASE,
+  COMPLIANCE_WRITES_TESTED_BY,
+  INTEGRATIONS_WRITES_TESTED_BY,
   ATO_WRITES_TESTED_BY,
   DETECTION_WRITES_TESTED_BY,
   PLATFORM_OPS_WRITES_TESTED_BY,
@@ -115,8 +118,8 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('AI-4: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-4');
+  it('AI-5: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-5');
     expect(PROGRAM_PHASES).toEqual(['AI-1', 'AI-2', 'AI-3', 'AI-R', 'AI-4', 'AI-5', 'AI-6']);
     expect(registryConsistencyIssues(ALL_TOOLS, { openApiOperationIds: OPENAPI_IDS })).toEqual([]);
     // AI-R adds no OpenAPI tool; every generated tool of AI-5 and later stays disabled.
@@ -130,7 +133,8 @@ describe('registry completeness and consistency (D3)', () => {
           expect(tool.testedBy, tool.name).toBe(
             AI2_WRITES_TESTED_BY[tool.operationId] ??
               AI3_WRITES_TESTED_BY[tool.operationId] ??
-              AI4_WRITES_TESTED_BY[tool.operationId],
+              AI4_WRITES_TESTED_BY[tool.operationId] ??
+              AI5_WRITES_TESTED_BY[tool.operationId],
           );
           expect(confirmationSpecOf(tool.operationId), tool.name).toBeDefined();
           expect(['low', 'medium', 'high'], tool.name).toContain(tool.risk);
@@ -162,6 +166,9 @@ describe('registry completeness and consistency (D3)', () => {
       ai4(PLATFORM_OPS_WRITES_TESTED_BY),
     ]).toEqual([22, 34, 8]);
     expect(Object.keys(AI4_WRITES_TESTED_BY)).toHaveLength(64);
+    const ai5 = (suite: string) =>
+      Object.values(AI5_WRITES_TESTED_BY).filter((value) => value === suite).length;
+    expect([ai5(COMPLIANCE_WRITES_TESTED_BY), ai5(INTEGRATIONS_WRITES_TESTED_BY)]).toEqual([16, 9]);
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
     for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
       expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
@@ -781,7 +788,10 @@ describe('permission pre-filter, catalogue index, describe', () => {
       available: true,
       unavailableReason: null,
     });
-    expect(describeTool(findTool('archive_retention_create')!)).toMatchObject({
+    // Every planned tool is enabled since AI-5: a disabled record is synthetic.
+    expect(
+      describeTool({ ...findTool('archive_retention_create')!, enabled: false }),
+    ).toMatchObject({
       access: 'write',
       available: false,
       unavailableReason: 'disabled',
@@ -1003,7 +1013,7 @@ describe('native tools (step AI-R D1)', () => {
   });
 
   it('AI-4 totals (design 32 D1): 427 operations, 353 operation tools (327 enabled), 329 enabled tools (186 reads, 143 writes)', () => {
-    if (operations.length !== 427) return; // later steps add operations; the rules above still hold
+    if (operations.length !== 427) return; // later steps add operations; the rules above still hold (AI-5 totals below)
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
     expect(OPERATION_TOOLS).toHaveLength(353);
@@ -1066,6 +1076,165 @@ describe('native tools (step AI-R D1)', () => {
     );
     expect(matrix).toMatch(
       /\| `report_send_email` .*\| W +\| medium +\| confirm\+impact +\| IMPLEMENTED +\| AI-R +\| \/assistant +\|/,
+    );
+  });
+});
+
+describe('step AI-5 (design 33 D1, D2, D7, D8, D10)', () => {
+  it('AI-5 totals (D1, §11): 428 operations, 354 operation tools (354 enabled), 356 enabled tools (188 reads, 168 writes), MISSING 0', () => {
+    const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    expect(operations).toHaveLength(428);
+    expect(OPERATION_TOOLS).toHaveLength(354);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(74);
+    expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
+    expect(count((t) => t.enabled)).toBe(354);
+    expect(enabled).toHaveLength(356);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(188);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(168);
+    expect(count((t) => t.status === 'MISSING')).toBe(0);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 174, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 0 },
+    );
+    // AI-5: the 25 writes, the side-effect-free preview read and the new capture-issue read.
+    const ai5 = OPERATION_TOOLS.filter((t) => t.phase === 'AI-5');
+    expect(ai5.every((t) => t.enabled && t.status === 'IMPLEMENTED')).toBe(true);
+    expect(
+      ai5
+        .filter((t) => t.access === 'write')
+        .map((t) => t.operationId)
+        .sort(),
+    ).toEqual(Object.keys(AI5_WRITES_TESTED_BY).sort());
+    expect(
+      ai5
+        .filter((t) => t.access === 'read')
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual(['archive_admin_capture_issue', 'provider_mail_flow_preview']);
+    const writesByRisk = Object.fromEntries(
+      ['low', 'medium', 'high'].map((r) => [
+        r,
+        ai5.filter((t) => t.access === 'write' && t.risk === r).length,
+      ]),
+    );
+    expect(writesByRisk).toEqual({ low: 7, medium: 10, high: 8 });
+    expect(ALL_TOOLS.some((t) => t.enabled && phase(t.phase) > phase('AI-5'))).toBe(false);
+  });
+
+  it('risks of D2 and the unchanged §4.4 rules of the AI-5 writes', () => {
+    const risks = Object.fromEntries(
+      Object.keys(AI5_WRITES_TESTED_BY).map((id) => {
+        const tool = OPERATION_TOOLS.find((t) => t.operationId === id)!;
+        return [tool.name, tool.risk];
+      }),
+    );
+    expect(risks).toEqual({
+      archive_retention_create: 'high',
+      archive_retention_update: 'medium',
+      archive_retention_delete: 'high',
+      archive_admin_retry: 'medium',
+      archive_admin_update: 'medium',
+      journaling_update: 'medium',
+      intake_sources_update: 'low',
+      intake_sources_disable: 'high',
+      intake_sources_attest: 'medium',
+      ediscovery_cases_create: 'low',
+      ediscovery_cases_update: 'low',
+      ediscovery_cases_close: 'medium',
+      ediscovery_cases_create_hold: 'high',
+      ediscovery_searches_create: 'low',
+      ediscovery_searches_review: 'medium',
+      ediscovery_exports_create: 'high',
+      provider_connections_create: 'low',
+      provider_connections_update: 'low',
+      provider_connections_disconnect: 'high',
+      provider_attestations_record: 'medium',
+      provider_domains_replace: 'medium',
+      provider_grants_revoke: 'high',
+      provider_grants_verify: 'medium',
+      provider_health_check_now: 'low',
+      provider_mail_flow_apply: 'high',
+    });
+    expect(findTool('provider_mail_flow_preview')).toMatchObject({
+      access: 'read',
+      risk: 'read',
+      method: 'POST',
+      phase: 'AI-5',
+      enabled: true,
+      testedBy: READ_TOOLS_TESTED_BY,
+    });
+  });
+
+  it('the capture-issue read (D8) is an AI-5 read of the sweep with the message ref', () => {
+    expect(findTool('archive_admin_capture_issue')).toMatchObject({
+      operationId: 'ArchiveAdminController_captureIssue_v1',
+      method: 'GET',
+      pathTemplate: '/api/v1/archive/capture-issues/{messageId}',
+      access: 'read',
+      risk: 'read',
+      phase: 'AI-5',
+      enabled: true,
+      testedBy: READ_TOOLS_TESTED_BY,
+      pathParams: ['messageId'],
+      display: expect.objectContaining({ refField: 'messageId' }),
+    });
+  });
+
+  it('untrusted fields and display hints of D10 name response paths; hits refs are message ids', () => {
+    const untrusted = (name: string) => findTool(name)!.untrustedFields;
+    expect(untrusted('archive_retention_list')).toContain('data[].name');
+    expect(untrusted('archive_retention_get')).toContain('name');
+    for (const name of [
+      'ediscovery_cases_get',
+      'ediscovery_cases_update',
+      'ediscovery_cases_close',
+    ])
+      expect(untrusted(name), name).toEqual(
+        expect.arrayContaining(['name', 'description', 'matterReference']),
+      );
+    expect(untrusted('ediscovery_cases_list')).toEqual(
+      expect.arrayContaining(['data[].name', 'data[].description', 'data[].matterReference']),
+    );
+    expect(untrusted('ediscovery_cases_create_hold')).toEqual(
+      expect.arrayContaining(['name', 'reason']),
+    );
+    expect(untrusted('legal_holds_list')).toEqual(
+      expect.arrayContaining(['data[].name', 'data[].reason']),
+    );
+    expect(untrusted('intake_sources_get')).toContain('displayName');
+    expect(untrusted('intake_sources_list')).toContain('data[].displayName');
+    expect(untrusted('provider_connections_get')).toContain('displayName');
+    expect(untrusted('provider_connections_list')).toContain('data[].displayName');
+    expect(untrusted('provider_connections_disconnect')).toContain('connection.displayName');
+    // The hits' row refs are the archive message ids `ediscovery_searches_review` expects.
+    const hits = findTool('ediscovery_searches_hits')!;
+    expect(hits.display.refField).toBe('messageId');
+    const review = findTool('ediscovery_searches_review')!;
+    expect(
+      (review.inputSchema.properties as Record<string, { properties: Record<string, unknown> }>)
+        .body!.properties.messageIds,
+    ).toMatchObject({ type: 'array', items: { format: 'uuid' } });
+    // Creates keep the default ref field (`id`) so follow-ups use the created row's ref.
+    for (const name of [
+      'archive_retention_create',
+      'ediscovery_cases_create',
+      'ediscovery_cases_create_hold',
+      'ediscovery_exports_create',
+      'provider_connections_create',
+    ])
+      expect(findTool(name)!.display.refField, name).toBeUndefined();
+  });
+
+  it('description overrides of D5 and D10', () => {
+    expect(findTool('provider_mail_flow_apply')!.description).toContain(
+      '`impactToken` and `confirm` are filled by the server from a fresh preview; pass only `change`.',
+    );
+    expect(findTool('provider_connections_disconnect')!.description).toContain(
+      'Pass only `id`; the server previews the disconnect',
+    );
+    expect(findTool('provider_connections_wizard')!.description).toContain(
+      'Use `nextAction` to guide the setup; steps `connect` (grants, credentials, consent) and `validate` are done in the portal.',
     );
   });
 });

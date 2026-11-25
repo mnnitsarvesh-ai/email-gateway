@@ -861,6 +861,17 @@ export const ARCHIVE_EXAMPLES = {
     ],
     nextCursor: null,
   } satisfies CaptureIssuePage,
+  // Step AI-5 D8: the single read answers any intent status (here a captured one).
+  captureIssue: {
+    messageId: ID.message,
+    receivedAt: '2026-11-16T10:15:00.000Z',
+    status: 'captured_open',
+    code: null,
+    attempts: 1,
+    sources: { journal: true, policy: false },
+    nextCheckAt: '2026-11-16T10:20:00.000Z',
+    createdAt: '2026-11-16T10:15:02.000Z',
+  } satisfies CaptureIssueView,
   captureRetry: {
     messageId: ID.message,
     status: 'pending',

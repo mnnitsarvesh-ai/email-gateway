@@ -561,6 +561,43 @@ export class ArchiveRecordsRepository {
     }));
   }
 
+  /**
+   * Step AI-5 D8: the capture intent of one message by its public id, whatever its status (the
+   * list's projection; non-locking). The registry key and the intent are read where the list
+   * reads (`PrismaReadService.client`: the replica, or the writer inside `runReadsOnWriter`), by
+   * the unique `(message_id, received_at)` of the intent (partition pruned). Null when the
+   * message is unknown, of another organization or has no intent.
+   */
+  async captureIssue(scope: TenantScope, publicId: string): Promise<CaptureIssueRow | null> {
+    const key = await this.messageKey(scope, publicId);
+    if (key === null) return null;
+    const row = await this.db.archiveCaptureIntent.findFirst({
+      where: tenantWhere(scope, { messageId: key.id, receivedAt: key.receivedAt }),
+      select: {
+        id: true,
+        receivedAt: true,
+        messageId: true,
+        organizationId: true,
+        status: true,
+        skipReason: true,
+        lastErrorCode: true,
+        attempts: true,
+        sourceJournal: true,
+        sourcePolicy: true,
+        nextCheckAt: true,
+        createdAt: true,
+      },
+    });
+    if (row === null) return null;
+    assertEcho('archive.intents.issue', [row], {
+      organizationId: scope.organizationId,
+      messageId: key.id,
+      receivedAt: key.receivedAt,
+    });
+    const { organizationId: _o, ...rest } = row;
+    return { ...rest, messagePublicId: key.publicId };
+  }
+
   /** The intent of a message, locked (writer). */
   async lockIntent(
     tx: Tx,

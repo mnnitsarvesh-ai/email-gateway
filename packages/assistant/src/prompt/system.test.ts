@@ -20,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/5', () => {
+describe('assistant-system/6', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/5');
+    expect(PROMPT_VERSION).toBe('assistant-system/6');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -105,7 +105,6 @@ describe('assistant-system/5', () => {
     const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
     const v4 = read('assistant-system-4.md');
     const v5 = read('assistant-system-5.md');
-    expect(loadSystemPromptTemplate().text).toBe(v5.trim());
     const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
     expect(scope(v5)).toBe(scope(v4));
     expect(scope(v5).length).toBeGreaterThan(20);
@@ -120,6 +119,28 @@ describe('assistant-system/5', () => {
     expect(v5.indexOf('\n13. ')).toBeLessThan(v5.indexOf('\n14. '));
     expect(v5.indexOf('\n14. ')).toBeLessThan(v5.indexOf('# Tools'));
     for (const n of [1, 2, 3, 4])
+      expect(read(`assistant-system-${n}.md`).length, String(n)).toBeGreaterThan(0);
+  });
+
+  it('is assistant-system/5 plus rule 15 (step AI-5 D11); the Scope section is byte-identical', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
+    const v5 = read('assistant-system-5.md');
+    const v6 = read('assistant-system-6.md');
+    expect(loadSystemPromptTemplate().text).toBe(v6.trim());
+    const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
+    expect(scope(v6)).toBe(scope(v5));
+    expect(scope(v6).length).toBeGreaterThan(20);
+    expect(v6.replace(/^15\. .*\n/m, '')).toBe(v5);
+    expect([...v6.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: 15 }, (_, i) => i + 1),
+    );
+    expect(v6).toContain(
+      '15. Compliance and integrations: archived message bodies and attachments, previews, downloads, export files, record disposal, legal-hold release and archive key rotation are only in the portal; link to the page. An eDiscovery export starts after the user confirms it, and its file is downloaded in the portal. Changes that shorten retention, delete expired records without review, change which mail a retention policy matches, turn off or replace capture settings, or pause, disable or loosen a journal intake source need the user to re-authenticate in the confirmation card. For a provider connection, follow its wizard (`nextAction`): you may create and rename it, link domains, record attestations, check health, verify or revoke grants, and preview and apply mail-flow changes (pass only the change; the server takes the impact token from a fresh preview). Credentials, client secrets, certificates, OAuth consent and validation runs are done only in the portal; never ask the user to paste a secret into chat, and if they do, tell them to remove it and use the portal.',
+    );
+    // Rule 15 sits between rule 14 and the Tools section; the files 1 to 5 stay readable.
+    expect(v6.indexOf('\n14. ')).toBeLessThan(v6.indexOf('\n15. '));
+    expect(v6.indexOf('\n15. ')).toBeLessThan(v6.indexOf('# Tools'));
+    for (const n of [1, 2, 3, 4, 5])
       expect(read(`assistant-system-${n}.md`).length, String(n)).toBeGreaterThan(0);
   });
 

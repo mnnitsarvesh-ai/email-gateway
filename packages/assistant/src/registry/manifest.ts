@@ -24,9 +24,10 @@ import type {
  * Phase the program has reached: tools of this phase and earlier are enabled (reads; writes with
  * a `testedBy` suite and a confirmation spec, step AI-2; identity and tenant administration
  * writes, step AI-3; the native report tools, step AI-R, which adds no OpenAPI tool; security
- * operations, step AI-4).
+ * operations, step AI-4; compliance and integrations, step AI-5, after which every planned
+ * OpenAPI tool of the program is enabled).
  */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-4';
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-5';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';
@@ -249,6 +250,57 @@ export const AI4_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
   ),
 };
 
+/** Integration suites of the AI-5 writes (design 33 §4.3, §9 item 3). */
+export const COMPLIANCE_WRITES_TESTED_BY =
+  'apps/api/integration/assistant-writes-compliance.test.ts';
+export const INTEGRATIONS_WRITES_TESTED_BY =
+  'apps/api/integration/assistant-writes-integrations.test.ts';
+
+/**
+ * The 25 write operations of step AI-5 and the suite that covers each (`testedBy`): 5 archive,
+ * 4 journaling and 7 eDiscovery writes (16), 9 provider-connection writes.
+ *
+ * Rule for later steps (design 33 I22): when the request body of one of these routes gains a
+ * field that shortens retention, deletes records without review, changes which mail a retention
+ * policy matches, turns capture off or narrows it, or loosens a journal intake source, add a risk
+ * escalation for it to the operation's confirmation spec.
+ */
+export const AI5_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    [
+      'ArchiveRetentionController_create_v1',
+      'ArchiveRetentionController_update_v1',
+      'ArchiveRetentionController_delete_v1',
+      'ArchiveAdminController_retry_v1',
+      'ArchiveAdminController_update_v1',
+      'JournalingController_update_v1',
+      'IntakeSourcesController_update_v1',
+      'IntakeSourcesController_disable_v1',
+      'IntakeSourcesController_attest_v1',
+      'EdiscoveryCasesController_create_v1',
+      'EdiscoveryCasesController_update_v1',
+      'EdiscoveryCasesController_close_v1',
+      'EdiscoveryCasesController_createHold_v1',
+      'EdiscoverySearchesController_create_v1',
+      'EdiscoverySearchesController_review_v1',
+      'EdiscoveryExportsController_create_v1',
+    ].map((id) => [id, COMPLIANCE_WRITES_TESTED_BY]),
+  ),
+  ...Object.fromEntries(
+    [
+      'ProviderConnectionsController_create_v1',
+      'ProviderConnectionsController_update_v1',
+      'ProviderConnectionsController_disconnect_v1',
+      'ProviderAttestationsController_record_v1',
+      'ProviderDomainsController_replace_v1',
+      'ProviderGrantsController_revoke_v1',
+      'ProviderGrantsController_verify_v1',
+      'ProviderHealthController_checkNow_v1',
+      'ProviderMailFlowController_apply_v1',
+    ].map((id) => [id, INTEGRATIONS_WRITES_TESTED_BY]),
+  ),
+};
+
 /**
  * Input properties of enabled writes whose key matches the credential-key pattern
  * (`isCredentialKey`) but which are not credentials (step AI-3 D6, I14). Named per operation and
@@ -280,7 +332,37 @@ export const CREDENTIAL_KEY_EXCEPTIONS: Readonly<Record<string, Readonly<Record<
     IncidentsController_update_v1: {
       'body.resolution.code': 'incident resolution code (an enum value)',
     },
+    // Step AI-5: attestation codes name the attested setup step (identifiers).
+    IntakeSourcesController_attest_v1: {
+      'body.code': 'attestation code (the identifier of an attested setup step)',
+    },
+    ProviderAttestationsController_record_v1: {
+      'body.code': 'attestation code (the identifier of an attested setup step)',
+    },
   };
+
+/**
+ * State and display fields of confirmation specs whose path has a segment matching the
+ * credential-key pattern but which are not credentials (step AI-5 §4.3: no state or display
+ * field may hold a credential-pattern key, such as the preview's `impactToken`). Named per
+ * operation and field path with the reason.
+ */
+export const CREDENTIAL_FIELD_EXCEPTIONS: Readonly<
+  Record<string, Readonly<Record<string, string>>>
+> = {
+  UsersController_update_v1: { 'roles[].key': 'role keys (identifiers)' },
+  UsersController_changeStatus_v1: { 'roles[].key': 'role keys (identifiers)' },
+  UsersController_replaceRoles_v1: { 'roles[].key': 'role keys (identifiers)' },
+  UsersController_remove_v1: { 'roles[].key': 'role keys (identifiers)' },
+  DomainsController_remove_v1: { unicodeName: 'the Unicode form of the domain name' },
+  DomainsController_changeStatus_v1: { unicodeName: 'the Unicode form of the domain name' },
+  OrganizationsController_update_v1: { 'plan.code': 'plan code (an identifier)' },
+  WebhookDeliveriesController_replay_v1: { lastResponseCode: 'HTTP status of the last attempt' },
+  BecFeedbackController_deleteSuppression_v1: { reasonCode: 'BEC reason code (a rule identifier)' },
+  ArchiveAdminController_retry_v1: {
+    code: 'capture failure code (an error identifier, never text)',
+  },
+};
 
 export const NOT_APPLICABLE_REASONS = {
   ceremony: 'credential/session ceremony (portal only)',
@@ -450,6 +532,10 @@ export const RISK_OVERRIDES: Readonly<Record<string, ToolRisk>> = {
   AtoProvidersController_create_v1: 'medium',
   AtoProvidersController_healthCheck_v1: 'low',
   AtoAccountMailboxController_refresh_v1: 'low',
+  // Step AI-5 D2 (I22): a new retention policy can take precedence and shorten retention or
+  // delete on expiry; a provider health check only queues a read-only probe.
+  ArchiveRetentionController_create_v1: 'high',
+  ProviderHealthController_checkNow_v1: 'low',
 };
 
 export const CONFIRM_OF_RISK: Readonly<Record<ToolRisk, ToolConfirm>> = {
@@ -1083,6 +1169,75 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   // The created hash is row ref r<seq>.1 by its SHA-256 (it has no other id).
   ThreatHashesController_add_v1: { display: { refField: 'sha256' } },
 
+  // --- compliance and integrations (step AI-5 D7, D8, D10) ---
+  // Tenant-authored free text: retention policy, case and hold names and descriptions, intake
+  // source and provider connection display names; the provider-reported tenant name.
+  ArchiveRetentionController_list_v1: {
+    display: columns('name', 'retentionDays', 'onExpiry', 'priority', 'isDefault'),
+    untrustedFields: ['data[].name'],
+  },
+  ArchiveRetentionController_get_v1: { untrustedFields: ['name'] },
+  ArchiveRetentionController_create_v1: { untrustedFields: ['name'] },
+  ArchiveRetentionController_update_v1: { untrustedFields: ['name'] },
+  // The single read the capture-retry card needs (D8); covered by the read sweep.
+  ArchiveAdminController_captureIssue_v1: { phase: 'AI-5', display: { refField: 'messageId' } },
+  EdiscoveryCasesController_list_v1: {
+    display: columns('name', 'status', 'matterReference', 'createdAt'),
+    untrustedFields: ['data[].name', 'data[].description', 'data[].matterReference'],
+  },
+  EdiscoveryCasesController_get_v1: { untrustedFields: ['name', 'description', 'matterReference'] },
+  EdiscoveryCasesController_create_v1: {
+    untrustedFields: ['name', 'description', 'matterReference'],
+  },
+  EdiscoveryCasesController_update_v1: {
+    untrustedFields: ['name', 'description', 'matterReference'],
+  },
+  EdiscoveryCasesController_close_v1: {
+    untrustedFields: ['name', 'description', 'matterReference'],
+  },
+  EdiscoveryCasesController_createHold_v1: { untrustedFields: ['name', 'reason'] },
+  LegalHoldsController_list_v1: {
+    display: columns('name', 'status', 'caseId', 'createdAt'),
+    untrustedFields: ['data[].name', 'data[].reason', 'data[].releaseReason'],
+  },
+  LegalHoldsController_get_v1: { untrustedFields: ['name', 'reason', 'releaseReason'] },
+  IntakeSourcesController_list_v1: {
+    display: columns('displayName', 'kind', 'status', 'requireTls'),
+    untrustedFields: ['data[].displayName'],
+  },
+  // The intake address is the source's credential: never revealed through chat (I23, A5-5).
+  IntakeSourcesController_get_v1: {
+    description:
+      'The source with its health and the counters of the last 7 UTC days (accepted, duplicates, bytes, refusals by reason, proof drops, unwrap failures). The intake address and the Google header token are always masked here; showing them in clear is done only in the portal.',
+    untrustedFields: ['displayName'],
+    omitInputs: ['reveal'],
+  },
+  IntakeSourcesController_update_v1: { untrustedFields: ['displayName'] },
+  IntakeSourcesController_disable_v1: { untrustedFields: ['displayName'] },
+  ProviderConnectionsController_list_v1: {
+    display: columns('displayName', 'provider', 'status', 'health', 'domainCount'),
+    untrustedFields: ['data[].displayName', 'data[].tenantName'],
+  },
+  ProviderConnectionsController_get_v1: { untrustedFields: ['displayName', 'tenantName'] },
+  ProviderConnectionsController_create_v1: { untrustedFields: ['displayName', 'tenantName'] },
+  ProviderConnectionsController_update_v1: { untrustedFields: ['displayName', 'tenantName'] },
+  ProviderConnectionsController_disconnect_v1: {
+    description:
+      'Disconnects the provider connection: grants are revoked and their credentials wiped, outbound and internal routing stop, inbound destinations are kept. Pass only `id`; the server previews the disconnect and fills `impactToken` and `confirm`.',
+    untrustedFields: ['connection.displayName', 'connection.tenantName'],
+  },
+  ProviderConnectionsController_wizard_v1: {
+    description:
+      'The setup wizard of a provider connection: six steps with their status and blockers. Use `nextAction` to guide the setup; steps `connect` (grants, credentials, consent) and `validate` are done in the portal.',
+  },
+  ProviderMailFlowController_apply_v1: {
+    description:
+      'Applies a mail-flow change of the connection (`inbound`, `outbound`, `activate`, `proof`, `suspend`, `disable_outbound`). `impactToken` and `confirm` are filled by the server from a fresh preview; pass only `change`.',
+    untrustedFields: ['connection.displayName', 'connection.tenantName'],
+  },
+  // The Google delegation confirmation is part of the consent ceremony (portal only, A5-4).
+  ProviderGrantsController_verify_v1: { omitInputs: ['body.subjectEmail'] },
+
   // --- own organization (bind {id}) ---
   OrganizationsController_get_v1: { bind: SELF_ORGANIZATION },
   OrganizationsController_getUsage_v1: { bind: SELF_ORGANIZATION },
@@ -1092,13 +1247,14 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   OrganizationConfigurationController_getSettings_v1: { bind: SELF_ORGANIZATION },
 };
 
-/** The overrides with the AI-2, AI-3 and AI-4 writes' `testedBy` merged in. */
+/** The overrides with the AI-2, AI-3, AI-4 and AI-5 writes' `testedBy` merged in. */
 export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = (() => {
   const out: Record<string, OperationOverride> = { ...BASE_OVERRIDES };
   for (const [operationId, testedBy] of Object.entries({
     ...AI2_WRITES_TESTED_BY,
     ...AI3_WRITES_TESTED_BY,
     ...AI4_WRITES_TESTED_BY,
+    ...AI5_WRITES_TESTED_BY,
   }))
     out[operationId] = { ...out[operationId], testedBy };
   return out;

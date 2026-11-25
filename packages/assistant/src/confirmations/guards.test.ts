@@ -37,6 +37,13 @@ describe('proposal guards (design 30 D3)', () => {
         'The assistant cannot change who may configure it. Change roles that grant assistant:configure in the portal.',
       ato_four_eyes:
         'This response needs a different person to decide it. The person who requested a response, or who created the API key that requested it, can never approve or reject it, and deciding needs a session signed in with MFA. Ask another responder to decide it in chat or on the Responses page.',
+      // step AI-5 D4
+      retention_default_policy:
+        'The default retention policy cannot be deleted. Choose another default in the archive settings first (Retention and lock in the portal).',
+      capture_not_retryable:
+        'Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive.',
+      case_active_holds:
+        'This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that.',
     });
   });
 
@@ -63,6 +70,10 @@ describe('proposal guards (design 30 D3)', () => {
       // step AI-4 D3 (I18)
       AtoResponsesController_approve_v1: 'guard: not requester; guard: canDecide = true',
       AtoResponsesController_reject_v1: 'guard: not requester; guard: canDecide = true',
+      // step AI-5 D4
+      ArchiveRetentionController_delete_v1: 'guard: isDefault = false',
+      ArchiveAdminController_retry_v1: 'guard: status = failed',
+      EdiscoveryCasesController_close_v1: 'guard: counts.activeHolds = 0',
     });
   });
 
@@ -175,8 +186,9 @@ describe('proposal guards (design 30 D3)', () => {
 
   it('phases and messages never contain argument values', () => {
     const guards: ProposalGuard[] = CONFIRMATION_SPECS.flatMap((s) => s.guards ?? []);
-    // roles_update, plus the two four-eyes guards of ATO approve and reject (step AI-4).
-    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(5);
+    // roles_update, the two four-eyes guards of ATO approve and reject (step AI-4) and the
+    // three compliance guards (step AI-5).
+    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(8);
     const marker = 'VALUE-MARKER-1234';
     const refusals = [
       before(spec('UsersController_update_v1'), { id: SELF, body: { displayName: marker } }),
@@ -314,5 +326,78 @@ describe('ATO four-eyes guards (design 32 D3, I18)', () => {
     expect(refusal).not.toBeNull();
     expect(JSON.stringify(refusal)).not.toContain(marker);
     expect(JSON.stringify(refusal)).not.toContain(SELF);
+  });
+});
+
+describe('compliance guards (design 33 D4)', () => {
+  const after5 = (operationId: string, read: unknown) =>
+    guardRefusal(
+      confirmationSpecOf(operationId)!,
+      { args: {}, principalUserPublicId: SELF, read },
+      'after_read',
+    );
+
+  it('are after-read guards with one message each, reading no argument', () => {
+    for (const [operationId, key] of [
+      ['ArchiveRetentionController_delete_v1', 'retention_default_policy'],
+      ['ArchiveAdminController_retry_v1', 'capture_not_retryable'],
+      ['EdiscoveryCasesController_close_v1', 'case_active_holds'],
+    ] as const) {
+      const s = confirmationSpecOf(operationId)!;
+      expect(s.guards, operationId).toHaveLength(1);
+      expect(guardPhase(s.guards![0]!)).toBe('after_read');
+      expect(guardArgumentPaths(s.guards![0]!)).toEqual([]);
+      expect(guardMessageOf(s)).toBe(GUARD_MESSAGES[key]);
+      // Never evaluated before the read.
+      expect(
+        guardRefusal(s, { args: {}, principalUserPublicId: SELF, read: null }, 'before_read'),
+      ).toBeNull();
+    }
+  });
+
+  it('archive_retention_delete: the default policy is refused; another policy passes', () => {
+    expect(after5('ArchiveRetentionController_delete_v1', { isDefault: true })).toEqual({
+      guard: 'require_read_value',
+      message: GUARD_MESSAGES.retention_default_policy,
+    });
+    expect(after5('ArchiveRetentionController_delete_v1', { isDefault: false })).toBeNull();
+    // Fail closed: a missing or non-boolean value refuses.
+    expect(after5('ArchiveRetentionController_delete_v1', {})).not.toBeNull();
+    expect(after5('ArchiveRetentionController_delete_v1', { isDefault: 'false' })).not.toBeNull();
+  });
+
+  it('archive_admin_retry: only a failed capture passes', () => {
+    expect(after5('ArchiveAdminController_retry_v1', { status: 'failed' })).toBeNull();
+    for (const status of ['pending', 'lost', 'captured_open', 'closed', 'skipped', undefined])
+      expect(after5('ArchiveAdminController_retry_v1', { status })?.message, String(status)).toBe(
+        GUARD_MESSAGES.capture_not_retryable,
+      );
+  });
+
+  it('ediscovery_cases_close: numeric equality on counts.activeHolds (strict)', () => {
+    const close = 'EdiscoveryCasesController_close_v1';
+    expect(after5(close, { status: 'open', counts: { activeHolds: 0 } })).toBeNull();
+    expect(after5(close, { status: 'open', counts: { activeHolds: 2 } })).toEqual({
+      guard: 'require_read_value',
+      message: GUARD_MESSAGES.case_active_holds,
+    });
+    // Strict: the string "0", a missing count or a missing counts object refuse (fail closed).
+    expect(after5(close, { counts: { activeHolds: '0' } })).not.toBeNull();
+    expect(after5(close, { counts: {} })).not.toBeNull();
+    expect(after5(close, {})).not.toBeNull();
+  });
+
+  it('require_read_value accepts numbers (synthetic spec)', () => {
+    const numeric = {
+      guards: [
+        { kind: 'require_read_value', field: 'n', equals: 3, message: 'self' },
+      ] as ProposalGuard[],
+    };
+    const run = (read: unknown) =>
+      guardRefusal(numeric, { args: {}, principalUserPublicId: SELF, read }, 'after_read');
+    expect(run({ n: 3 })).toBeNull();
+    expect(run({ n: 4 })).not.toBeNull();
+    expect(run({ n: '3' })).not.toBeNull();
+    expect(guardNote(numeric.guards[0]!)).toBe('guard: n = 3');
   });
 });

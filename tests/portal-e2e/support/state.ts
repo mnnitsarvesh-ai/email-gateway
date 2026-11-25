@@ -41,6 +41,9 @@ export const USER_KEYS = [
   // requests an ATO response, the other approves it; the requester is refused).
   'deltaResponderA',
   'deltaResponderB',
+  // Step AI-5: a compliance officer of delta with MFA (retention, eDiscovery and legal holds in
+  // chat; seed/assistant.ts prepareAssistantCompliance).
+  'deltaCompliance',
   'epsilonAdmin',
   'platformAdmin',
 ] as const;
@@ -173,6 +176,13 @@ export interface E2eState {
       mfaAdminUserId: string;
       /** Step AI-3: a seeded read-only delta user that only the assistant spec uses (disabled). */
       offboardUser: { id: string; email: string };
+      /** Step AI-5: delta's compliance rows (seed/assistant.ts prepareAssistantCompliance). */
+      compliance: {
+        defaultPolicyId: string;
+        retentionPolicy: { id: string; name: string; retentionDays: number };
+        holdCase: { id: string; name: string };
+        hold: { id: string; name: string };
+      };
       /** Step AI-4: delta's ATO account with an open incident (seed/ato.ts DELTA_ATO_PLAN). */
       ato: { accountId: string; address: string; incidentId: string };
     };

@@ -56,7 +56,9 @@
  * confirmation row's atomic transition). Step AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1)
  * adds the report read (`NEW_IN_AI_R`, example required, the assistant manifest). Step AI-4
  * (docs/plan/steps/32-ai-chat-security-operations.md D8) adds four single-item reads of existing
- * modules (`NEW_IN_AI_4`, examples required, in the legacy manifest next to their lists).
+ * modules (`NEW_IN_AI_4`, examples required, in the legacy manifest next to their lists). Step
+ * AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8) adds the capture-issue read
+ * (`NEW_IN_AI_5`, example required, in the archive manifest next to its list).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -546,6 +548,9 @@ const NEW_IN_AI_4 = [
   'get /api/v1/platform/threat-indicators/:id',
 ];
 
+/** Step AI-5 D8: the capture-issue read the assistant's capture retry card needs (archive). */
+const NEW_IN_AI_5 = ['get /api/v1/archive/capture-issues/:messageId'];
+
 /** Step AI-2: confirm and cancel are `sensitive`, unkeyed (the row's transition is single use). */
 const SENSITIVE_UNKEYED_AI_2 = [
   'post /api/v1/assistant/confirmations/:confirmationId/confirm',
@@ -782,7 +787,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (427 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (428 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
@@ -792,8 +797,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // identity-provider and mailbox state operations of step 8.5, plus the 12 journaling
     // operations of step 8.6, plus the 15 assistant operations of step AI-1, plus the 3
     // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8), plus the
-    // report read of step AI-R (§4.1), plus the four single-item reads of step AI-4 (D8).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(427);
+    // report read of step AI-R (§4.1), plus the four single-item reads of step AI-4 (D8), plus
+    // the capture-issue read of step AI-5 (D8).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(428);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -888,7 +894,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5, 8.6, AI-1, AI-2, AI-R and AI-4 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5, 8.6, AI-1, AI-2, AI-R, AI-4 and AI-5 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -905,6 +911,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_AI_2,
       ...NEW_IN_AI_R,
       ...NEW_IN_AI_4,
+      ...NEW_IN_AI_5,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -954,8 +961,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(COVERAGE_BY_AREA['policy-builder'].map((c) => c.route).sort()).toEqual(
       [...NEW_IN_7_3].sort(),
     );
-    // NEW_IN_8_1 is exactly the step 8.1 archive manifest (41 operations).
-    expect(COVERAGE_BY_AREA.archive.map((c) => c.route).sort()).toEqual([...NEW_IN_8_1].sort());
+    // NEW_IN_8_1 + NEW_IN_AI_5 is exactly the archive manifest (41 operations of step 8.1 plus
+    // the capture-issue read of step AI-5).
+    expect(COVERAGE_BY_AREA.archive.map((c) => c.route).sort()).toEqual(
+      [...NEW_IN_8_1, ...NEW_IN_AI_5].sort(),
+    );
     expect(NEW_IN_8_1).toHaveLength(41);
     // NEW_IN_8_4 is exactly the step 8.4 ato and incidents manifests (26 + 8 operations).
     expect(
@@ -987,6 +997,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     expect(NEW_IN_AI_4).toHaveLength(4);
     const legacyRoutes = COVERAGE_BY_AREA.legacy.map((c) => c.route);
     expect(NEW_IN_AI_4.filter((r) => !legacyRoutes.includes(r))).toEqual([]);
+    expect(NEW_IN_AI_5).toHaveLength(1);
   });
 
   it('has one coverage entry per served route and none for a route that does not exist (§3.8)', () => {
@@ -1011,6 +1022,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_AI_1.includes(route), route).toBe(false);
       expect(NEW_IN_AI_2.includes(route), route).toBe(false);
       expect(NEW_IN_AI_R.includes(route), route).toBe(false);
+      expect(NEW_IN_AI_5.includes(route), route).toBe(false);
     }
   });
 
@@ -1066,7 +1078,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_8_6.includes(key) ||
           NEW_IN_AI_1.includes(key) ||
           NEW_IN_AI_2.includes(key) ||
-          NEW_IN_AI_R.includes(key)) &&
+          NEW_IN_AI_R.includes(key) ||
+          NEW_IN_AI_5.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);

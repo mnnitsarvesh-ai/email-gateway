@@ -3,7 +3,7 @@
  * CAS, generation, enablement time and audit rows (changed paths, never values); retention
  * policies with the plan cap, soft delete and the default refusal; key rotation (wrapped under the
  * root key, records of the old version still decrypt); status counts; capture issues and the
- * retry; the disposal log; the export signing keys; the organization purge repository phases;
+ * retry; the capture issue of one message (step AI-5 D8); the disposal log; the export signing keys; the organization purge repository phases;
  * EXPLAIN of the replica list queries (recorded in the WP4 note).
  */
 // @covers get /api/v1/archive/settings
@@ -17,6 +17,7 @@
 // @covers post /api/v1/archive/keys/rotate
 // @covers get /api/v1/archive/status
 // @covers get /api/v1/archive/capture-issues
+// @covers get /api/v1/archive/capture-issues/:messageId
 // @covers post /api/v1/archive/capture-issues/:messageId/retry
 // @covers get /api/v1/archive/disposals
 // @covers get /api/v1/archive/export-signing-keys
@@ -372,6 +373,87 @@ describe('keys, status, capture issues, disposals and signing keys', () => {
     } finally {
       await ctx.prisma.archiveCaptureIntent.deleteMany({
         where: { organizationId: org.id, messageId: { in: seeded.map((r) => r.row.messageId) } },
+      });
+    }
+  });
+
+  it('the capture issue of one message: any status, coded 404 for unknown, intent-less and foreign messages (AI-5 D8)', async () => {
+    const other = await fx.createOrganization({ planCode: 'enterprise' });
+    const foreign = await ax.record(other, {}, { index: false });
+    const [failed, captured, closed, none] = await Promise.all(
+      [0, 1, 2, 3].map(() => ax.record(org, {}, { index: false })),
+    );
+    const intent = (
+      o: FixtureOrganization,
+      r: typeof foreign | undefined,
+      data: {
+        status: 'failed' | 'captured_open' | 'closed';
+        attempts: number;
+        lastErrorCode?: string;
+        sourcePolicy?: boolean;
+      },
+    ) =>
+      ctx.prisma.archiveCaptureIntent.create({
+        data: {
+          receivedAt: r!.row.receivedAt,
+          organizationId: o.id,
+          messageId: r!.row.messageId,
+          direction: 'inbound',
+          sourceJournal: true,
+          nextCheckAt: new Date(Date.now() + DAY),
+          settingsGeneration: 1n,
+          ...data,
+        },
+      });
+    await intent(other, foreign, { status: 'failed', lastErrorCode: 'storage_error', attempts: 2 });
+    await intent(org, failed, { status: 'failed', lastErrorCode: 'storage_error', attempts: 5 });
+    await intent(org, captured, { status: 'captured_open', sourcePolicy: true, attempts: 1 });
+    await intent(org, closed, { status: 'closed', attempts: 1 });
+    const own = [failed!, captured!, closed!, none!];
+    try {
+      const path = (r: { row: { messagePublicId: string } }) =>
+        `${BASE}/capture-issues/${r.row.messagePublicId}`;
+      // The replica applies the writes in order: once the last intent shows, all of them do.
+      await expect
+        .poll(async () => (await admin.get(path(closed!))).status, ARCHIVE_POLL)
+        .toBe(200);
+      const failedView = await admin.get(path(failed!));
+      expect(failedView.status).toBe(200);
+      expect(failedView.body).toEqual({
+        messageId: failed!.row.messagePublicId,
+        receivedAt: failed!.row.receivedAt.toISOString(),
+        status: 'failed',
+        code: 'storage_error',
+        attempts: 5,
+        sources: { journal: true, policy: false },
+        nextCheckAt: expect.any(String),
+        createdAt: expect.any(String),
+      });
+      // The API key with archive:manage reads it too (as the list).
+      expect((await keyClient.get(path(failed!))).body).toEqual(failedView.body);
+      expect((await admin.get(path(captured!))).body).toMatchObject({
+        messageId: captured!.row.messagePublicId,
+        status: 'captured_open',
+        code: null,
+        attempts: 1,
+        sources: { journal: true, policy: true },
+      });
+      expect((await admin.get(path(closed!))).body).toMatchObject({ status: 'closed', code: null });
+      // No intent, an unknown id and another organization's message: the retry's coded 404.
+      for (const target of [path(none!), `${BASE}/capture-issues/${randomUUID()}`, path(foreign)]) {
+        const res = await admin.get(target);
+        expect(res.status, target).toBe(404);
+        expect(res.body.code, target).toBe('archive_capture_issue_not_found');
+      }
+      expect((await admin.get(`${BASE}/capture-issues/not-a-uuid`)).status).toBe(400);
+    } finally {
+      await ctx.prisma.archiveCaptureIntent.deleteMany({
+        where: {
+          OR: [
+            { organizationId: org.id, messageId: { in: own.map((r) => r.row.messageId) } },
+            { organizationId: other.id, messageId: foreign.row.messageId },
+          ],
+        },
       });
     }
   });

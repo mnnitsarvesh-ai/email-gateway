@@ -1,15 +1,34 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { planWindow } from '../context/window';
 import { FakeProvider } from '../providers/fake';
-import { findTool } from '../registry/registry';
+import type { OpenApiDocument } from '../registry/build';
+import { AI5_WRITES_TESTED_BY } from '../registry/manifest';
+import { ALL_TOOLS, findTool } from '../registry/registry';
 import {
   ACTION_UPDATES_HEADER,
   ACTION_UPDATES_MAX,
+  QUEUED_202_LINES,
   QUEUED_202_TOOLS,
   USER_MESSAGE_MARKER,
+  actionUpdateLine,
   buildActionUpdates,
   composeUserEntryText,
 } from './updates';
+
+const openapi = JSON.parse(
+  readFileSync(join(__dirname, '../../../../docs/api/openapi.json'), 'utf8'),
+) as OpenApiDocument;
+
+/** The 2xx response codes of an OpenAPI operation. */
+function successCodesOf(operationId: string): string[] {
+  for (const item of Object.values(openapi.paths))
+    for (const op of Object.values(item))
+      if (op?.operationId === operationId)
+        return Object.keys(op.responses ?? {}).filter((code) => /^2\d\d$/.test(code));
+  throw new Error(operationId);
+}
 
 const provider = new FakeProvider({ nodeEnv: 'test' });
 
@@ -106,7 +125,7 @@ describe('buildActionUpdates (D6)', () => {
 });
 
 describe('queued work and ATO response requests (design 32 D10)', () => {
-  it('QUEUED_202_TOOLS: the report email, the AI-4 queued operations and earlier queued writes', () => {
+  it('QUEUED_202_TOOLS: the report email, the AI-4 and AI-5 queued operations and earlier queued writes', () => {
     expect([...QUEUED_202_TOOLS].sort()).toEqual(
       [
         'report_send_email',
@@ -119,6 +138,10 @@ describe('queued work and ATO response requests (design 32 D10)', () => {
         'webhooks_test',
         'webhook_deliveries_replay',
         'webhook_deliveries_create_replay',
+        // step AI-5 D11
+        'ediscovery_searches_create',
+        'ediscovery_exports_create',
+        'provider_health_check_now',
       ].sort(),
     );
     // Every member is an enabled write whose OpenAPI success includes 202 (checked against the
@@ -261,5 +284,59 @@ describe('user entry composition with action updates', () => {
     expect(text.indexOf('Conversation recap')).toBeLessThan(text.indexOf(ACTION_UPDATES_HEADER));
     expect(text.indexOf(ACTION_UPDATES_HEADER)).toBeLessThan(text.indexOf(USER_MESSAGE_MARKER));
     expect(text.endsWith(`${USER_MESSAGE_MARKER}second`)).toBe(true);
+  });
+});
+
+describe('queued compliance and integrations work (design 33 D11)', () => {
+  it('every enabled AI-5 write whose OpenAPI success is 202 is queued work, and only those', () => {
+    const ai5Writes = ALL_TOOLS.filter(
+      (t) => t.enabled && t.access === 'write' && t.operationId in AI5_WRITES_TESTED_BY,
+    );
+    expect(ai5Writes).toHaveLength(25);
+    const accepted = ai5Writes
+      .filter((t) => successCodesOf(t.operationId).includes('202'))
+      .map((t) => t.name)
+      .sort();
+    expect(accepted).toEqual([
+      'ediscovery_exports_create',
+      'ediscovery_searches_create',
+      'provider_health_check_now',
+    ]);
+    for (const name of accepted) expect(QUEUED_202_TOOLS.has(name), name).toBe(true);
+    for (const t of ai5Writes)
+      if (!accepted.includes(t.name)) expect(QUEUED_202_TOOLS.has(t.name), t.name).toBe(false);
+  });
+
+  it('the export and search lines say where to follow them; the health check is queued', () => {
+    const block = buildActionUpdates([
+      {
+        tool: 'ediscovery_exports_create',
+        callSeq: 4,
+        status: 'executed',
+        httpStatus: 202,
+        resultSeq: 5,
+        resultRowRef: true,
+      },
+      { tool: 'ediscovery_searches_create', callSeq: 6, status: 'executed', httpStatus: 202 },
+      { tool: 'provider_health_check_now', callSeq: 7, status: 'executed', httpStatus: 202 },
+    ]);
+    expect(block.split('\n').slice(1)).toEqual([
+      '- ediscovery_exports_create (call r4): the user confirmed it; the export was queued (HTTP 202). It is downloaded only on the case page in the portal. Result: ref r5, row ref r5.1.',
+      '- ediscovery_searches_create (call r6): the user confirmed it; the search was queued (HTTP 202); follow it with `ediscovery_searches_get`.',
+      '- provider_health_check_now (call r7): the user confirmed it; it was queued (HTTP 202).',
+    ]);
+    expect(Object.keys(QUEUED_202_LINES).every((tool) => QUEUED_202_TOOLS.has(tool))).toBe(true);
+    // A failed export keeps the failure wording.
+    expect(
+      actionUpdateLine({
+        tool: 'ediscovery_exports_create',
+        callSeq: 8,
+        status: 'failed',
+        httpStatus: 409,
+        error: 'ediscovery_export_malicious_ack_required',
+      }),
+    ).toBe(
+      '- ediscovery_exports_create (call r8): the user confirmed it; it failed (HTTP 409, ediscovery_export_malicious_ack_required).',
+    );
   });
 });

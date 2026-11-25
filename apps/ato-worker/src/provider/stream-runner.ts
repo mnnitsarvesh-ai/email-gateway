@@ -35,6 +35,7 @@ import type { AfterCommit, DetectionPipeline } from '../detect/pipeline';
 import type { IpEnrichment } from '../enrichment/enricher';
 import type { AtoMetrics } from '../metrics/ato-metrics';
 import type { IdpMetrics } from '../metrics/idp-metrics';
+import type { ProviderContextCache } from './provider-context';
 import { atoEnabled, type OrgContext } from '../reads/org-context';
 import { big, LEDGERS, orgFilter, type Tx } from '../shared/db';
 import { errorCode, errorFields } from '../shared/errors';
@@ -154,6 +155,8 @@ export class IdpStreamRunner {
       metrics: AtoMetrics | null;
       idpMetrics: IdpMetrics | null;
       seen: SeenRedis;
+      /** The pipeline's provider context cache (capabilities of the organization's integrations). */
+      providers: Pick<ProviderContextCache, 'invalidate'>;
       logger: Logger;
       config: IdpStreamRunnerConfig;
       /** Test seam: the wait between transient retries (default: a timer). */
@@ -337,6 +340,12 @@ export class IdpStreamRunner {
       });
       return;
     }
+    // The rules see a provider stream only when the organization's provider context lists it
+    // (`provider:<stream>` capabilities, stored by the probe). That context is cached per
+    // organization; an entry loaded by another event before the first probe committed would hide
+    // every stream for up to ATO_SETTINGS_CACHE_SECONDS, and this poll's events, remembered as
+    // processed, would never raise their signals (step AI-5 D13). Read it again for every poll.
+    this.deps.providers.invalidate(integration.organizationId);
     const started = performance.now();
     let adapter: IdpAdapter;
     try {

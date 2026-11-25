@@ -797,6 +797,8 @@ describe('route security (e2e, dependencies stubbed)', () => {
       ],
       'get /api/v1/archive/status': [[R, JR], { any: true }],
       'get /api/v1/archive/capture-issues': [[JM, M], { any: true, cursor: true }],
+      // Step AI-5 D8: the single read keeps the list's permissions and flags (API keys allowed).
+      'get /api/v1/archive/capture-issues/:messageId': [[JM, M], { any: true }],
       'post /api/v1/archive/capture-issues/:messageId/retry': [
         [JM, M],
         { any: true, cls: 'sensitive', key: 'archive.capture_retry' },
@@ -876,7 +878,8 @@ describe('route security (e2e, dependencies stubbed)', () => {
     expect(archiveRoutes.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
       Object.keys(expected).sort(),
     );
-    expect(archiveRoutes).toHaveLength(41);
+    // 41 of step 8.1 plus the capture-issue read of step AI-5 (D8).
+    expect(archiveRoutes).toHaveLength(42);
     for (const [key, [permissions, flags]] of Object.entries(expected)) {
       const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
       expect(route.isPublic, key).toBe(false);
@@ -1363,6 +1366,28 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route?.userOnly, key).toBe(false);
       expect(route?.requireMfa, key).toBe(false);
     }
+  });
+
+  it('the step AI-5 capture-issue read keeps the flags of its list and is no cursor list (D8)', () => {
+    const route = routes.find(
+      (r) => `${r.method} ${r.path}` === 'get /api/v1/archive/capture-issues/:messageId',
+    );
+    const list = routes.find(
+      (r) => `${r.method} ${r.path}` === 'get /api/v1/archive/capture-issues',
+    );
+    expect(route?.isPublic).toBe(false);
+    expect(route?.requirement).toEqual({
+      mode: 'any',
+      permissions: ['journal:manage', 'archive:manage'],
+    });
+    expect(route?.requirement).toEqual(list?.requirement);
+    expect(route?.requireMfa).toBe(list?.requireMfa);
+    expect(route?.userOnly).toBe(list?.userOnly);
+    expect(route?.userOnly).toBe(false);
+    expect(route?.returnsSecret).toBe(false);
+    expect(route?.rateClass ?? null).toBeNull();
+    expect(route?.cursor ?? null).toBeNull();
+    expect(route?.idempotency ?? null).toBeNull();
   });
 
   it('every body and query schema of the legacy routes is strict at every object node (D1)', () => {

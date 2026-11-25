@@ -41,6 +41,7 @@ import {
   ApiArchiveResponse,
   ApiArchiveUnavailable,
   ApiArchiveUnprocessable,
+  ApiCaptureIssueNotFound,
   ApiKeyedErrors,
   ApiMessageIdParam,
   ArchiveIdempotency,
@@ -61,6 +62,8 @@ import {
   type CaptureIssueListQuery,
   type CaptureIssuePage,
   CaptureIssuePageSchema,
+  CaptureIssueSchema,
+  type CaptureIssueView,
   CaptureRetrySchema,
   type CaptureRetryView,
   DisposalListQuerySchema,
@@ -324,6 +327,30 @@ export class ArchiveAdminController {
     return this.operations.captureIssues(principal, scope, query);
   }
 
+  @Get('capture-issues/:messageId')
+  @RequireAnyPermission(P.journalManage, P.manage)
+  @ApiTags('journaling')
+  @ApiOperation({
+    summary: 'Get the capture issue of a message',
+    description:
+      'The capture intent of one message in the list item’s view, whatever its status ' +
+      '(`pending`, `captured_open`, `closed`, `skipped`, `lost`, `failed`): received time, ' +
+      'status, a code (never text), attempts, sources. A message that is unknown, of another ' +
+      'organization or has no capture intent answers `404 archive_capture_issue_not_found`. ' +
+      'From the read replica. Step AI-5: `journal:manage` or `archive:manage` (as the list).',
+  })
+  @ApiMessageIdParam()
+  @ApiArchiveResponse(200, CaptureIssueSchema, X.captureIssue, 'The capture issue')
+  @ApiArchiveForbidden()
+  @ApiCaptureIssueNotFound()
+  @ApiArchiveUnavailable()
+  captureIssue(
+    @CurrentScope() scope: TenantScope,
+    @Param('messageId') messageId: string,
+  ): Promise<CaptureIssueView> {
+    return this.operations.captureIssue(scope, messageId);
+  }
+
   @Post('capture-issues/:messageId/retry')
   @RequireAnyPermission(P.journalManage, P.manage)
   @ApiTags('journaling')
@@ -342,9 +369,7 @@ export class ArchiveAdminController {
   @ApiArchiveResponse(200, CaptureRetrySchema, X.captureRetry, 'Queued for capture', true)
   @ApiKeyedErrors()
   @ApiArchiveForbidden([C.notEnabled], '`archiving_not_enabled`')
-  @ApiCodedError(404, 'No capture issue for this message in your organization', [
-    C.captureIssueNotFound,
-  ])
+  @ApiCaptureIssueNotFound()
   @ApiArchiveConflicts(
     [C.captureRetryNotAllowed],
     '`archive_capture_retry_not_allowed` (`status`)',

@@ -34,13 +34,21 @@ const w = new IdpWorld(fx, clock);
 /** A second synthetic directory (own tenant and domain) for the backfill replay scenario. */
 const BACKFILL_TENANT = '44444444-5555-4666-8777-888888888888';
 const BACKFILL_DOMAIN = 'contoso-bf.example';
+/** A third synthetic directory for the provider-context cache scenario (step AI-5 D13). */
+const CACHE_TENANT = '55555555-6666-4777-8888-999999999999';
+const CACHE_DOMAIN = 'contoso-pc.example';
 
 beforeAll(async () => {
   const now = clock.now();
   const backfillDir = msDirectoryAs(now, BACKFILL_TENANT, BACKFILL_DOMAIN);
   backfillDir.signIns = [];
+  const cacheDir = msDirectoryAs(now, CACHE_TENANT, CACHE_DOMAIN);
+  cacheDir.signIns = [];
+  cacheDir.riskDetections = [];
+  cacheDir.directoryAudits = [];
+  cacheDir.exchange.blobs = [];
   await w.start({
-    microsoft: [microsoftDirectory(now), backfillDir],
+    microsoft: [microsoftDirectory(now), backfillDir, cacheDir],
     google: [googleCustomer(now)],
   });
 });
@@ -398,5 +406,59 @@ describe('backfill over an already ingested range (review fix)', () => {
     const done = await signIns();
     expect(done).toMatchObject({ status: 'active', replayFrom: null, replayUntil: null });
     expect(done.coveredFrom).toEqual(from);
+  });
+});
+
+describe('provider context cached before the first probe (step AI-5 D13)', () => {
+  it('raises the provider signals of the first poll although the organization context was cached without streams', async () => {
+    const org = await fx.organization('mspc');
+    await configure(w.h, org.id);
+    const connection = w.connect(org.id, 'microsoft_entra', {
+      tenantId: CACHE_TENANT,
+      domain: CACHE_DOMAIN,
+    });
+    const integration = await w.bind(connection);
+    // Another event of the organization (in the portal suite: the administrator's sign-in just
+    // before connecting) loads its provider context while the integration has no probed
+    // capabilities yet; the entry lives ATO_SETTINGS_CACHE_SECONDS (the suite's clock stands
+    // still, so it stays fresh here).
+    expect((await w.h.comps.providers.get(org.id)).streams).toEqual([]);
+    // The worker's probe loop alone (the world's `probe()` also drops the cache): the probe
+    // stores the capabilities, the cached context still lists no stream.
+    await w.h.comps.probeLoop!.runOnce();
+    const probed = await fx.prisma.atoProviderIntegration.findUniqueOrThrow({
+      where: { id: integration.id },
+    });
+    expect(probed.healthStatus).toBe('healthy');
+    expect((await w.h.comps.providers.get(org.id)).streams).toEqual([]);
+
+    // A high-risk detection for alex inside the first window of risk_events.
+    const dir = w.sims.script.dataset.microsoft!.directories.find(
+      (d) => d.tenantId === CACHE_TENANT,
+    )!;
+    dir.riskDetections.push(
+      msRiskDetection(clock.now(), {
+        minutesAgo: 4,
+        riskLevel: 'high',
+        userPrincipalName: `alex@${CACHE_DOMAIN}`,
+      }),
+    );
+    await w.due(integration.id);
+    await w.poll();
+
+    // The poll read the context again: the provider rule fired live and opened an incident.
+    const alex = await accountOf(fx, org.id, 'mailbox', `alex@${CACHE_DOMAIN}`);
+    expect(alex).not.toBeNull();
+    const signals = await fx.prisma.atoRiskSignal.findMany({
+      where: { organizationId: org.id, accountId: alex!.id, ruleCode: 'ato.provider.risk_event' },
+      select: { status: true },
+    });
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((s) => s.status === 'active')).toBe(true);
+    const incident = await fx.prisma.securityIncident.findFirst({
+      where: { organizationId: org.id, subjectRefId: alex!.id, activeMarker: 1 },
+    });
+    expect(incident).not.toBeNull();
+    expect((await w.h.comps.providers.get(org.id)).streams).toContain('risk_events');
   });
 });

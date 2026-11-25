@@ -4,11 +4,14 @@ import { apiErrorJson, expectNoAxeViolations, mockApi, okJson, renderWithProvide
 import { DeniedCard, ResultCard, deniedLinkOf, seriesRows } from './result-card';
 import {
   ATO_FOUR_EYES_MESSAGE,
+  CAPTURE_NOT_RETRYABLE_MESSAGE,
+  CASE_ACTIVE_HOLDS_MESSAGE,
   ERROR_CARD,
   EXECUTION_ID,
   KV_CARD,
   POLICY_ID,
   POLICY_ID_3,
+  RETENTION_DEFAULT_POLICY_MESSAGE,
   SELF_GUARD_MESSAGE,
   SERIES_CARD,
   TABLE_CARD,
@@ -244,6 +247,98 @@ describe('ResultCard (assistant-card/1)', () => {
         'link',
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      'archive_retention_delete',
+      'Delete retention policy',
+      RETENTION_DEFAULT_POLICY_MESSAGE,
+      'Retention and lock',
+      '/archive/retention',
+    ],
+    [
+      'ediscovery_cases_close',
+      'Close eDiscovery case',
+      CASE_ACTIVE_HOLDS_MESSAGE,
+      'Legal holds',
+      '/legal-holds',
+    ],
+    [
+      'archive_admin_retry',
+      'Retry archive capture',
+      CAPTURE_NOT_RETRYABLE_MESSAGE,
+      'Capture issues',
+      '/archive/retention?tab=capture',
+    ],
+  ])(
+    'links the %s guard refusal to the page that resolves it (step AI-5 D11)',
+    async (tool, title, message, label, href) => {
+      const onNavigate = vi.fn();
+      const { container } = renderWithProviders(
+        <DeniedCard
+          title={title}
+          decision="denied_guard"
+          message={message}
+          tool={tool}
+          onNavigate={onNavigate}
+        />,
+      );
+      const card = screen.getByRole('region', { name: `Result: ${title}` });
+      expect(within(card).getByText('Not allowed in chat')).toBeInTheDocument();
+      expect(within(card).getByText(message)).toBeInTheDocument();
+      const link = within(card).getByRole('link', { name: `Open ${label} in the portal` });
+      expect(link).toHaveAttribute('href', href);
+      link.click();
+      expect(onNavigate).toHaveBeenCalledTimes(1);
+      expect(deniedLinkOf(tool, 'denied_guard')).toEqual({ label, href });
+      expect(deniedLinkOf(tool, 'denied_permission')).toBeNull();
+      expect(deniedLinkOf(tool, 'denied_schema')).toBeNull();
+      await expectNoAxeViolations(container);
+    },
+  );
+
+  it('links a "Not available in chat" refusal of a portal-only operation to its page (step AI-5 D11)', async () => {
+    const { container } = renderWithProviders(
+      <DeniedCard
+        title="Release legal hold"
+        decision="denied_not_applicable"
+        message="This action is not available in chat; use the portal page. Reason: critical: portal only by policy (chat links to the page)."
+        tool="legal_holds_release"
+      />,
+    );
+    const card = screen.getByRole('region', { name: 'Result: Release legal hold' });
+    expect(
+      within(card).getByText('Not available in chat; use the portal page'),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByRole('link', { name: 'Open Legal holds in the portal' }),
+    ).toHaveAttribute('href', '/legal-holds');
+    await expectNoAxeViolations(container);
+
+    expect(deniedLinkOf('archive_messages_dispose', 'denied_not_applicable')?.href).toBe(
+      '/archive/retention?tab=review',
+    );
+    expect(deniedLinkOf('archive_admin_rotate', 'denied_not_applicable')?.href).toBe(
+      '/archive/retention?tab=immutability',
+    );
+    for (const tool of [
+      'provider_grants_create',
+      'provider_grants_set_credentials',
+      'provider_grants_complete_consent',
+      'provider_validations_create',
+    ])
+      expect(deniedLinkOf(tool, 'denied_not_applicable')).toEqual({
+        label: 'Provider connections',
+        href: '/integrations/providers',
+      });
+    // Only the listed tools, only for their decision; never a prototype key.
+    expect(deniedLinkOf('legal_holds_release', 'denied_guard')).toBeNull();
+    expect(deniedLinkOf('legal_holds_release', 'denied_permission')).toBeNull();
+    expect(deniedLinkOf('archive_retention_delete', 'denied_not_applicable')).toBeNull();
+    expect(deniedLinkOf('api_keys_create', 'denied_not_applicable')).toBeNull();
+    expect(deniedLinkOf('constructor', 'denied_not_applicable')).toBeNull();
+    expect(deniedLinkOf('toString', 'denied_guard')).toBeNull();
   });
 
   it('never turns markup or URLs of a denial message into elements', () => {

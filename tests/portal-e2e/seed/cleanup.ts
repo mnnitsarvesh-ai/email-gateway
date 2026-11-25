@@ -99,7 +99,9 @@ const ORDER = [
   'quarantine_settings',
   // Message graph (quarantine.ts deleteQuarantineFixtures, messages-data.ts, lifecycle.ts).
   'message_outbox',
-  // Step 8.1: archive and eDiscovery rows (seed/archive.ts ARCHIVE_TABLES order).
+  // Step 8.1: archive and eDiscovery rows (seed/archive.ts ARCHIVE_TABLES order). Step AI-5:
+  // also delta's retention policies, archive settings, its case with an active hold (holds are
+  // deleted with their case rows here, never released) and the case the assistant spec creates.
   ...ARCHIVE_TABLES,
   // Step 8.6: journal intake (sources reference provider_connections RESTRICT; counters CASCADE).
   'journal_intake_counters',

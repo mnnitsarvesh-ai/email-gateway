@@ -61,7 +61,9 @@ function AssistantWorkspace() {
   }, [conversationId, requested, router, selectConversation]);
 
   return (
-    <div className="flex flex-col gap-4">
+    // On md+ the page fills the viewport below the top bar (h-14) and the main padding (py-5),
+    // so only the conversation scrolls, never the whole page.
+    <div className="flex flex-col gap-4 md:h-[calc(100dvh-6rem)]">
       <PageHeader
         title="AI assistant"
         description="Ask questions about your organization's email security in plain language. The assistant uses your own permissions and links to the pages it used. It changes nothing until you confirm the action in its card."
@@ -71,10 +73,10 @@ function AssistantWorkspace() {
       ) : !access.available ? (
         <UnavailableReason access={access} />
       ) : (
-        <div className="grid gap-4 md:grid-cols-[16rem_minmax(0,1fr)] lg:grid-cols-[18rem_minmax(0,1fr)]">
+        <div className="grid gap-4 md:min-h-0 md:flex-1 md:grid-cols-[16rem_minmax(0,1fr)] lg:grid-cols-[18rem_minmax(0,1fr)]">
           <aside
             aria-label="Conversation history"
-            className="rounded-lg border bg-card p-3 md:max-h-[calc(100vh-12rem)] md:overflow-hidden"
+            className="rounded-lg border bg-card p-3 md:min-h-0 md:overflow-hidden"
           >
             <ConversationList
               className="h-full max-h-80 md:max-h-none"
@@ -83,7 +85,7 @@ function AssistantWorkspace() {
           </aside>
           <section
             aria-label="Conversation"
-            className="flex min-h-[28rem] flex-col rounded-lg border bg-card md:h-[calc(100vh-12rem)]"
+            className="flex min-h-[28rem] flex-col rounded-lg border bg-card md:min-h-0"
           >
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <ConversationView />
