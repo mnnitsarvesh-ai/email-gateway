@@ -92,6 +92,8 @@ export type ProviderConnectionsConfig = Pick<
   | 'PROVIDER_MAX_DOMAINS_PER_CONNECTION'
   | 'PROVIDER_M365_MAILFLOW_APP_CLIENT_ID'
   | 'PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID'
+  | 'PROVIDER_M365_MAILBOX_APP_CLIENT_ID'
+  | 'PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID'
   | 'PROVIDER_PROBE_DOMAIN'
   | 'GATEWAY_MX_HOSTS'
   | 'GATEWAY_EGRESS_NETWORKS'
@@ -133,17 +135,45 @@ export class ProviderConnectionsService {
     return new Date();
   }
 
-  /** Platform methods are available only when the operator configured their client id (D2). */
-  availableAuthMethods(): Set<string> {
+  /**
+   * The operator's platform client id of a profile purpose and platform method (D2): the
+   * mail-flow app / service account, or, for step API-1's `mailbox_remediation` profiles, the
+   * separate mailbox-access app / service account (ADR-0099). Null when not configured.
+   */
+  platformClientId(purpose: string | undefined, method: string): string | null {
+    const mailbox = purpose === 'mailbox_remediation';
+    if (method === 'platform_app') {
+      return (
+        (mailbox
+          ? this.config.PROVIDER_M365_MAILBOX_APP_CLIENT_ID
+          : this.config.PROVIDER_M365_MAILFLOW_APP_CLIENT_ID) ?? null
+      );
+    }
+    if (method === 'platform_service_account') {
+      return (
+        (mailbox
+          ? this.config.PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID
+          : this.config.PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID) ?? null
+      );
+    }
+    return null;
+  }
+
+  /**
+   * Platform methods are available only when the operator configured their client id (D2; per
+   * profile purpose since step API-1: the mailbox-access profiles have their own apps).
+   */
+  availableAuthMethods(purpose?: string): Set<string> {
     const out = new Set(['customer_app_secret', 'customer_service_account']);
-    if (this.config.PROVIDER_M365_MAILFLOW_APP_CLIENT_ID) out.add('platform_app');
-    if (this.config.PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID) out.add('platform_service_account');
+    if (this.platformClientId(purpose, 'platform_app')) out.add('platform_app');
+    if (this.platformClientId(purpose, 'platform_service_account')) {
+      out.add('platform_service_account');
+    }
     return out;
   }
 
   /** `GET /provider-integrations/catalog` (#1). */
   async catalog(): Promise<CatalogView> {
-    const available = this.availableAuthMethods();
     const sets = await this.runs.activeEgressSets();
     return {
       providers: INTEGRATION_PROVIDERS.map((provider) => {
@@ -160,7 +190,9 @@ export class ProviderConnectionsService {
             permissions: [...p.permissions],
             readOnly: p.readOnly,
             authMethods: [...p.authMethods],
-            availableAuthMethods: p.authMethods.filter((m) => available.has(m)),
+            availableAuthMethods: p.authMethods.filter((m) =>
+              this.availableAuthMethods(p.purpose).has(m),
+            ),
           })),
           attestations: ATTESTATIONS.filter((a) => a.provider === provider).map((a) => ({
             code: a.code,

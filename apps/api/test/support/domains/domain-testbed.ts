@@ -209,8 +209,12 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
   );
   // Step 8.6 D13: the service profile of the organization (`gateway` unless a test says so).
   const profile: { value: 'gateway' | 'archive_only' } = { value: 'gateway' };
+  // Step API-1: the organizations entitled to API mode (`api_mode_protection`).
+  const apiModeEntitled = new Set<bigint>();
   const features = {
     serviceProfile: () => Promise.resolve(profile.value),
+    isEffectivelyEnabled: (organizationId: bigint, key: string) =>
+      Promise.resolve(key === 'api_mode_protection' && apiModeEntitled.has(organizationId)),
   } as unknown as OrganizationFeaturesService;
   const service = new DomainsService(
     config,
@@ -243,6 +247,8 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     service,
     /** Step 8.6: the organization's service profile seen by `DomainsService`. */
     profile,
+    /** Step API-1: organizations entitled to API mode. */
+    apiModeEntitled,
     scheduler,
     gatewayHosts,
     repos: { domains, verifications, records, keys, mx, ownership, jobs },

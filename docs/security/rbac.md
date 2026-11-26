@@ -91,10 +91,12 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `journal:manage`               | Manage journaling capture settings and journal intake sources (step 8.6; category `journaling`)                                          |
 | `assistant:use`                | Use the AI assistant; tools are limited to the user's own permissions (step AI-1; category `assistant`)                                  |
 | `assistant:configure`          | Enable the AI assistant for the organization, set its budget and retention, view its usage (step AI-1; category `assistant`)             |
+| `remediation:read`             | View API-mode protection: mailbox coverage, connection health, intake lag, throttling and detections (step API-1; in the read set)       |
+| `remediation:write`            | Manage API-mode protection: change feeds, mailbox inventory and resync; grant mailbox access (step API-1; category `remediation`)        |
 
 Step 8.6 (ADR-0089) also re-scoped `archive:read` to "View archive configuration, retention policies, key versions and status (no records)" (it is in the read set) and exports `ARCHIVE_ACCESS_PERMISSIONS` = `archive:search`, `archive:retrieve`, `archive:export`, `archive:legal_hold`, `archive:manage`, `ediscovery:manage` (the permissions that open archived mail or govern it).
 
-The catalog has **74** permissions (72 before step AI-1, 70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
+The catalog has **76** permissions (74 before step API-1, 72 before step AI-1, 70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -194,6 +196,8 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `journal:manage`               |  ✓  |     |  ✓  |  ✓  |     |     |     |     |     |     |
 | `assistant:use`                |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |
 | `assistant:configure`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
+| `remediation:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |     |
+| `remediation:write`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -591,6 +595,24 @@ Design [25-m365-google-connectors.md](../plan/steps/25-m365-google-connectors.md
 **Role matrix excerpt** (seed catalog): super_admin and organization_admin both; domain_admin both (with its `domain:routing_manage` and `connector:manage` it can run the whole wizard); security_analyst, compliance_auditor, read_only_user and platform_admin `integration:read`; quarantine_reviewer and mailbox_user none.
 
 **Rate limits (D17).** Grant, consent, credential, verification, revocation, disconnect and validation creation are `sensitive`; validation runs are limited to 10 per hour and "check now" to 6 per hour per connection; applies to 30 per minute per principal.
+
+## API-mode protection (step API-1)
+
+Design [35-api-mode-protection.md](../plan/steps/35-api-mode-protection.md) §3.3, D2, D4, D12; [ADR-0098](../architecture/adr/0098-protection-modes-and-detect-mode-copies.md), [ADR-0099](../architecture/adr/0099-mailbox-access-consent-and-custody.md). Permissions (category `remediation`): `remediation:read` (coverage, connection health, lag, throttling, mailboxes, detections; part of `TENANT_READ_PERMISSIONS`) and `remediation:write` (change feeds, inventory and resync requests, and the mailbox-access grants; from step API-2 remediation and restore actions). `remediation:purge` is designed for step API-3 and does not exist yet. The protection-mode changes use the existing organization and domain permissions. Grants of the migration `api_mode_protection` are additive only (no user loses a permission; effect check with the `effective-permissions export|compare` CLI).
+
+| Route                                                                                                                                                               | Permission(s)                                                                                                                     | Principals                                  | Override |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | -------- |
+| `GET /organizations/{id}/protection-mode`                                                                                                                           | `organization:read` (or `platform:organizations`)                                                                                 | users, API keys                             | yes      |
+| `PUT /organizations/{id}/protection-mode`                                                                                                                           | `organization:manage` (or `platform:organizations`)                                                                               | users, API keys                             | yes      |
+| `PUT /domains/{domainId}/protection-mode`; `POST /domains` with `protectionMode`                                                                                    | `domain:manage`                                                                                                                   | users, API keys                             | yes      |
+| `GET /api-mode/overview`, `/connections[/{id}]`, `…/setup-guide`, `/mailboxes[/{id}]`, `/detections[/{id}]`                                                         | `remediation:read`                                                                                                                | users, API keys                             | yes      |
+| `PUT /api-mode/connections/{id}/settings`, `POST …/inventory-sync`, `POST /api-mode/mailboxes/{id}/resync`                                                          | `remediation:write`                                                                                                               | users, API keys                             | yes      |
+| 8.2 grant routes for `m365.mailbox_remediation` / `google.mailbox_remediation` (`POST …/grants`, `PUT …/credentials`, `POST …/verify`, `DELETE …/grants/{profile}`) | `integration:manage` **and** `remediation:write` (`403 remediation_permission_required`)                                          | users, API keys (admin consent: users only) | yes      |
+| `POST /provider-notifications/graph[/lifecycle]`                                                                                                                    | public (Microsoft Graph callbacks; a stored subscription id and client-state hash select a mailbox, an item only requests a sync) | none                                        | n/a      |
+
+**Role matrix excerpt** (seed catalog): `remediation:read` — super_admin, platform_admin, organization_admin, domain_admin, security_analyst, compliance_auditor, read_only_user; `remediation:write` — super_admin, organization_admin, security_analyst. quarantine_reviewer, mailbox_user and compliance_officer hold neither. The `api` and `hybrid` modes additionally need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`), which is not a permission.
+
+**Why a second permission for mailbox access (ADR-0099).** The mailbox-access profiles are write-capable at the provider (Microsoft Graph `Mail.ReadWrite`, Google `gmail.modify`, used by step API-2 to remove threats); `integration:manage` alone (e.g. a domain admin wiring mail flow) cannot consent to them. Revoking the grant stops the change feeds and the inventory at the mailbox-worker's next claim; journal detection continues.
 
 ## AI assistant (step AI-1)
 

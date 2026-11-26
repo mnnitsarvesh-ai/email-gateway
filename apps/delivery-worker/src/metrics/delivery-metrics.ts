@@ -58,7 +58,7 @@ export class DeliveryMetrics {
     );
     this.approvalsRejected = metrics.counter(
       'delivery_approvals_rejected_total',
-      'Delivery approvals the planner acknowledged without planning, by reason (lifecycle_state, eml_key_prefix, message_not_found, no_known_recipients, intake_not_deliverable)',
+      'Delivery approvals the planner acknowledged without planning, by reason (lifecycle_state, eml_key_prefix, message_not_found, no_known_recipients, intake_not_deliverable: any non-gateway copy)',
       ['reason'],
     );
     this.lifecycleTransitions = metrics.counter(

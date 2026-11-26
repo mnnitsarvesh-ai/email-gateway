@@ -116,6 +116,9 @@ export class JournalSweep {
     const intents: IntentUpsert[] = [];
     const candidates = [];
     for (const row of visible) {
+      // Step API-1 D7.6: mailbox API copies are detection copies, never the compliance record
+      // (the journal copy is): no intent. The cursor still passes them (`visible`).
+      if (row.ingest_source === 'mailbox_api') continue;
       const org = big(row.organization_id);
       if (!orgAllowed(org, this.options.organizationIds)) continue;
       const ctx = await this.orgs.get(org);

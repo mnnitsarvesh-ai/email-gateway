@@ -1,6 +1,7 @@
 import type { HandleOutcome } from '@email-gateway/common';
 import type { MessageDirection, MessageParseStatus } from '@email-gateway/database';
 import type { MimeLimitName, ParseFailureReason } from '@email-gateway/event-contracts';
+import type { MessageIngestSourceValue } from '@email-gateway/message-lifecycle';
 import type { MimeParseResult, MimeParseStats } from '@email-gateway/mime-parser';
 
 /** The writer row of the message being parsed (the only source of ids, keys and the tenant). */
@@ -13,10 +14,11 @@ export interface MessageRecord {
   emlSha256: string;
   sizeBytes: number;
   /**
-   * `email_messages.ingest_source` (step 8.6 D4); absent = `gateway`. A journal intake message
-   * never gets `parse_failed.v1`, and `parsed.v1` only when its scan was requested.
+   * `email_messages.ingest_source` (step 8.6 D4, step API-1 D8); absent = `gateway`. A copy
+   * (`journal_intake`, `mailbox_api`) never gets `parse_failed.v1`, and `parsed.v1` only when its
+   * scan was requested (always for `mailbox_api`).
    */
-  ingestSource?: 'gateway' | 'journal_intake';
+  ingestSource?: MessageIngestSourceValue;
 }
 
 export interface ParseRowState {
@@ -54,10 +56,12 @@ export interface FinalizeInput {
 }
 
 /**
- * What the parse commit did for a journal intake message (step 8.6 D4): `scan_requested` wrote
+ * What the parse commit did for a copy (step 8.6 D4, step API-1 D8): `scan_requested` wrote
  * `parsed.v1` (the scan stage runs and ends the message with E31/E32); `journaled` applied E30
- * (`intake_unscanned` or `intake_parse_failed`) and wrote no outbox row; `transition_skipped`
- * wrote no outbox row and found the message no longer `persisted` (E30 stale or invalid).
+ * (`intake_unscanned` or `intake_parse_failed`; for a copy whose scan was requested and whose
+ * parse failed, also the `mail.message.copy_scanned.v1` row with `outcome = parse_failed`, never
+ * `parse_failed.v1`); `transition_skipped` wrote no outbox row and found the message no longer
+ * `persisted` (E30 stale or invalid).
  */
 export type IntakeGateResult = 'scan_requested' | 'journaled' | 'transition_skipped';
 
@@ -65,8 +69,10 @@ export interface FinalizeResult {
   outcome: HandleOutcome;
   /** The new outbox event id (`handled` with an outbox row only). */
   outboxEventId?: string;
-  /** Journal intake messages only (step 8.6 D4). */
+  /** Copies only (`journal_intake`, `mailbox_api`; step 8.6 D4, step API-1 D8). */
   intake?: IntakeGateResult;
+  /** The `mail.message.copy_scanned.v1` outbox event id (a copy's parse failure, API-1 D8). */
+  copyScannedEventId?: string;
 }
 
 export type MarkParsingResult = { kind: 'parsing'; attempts: number } | { kind: 'final' };

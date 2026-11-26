@@ -113,6 +113,9 @@ export class InMemoryDomainStore {
   }
 
   /** Adds a domain row directly (fixtures). */
+  /** Step API-1: the organizations' protection modes (default `inline`). */
+  readonly organizationModes = new Map<bigint, 'inline' | 'api' | 'hybrid'>();
+
   addDomain(organizationId: bigint, name: string, patch: Partial<DomainRow> = {}): DomainRow {
     const now = new Date();
     const row: DomainRow = {
@@ -131,6 +134,9 @@ export class InMemoryDomainStore {
       nextCheckAt: null,
       lastCheckedAt: null,
       checkFailures: 0,
+      protectionMode: null,
+      protectionModeChangedAt: null,
+      organization: { protectionMode: this.organizationModes.get(organizationId) ?? 'inline' },
       createdAt: now,
       updatedAt: now,
       ...patch,
@@ -259,12 +265,20 @@ export class InMemoryDomainStore {
       create: (
         _tx: unknown,
         scope: TenantScope,
-        data: { name: string; inboundEnabled: boolean; nextCheckAt: Date; now: Date },
+        data: {
+          name: string;
+          inboundEnabled: boolean;
+          nextCheckAt: Date;
+          now: Date;
+          protectionMode?: 'inline' | 'api' | 'hybrid' | null;
+        },
       ) => {
         const row = this.addDomain(scope.organizationId, data.name, {
           inboundEnabled: data.inboundEnabled,
           nextCheckAt: data.nextCheckAt,
           statusChangedAt: data.now,
+          protectionMode: data.protectionMode ?? null,
+          protectionModeChangedAt: data.protectionMode == null ? null : data.now,
         });
         try {
           this.checkUniques(row);
@@ -274,6 +288,8 @@ export class InMemoryDomainStore {
         }
         return Promise.resolve(clone(row));
       },
+      organizationMode: (scope: TenantScope) =>
+        Promise.resolve(this.organizationModes.get(scope.organizationId) ?? 'inline'),
       update: (_tx: unknown, scope: TenantScope, id: bigint, data: DomainWrite) => {
         this.beforeDomainUpdate?.(id, data);
         const row = this.domains.find((d) => visible(scope, d) && d.id === id);

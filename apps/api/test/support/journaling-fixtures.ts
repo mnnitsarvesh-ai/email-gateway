@@ -8,6 +8,7 @@
 /* eslint-disable @typescript-eslint/no-this-alias -- the doubles close over the world's state */
 import type { TestingModuleBuilder } from '@nestjs/testing';
 import type { TenantScope } from '../../src/auth-contracts/tenant-scope';
+import { ApiModeStatusService } from '../../src/tenancy/api-mode-status.service';
 import {
   type ConnectionRef,
   type CounterRow,
@@ -40,6 +41,8 @@ export class JournalingWorld {
   }> = [];
   egressRanges: string[] = ['40.92.0.0/15', '52.100.0.0/14'];
   intents: Array<{ organizationId: bigint; status: string; createdAt: Date }> = [];
+  /** Step API-1 D6: organizations where API mode is active (entitles intake without archiving). */
+  apiModeActive = new Set<bigint>();
   private nextId = 9000n;
 
   id(): bigint {
@@ -54,6 +57,7 @@ export class JournalingWorld {
     this.domains = [];
     this.egressRanges = ['40.92.0.0/15', '52.100.0.0/14'];
     this.intents = [];
+    this.apiModeActive.clear();
   }
 
   addConnection(
@@ -280,10 +284,17 @@ export class JournalingWorld {
   }
 }
 
-/** Overrides the journaling repository with the world's double. */
+/** Overrides the journaling repository and the API-mode status with the world's doubles. */
 export function overrideJournaling(
   builder: TestingModuleBuilder,
   world: JournalingWorld,
 ): TestingModuleBuilder {
-  return builder.overrideProvider(JournalingRepository).useValue(world.double());
+  return builder
+    .overrideProvider(JournalingRepository)
+    .useValue(world.double())
+    .overrideProvider(ApiModeStatusService)
+    .useValue({
+      isActive: (organizationId: bigint) =>
+        Promise.resolve(world.apiModeActive.has(organizationId)),
+    });
 }

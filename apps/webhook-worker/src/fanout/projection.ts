@@ -174,9 +174,10 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
   switch (event.eventType) {
     case EventTypes.MessageReceived: {
       const p = event.payload as MessageReceivedV1;
-      // Step 8.6 D4 (ADR-0087): a journal intake copy is archived, never a gateway message: no
-      // `email.received` for it (the provider already delivered it).
-      if (p.ingestSource === 'journal_intake') return [];
+      // Step 8.6 D4 (ADR-0087), step API-1 D7.7 (ADR-0098, N1): a copy (`journal_intake`,
+      // `mailbox_api`) is never a gateway message: no `email.received` for it (the provider
+      // already delivered it). No field = a gateway message (before step 8.6).
+      if (p.ingestSource !== undefined && p.ingestSource !== 'gateway') return [];
       return [
         {
           rule: 'received',
@@ -243,7 +244,9 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
     }
     case EventTypes.MessageStateChanged: {
       const p = event.payload as MessageStateChangedV1;
-      // Step 8.6: `journaled` (E30–E32, intake only) projects nothing (no rule of the W3 table).
+      // Step 8.6, step API-1 D7.7: `journaled` (E30–E32, copies only: journal intake and
+      // mailbox API) projects nothing (no rule of the W3 table), explicitly.
+      if (p.state === 'journaled') return [];
       if (p.state === 'delivered') {
         return [
           {

@@ -16,6 +16,7 @@ import { Can } from '@/lib/auth/can';
 import { useMe, usePermissions } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { formatUtc, humanize } from '@/lib/format';
+import { OrganizationProtectionModePanel } from '@/features/api-mode/protection-mode';
 import { LimitsTable, UsageSummary } from '@/features/billing/entitlements';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
 import { navGate } from '@/features/reports/nav-gate';
@@ -228,6 +229,16 @@ function ProfilePanel({
           <ProfileForm organization={organization} allowPlan={!tenantView} />
         </ReportSection>
       </Can>
+      {organization.kind === 'customer' ? (
+        <Can op="ProtectionModeController_getOrganization_v1">
+          <div className="min-w-0 xl:col-span-2">
+            <OrganizationProtectionModePanel
+              organizationId={organization.id}
+              organizationName={organization.name}
+            />
+          </div>
+        </Can>
+      ) : null}
       <ReportSection title="Deployments" className="xl:col-span-2">
         {organization.deployments.length === 0 ? (
           <p className="text-sm text-muted-foreground">No deployment is recorded.</p>

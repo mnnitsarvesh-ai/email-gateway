@@ -210,6 +210,75 @@ describe('intake capture (D6)', () => {
   });
 });
 
+describe('API-mode copies (step API-1 D7.6)', () => {
+  it('a mailbox API copy gets no intent from the journal sweep and a direct intent is skipped (api_copy)', async () => {
+    const org = await fx.organization('apicopy');
+    const swept = await fx.copy(org.id, { ...message(), ingestSource: 'mailbox_api' });
+    // A journal copy of the same organization in the same sweep pass is still captured.
+    const source = await fx.intakeSource(org.id);
+    const journal = await fx.copy(org.id, {
+      ...message(),
+      ingestSource: 'journal_intake',
+      sourceId: source.id,
+    });
+    await h.comps.capture!.journal.runOnce();
+    expect(await intentOf(swept)).toBeNull();
+    expect(await intentOf(journal)).not.toBeNull();
+    await drainCapture(h, fx, clock.now);
+    expect(await recordOf(swept)).toBeNull();
+    expect(await recordOf(journal)).toMatchObject({ sourceJournalIntake: true });
+
+    // Defence in depth: an intent created by any other path is skipped by decideCapture.
+    const direct = await fx.copy(org.id, { ...message(), ingestSource: 'mailbox_api' });
+    const before = await metric('archive_capture_skipped_total', { reason: 'api_copy' });
+    await capture(direct);
+    expect(await intentOf(direct)).toMatchObject({ status: 'skipped', skipReason: 'api_copy' });
+    expect(await recordOf(direct)).toBeNull();
+    expect(await metric('archive_capture_skipped_total', { reason: 'api_copy' })).toBe(before + 1);
+  });
+
+  it('journal copies of an API-only organization (journaling off) are never captured', async () => {
+    // Archiving entitled but not enabled (API mode entitles the intake, step API-1 D6).
+    const off = await fx.organization('apionly-off', { enabled: false, journalEnabledAt: null });
+    const offSource = await fx.intakeSource(off.id);
+    const offCopy = await fx.copy(off.id, {
+      ...message(),
+      ingestSource: 'journal_intake',
+      sourceId: offSource.id,
+      scanRequested: true,
+    });
+    // Archiving not entitled at all (an API-only plan).
+    const none = await fx.organization('apionly-none', {
+      entitled: false,
+      enabled: false,
+      journalEnabledAt: null,
+    });
+    const noneSource = await fx.intakeSource(none.id);
+    const noneCopy = await fx.copy(none.id, {
+      ...message(),
+      ingestSource: 'journal_intake',
+      sourceId: noneSource.id,
+      scanRequested: true,
+    });
+    await h.comps.capture!.journal.runOnce();
+    expect(await intentOf(offCopy)).toBeNull();
+    expect(await intentOf(noneCopy)).toBeNull();
+    // An intent from any other path is skipped by the organization gates.
+    await capture(offCopy);
+    await capture(noneCopy);
+    expect(await intentOf(offCopy)).toMatchObject({
+      status: 'skipped',
+      skipReason: 'archiving_disabled',
+    });
+    expect(await intentOf(noneCopy)).toMatchObject({
+      status: 'skipped',
+      skipReason: 'not_entitled',
+    });
+    expect(await recordOf(offCopy)).toBeNull();
+    expect(await recordOf(noneCopy)).toBeNull();
+  });
+});
+
 describe('cross-source dedupe (D7, ADR-0088)', () => {
   it('gateway first, same body: the journal copy merges without content (BCC added, one record)', async () => {
     const org = await fx.organization('gw-first');

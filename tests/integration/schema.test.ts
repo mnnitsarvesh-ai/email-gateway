@@ -31,7 +31,8 @@ import { stack } from './support/env';
  * takeover tables and columns of step 8.4 (24-account-takeover-core.md §3) and the provider
  * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3) and the AI
  * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3) and
- * the AI assistant reports and report emails of step AI-R (31-ai-chat-reports.md §3).
+ * the AI assistant reports and report emails of step AI-R (31-ai-chat-reports.md §3) and the
+ * API-mode protection tables and columns of step API-1 (35-api-mode-protection.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -92,6 +93,8 @@ const PARTITIONED: Record<string, string> = {
   // Step 8.6 §3.2: journal intake messages (core) and the merged copies of archive records.
   journal_intake_messages: 'received_at',
   archive_record_sources: 'archive_received_at',
+  // Step API-1 §3.2: the per-mailbox API-mode copy records (core, like email_messages).
+  api_message_copies: 'received_at',
 };
 
 /**
@@ -343,22 +346,30 @@ const TENANT_OWNED = [
   'ai_chat_pseudonyms',
   'ai_chat_provider_keys',
   'ai_chat_report_jobs',
+  // Step API-1 §3.2: API-mode connections, mailboxes, their addresses, per-mailbox copies, dedupe
+  // claims and hourly counters (organization_id NOT NULL on all six).
+  'api_mode_connections',
+  'api_mailboxes',
+  'api_mailbox_addresses',
+  'api_message_copies',
+  'api_copy_dedupe_keys',
+  'api_mode_counters',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 183 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 189 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(183);
-    expect(new Set(ALL_TABLES).size).toBe(183);
+    expect(ALL_TABLES).toHaveLength(189);
+    expect(new Set(ALL_TABLES).size).toBe(189);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
-  it('partitions the 41 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
-    expect(Object.keys(PARTITIONED)).toHaveLength(41);
+  it('partitions the 42 high-volume tables by RANGE COLUMNS with a pmax partition', async () => {
+    expect(Object.keys(PARTITIONED)).toHaveLength(42);
     const rows = await prisma.$queryRaw<
       { tableName: string; method: string; expression: string; partitionName: string }[]
     >`
@@ -1713,10 +1724,11 @@ describe('message lifecycle schema (step 3.3, §3.1, §3.2)', () => {
       columnDefault: null,
     });
     // 27 since step 3.3; step 4.1 §3 adds client_name; step 7.2 §3.1 the three generated search
-    // keys subject_key, sender_domain and message_id_key; step 8.6 §3.1 ingest_source.
+    // keys subject_key, sender_domain and message_id_key; step 8.6 §3.1 ingest_source (step
+    // API-1 §3.1 appends mailbox_api).
     expect(cols.size).toBe(32);
     expect(cols.get('email_messages.ingest_source')).toMatchObject({
-      columnType: "enum('gateway','journal_intake')",
+      columnType: "enum('gateway','journal_intake','mailbox_api')",
       nullable: 'NO',
       columnDefault: 'gateway',
     });
@@ -6894,6 +6906,503 @@ describe('step AI-6 assistant hardening schema (34-ai-chat-hardening-operations.
       await prisma.aiChatReport.deleteMany({ where: { organizationId } });
       await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
       await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  const expectIndexes = async (
+    table: string,
+    expected: Record<string, { columns: string[]; unique: boolean }>,
+  ) => {
+    const idx = await indexes(table);
+    for (const [name, definition] of Object.entries(expected)) {
+      expect(idx.get(name), name).toEqual(definition);
+    }
+  };
+
+  const MODE = "enum('inline','api','hybrid')";
+  const SOURCE = "enum('journal','graph','gmail')";
+  const VERDICT =
+    "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')";
+
+  it('adds the protection mode to organizations (default inline) and domains (NULL = inherit)', async () => {
+    const cols = await columns(['organizations', 'domains']);
+    expect(cols.get('organizations.protection_mode')).toMatchObject({
+      columnType: MODE,
+      nullable: 'NO',
+      columnDefault: 'inline',
+    });
+    expect(cols.get('domains.protection_mode')).toMatchObject({
+      columnType: MODE,
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    for (const table of ['organizations', 'domains']) {
+      expect(cols.get(`${table}.protection_mode_changed_at`), table).toMatchObject({
+        columnType: 'datetime(3)',
+        nullable: 'YES',
+        columnDefault: null,
+      });
+    }
+  });
+
+  it('appends mailbox_api to every MessageIngestSource column', async () => {
+    const cols = await columns(['email_messages', 'archive_record_sources']);
+    expect(cols.get('email_messages.ingest_source')!.columnType).toBe(
+      "enum('gateway','journal_intake','mailbox_api')",
+    );
+    expect(cols.get('archive_record_sources.source')!.columnType).toBe(
+      "enum('gateway','journal_intake','mailbox_api')",
+    );
+  });
+
+  it('creates api_mode_connections (one row per provider connection)', async () => {
+    const table = 'api_mode_connections';
+    await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      provider_connection_id: ['bigint unsigned', 'NO'],
+      provider: ["enum('microsoft_365','google_workspace')", 'NO'],
+      feeds_enabled: ['tinyint(1)', 'NO'],
+      feed_mode: ["enum('poll','notify')", 'NO'],
+      feeds_enabled_at: ['datetime(3)', 'YES'],
+      inventory_status: ["enum('never','ok','failed','unavailable')", 'NO'],
+      inventory_synced_at: ['datetime(3)', 'YES'],
+      inventory_requested_at: ['datetime(3)', 'YES'],
+      next_inventory_at: ['datetime(3)', 'YES'],
+      mailboxes_total: ['int unsigned', 'YES'],
+      health_status: ["enum('unknown','healthy','degraded','failing')", 'NO'],
+      health_checks: ['json', 'YES'],
+      health_changed_at: ['datetime(3)', 'YES'],
+      health_alerted_at: ['datetime(3)', 'YES'],
+      throttled_until: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      created_by_user_id: ['bigint unsigned', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    await expectIndexes(table, {
+      api_mode_connections_public_id_key: { columns: ['public_id'], unique: true },
+      api_mode_connections_provider_connection_id_key: {
+        columns: ['provider_connection_id'],
+        unique: true,
+      },
+      api_mode_connections_organization_id_idx: { columns: ['organization_id'], unique: false },
+      api_mode_connections_health_status_idx: { columns: ['health_status'], unique: false },
+      api_mode_connections_next_inventory_at_idx: {
+        columns: ['next_inventory_at'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      {
+        columnName: 'provider_connection_id',
+        referenced: 'provider_connections',
+        onDelete: 'RESTRICT',
+      },
+    ]);
+  });
+
+  it('creates api_mailboxes and api_mailbox_addresses', async () => {
+    const cols = await expectColumns('api_mailboxes', {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      provider_user_id: ['varchar(128)', 'YES'],
+      primary_address: ['varchar(320)', 'NO'],
+      domain_id: ['bigint unsigned', 'YES'],
+      status: ["enum('active','discovered','disabled','deleted')", 'NO'],
+      coverage_state: ["enum('covered','gap','out_of_scope')", 'NO'],
+      coverage_changed_at: ['datetime(3)', 'YES'],
+      journal_last_seen_at: ['datetime(3)', 'YES'],
+      feed_status: ["enum('off','pending','active','error','throttled','revoked')", 'NO'],
+      feed_cursor: ['text', 'YES'],
+      feed_started_at: ['datetime(3)', 'YES'],
+      subscription_id: ['varchar(128)', 'YES'],
+      subscription_expires_at: ['datetime(3)', 'YES'],
+      client_state_hash: ['char(64)', 'YES'],
+      client_state_version: ['smallint unsigned', 'NO'],
+      sync_requested_at: ['datetime(3)', 'YES'],
+      next_sync_at: ['datetime(3)', 'YES'],
+      last_sync_at: ['datetime(3)', 'YES'],
+      last_change_at: ['datetime(3)', 'YES'],
+      last_gap_at: ['datetime(3)', 'YES'],
+      consecutive_failures: ['smallint unsigned', 'NO'],
+      last_error_code: ['varchar(64)', 'YES'],
+      lease_until: ['datetime(3)', 'YES'],
+      deleted_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get('api_mailboxes.status')!.columnDefault).toBe('discovered');
+    expect(cols.get('api_mailboxes.coverage_state')!.columnDefault).toBe('out_of_scope');
+    expect(cols.get('api_mailboxes.feed_status')!.columnDefault).toBe('off');
+    await expectIndexes('api_mailboxes', {
+      api_mailboxes_public_id_key: { columns: ['public_id'], unique: true },
+      api_mailboxes_subscription_id_key: { columns: ['subscription_id'], unique: true },
+      api_mailboxes_api_connection_id_provider_user_id_key: {
+        columns: ['api_connection_id', 'provider_user_id'],
+        unique: true,
+      },
+      api_mailboxes_organization_id_status_idx: {
+        columns: ['organization_id', 'status'],
+        unique: false,
+      },
+      api_mailboxes_api_connection_id_coverage_state_idx: {
+        columns: ['api_connection_id', 'coverage_state'],
+        unique: false,
+      },
+      api_mailboxes_feed_status_next_sync_at_idx: {
+        columns: ['feed_status', 'next_sync_at'],
+        unique: false,
+      },
+      api_mailboxes_sync_requested_at_idx: { columns: ['sync_requested_at'], unique: false },
+    });
+    expect(await foreignKeys('api_mailboxes')).toEqual([
+      { columnName: 'api_connection_id', referenced: 'api_mode_connections', onDelete: 'RESTRICT' },
+    ]);
+
+    await expectColumns('api_mailbox_addresses', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      mailbox_id: ['bigint unsigned', 'NO'],
+      address: ['varchar(320)', 'NO'],
+      kind: ["enum('primary','alias')", 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    await expectIndexes('api_mailbox_addresses', {
+      api_mailbox_addresses_organization_id_address_key: {
+        columns: ['organization_id', 'address'],
+        unique: true,
+      },
+      api_mailbox_addresses_mailbox_id_idx: { columns: ['mailbox_id'], unique: false },
+    });
+    expect(await foreignKeys('api_mailbox_addresses')).toEqual([
+      { columnName: 'mailbox_id', referenced: 'api_mailboxes', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('creates the partitioned api_message_copies (keys end with received_at, no FK)', async () => {
+    const table = 'api_message_copies';
+    await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      received_at: ['datetime(3)', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      mailbox_id: ['bigint unsigned', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      source: [SOURCE, 'NO'],
+      seen_journal: ['tinyint(1)', 'NO'],
+      seen_api: ['tinyint(1)', 'NO'],
+      direction: ["enum('inbound','internal')", 'NO'],
+      message_id_hash: ['char(64)', 'YES'],
+      provider_message_id: ['varchar(256)', 'YES'],
+      provider_delivered_at: ['datetime(3)', 'YES'],
+      delivered_basis: [
+        "enum('received_header','graph_received','gmail_internal','ingest')",
+        'YES',
+      ],
+      status: ["enum('pending','scanned','scan_failed','parse_failed','too_large')", 'NO'],
+      verdict: [VERDICT, 'YES'],
+      risk_score: ['smallint unsigned', 'YES'],
+      verdict_at: ['datetime(3)', 'YES'],
+      lag_ms: ['int unsigned', 'YES'],
+      verdict_authority: ["enum('copy','inline')", 'NO'],
+      inline_message_id: ['bigint unsigned', 'YES'],
+      inline_received_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    const idx = await indexes(table);
+    expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
+    for (const [name, definition] of idx) {
+      if (definition.unique) expect(definition.columns, name).toContain('received_at');
+    }
+    await expectIndexes(table, {
+      api_message_copies_message_id_received_at_mailbox_id_key: {
+        columns: ['message_id', 'received_at', 'mailbox_id'],
+        unique: true,
+      },
+      api_message_copies_organization_id_received_at_id_idx: {
+        columns: ['organization_id', 'received_at', 'id'],
+        unique: false,
+      },
+      api_message_copies_organization_id_public_id_idx: {
+        columns: ['organization_id', 'public_id'],
+        unique: false,
+      },
+      api_message_copies_organization_id_mailbox_id_received_at_idx: {
+        columns: ['organization_id', 'mailbox_id', 'received_at'],
+        unique: false,
+      },
+      api_message_copies_organization_id_message_id_hash_idx: {
+        columns: ['organization_id', 'message_id_hash'],
+        unique: false,
+      },
+      api_message_copies_organization_id_verdict_received_at_idx: {
+        columns: ['organization_id', 'verdict', 'received_at'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([]);
+    expect(PARTITIONED[table]).toBe('received_at');
+  });
+
+  it('creates api_copy_dedupe_keys (transient, no FK) and api_mode_counters', async () => {
+    await expectColumns('api_copy_dedupe_keys', {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      mailbox_id: ['bigint unsigned', 'NO'],
+      message_id_hash: ['char(64)', 'NO'],
+      claimed_by: [SOURCE, 'NO'],
+      copy_id: ['bigint unsigned', 'YES'],
+      copy_received_at: ['datetime(3)', 'YES'],
+      claim_expires_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    await expectIndexes('api_copy_dedupe_keys', {
+      api_copy_dedupe_keys_mailbox_id_message_id_hash_key: {
+        columns: ['mailbox_id', 'message_id_hash'],
+        unique: true,
+      },
+      api_copy_dedupe_keys_created_at_idx: { columns: ['created_at'], unique: false },
+      api_copy_dedupe_keys_organization_id_idx: { columns: ['organization_id'], unique: false },
+    });
+    expect(await foreignKeys('api_copy_dedupe_keys')).toEqual([]);
+
+    const counters: Record<string, [string, string]> = {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      hour: ['datetime', 'NO'],
+      fetch_bytes: ['bigint unsigned', 'NO'],
+      lag_sum_ms: ['bigint unsigned', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    };
+    for (const column of [
+      'journal_copies',
+      'feed_copies',
+      'duplicates',
+      'skipped_internal',
+      'too_large',
+      'provider_requests',
+      'throttled_429',
+      'throttled_503',
+      'provider_errors',
+      'cursor_resets',
+      'lag_count',
+      'lag_le_60s',
+      'lag_le_300s',
+      'lag_le_900s',
+      'lag_le_3600s',
+      'lag_gt_3600s',
+      'lag_max_ms',
+    ]) {
+      counters[column] = ['int unsigned', 'NO'];
+    }
+    await expectColumns('api_mode_counters', counters);
+    await expectIndexes('api_mode_counters', {
+      api_mode_counters_api_connection_id_hour_key: {
+        columns: ['api_connection_id', 'hour'],
+        unique: true,
+      },
+      api_mode_counters_organization_id_hour_idx: {
+        columns: ['organization_id', 'hour'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys('api_mode_counters')).toEqual([
+      { columnName: 'api_connection_id', referenced: 'api_mode_connections', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('enforces the unique keys, the RESTRICT chain and the cascades', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const provider = await prisma.providerConnection.create({
+      data: {
+        organizationId,
+        provider: 'microsoft_365',
+        displayName: `it-${suffix}`,
+      },
+    });
+    try {
+      const organization = await prisma.organization.findUniqueOrThrow({
+        where: { id: organizationId },
+      });
+      expect(organization.protectionMode).toBe('inline');
+      const domain = await prisma.domain.create({
+        data: { organizationId, name: `it-${suffix}.example.test` },
+      });
+      expect(domain.protectionMode).toBeNull();
+
+      const connection = await prisma.apiModeConnection.create({
+        data: { organizationId, providerConnectionId: provider.id, provider: 'microsoft_365' },
+      });
+      expect(connection).toMatchObject({
+        feedsEnabled: false,
+        feedMode: 'poll',
+        inventoryStatus: 'never',
+        healthStatus: 'unknown',
+        mailboxesTotal: null,
+        rowVersion: 1,
+      });
+      expect(connection.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      // One API-mode row per provider connection.
+      await expect(
+        prisma.apiModeConnection.create({
+          data: { organizationId, providerConnectionId: provider.id, provider: 'microsoft_365' },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const mailbox = await prisma.apiMailbox.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          providerUserId: `it-${suffix}-user`,
+          primaryAddress: `user@it-${suffix}.example.test`,
+          domainId: domain.id,
+          addresses: {
+            create: [
+              { organizationId, address: `user@it-${suffix}.example.test`, kind: 'primary' },
+              { organizationId, address: `alias@it-${suffix}.example.test`, kind: 'alias' },
+            ],
+          },
+        },
+      });
+      expect(mailbox).toMatchObject({
+        status: 'discovered',
+        coverageState: 'out_of_scope',
+        feedStatus: 'off',
+        clientStateVersion: 0,
+        consecutiveFailures: 0,
+      });
+      // Two mailboxes discovered from journal envelopes (provider_user_id NULL) may coexist.
+      for (const local of ['d1', 'd2']) {
+        await prisma.apiMailbox.create({
+          data: {
+            organizationId,
+            apiConnectionId: connection.id,
+            primaryAddress: `${local}@it-${suffix}.example.test`,
+          },
+        });
+      }
+      await expect(
+        prisma.apiMailbox.create({
+          data: {
+            organizationId,
+            apiConnectionId: connection.id,
+            providerUserId: `it-${suffix}-user`,
+            primaryAddress: `other@it-${suffix}.example.test`,
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // An address belongs to one mailbox of the organization.
+      await expect(
+        prisma.apiMailboxAddress.create({
+          data: {
+            organizationId,
+            mailboxId: mailbox.id,
+            address: `alias@it-${suffix}.example.test`,
+            kind: 'alias',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const receivedAt = new Date();
+      const copy = {
+        receivedAt,
+        publicId: randomUUID(),
+        organizationId,
+        apiConnectionId: connection.id,
+        mailboxId: mailbox.id,
+        messageId: 9_200_000_000n,
+        source: 'journal' as const,
+        status: 'pending' as const,
+      };
+      const created = await prisma.apiMessageCopy.create({ data: copy });
+      expect(created).toMatchObject({
+        seenJournal: false,
+        seenApi: false,
+        direction: 'inbound',
+        verdictAuthority: 'copy',
+        verdict: null,
+      });
+      await expect(
+        prisma.apiMessageCopy.create({ data: { ...copy, publicId: randomUUID() } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const hash = 'a'.repeat(64);
+      await prisma.apiCopyDedupeKey.create({
+        data: { organizationId, mailboxId: mailbox.id, messageIdHash: hash, claimedBy: 'journal' },
+      });
+      await expect(
+        prisma.apiCopyDedupeKey.create({
+          data: { organizationId, mailboxId: mailbox.id, messageIdHash: hash, claimedBy: 'graph' },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const hour = new Date('2026-11-26T08:00:00.000Z');
+      await prisma.apiModeCounter.create({
+        data: { organizationId, apiConnectionId: connection.id, hour, journalCopies: 1 },
+      });
+      await expect(
+        prisma.apiModeCounter.create({
+          data: { organizationId, apiConnectionId: connection.id, hour },
+        }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // RESTRICT: the connection cannot go while mailboxes reference it, nor the provider
+      // connection while its API-mode row exists.
+      await expect(
+        prisma.$executeRaw`DELETE FROM api_mode_connections WHERE id = ${connection.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      await expect(
+        prisma.$executeRaw`DELETE FROM provider_connections WHERE id = ${provider.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // CASCADE: a mailbox takes its addresses; the connection takes its counters.
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiCopyDedupeKey.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      expect(await prisma.apiMailboxAddress.count({ where: { organizationId } })).toBe(0);
+      await prisma.apiModeConnection.delete({ where: { id: connection.id } });
+      expect(await prisma.apiModeCounter.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiCopyDedupeKey.deleteMany({ where: { organizationId } });
+      await prisma.apiModeCounter.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
+      await prisma.providerConnection.deleteMany({ where: { organizationId } });
       await cleanup();
     }
   });

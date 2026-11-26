@@ -61,12 +61,28 @@ export function addressUsable(snapshot: IntakeSourceSnapshot, now: Date): boolea
 }
 
 /**
+ * The intake entitlement (8.6 D1, relaxed by step API-1 D6 / ADR-0098): the `journal_intake`
+ * feature and either archiving (feature entitled and archiving enabled, as 8.6) or API mode
+ * active for the organization (`apiDetect`). Pure.
+ */
+export function intakeEntitled(
+  organization: Pick<
+    IntakeSourceSnapshot['organization'],
+    'journalIntakeFeature' | 'archivingFeature' | 'archivingEnabled' | 'apiDetect'
+  >,
+): boolean {
+  if (!organization.journalIntakeFeature) return false;
+  return (organization.archivingFeature && organization.archivingEnabled) || organization.apiDetect;
+}
+
+/**
  * Steps 1–4 of the intake RCPT decision (D2.2), pure. The LMTP re-check (D2.5) runs the same
  * function on a fresh writer snapshot with the facts Postfix passed (XFORWARD client address,
  * TLS and certificate facts of the END-OF-MESSAGE marker).
  *
  * 1. a snapshot (address hash, current or unexpired previous) of a non-disabled source;
- * 2. organization active, `archiving` + `journal_intake`, archiving enabled; source not paused;
+ * 2. organization active and entitled (`intakeEntitled`: `journal_intake` and either `archiving`
+ *    with archiving enabled or API mode active, step API-1 D6); source not paused;
  * 3. network: provider kinds → the bound, non-disabled connection of the same organization and
  *    provider, and the client in that provider's egress set; on-premises kinds → the client in
  *    the source's networks and in no provider egress set; the client certificate when
@@ -86,12 +102,7 @@ export function admitIntakeRecipient(
       source.status === 'disabled' ? 'refused_disabled' : 'refused_address_expired',
     );
   }
-  if (
-    !organization.active ||
-    !organization.archivingFeature ||
-    !organization.journalIntakeFeature ||
-    !organization.archivingEnabled
-  ) {
+  if (!organization.active || !intakeEntitled(organization)) {
     return refuse('unavailable', 'refused_unavailable');
   }
   if (source.status === 'paused')

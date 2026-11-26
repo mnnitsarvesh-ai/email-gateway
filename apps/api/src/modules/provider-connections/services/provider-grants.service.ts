@@ -68,7 +68,12 @@ import {
   ProviderConnectionsRepository,
 } from '../repositories/provider-connections.repository';
 import { ProviderGrantsRepository } from '../repositories/provider-grants.repository';
-import { parseBody, parseProfileKey, parsePublicId } from './provider-common';
+import {
+  parseBody,
+  parseProfileKey,
+  parsePublicId,
+  requireMailboxGrantPermission,
+} from './provider-common';
 import { ProviderConnectionsService } from './provider-connections.service';
 
 type Tx = Prisma.TransactionClient;
@@ -81,8 +86,6 @@ export type ProviderGrantsConfig = Pick<
   | 'PROVIDER_M365_LOGIN_URL'
   | 'PROVIDER_GOOGLE_TOKEN_URL'
   | 'PROVIDER_ALLOW_HTTP_ENDPOINTS'
-  | 'PROVIDER_M365_MAILFLOW_APP_CLIENT_ID'
-  | 'PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID'
   | 'PROVIDER_CONSENT_REDIRECT_URL'
   | 'PROVIDER_CONSENT_STATE_TTL_SECONDS'
   | 'PORTAL_PUBLIC_URL'
@@ -114,13 +117,17 @@ export function providerRemovalSteps(provider: string, authMethod: string): stri
 }
 
 /** Steps shown for Google domain-wide delegation (D3.5). */
-export function delegationSteps(clientId: string, scopes: readonly string[]): string[] {
+export function delegationSteps(
+  clientId: string,
+  scopes: readonly string[],
+  profileKey = 'google.mail_flow',
+): string[] {
   return [
     'Sign in to the Google Admin console as a super administrator.',
     'Open Security → Access and data control → API controls → Manage domain-wide delegation.',
     `Add new: client ID ${clientId}, OAuth scopes ${scopes.join(',')}.`,
     'Choose a delegated administrator (ideally a dedicated admin with a custom read-only role) ' +
-      'and confirm with POST …/grants/google.mail_flow/verify { subjectEmail }.',
+      `and confirm with POST …/grants/${profileKey}/verify { subjectEmail }.`,
   ];
 }
 
@@ -221,6 +228,7 @@ export class ProviderGrantsService {
     const publicId = parsePublicId(input.id, 'id');
     const key = parseIdempotencyKey(input.idempotencyKey);
     const body = parseBody(CreateGrantBodySchema, input.body);
+    requireMailboxGrantPermission(principal, body.profile);
     const live: { consentUrl: string | null } = { consentUrl: null };
     const result = await this.idempotency.execute<CreatedGrantView>(
       {
@@ -247,18 +255,14 @@ export class ProviderGrantsService {
         ) {
           throw authMethodNotAllowed(body.authMethod);
         }
-        if (!this.base.availableAuthMethods().has(body.authMethod)) {
+        if (!this.base.availableAuthMethods(profile.purpose).has(body.authMethod)) {
           throw authMethodUnavailable(body.authMethod);
         }
         if (body.authMethod === 'platform_app' && principal.kind !== 'user') {
           throw userPrincipalRequired();
         }
-        const clientId =
-          body.authMethod === 'platform_app'
-            ? this.config.PROVIDER_M365_MAILFLOW_APP_CLIENT_ID!
-            : body.authMethod === 'platform_service_account'
-              ? this.config.PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID!
-              : null;
+        // Step API-1 D4: the mailbox-access profiles have their own operator app / account.
+        const clientId = this.base.platformClientId(profile.purpose, body.authMethod);
         const existing = await this.grants.lockGrant(tx, scope, c.id, profile.key);
         if (existing && existing.status !== 'revoked') throw grantExists(existing.status);
         const fresh = {
@@ -346,7 +350,7 @@ export class ProviderGrantsService {
                 ? {
                     clientId: clientId!,
                     scopes: [...profile.permissions],
-                    adminConsoleSteps: delegationSteps(clientId!, profile.permissions),
+                    adminConsoleSteps: delegationSteps(clientId!, profile.permissions, profile.key),
                   }
                 : null,
           },
@@ -491,6 +495,7 @@ export class ProviderGrantsService {
     const profileKey = parseProfileKey(input.profile);
     const key = parseIdempotencyKey(input.idempotencyKey);
     const body = parseBody(SetCredentialsBodySchema, input.body);
+    requireMailboxGrantPermission(principal, profileKey);
     const redacted =
       'clientSecret' in body
         ? { ...body, clientSecret: this.keyed(body.clientSecret) }
@@ -625,6 +630,7 @@ export class ProviderGrantsService {
     const profileKey = parseProfileKey(input.profile);
     const key = parseIdempotencyKey(input.idempotencyKey);
     const body = parseBody(VerifyGrantBodySchema, input.body);
+    requireMailboxGrantPermission(principal, profileKey);
     return this.idempotency.execute<GrantView>(
       {
         organizationId: scope.organizationId,
@@ -714,6 +720,7 @@ export class ProviderGrantsService {
     const publicId = parsePublicId(input.id, 'id');
     const profileKey = parseProfileKey(input.profile);
     const key = parseIdempotencyKey(input.idempotencyKey);
+    requireMailboxGrantPermission(principal, profileKey);
     return this.idempotency.execute<RevokedGrantView>(
       {
         organizationId: scope.organizationId,

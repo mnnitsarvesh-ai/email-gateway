@@ -272,6 +272,28 @@ describe('journal intake guard (step 8.6 D4)', () => {
     recordDeliverySignal.mockReset();
   });
 
+  it('refuses to reinject a mailbox API copy (step API-1 D7.7): row failed, no SMTP', async () => {
+    const { reinjector, store, prisma, metrics } = build({
+      context: vi.fn().mockResolvedValue({
+        ingestSource: 'mailbox_api',
+        envelopeFrom: 'sender@ext.test',
+        clientIp: null,
+        clientHelo: null,
+        deliveries: active,
+      }),
+    });
+    const inc = vi.spyOn(metrics.intakeRefusals, 'inc');
+    await expect(reinjector.process(claimed(1))).resolves.toBe('failed');
+    expect(inc).toHaveBeenCalledWith({ stage: 'reinjection' });
+    expect(store.markFailed).toHaveBeenCalledWith(
+      expect.anything(),
+      'intake_not_deliverable',
+      'non-gateway copies (journal intake, mailbox API) are never delivered',
+    );
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(recordDeliverySignal).not.toHaveBeenCalled();
+  });
+
   it('refuses to reinject a journal intake message: row failed, metric, no SMTP, no signal', async () => {
     const { reinjector, store, prisma, metrics } = build({
       context: vi.fn().mockResolvedValue({
@@ -288,7 +310,7 @@ describe('journal intake guard (step 8.6 D4)', () => {
     expect(store.markFailed).toHaveBeenCalledWith(
       expect.anything(),
       'intake_not_deliverable',
-      'journal intake messages are never delivered',
+      'non-gateway copies (journal intake, mailbox API) are never delivered',
     );
     expect(store.approvalTime).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();

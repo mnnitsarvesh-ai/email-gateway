@@ -196,7 +196,11 @@ export class Harness {
   async grant(
     connection: { id: bigint; publicId: string; organizationId: bigint; provider: string },
     input: {
-      authMethod: 'customer_app_secret' | 'customer_service_account' | 'platform_app';
+      authMethod:
+        | 'customer_app_secret'
+        | 'customer_service_account'
+        | 'platform_app'
+        | 'platform_service_account';
       credential?: ProviderCredential;
       clientId?: string;
       claimedTenantId?: string;
@@ -204,7 +208,10 @@ export class Harness {
       status?: 'verifying' | 'active' | 'error';
       expiresAt?: Date;
       keyCipher?: ProviderCredentialCipher;
-      /** Another registered profile (step 8.5: the ATO profiles); default the mail-flow one. */
+      /**
+       * Another registered profile (step 8.5: the ATO profiles; step API-1: the mailbox-access
+       * profiles); default the mail-flow one.
+       */
       profile?: PermissionProfile;
     },
   ) {

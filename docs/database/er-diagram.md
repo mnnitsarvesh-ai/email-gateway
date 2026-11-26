@@ -95,6 +95,12 @@ flowchart LR
     provider_health[provider_validation_runs, provider_probe_observations, provider_health_checks, provider_health_events, provider_relay_counters]
     provider_egress[provider_egress_range_sets, provider_egress_ranges]
   end
+  subgraph apimode[API-mode protection]
+    api_mode_connections
+    api_mailboxes[api_mailboxes, api_mailbox_addresses]
+    api_message_copies[(api_message_copies P)]
+    api_mode_counters[api_mode_counters, api_copy_dedupe_keys]
+  end
   subgraph assistant[AI assistant]
     ai_chat_settings
     ai_chat_conversations[ai_chat_conversations, ai_chat_turns, ai_chat_messages, ai_chat_tool_executions, ai_chat_action_confirmations]
@@ -164,6 +170,12 @@ flowchart LR
   journal_intake_sources --> journal_intake_counters
   email_messages -.-> journal_intake_messages
   journal_intake_sources -.-> journal_intake_messages
+  organizations --> api_mode_connections
+  provider_connections --> api_mode_connections
+  api_mode_connections --> api_mailboxes
+  api_mode_connections --> api_mode_counters
+  email_messages -.-> api_message_copies
+  api_mailboxes -.-> api_message_copies
   organizations --> archive_encryption_keys
   organizations --> ediscovery_cases
   email_messages -.-> message_outbox
@@ -1379,6 +1391,84 @@ erDiagram
     datetime received_at PK "PARTITIONED"
     enum ingest_source "gateway, journal_intake"
     enum status "... journaled"
+  }
+```
+
+## API-mode protection
+
+Step API-1 ([design §3](../plan/steps/35-api-mode-protection.md#3-data-model-one-forward-migration-utc-timestamp_api_mode_protection-wp1), ADR-0098, ADR-0100). Copies are ordinary registry messages (`email_messages.ingest_source` `journal_intake` or `mailbox_api`); `api_message_copies` holds one row per scanned copy and mailbox. The protection mode lives on `organizations.protection_mode` (default) and `domains.protection_mode` (NULL = inherit). Solid lines are foreign keys; dotted lines are logical references. No message content and no provider credential is stored here (credentials are step 8.2 grants).
+
+```mermaid
+erDiagram
+  organizations ||--o{ api_mode_connections : "RESTRICT"
+  provider_connections ||--o| api_mode_connections : "UQ, RESTRICT"
+  api_mode_connections ||--o{ api_mailboxes : "RESTRICT"
+  api_mailboxes ||--o{ api_mailbox_addresses : "CASCADE"
+  api_mode_connections ||--o{ api_mode_counters : "CASCADE"
+  api_mailboxes ||..o{ api_message_copies : "mailbox_id, no FK"
+  email_messages ||..o{ api_message_copies : "message_id + received_at"
+  api_mailboxes ||..o{ api_copy_dedupe_keys : "mailbox_id, no FK"
+  api_message_copies ||..o| api_copy_dedupe_keys : "copy_id + copy_received_at"
+  domains ||..o{ api_mailboxes : "domain_id, no FK"
+  api_mode_connections {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint provider_connection_id FK "UQ"
+    enum provider "microsoft_365, google_workspace"
+    bool feeds_enabled
+    enum feed_mode "poll, notify"
+    enum inventory_status "never, ok, failed, unavailable"
+    enum health_status "unknown, healthy, degraded, failing"
+    int row_version
+  }
+  api_mailboxes {
+    bigint id PK
+    char public_id UK
+    bigint organization_id
+    bigint api_connection_id FK "UQ with provider_user_id"
+    varchar provider_user_id "NULL = discovered"
+    varchar primary_address
+    bigint domain_id
+    enum status "active, discovered, disabled, deleted"
+    enum coverage_state "covered, gap, out_of_scope"
+    enum feed_status "off, pending, active, error, throttled, revoked"
+    varchar subscription_id UK
+    char client_state_hash
+  }
+  api_mailbox_addresses {
+    bigint id PK
+    bigint organization_id "UQ with address"
+    bigint mailbox_id FK
+    varchar address
+    enum kind "primary, alias"
+  }
+  api_message_copies {
+    bigint id PK
+    datetime received_at PK "PARTITIONED month"
+    char public_id
+    bigint organization_id
+    bigint api_connection_id
+    bigint mailbox_id "UQ with message_id, received_at"
+    bigint message_id
+    enum source "journal, graph, gmail"
+    enum status "pending, scanned, scan_failed, parse_failed, too_large"
+    enum verdict "MessageVerdict"
+    enum verdict_authority "copy, inline"
+  }
+  api_copy_dedupe_keys {
+    bigint id PK
+    bigint organization_id
+    bigint mailbox_id "UQ with message_id_hash"
+    char message_id_hash
+    enum claimed_by "journal, graph, gmail"
+    bigint copy_id
+  }
+  api_mode_counters {
+    bigint id PK
+    bigint organization_id
+    bigint api_connection_id FK "UQ with hour"
+    datetime hour
   }
 ```
 

@@ -1,8 +1,17 @@
 /**
  * Microsoft Graph v1.0 simulator (design note D12): exactly the endpoints, query parameters,
- * paging and error shapes the Microsoft adapter uses. Bearer tokens are checked against the token
+ * paging and error shapes the Microsoft adapter uses, plus the mail endpoints of step API-1
+ * (`graph-mail.ts`: Inbox delta, `$value`, subscriptions). Bearer tokens are checked against the token
  * registry and every endpoint enforces its permission, so missing-permission paths are real.
  */
+import {
+  DELTA_PATH,
+  graphDelta,
+  graphMessageValue,
+  graphSubscriptions,
+  SUBSCRIPTIONS_PATH,
+  VALUE_PATH,
+} from './graph-mail';
 import { json, type SimRequest, type SimResponse, type Simulator } from './server';
 import type { SimScript } from './script';
 import { hasPermission, type ResolvedToken } from './tokens';
@@ -113,7 +122,7 @@ export class GraphSimulator implements Simulator {
     );
   }
 
-  handle(request: SimRequest): SimResponse {
+  handle(request: SimRequest): SimResponse | Promise<SimResponse> {
     const auth = this.authenticate(request);
     if ('status' in auth) return auth;
     const { token, directory } = auth;
@@ -240,6 +249,29 @@ export class GraphSimulator implements Simulator {
           match[3] === undefined ? undefined : decodeURIComponent(match[3]),
         ),
       );
+    }
+    // Step API-1 (D13): Inbox delta, MIME content and change-notification subscriptions.
+    const error = (status: number, code: string) => this.error(status, code);
+    if (m === 'GET' && (match = DELTA_PATH.exec(p))) {
+      const user = this.user(directory, match[1] as string);
+      return respond(graphDelta(this.script, request, token, directory, user, error));
+    }
+    if (m === 'GET' && (match = VALUE_PATH.exec(p))) {
+      const user = this.user(directory, match[1] as string);
+      const messageId = decodeURIComponent(match[2] as string);
+      return respond(graphMessageValue(token, directory, user, messageId, error));
+    }
+    if ((match = SUBSCRIPTIONS_PATH.exec(p))) {
+      const id = match[1] === undefined ? undefined : decodeURIComponent(match[1]);
+      return graphSubscriptions(
+        this.script,
+        request,
+        token,
+        directory,
+        id,
+        (key) => this.user(directory, key),
+        error,
+      ).then(respond);
     }
     return this.error(404, 'Request_ResourceNotFound');
   }

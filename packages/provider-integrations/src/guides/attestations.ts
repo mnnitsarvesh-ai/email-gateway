@@ -225,3 +225,46 @@ export const intakeConfigureAttestations = (kind: JournalIntakeKind): string[] =
   intakeAttestationsFor(kind)
     .filter((a) => a.requiredFor === 'configure')
     .map((a) => a.code);
+
+// ---------------------------------------------------------------------------------------------
+// Step API-1: API-mode guides (docs/plan/steps/35-api-mode-protection.md D4, D12)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Attestation codes of the API-mode guides (`api-mode-guide/1`): customer-side steps the gateway
+ * cannot observe. Statements, not proofs; no wizard step requires them (the mailbox-access step
+ * is done when the grant is active).
+ */
+export interface ApiModeAttestationDefinition {
+  code: string;
+  provider: IntegrationProvider;
+  statement: string;
+  requiredFor: null;
+}
+
+export const API_MODE_ATTESTATIONS: readonly ApiModeAttestationDefinition[] = Object.freeze([
+  {
+    code: 'api_mode.m365.app_access_scoped',
+    provider: 'microsoft_365',
+    statement:
+      'An Exchange Online RBAC for Applications scope limits the mailbox-access application to the mailboxes API mode protects; mailboxes outside the scope without journal copies appear as coverage gaps.',
+    requiredFor: null,
+  },
+  {
+    code: 'api_mode.google.delegation_added',
+    provider: 'google_workspace',
+    statement:
+      'Domain-wide delegation lists the mailbox-access client ID with exactly the scopes gmail.modify and admin.directory.user.readonly.',
+    requiredFor: null,
+  },
+] satisfies ApiModeAttestationDefinition[]);
+
+export const apiModeAttestationsFor = (
+  provider: IntegrationProvider,
+): ApiModeAttestationDefinition[] => API_MODE_ATTESTATIONS.filter((a) => a.provider === provider);
+
+export const apiModeAttestationByCode = (
+  provider: IntegrationProvider,
+  code: string,
+): ApiModeAttestationDefinition | undefined =>
+  API_MODE_ATTESTATIONS.find((a) => a.provider === provider && a.code === code);

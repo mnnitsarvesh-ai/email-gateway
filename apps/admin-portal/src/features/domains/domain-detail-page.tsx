@@ -12,6 +12,7 @@ import { useApiQuery } from '@/lib/api/hooks';
 import { Can } from '@/lib/auth/can';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { humanize } from '@/lib/format';
+import { DomainProtectionModePanel } from '@/features/api-mode/protection-mode';
 import { DestinationsEditor } from './destinations-editor';
 import { DkimPanel } from './dkim-panel';
 import { DnsRecordsPanel } from './dns-records';
@@ -80,6 +81,7 @@ function Overview({ domain }: { domain: DomainDetail }) {
       >
         <VerificationPanel domainId={domain.id} />
       </Section>
+      <DomainProtectionModePanel domain={domain} />
     </div>
   );
 }

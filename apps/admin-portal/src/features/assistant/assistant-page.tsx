@@ -76,7 +76,7 @@ function AssistantWorkspace() {
         <div className="grid gap-4 md:min-h-0 md:flex-1 md:grid-cols-[16rem_minmax(0,1fr)] lg:grid-cols-[18rem_minmax(0,1fr)]">
           <aside
             aria-label="Conversation history"
-            className="rounded-lg border bg-card p-3 md:min-h-0 md:overflow-hidden"
+            className="relative rounded-lg border bg-card p-3 md:min-h-0 md:overflow-hidden"
           >
             <ConversationList
               className="h-full max-h-80 md:max-h-none"
@@ -87,7 +87,7 @@ function AssistantWorkspace() {
             aria-label="Conversation"
             className="flex min-h-[28rem] flex-col rounded-lg border bg-card md:min-h-0"
           >
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <div className="relative min-h-0 flex-1 overflow-y-auto p-4">
               <ConversationView />
             </div>
             <div className="border-t p-3">

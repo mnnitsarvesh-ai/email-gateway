@@ -272,3 +272,67 @@ describe('journal_intake_silent template (step 8.6 D9)', () => {
     expect(notice.text).not.toContain('journal.gateway.test');
   });
 });
+
+describe('api_mode_unhealthy template (step API-1 D11.3)', () => {
+  const CONNECTION = '0192f0c4-cccc-7ddd-8eee-0000000000a1';
+  const apiMode = (
+    over: Partial<Extract<AlertFacts, { kind: 'api_mode_unhealthy' }>['apiMode']> = {},
+    severity: 'medium' | 'high' = 'medium',
+  ) =>
+    ({
+      ...common,
+      severity,
+      kind: 'api_mode_unhealthy',
+      apiMode: {
+        connectionPublicId: CONNECTION,
+        name: 'Contoso M365',
+        provider: 'google_workspace',
+        healthNow: 'degraded',
+        failingChecks: ['mailbox_access.grant', 'throttling.1h'],
+        ...over,
+      },
+    }) as AlertFacts;
+
+  it('names the provider and connection, lists the check titles, links /api-mode; no address', () => {
+    const notice = renderSecurityAlert(apiMode());
+    expect(notice.subject).toBe(
+      '[Email Gateway] Security alert (medium): API-mode protection needs attention',
+    );
+    expect(notice.text).toContain('Alert: API-mode protection connection degraded or failing');
+    expect(notice.text).toContain('Provider: Google Workspace');
+    expect(notice.text).toContain(`Connection: Contoso M365 (${CONNECTION})`);
+    expect(notice.text).toContain('Problem: degraded.');
+    expect(notice.text).toContain('- Mailbox access grant active (mailbox_access.grant)');
+    expect(notice.text).toContain('- Provider throttling (last hour) (throttling.1h)');
+    expect(notice.text).toContain(`Details: ${PORTAL}/api-mode?connection=${CONNECTION}`);
+    expect(notice.text).not.toContain('@');
+  });
+
+  it('failing (high) text; unknown provider, codes and names are neutral', () => {
+    const notice = renderSecurityAlert(
+      apiMode(
+        {
+          name: 'admin@contoso.example',
+          provider: 'other',
+          healthNow: 'Bad!',
+          failingChecks: ['future.check', 'NOT A CODE', 'connection.active'],
+        },
+        'high',
+      ),
+    );
+    expect(notice.text).toContain('Problem: failing.');
+    expect(notice.text).toContain('Provider: unknown');
+    expect(notice.text).toContain('(name not shown)');
+    expect(notice.text).toContain('Health now: unknown');
+    expect(notice.text).toContain('- future.check (future.check)');
+    expect(notice.text).toContain('- unknown');
+    expect(notice.text).toContain('- Provider connection active and bound (connection.active)');
+    expect(notice.text).not.toContain('contoso.example');
+  });
+
+  it('no failing check and a malformed id: no link', () => {
+    const notice = renderSecurityAlert(apiMode({ failingChecks: [], connectionPublicId: 'x' }));
+    expect(notice.text).toContain('- none reported');
+    expect(notice.text).not.toContain('/api-mode');
+  });
+});

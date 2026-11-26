@@ -545,6 +545,46 @@ describe('journaling routes (e2e, dependencies stubbed)', () => {
     });
   });
 
+  describe('step API-1 D6: API mode entitles journal intake without archiving', () => {
+    it('creates and resumes sources without archiving when API mode is active; the wizard skips archiving', async () => {
+      const post = async (displayName: string) =>
+        api
+          .http()
+          .post(SRC)
+          .set(await asUser(ALL))
+          .set('Idempotency-Key', randomUUID())
+          .send({ kind: 'smtp_bcc', displayName, networks: ['198.51.100.16/28'] });
+      // Archiving not entitled and not enabled: refused without API mode (8.6 errors unchanged).
+      archive.archivingDisabled.add(org);
+      archive.settings.get(org)!.enabled = false;
+      expect((await post('No API mode')).body.code).toBe('journal_intake_not_enabled');
+      archive.archivingDisabled.delete(org);
+      expect((await post('No API mode')).body.code).toBe('archiving_not_enabled');
+      archive.archivingDisabled.add(org);
+      // API mode active: accepted.
+      world.apiModeActive.add(org);
+      const created = await post('API mode intake');
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const wizard = await api
+        .http()
+        .get(`${SRC}/${created.body.source.id}/wizard`)
+        .set(await asUser([JREAD]));
+      expect(wizard.status).toBe(200);
+      expect(wizard.body.steps[0]).toEqual({
+        step: 'archiving',
+        status: 'skipped',
+        blockers: [],
+        reason: 'api_mode',
+      });
+      // journal_intake itself stays required.
+      archive.intakeEntitled.delete(org);
+      expect((await post('No intake feature')).body.code).toBe('journal_intake_not_enabled');
+      archive.intakeEntitled.add(org);
+      archive.archivingDisabled.delete(org);
+      archive.settings.get(org)!.enabled = true;
+    });
+  });
+
   describe('reveal, rotation and changes', () => {
     it('masks the address; ?reveal=true needs journal:manage and is audited before the response', async () => {
       const masked = await api

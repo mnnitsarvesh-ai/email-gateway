@@ -589,6 +589,7 @@ export class JournalIntakeService {
             proof: input.proofDocument,
             reportSha256: input.reportSha256,
             reportSizeBytes: input.reportBytes,
+            apiDetect: snapshot.organization.apiDetect,
           },
           config.INGEST_DB_TIMEOUT_MS,
         ),

@@ -124,6 +124,32 @@ const METHODS: Record<Provider, Grant['authMethod'][]> = {
   microsoft_365: ['platform_app', 'customer_app_secret'],
   google_workspace: ['platform_service_account', 'customer_service_account'],
 };
+/** Step API-1 (D4): the mailbox-access profile of each provider and its permissions. */
+export const MAILBOX_PROFILE: Record<Provider, string> = {
+  microsoft_365: 'm365.mailbox_remediation',
+  google_workspace: 'google.mailbox_remediation',
+};
+const MAILBOX_PERMISSIONS: Record<Provider, string[]> = {
+  microsoft_365: ['Mail.ReadWrite', 'User.Read.All'],
+  google_workspace: [
+    'https://www.googleapis.com/auth/gmail.modify',
+    'https://www.googleapis.com/auth/admin.directory.user.readonly',
+  ],
+};
+const isMailboxProfile = (profile: string | undefined) =>
+  profile === MAILBOX_PROFILE.microsoft_365 || profile === MAILBOX_PROFILE.google_workspace;
+const permissionsOf = (provider: Provider, profile: string) =>
+  isMailboxProfile(profile) ? MAILBOX_PERMISSIONS[provider] : PERMISSIONS[provider];
+/** The extra `remediation:write` gate of the mailbox-access grant routes (D4). */
+function mailboxGate(profile: string | undefined, permissions: readonly string[]) {
+  return isMailboxProfile(profile) && !permissions.includes('remediation:write')
+    ? apiError(
+        403,
+        'remediation_permission_required',
+        'Mailbox access for API mode needs the remediation:write permission',
+      )
+    : null;
+}
 const ATTESTATIONS: {
   code: string;
   provider: Provider;
@@ -248,13 +274,14 @@ function grantOf(
   authMethod: Grant['authMethod'],
   status: Grant['status'],
   at: string,
+  profile: string = PROFILE[provider],
 ): Grant {
   const active = status === 'active';
   const customer =
     authMethod === 'customer_app_secret' || authMethod === 'customer_service_account';
   return {
-    id: stableUuid(`${connectionId}:grant:${authMethod}:${at}`),
-    profile: PROFILE[provider],
+    id: stableUuid(`${connectionId}:grant:${profile}:${authMethod}:${at}`),
+    profile,
     profileVersion: 1,
     authMethod,
     status,
@@ -269,8 +296,8 @@ function grantOf(
     credentialVersion: customer && active ? 1 : 0,
     credentialSetAt: customer && active ? at : null,
     credentialExpiresAt: null,
-    requestedPermissions: PERMISSIONS[provider],
-    observedPermissions: active ? PERMISSIONS[provider] : [],
+    requestedPermissions: permissionsOf(provider, profile),
+    observedPermissions: active ? permissionsOf(provider, profile) : [],
     missingPermissions: [],
     excessPermissions: [],
     consentedAt: active ? at : null,
@@ -320,7 +347,18 @@ function seed(organizationId: string): OrgState {
       domainCount: m365Domains.length,
       createdAt: created,
       updatedAt: created,
-      grants: [grantOf(m365Id, 'microsoft_365', 'platform_app', 'active', created)],
+      grants: [
+        grantOf(m365Id, 'microsoft_365', 'platform_app', 'active', created),
+        // Step API-1: mailbox access for API mode (the api-mode fixtures' first connection).
+        grantOf(
+          m365Id,
+          'microsoft_365',
+          'platform_app',
+          'active',
+          created,
+          MAILBOX_PROFILE.microsoft_365,
+        ),
+      ],
       domains: m365Domains.map((d) => ({
         id: d.id,
         name: d.name,
@@ -426,6 +464,13 @@ function orgState(organizationId: string): OrgState {
   return org;
 }
 
+/** The organization's 8.2 connections (step API-1: read by the api-mode fixtures). */
+export function providerConnectionsOf(organizationId: string): Connection[] {
+  const org = orgState(organizationId);
+  for (const c of org.connections) tick(organizationId, c);
+  return org.connections.map((c) => c.connection);
+}
+
 const notFound = () => apiError(404, 'connection_not_found', 'Provider connection not found');
 
 function find(organizationId: string, id: string | undefined): ConnectionState | null {
@@ -469,7 +514,7 @@ function tick(organizationId: string, c: ConnectionState): void {
     Object.assign(grant, {
       status: 'active',
       verifiedAt: at,
-      observedPermissions: PERMISSIONS[conn.provider],
+      observedPermissions: permissionsOf(conn.provider, grant.profile),
       missingPermissions: [],
       excessPermissions: [],
       updatedAt: at,
@@ -1063,6 +1108,18 @@ export const fixtures: FixtureHandlers = {
             authMethods: METHODS[provider],
             availableAuthMethods: METHODS[provider],
           },
+          {
+            key: MAILBOX_PROFILE[provider],
+            version: 1,
+            purpose: 'mailbox_remediation',
+            title: 'Mailbox access for API mode',
+            description:
+              'Reads new messages of in-scope mailboxes for scanning and lists users for coverage; from step API-2 moves detected threats. Separate from mail flow and account takeover response.',
+            permissions: MAILBOX_PERMISSIONS[provider],
+            readOnly: false,
+            authMethods: METHODS[provider],
+            availableAuthMethods: METHODS[provider],
+          },
         ],
         attestations: ATTESTATIONS.filter((a) => a.provider === provider).map(
           ({ code, phase, statement, requiredFor }) => ({ code, phase, statement, requiredFor }),
@@ -1242,7 +1299,12 @@ export const fixtures: FixtureHandlers = {
         if (!c) return notFound();
         const body = bodyOf<RequestBody<'ProviderGrantsController_create_v1'>>(request);
         const conn = c.connection;
-        if (body.profile !== PROFILE[conn.provider])
+        const gate = mailboxGate(body.profile, p.permissions);
+        if (gate) return gate;
+        if (
+          body.profile !== PROFILE[conn.provider] &&
+          body.profile !== MAILBOX_PROFILE[conn.provider]
+        )
           return apiError(422, 'auth_method_not_allowed', 'Unknown profile');
         const method = body.authMethod ?? 'platform_app';
         if (!METHODS[conn.provider].includes(method))
@@ -1251,7 +1313,14 @@ export const fixtures: FixtureHandlers = {
           return apiError(409, 'grant_exists', 'A grant of this profile exists');
         const at = new Date().toISOString();
         conn.grants = conn.grants.filter((g) => g.profile !== body.profile);
-        const grant = grantOf(conn.id, conn.provider, method, 'pending_consent', at);
+        const grant = grantOf(
+          conn.id,
+          conn.provider,
+          method,
+          'pending_consent',
+          at,
+          String(body.profile),
+        );
         conn.grants.push(grant);
         if (conn.status === 'draft') conn.status = 'connecting';
         touch(c);
@@ -1290,7 +1359,7 @@ export const fixtures: FixtureHandlers = {
               method === 'platform_service_account'
                 ? {
                     clientId: grant.clientId ?? '',
-                    scopes: PERMISSIONS.google_workspace,
+                    scopes: permissionsOf('google_workspace', String(body.profile)),
                     adminConsoleSteps: [
                       'Open the Google Admin console → Security → Access and data control → API controls → Manage domain-wide delegation.',
                       'Add new: enter the client ID and the two OAuth scopes below, then Authorize.',
@@ -1357,6 +1426,8 @@ export const fixtures: FixtureHandlers = {
     'ProviderGrantsController_setCredentials_v1',
     (request, p) =>
       keyed(request, () => {
+        const gate = mailboxGate(request.params.profile, p.permissions);
+        if (gate) return gate;
         const c = find(p.organizationId, request.params.id);
         if (!c) return notFound();
         const grant = c.connection.grants.find(
@@ -1403,6 +1474,8 @@ export const fixtures: FixtureHandlers = {
   ),
   ProviderGrantsController_verify_v1: guarded('ProviderGrantsController_verify_v1', (request, p) =>
     keyed(request, () => {
+      const gate = mailboxGate(request.params.profile, p.permissions);
+      if (gate) return gate;
       const c = find(p.organizationId, request.params.id);
       if (!c) return notFound();
       const grant = c.connection.grants.find(
@@ -1435,13 +1508,15 @@ export const fixtures: FixtureHandlers = {
   ),
   ProviderGrantsController_revoke_v1: guarded('ProviderGrantsController_revoke_v1', (request, p) =>
     keyed(request, () => {
+      const gate = mailboxGate(request.params.profile, p.permissions);
+      if (gate) return gate;
       const c = find(p.organizationId, request.params.id);
       if (!c) return notFound();
       const grant = c.connection.grants.find(
         (g) => g.profile === request.params.profile && g.status !== 'revoked',
       );
       if (!grant) return apiError(404, 'grant_not_found', 'Grant not found');
-      if (c.connection.outboundMode === 'active')
+      if (c.connection.outboundMode === 'active' && !isMailboxProfile(grant.profile))
         return apiError(409, 'outbound_active', 'Disable outbound routing first');
       Object.assign(grant, {
         status: 'revoked',

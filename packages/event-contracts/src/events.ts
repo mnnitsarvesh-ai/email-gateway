@@ -12,6 +12,14 @@ const s3Key = z
  * can prune to one partition (ADR-0014). Consumers de-duplicate through `message_idempotency`.
  */
 
+/**
+ * `email_messages.ingest_source` (Prisma `MessageIngestSource`): `gateway` (step 8.6 default),
+ * `journal_intake` (step 8.6, ADR-0087) and `mailbox_api` (step API-1, ADR-0100). Append-only.
+ */
+export const MESSAGE_INGEST_SOURCE_VALUES = ['gateway', 'journal_intake', 'mailbox_api'] as const;
+/** The non-gateway ingest sources: copies that end in `journaled`, never delivered (ADR-0098). */
+export const MESSAGE_COPY_INGEST_SOURCE_VALUES = ['journal_intake', 'mailbox_api'] as const;
+
 /** Published by ingestion after the EML is in S3 and the message row is committed. */
 export const messageReceivedV1 = z.object({
   messageId: decimalIdSchema,
@@ -26,9 +34,11 @@ export const messageReceivedV1 = z.object({
    * `gateway` (every producer before 8.6). `journal_intake` messages are journal copies: the
    * email-worker parses them (and scans them only when the organization opted in), never routes
    * them to the policy engine, and webhooks never project them. Optional and the schema stays
-   * non-strict, so consumers built before 8.6 ignore it.
+   * non-strict, so consumers built before 8.6 ignore it. Step API-1 (ADR-0098, ADR-0100,
+   * contracts §36) appends `mailbox_api`: a per-mailbox copy fetched by the mailbox-worker from a
+   * provider change feed, handled like `journal_intake` (always scanned in detect mode).
    */
-  ingestSource: z.enum(['gateway', 'journal_intake']).optional(),
+  ingestSource: z.enum(MESSAGE_INGEST_SOURCE_VALUES).optional(),
 });
 export type MessageReceivedV1 = z.infer<typeof messageReceivedV1>;
 
@@ -2072,6 +2082,9 @@ export const NOTIFICATION_ALERT_KIND_VALUES = [
   // Step 8.6 D9 (ADR-0087): a journal intake source became `silent` or `failing` (archive-worker
   // intake health loop).
   'journal_intake_silent',
+  // Step API-1 D11.3 (ADR-0100): an API-mode connection became `degraded` or `failing`
+  // (mailbox-worker health role).
+  'api_mode_unhealthy',
 ] as const;
 /** Public event severities (step 6.2 §5). */
 export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
@@ -2085,6 +2098,7 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
   webhook_disabled: ['subscriptionId'],
   integration_unhealthy: ['webhookEventId', 'connectionId'],
   journal_intake_silent: ['intakeSourceId'],
+  api_mode_unhealthy: ['apiModeConnectionId'],
 };
 
 /**
@@ -2092,7 +2106,8 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * (`notification_alert_windows`) of an organization, kind and scope. Written by the
  * webhook-worker (fanout: `threat_detected`, `domain_dns_failed`; delivery role auto-disable:
  * `webhook_disabled`; step 8.2 integration-worker: `integration_unhealthy`; step 8.6
- * archive-worker intake health loop: `journal_intake_silent`) through `message_outbox`
+ * archive-worker intake health loop: `journal_intake_silent`; step API-1 mailbox-worker health
+ * role: `api_mode_unhealthy`) through `message_outbox`
  * (`aggregate_type = 'organization'`,
  * `aggregate_id` = the decimal organization id); published to `email.policy` and consumed from
  * `email.notifications` by the notification-worker, which reads what it renders at send time.
@@ -2100,7 +2115,8 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * Strict; ids, codes, times and counts only (no address, subject, URL, name or secret). Each
  * kind carries the refs it needs (threat: the public event id, message id and received time;
  * DNS: the public event id and domain id; webhook disabled: the subscription public id; journal
- * intake silent: the intake source public id);
+ * intake silent: the intake source public id; API mode unhealthy: the `api_mode_connections`
+ * public id);
  * `messageId` and `receivedAt` go together; `window.from` precedes `window.to`.
  */
 export const notificationAlertRequestedV1 = z
@@ -2117,6 +2133,8 @@ export const notificationAlertRequestedV1 = z
       connectionId: z.uuid().optional(),
       /** Step 8.6: the journal intake source public id (`journal_intake_silent`). */
       intakeSourceId: z.uuid().optional(),
+      /** Step API-1: the API-mode connection public id (`api_mode_unhealthy`). */
+      apiModeConnectionId: z.uuid().optional(),
     }),
     window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
     counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),
@@ -2209,6 +2227,66 @@ export const integrationHealthChangedV1 = z
   });
 export type IntegrationHealthChangedV1 = z.infer<typeof integrationHealthChangedV1>;
 
+/** `mail.message.copy_scanned.v1` outcomes (step API-1 D8). */
+export const COPY_SCAN_OUTCOME_VALUES = ['scanned', 'scan_failed', 'parse_failed'] as const;
+
+/**
+ * A detect-mode scan of a non-gateway copy finished (step API-1 D8, ADR-0098, ADR-0100, contracts
+ * §36). Written by the email-worker through `message_outbox` (`aggregate_type = 'message'`,
+ * `aggregate_id` = the message public id) in the transaction that applies E31 / E32 (`scanned` /
+ * `scan_failed`) or E30 (`parse_failed`, only when the copy's scan was requested) to a
+ * `journal_intake` or `mailbox_api` message; never for a gateway message, and such a copy never
+ * gets `mail.message.scanned.v1`. Published to `email.security` (like `scanned.v1`); consumed
+ * from `email.mailbox` (topology v17) by the mailbox-worker `copies` role, which records one
+ * `api_message_copies` row per API-mode mailbox (verdict, risk score, lag).
+ *
+ * Strict; ids, codes, the verdict, the score and times only (no address, subject or URL).
+ * Consistency: `parse_failed` carries no scan, verdict or score; `scanned` / `scan_failed` name
+ * the scan round; `scanned` carries a verdict.
+ */
+export const messageCopyScannedV1 = z
+  .strictObject({
+    /** Registry id (`message_identities.id`). */
+    messageId: decimalIdSchema,
+    messagePublicId: z.uuid(),
+    receivedAt: z.iso.datetime(),
+    ingestSource: z.enum(MESSAGE_COPY_INGEST_SOURCE_VALUES),
+    lifecycleRound: z.number().int().min(0).max(65_535),
+    /** `email_scans.id` of the round; null for `parse_failed`. */
+    scanId: decimalIdSchema.nullable(),
+    outcome: z.enum(COPY_SCAN_OUTCOME_VALUES),
+    /** The copy's detect-mode verdict (Prisma `MessageVerdict`); null when none was reached. */
+    verdict: z.enum(MESSAGE_VERDICT_VALUES).nullable(),
+    /** Risk score of the round (0–1000); null when none was computed. */
+    riskScore: z.number().int().min(0).max(1000).nullable(),
+    completedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.outcome === 'parse_failed') {
+      for (const field of ['scanId', 'verdict', 'riskScore'] as const) {
+        if (payload[field] !== null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [field],
+            message: `parse_failed carries no ${field}`,
+          });
+        }
+      }
+      return;
+    }
+    if (payload.scanId === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['scanId'],
+        message: `${payload.outcome} names the scan round`,
+      });
+    }
+    if (payload.outcome === 'scanned' && payload.verdict === null) {
+      ctx.addIssue({ code: 'custom', path: ['verdict'], message: 'scanned carries a verdict' });
+    }
+  });
+export type MessageCopyScannedV1 = z.infer<typeof messageCopyScannedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -2256,4 +2334,7 @@ export const EventTypes = {
   // Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md D5, §4.2): an asynchronous
   // assistant report job (schema in assistant-events.ts).
   AssistantReportGenerateRequested: 'assistant.report.generate_requested.v1',
+  // Step API-1 (docs/plan/steps/35-api-mode-protection.md D8, §5): the detect-mode scan of a
+  // non-gateway copy finished (consumer: mailbox-worker copies role, queue email.mailbox, v17).
+  MessageCopyScanned: 'mail.message.copy_scanned.v1',
 } as const;

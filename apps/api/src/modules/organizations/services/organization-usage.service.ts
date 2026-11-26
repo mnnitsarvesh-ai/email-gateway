@@ -77,6 +77,7 @@ export class OrganizationUsageService {
         internal: messages('internal'),
         today: counts.messagesToday,
         journalIntakeToday: counts.journalIntakeToday,
+        apiCopiesToday: counts.apiCopiesToday,
       },
       quarantine: { active: counts.quarantineActive },
       apiKeys: { active: counts.apiKeysActive },

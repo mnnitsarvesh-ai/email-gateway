@@ -54,7 +54,9 @@ export const ApiConnectionId = (): MethodDecorator =>
 export const ApiProfileParam = (): MethodDecorator =>
   ApiParam({
     name: 'profile',
-    description: 'Permission profile key (`m365.mail_flow`, `google.mail_flow`)',
+    description:
+      'Permission profile key (`m365.mail_flow`, `google.mail_flow`, the 8.5 ATO profiles, ' +
+      'step API-1 `m365.mailbox_remediation`, `google.mailbox_remediation`)',
     schema: { type: 'string', example: 'm365.mail_flow' },
   });
 export const ApiRunId = (): MethodDecorator =>

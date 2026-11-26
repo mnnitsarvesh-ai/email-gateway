@@ -21,6 +21,7 @@ const SCOPE = systemScope(ORG);
 const KEY = randomBytes(32).toString('hex');
 const SECRET = 'unit-client-secret-value-0123456789';
 const M365_APP_ID = '11111111-2222-3333-4444-555555555555';
+const MAILBOX_APP_ID = '66666666-7777-8888-9999-000000000000';
 
 function user(userId = 10n): UserPrincipal {
   return {
@@ -43,6 +44,12 @@ function bed(env: { appEnv?: string } = {}) {
   const base = {
     availableAuthMethods: () =>
       new Set(['platform_app', 'customer_app_secret', 'customer_service_account']),
+    platformClientId: (purpose: string | undefined, method: string) =>
+      method !== 'platform_app'
+        ? null
+        : purpose === 'mailbox_remediation'
+          ? MAILBOX_APP_ID
+          : M365_APP_ID,
     record: (
       _tx: unknown,
       _p: unknown,
@@ -254,6 +261,81 @@ describe('ProviderGrantsService (step 8.2 D3, D5)', () => {
         }),
       ),
     ).toBe('auth_method_not_allowed');
+  });
+
+  it('mailbox_remediation grants also need remediation:write (step API-1 D4)', async () => {
+    const c = b.world.addConnection(ORG);
+    const noRemediation = user();
+    const input = (profile: string) => ({
+      id: c.publicId,
+      profile,
+      idempotencyKey: randomUUID(),
+      body: {},
+    });
+    const create = (principal: UserPrincipal, profile: string) =>
+      b.service.create(
+        principal,
+        SCOPE,
+        {
+          id: c.publicId,
+          idempotencyKey: randomUUID(),
+          body: { profile, authMethod: 'platform_app' },
+        },
+        null,
+      );
+    expect(await codeOf(create(noRemediation, 'm365.mailbox_remediation'))).toBe(
+      'remediation_permission_required',
+    );
+    expect(
+      await codeOf(b.service.verify(noRemediation, SCOPE, input('m365.mailbox_remediation'), null)),
+    ).toBe('remediation_permission_required');
+    expect(
+      await codeOf(
+        b.service.revoke(noRemediation, SCOPE, input('google.mailbox_remediation'), null),
+      ),
+    ).toBe('remediation_permission_required');
+    expect(
+      await codeOf(
+        b.service.setCredentials(
+          noRemediation,
+          SCOPE,
+          {
+            ...input('m365.mailbox_remediation'),
+            body: {
+              tenantId: '22222222-3333-4444-5555-666666666666',
+              clientId: '33333333-4444-5555-6666-777777777777',
+              clientSecret: SECRET,
+            },
+          },
+          null,
+        ),
+      ),
+    ).toBe('remediation_permission_required');
+    // Nothing was written by a refused request.
+    expect(b.world.grants).toHaveLength(0);
+    expect(b.audit).toHaveLength(0);
+
+    // With remediation:write: the grant uses the separate mailbox-access app (ADR-0099).
+    const remediation = user();
+    (remediation.permissions as Set<string>).add('remediation:write');
+    const res = await create(remediation, 'm365.mailbox_remediation');
+    expect(res.statusCode).toBe(201);
+    expect(res.body.grant).toMatchObject({ profile: 'm365.mailbox_remediation' });
+    expect(new URL(res.body.consent!.consentUrl!).searchParams.get('client_id')).toBe(
+      MAILBOX_APP_ID,
+    );
+    expect(b.audit.at(-1)).toMatchObject({
+      action: 'integration.grant_created',
+      metadata: { profile: 'm365.mailbox_remediation' },
+    });
+    // The mail-flow profile still uses the mail-flow app and needs no remediation permission.
+    const mailFlow = await create(noRemediation, 'm365.mail_flow');
+    expect(new URL(mailFlow.body.consent!.consentUrl!).searchParams.get('client_id')).toBe(
+      M365_APP_ID,
+    );
+    expect(
+      delegationSteps('123456789012345678901', ['s'], 'google.mailbox_remediation')[3],
+    ).toMatch(/grants\/google\.mailbox_remediation\/verify/);
   });
 
   it('removal and cleanup steps name the provider-side objects (the gateway cannot revoke, I3)', () => {

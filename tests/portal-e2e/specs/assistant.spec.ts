@@ -234,6 +234,16 @@ test('assistant page: new conversation, search, rename and clear', async ({ page
   await expect(page).toHaveURL(/\/assistant\?conversation=[0-9a-f-]{36}$/);
   await expect(item(quarantineQuestion)).toHaveCount(1);
 
+  // Only the conversation scrolls, never the page (reported twice by the product owner): on a
+  // short window the turn overflows the conversation, and its visually hidden labels must not
+  // make the document taller than the viewport.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 1280, height: 560 });
+  await expect
+    .poll(() => page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight))
+    .toBeLessThanOrEqual(1);
+  if (viewport) await page.setViewportSize(viewport);
+
   // A new conversation.
   await history.getByRole('button', { name: 'New conversation' }).click();
   await expect(page).toHaveURL(/\/assistant$/);

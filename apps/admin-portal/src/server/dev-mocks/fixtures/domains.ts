@@ -10,6 +10,13 @@ import {
   type FixtureRequest,
   type FixtureResponse,
 } from '../types';
+import {
+  domainModeView,
+  entitledPlan,
+  planOf,
+  registerDomainModeSource,
+  type ProtectionMode,
+} from './protection-modes';
 import { resolveFixturePrincipal } from './session';
 
 export { DEV_MOCK_MARKER } from '../types';
@@ -147,6 +154,11 @@ function dkimKey(
   };
 }
 
+function initialMode(organizationId: string, index: number): ProtectionMode | null {
+  if (organizationId !== stableUuid('org:alpha')) return null;
+  return index === 1 ? 'api' : index === 2 ? 'hybrid' : null;
+}
+
 function makeEntry(organizationId: string, index: number): DomainEntry {
   const random = new SeededRandom(`${organizationId}:domain:${index}`);
   const name = `${WORDS[index % WORDS.length]}-${index + 1}.example.test`;
@@ -179,6 +191,12 @@ function makeEntry(organizationId: string, index: number): DomainEntry {
     createdAt: created,
     updatedAt: created,
     statusChangedAt: status === 'pending_verification' ? null : isoAgo(index * DAY + HOUR),
+    // Step API-1: the first customer has one API-mode and one Hybrid domain (the rest inherit).
+    protectionMode: domainModeView(
+      organizationId,
+      initialMode(organizationId, index),
+      initialMode(organizationId, index) ? isoAgo(DAY) : null,
+    ),
     verification: {
       method: 'dns_txt',
       host: `_emailgateway-verify.${name}`,
@@ -276,6 +294,30 @@ export function domainsOf(organizationId: string): DomainEntry[] {
   return list;
 }
 
+/**
+ * Recomputes the effective protection mode of every domain of the organization (after a change
+ * of a domain mode or of the organization mode, step API-1 D2).
+ */
+export function refreshDomainModes(organizationId: string): void {
+  for (const entry of domainsOf(organizationId)) {
+    const mode = entry.domain.protectionMode;
+    entry.domain = {
+      ...entry.domain,
+      protectionMode: domainModeView(organizationId, mode.configured, mode.changedAt),
+    };
+  }
+}
+
+registerDomainModeSource((organizationId) =>
+  domainsOf(organizationId).map((entry) => ({
+    id: entry.domain.id,
+    name: entry.domain.name,
+    configured: entry.domain.protectionMode.configured,
+    mxPointsToGateway: entry.checks.mx === 'valid',
+    deleted: entry.deleted,
+  })),
+);
+
 /** A live (non-deleted) domain of the organization, or null (foreign and unknown ids alike). */
 export function findDomain(organizationId: string, id: string | undefined): DomainEntry | null {
   return (
@@ -300,6 +342,7 @@ function summary(domain: Domain) {
     nextCheckAt: domain.nextCheckAt,
     createdAt: domain.createdAt,
     updatedAt: domain.updatedAt,
+    protectionMode: domain.protectionMode,
   };
 }
 
@@ -534,8 +577,20 @@ export const fixtures: FixtureHandlers = {
     const list = domainsOf(p.organizationId);
     if (list.some((e) => !e.deleted && e.domain.name === name))
       return apiError(409, 'domain_exists', 'Domain already exists');
+    // Step API-1 (D2): optional protection mode (absent = inherit); api/hybrid need the feature,
+    // and an api domain is created with inbound mail through the gateway off.
+    const mode = body.protectionMode ?? null;
+    if ((mode === 'api' || mode === 'hybrid') && !entitledPlan(planOf(p.organizationId)))
+      return apiError(403, 'api_mode_not_enabled', 'API-mode protection is not enabled');
+    if (mode === 'api' && body.inboundEnabled === true)
+      return apiError(
+        422,
+        'protection_mode_inbound_conflict',
+        'A domain in api mode is created with inbound mail flow off (inboundEnabled: false)',
+      );
     const entry = makeEntry(p.organizationId, list.length);
     const now = new Date().toISOString();
+    const modeView = domainModeView(p.organizationId, mode, mode ? now : null);
     entry.domain = {
       ...entry.domain,
       id: stableUuid(`${p.organizationId}:domain:${name}:${list.length}`),
@@ -543,8 +598,9 @@ export const fixtures: FixtureHandlers = {
       unicodeName: name,
       status: 'pending_verification',
       statusReason: null,
-      inboundEnabled: body.inboundEnabled ?? true,
+      inboundEnabled: body.inboundEnabled ?? modeView.effective !== 'api',
       outboundEnabled: false,
+      protectionMode: modeView,
       verifiedAt: null,
       activatedAt: null,
       lastCheckedAt: null,

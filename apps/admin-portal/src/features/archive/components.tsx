@@ -25,13 +25,14 @@ import { EnumBadge } from '@/features/messages/controls';
 import type { RevealedArchiveValues } from './hooks';
 import {
   CATEGORY_TONE,
-  INGEST_SOURCE_LABEL,
   LOCK_TONE,
   RECORD_STATUS_TONE,
   archiveMessageHref,
   explainArchiveError,
   isRetryable,
+  MERGED_COPY_SOURCE_LABEL,
   type ArchiveIngestSource,
+  type MergedCopySource,
   type ArchiveMessage,
 } from './model';
 
@@ -264,14 +265,14 @@ export function ArchiveCard({
 export function IngestSourcesBadges({
   sources,
 }: {
-  sources: readonly ArchiveIngestSource[] | undefined;
+  sources: readonly (ArchiveIngestSource | MergedCopySource)[] | undefined;
 }) {
   const list = sources && sources.length > 0 ? sources : (['gateway'] as const);
   return (
     <span className="flex flex-wrap items-center gap-1">
       {list.map((source) => (
         <ToneBadge key={source} tone={source === 'gateway' ? 'neutral' : 'info'}>
-          {INGEST_SOURCE_LABEL[source]}
+          {MERGED_COPY_SOURCE_LABEL[source]}
         </ToneBadge>
       ))}
     </span>

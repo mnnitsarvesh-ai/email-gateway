@@ -47,6 +47,226 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/api-mode/connections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the provider connections with their API-mode settings
+     * @description Every 8.2 provider connection of your organization with its API-mode row (absent: the defaults, `apiConnectionId: null`), the status of its mailbox-access grant (`*.mailbox_remediation`) and the provider journal intake sources bound to it. Needs `remediation:read`. Never returns a feed cursor (delta link / history id), a Graph subscription id or client state.
+     */
+    get: operations['ApiModeController_listConnections_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/connections/{connectionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get a provider connection’s API-mode state
+     * @description One connection (`connectionId` = the 8.2 provider connection public id) with its coverage, the server-computed setup wizard (`domains`, `connection`, `journal`, `mailbox_access`, `feeds`, `monitor`: each `not_started`, `in_progress`, `done`, `blocked` or `skipped` with blockers, and the next action), the `api-mode-health/1` checks of the last evaluation and the counters of the last 7 UTC days. Needs `remediation:read`. Never returns a feed cursor (delta link / history id), a Graph subscription id or client state.
+     */
+    get: operations['ApiModeController_getConnection_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/connections/{connectionId}/inventory-sync': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Request a mailbox inventory of a provider connection
+     * @description The mailbox-worker lists the tenant’s users at its next inventory tick (it runs every API_MODE_INVENTORY_INTERVAL_HOURS anyway): `inventoryRequestedAt` and `nextInventoryAt` = now. Needs the active mailbox-access grant (`409 api_mode_mailbox_access_required`). Audited `api_mode.inventory_sync_requested`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeController_inventorySync_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/connections/{connectionId}/settings': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Change the change-feed settings of a provider connection
+     * @description `{ feedsEnabled, feedMode?, expectedRowVersion }` (CAS: `409 api_mode_connection_conflict` with `currentRowVersion`; a connection without an API-mode row has version 1 and the row is created). Feeds are off by default; enabling them needs the active mailbox-access grant (`409 api_mode_mailbox_access_required`) and marks every in-scope mailbox with a provider id for its first (no-backfill) sync. `feedMode: notify` (Graph change notifications as wake-up hints for the delta query) needs Microsoft 365 and a public notification URL on the platform (`422 api_mode_notifications_unavailable`, `reason` `provider`/`platform`); Google Workspace always polls. Disabling stops the feeds at the worker’s next claim. Audited `api_mode.settings_updated`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ApiModeController_updateSettings_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/connections/{connectionId}/setup-guide': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the API-mode setup guide of a provider connection
+     * @description The customer-specific guide (`api-mode-guide/1`) generated from the connection’s own values: journal rule (the intake address masked), mailbox-access consent (Microsoft Graph `Mail.ReadWrite` + `User.Read.All`, or Google domain-wide delegation of `gmail.modify` + `admin.directory.user.readonly`), the optional Exchange Online scoping, change feeds, verification, revocation and troubleshooting, with attestation codes. The gateway never applies a step. `?format=markdown` or `Accept: text/markdown` returns `text/markdown` as a download. Needs `remediation:read`.
+     */
+    get: operations['ApiModeController_setupGuide_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/detections': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List API-mode detections
+     * @description Per-mailbox copies scanned in detect mode (never delivered), newest first: mailbox, source of the scanned copy (`journal`, `graph`, `gmail`), whether the journal and the feed saw it, status, verdict, risk score, verdict authority (`inline` for hybrid copies already filtered inline), receipt, provider delivery and verdict times and the lag. The subject is withheld (`subjectMasked`) and the sender’s local part masked (ADR-0062; `message:reveal` holders use the reveal flow of the message routes). Filters `verdict`, `status`, `source`, `mailboxId`, `connectionId`, `minRiskScore`, `from`/`to` (at most 31 days; default the last 7). v1 list (`api_message_copies`). From the read replica. Needs `remediation:read`.
+     */
+    get: operations['ApiModeController_listDetections_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/detections/{detectionId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an API-mode detection
+     * @description One copy with its direction, the basis of its provider delivery time and up to 10 risk reason codes of its scan (codes only; subject withheld, sender masked). Needs `remediation:read`.
+     */
+    get: operations['ApiModeController_getDetection_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/mailboxes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List API-mode mailboxes
+     * @description Mailboxes known to API mode (from the inventory or seen in journal copies), newest first: address, domain, status, coverage, feed status, journal last seen, last sync and last error code. Filters `connectionId`, `coverage`, `feedStatus`, `status`, `domainId`, `q` (address prefix, primary or alias). v1 list (`api_mailboxes`). From the read replica. Needs `remediation:read`. Never returns a feed cursor (delta link / history id), a Graph subscription id or client state.
+     */
+    get: operations['ApiModeController_listMailboxes_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/mailboxes/{mailboxId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an API-mode mailbox
+     * @description The mailbox with its aliases, feed state (whether a change-notification subscription exists and when it expires, never its id) and its last 20 copies (detection summaries, subjects withheld and senders masked). Needs `remediation:read`. Never returns a feed cursor (delta link / history id), a Graph subscription id or client state.
+     */
+    get: operations['ApiModeController_getMailbox_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/mailboxes/{mailboxId}/resync': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Resynchronize a mailbox’s change feed
+     * @description Clears the mailbox’s feed cursor (the worker re-initializes it WITHOUT backfill: only mail arriving afterwards is fetched) and requests a sync now. Needs the active mailbox-access grant of its connection (`409 api_mode_mailbox_access_required`). Audited `api_mode.mailbox_resync_requested`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeController_resyncMailbox_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/overview': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the API-mode coverage and health overview
+     * @description Whether the plan entitles API mode and whether it is active, the organization’s mode and the domains per effective mode, mailbox coverage (covered, gap, total of the last inventory or null, percent), connections by health, intake lag p50/p95 of the last hour and day (seconds, from the hourly counters’ buckets), throttling events, copies today, and per connection: health with its failing checks, coverage, feeds, the mailbox-access grant status, inventory status, lag, throttling, copies today and `throttledUntil`. Needs `remediation:read`.
+     */
+    get: operations['ApiModeController_overview_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/archive/capture-issues': {
     parameters: {
       query?: never;
@@ -2884,9 +3104,29 @@ export interface paths {
     put?: never;
     /**
      * Add a domain
-     * @description Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain (`PROVIDER_PROBE_DOMAIN`, step 8.2), the journal intake domain (`JOURNAL_INTAKE_DOMAIN`, step 8.6) and names under them are `422 domain_reserved`. Step 8.6: an archive-only organization (`serviceProfile: archive_only`) gets the domain with inbound mail flow off; `inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`).
+     * @description Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain (`PROVIDER_PROBE_DOMAIN`, step 8.2), the journal intake domain (`JOURNAL_INTAKE_DOMAIN`, step 8.6) and names under them are `422 domain_reserved`. Step 8.6: an archive-only organization (`serviceProfile: archive_only`) gets the domain with inbound mail flow off; `inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`). Step API-1 (ADR-0098): optional `protectionMode` (`inline`, `api`, `hybrid`; absent = inherit the organization’s mode); `api` and `hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`); a domain whose effective mode is `api` is created with inbound mail flow off, and `protectionMode: api` with `inboundEnabled: true` is `422 protection_mode_inbound_conflict`.
      */
     post: operations['DomainsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/domains/{domainId}/protection-mode': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Change the protection mode of a domain
+     * @description `{ mode, reason }` with `mode` `inline`, `api`, `hybrid` or `inherit` (clears the domain’s own mode: it follows the organization’s). `api` and `hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`); `inline` is always allowed. A change that makes a domain’s effective mode `api` is refused while its latest MX observation points to the gateway (`409 protection_mode_mx_points_to_gateway`, `details.domains` with at most 20 `{ id, name }`; choose `hybrid` or move the MX records first). The mode never changes inline mail flow (inbound/outbound switches, destinations, connectors). The same value again answers `200` with `changed: false` and no audit row. Audited `domain.protection_mode_changed` `{ fromConfigured, toConfigured, fromEffective, toEffective, reason }`. Needs `domain:manage`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ProtectionModeController_putDomain_v1'];
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -3476,7 +3716,7 @@ export interface paths {
     put?: never;
     /**
      * Create a journal intake source
-     * @description A sender configuration for journal-only intake: `microsoft_365_journal` (Purview journal rule) and `google_workspace_copy` (routing rule “Also deliver to”) need `providerConnectionId`, an 8.2 connection of the same provider, not disabled, bound to its tenant (`422 journal_intake_connection_invalid`, `reason`); `exchange_onprem_journal` and `smtp_bcc` need `networks` (1-32 public CIDRs, never a provider egress range, no prefix shorter than /16 (IPv4) or /32 (IPv6); `422 journal_intake_networks_invalid` with `issues: [{ code, index }]`). The source starts `pending_verification` (mail is accepted; the first accepted message makes it `active`). At most JOURNAL_INTAKE_MAX_SOURCES_PER_ORG sources that are not disabled (`409 journal_intake_source_limit`); unique names (`409 journal_intake_source_name_taken`). Without an intake domain on the platform: `503 journal_intake_unavailable`. Creating or resuming a source needs the plan features `archiving` and `journal_intake` (`403 journal_intake_not_enabled`), archiving enabled with a live default retention policy (`409 archiving_not_enabled`) and a TXT-verified domain (provider kinds: linked to the connection; `409 journal_intake_domain_required`, `reason`). Audited `journal_intake.source_created` (ids and codes only). `address` and `headerToken` are in clear ONLY in this response: the stored response under the Idempotency-Key carries `null`, so a replay returns them redacted (ADR-0057; reveal them again with GET …?reveal=true). Requires the Idempotency-Key header; rate class `sensitive`. MFA-authenticated users only (`403 mfa_required`; API keys `403 user_required`).
+     * @description A sender configuration for journal-only intake: `microsoft_365_journal` (Purview journal rule) and `google_workspace_copy` (routing rule “Also deliver to”) need `providerConnectionId`, an 8.2 connection of the same provider, not disabled, bound to its tenant (`422 journal_intake_connection_invalid`, `reason`); `exchange_onprem_journal` and `smtp_bcc` need `networks` (1-32 public CIDRs, never a provider egress range, no prefix shorter than /16 (IPv4) or /32 (IPv6); `422 journal_intake_networks_invalid` with `issues: [{ code, index }]`). The source starts `pending_verification` (mail is accepted; the first accepted message makes it `active`). At most JOURNAL_INTAKE_MAX_SOURCES_PER_ORG sources that are not disabled (`409 journal_intake_source_limit`); unique names (`409 journal_intake_source_name_taken`). Without an intake domain on the platform: `503 journal_intake_unavailable`. Creating or resuming a source needs the plan feature `journal_intake` and either archiving (the feature `archiving`, enabled with a live default retention policy) or, since step API-1, active API mode (`api_mode_protection` and a domain in `api` or `hybrid` mode; ADR-0098) — otherwise `403 journal_intake_not_enabled` without `archiving`, `409 archiving_not_enabled` with it — and a TXT-verified domain (provider kinds: linked to the connection; `409 journal_intake_domain_required`, `reason`). Audited `journal_intake.source_created` (ids and codes only). `address` and `headerToken` are in clear ONLY in this response: the stored response under the Idempotency-Key carries `null`, so a replay returns them redacted (ADR-0057; reveal them again with GET …?reveal=true). Requires the Idempotency-Key header; rate class `sensitive`. MFA-authenticated users only (`403 mfa_required`; API keys `403 user_required`).
      */
     post: operations['IntakeSourcesController_create_v1'];
     delete?: never;
@@ -3508,7 +3748,7 @@ export interface paths {
     head?: never;
     /**
      * Update a journal intake source
-     * @description `displayName`, `networks` (on-premises kinds; the rules of creation), `requireTls`, `clientCertFingerprints`, `maxMessageBytes`, `silenceAlertMinutes` and `status`: `paused` stops intake (senders get `450 4.7.1` and retry), `active` resumes it (`pending_verification` until the first accepted message). CAS `expectedRowVersion` (`409 journal_intake_source_conflict`, `currentRowVersion`); a disabled source cannot change (`409 journal_intake_source_disabled`). Creating or resuming a source needs the plan features `archiving` and `journal_intake` (`403 journal_intake_not_enabled`), archiving enabled with a live default retention policy (`409 archiving_not_enabled`) and a TXT-verified domain (provider kinds: linked to the connection; `409 journal_intake_domain_required`, `reason`). Audited `journal_intake.source_updated`, `…source_paused` or `…source_resumed`. Requires the Idempotency-Key header; rate class `sensitive`. MFA-authenticated users only (`403 mfa_required`; API keys `403 user_required`).
+     * @description `displayName`, `networks` (on-premises kinds; the rules of creation), `requireTls`, `clientCertFingerprints`, `maxMessageBytes`, `silenceAlertMinutes` and `status`: `paused` stops intake (senders get `450 4.7.1` and retry), `active` resumes it (`pending_verification` until the first accepted message). CAS `expectedRowVersion` (`409 journal_intake_source_conflict`, `currentRowVersion`); a disabled source cannot change (`409 journal_intake_source_disabled`). Creating or resuming a source needs the plan feature `journal_intake` and either archiving (the feature `archiving`, enabled with a live default retention policy) or, since step API-1, active API mode (`api_mode_protection` and a domain in `api` or `hybrid` mode; ADR-0098) — otherwise `403 journal_intake_not_enabled` without `archiving`, `409 archiving_not_enabled` with it — and a TXT-verified domain (provider kinds: linked to the connection; `409 journal_intake_domain_required`, `reason`). Audited `journal_intake.source_updated`, `…source_paused` or `…source_resumed`. Requires the Idempotency-Key header; rate class `sensitive`. MFA-authenticated users only (`403 mfa_required`; API keys `403 user_required`).
      */
     patch: operations['IntakeSourcesController_update_v1'];
     trace?: never;
@@ -3582,7 +3822,7 @@ export interface paths {
     };
     /**
      * Get the setup wizard of a source
-     * @description Computed from the rows (never stored): `archiving` (entitled, enabled, default retention), `domains` (a TXT-verified domain; provider kinds: linked to the connection), `connection` (provider kinds: bound and not disabled; `skipped` otherwise), `configure` (the customer-side attestations of the kind’s guide), `verify` (first accepted message), `monitor` (health). Each step `not_started`, `in_progress`, `done`, `blocked` or `skipped` with blockers, and the next action.
+     * @description Computed from the rows (never stored): `archiving` (entitled, enabled, default retention; `skipped` with `reason: api_mode` when active API mode entitles the source without archiving, step API-1), `domains` (a TXT-verified domain; provider kinds: linked to the connection), `connection` (provider kinds: bound and not disabled; `skipped` otherwise), `configure` (the customer-side attestations of the kind’s guide), `verify` (first accepted message), `monitor` (health). Each step `not_started`, `in_progress`, `done`, `blocked` or `skipped` with blockers, and the next action.
      */
     get: operations['IntakeSourcesController_wizard_v1'];
     put?: never;
@@ -4345,6 +4585,30 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/organizations/{id}/protection-mode': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the protection mode of an organization
+     * @description The organization’s protection mode (`inline`, `api`, `hybrid`: the default of every domain without its own mode), when it changed, whether the plan entitles API mode, whether API mode is active (entitled and at least one domain effective `api`/`hybrid`) and the non-deleted domains per effective mode. Your own organization (`404 organization_not_found` otherwise; platform staff with `platform:organizations` any). Needs `organization:read`.
+     */
+    get: operations['ProtectionModeController_getOrganization_v1'];
+    /**
+     * Change the protection mode of an organization
+     * @description `{ mode, reason }`: the new default mode of every domain without its own mode (inheriting domains change their effective mode; the response reports how many inherit). The MX check runs over every inheriting domain that would become effective `api`; any conflict refuses the whole change. `api` and `hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`); `inline` is always allowed. A change that makes a domain’s effective mode `api` is refused while its latest MX observation points to the gateway (`409 protection_mode_mx_points_to_gateway`, `details.domains` with at most 20 `{ id, name }`; choose `hybrid` or move the MX records first). The mode never changes inline mail flow (inbound/outbound switches, destinations, connectors). The same value again answers `200` with `changed: false` and no audit row. Audited `organization.protection_mode_changed` `{ from, to, reason, inheritingDomains, effectiveApiDomains }`. Needs `organization:manage`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ProtectionModeController_putOrganization_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/organizations/{id}/settings': {
     parameters: {
       query?: never;
@@ -4538,7 +4802,7 @@ export interface paths {
     put?: never;
     /**
      * Replay dead letters into a work queue
-     * @description Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.url`, `scan.url.inspect`, `scan.url.results`, `scan.attachment`, `scan.bec`, `scan.dlp`, `scan.sandbox`, `scan.sandbox.submissions`, `scan.sandbox.results`, `email.policy.evaluate`, `email.delivery.pending`, `email.quarantine`, `email.archive`, `email.notifications`, `email.webhooks`, `ato.events`, `ato.mail`, `ato.responses`, `assistant.reports`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).
+     * @description Fetches up to `limit` dead letters of `sourceQueue` (a work queue: `email.received`, `scan.spam`, `scan.url`, `scan.url.inspect`, `scan.url.results`, `scan.attachment`, `scan.bec`, `scan.dlp`, `scan.sandbox`, `scan.sandbox.submissions`, `scan.sandbox.results`, `email.policy.evaluate`, `email.delivery.pending`, `email.quarantine`, `email.archive`, `email.notifications`, `email.webhooks`, `ato.events`, `ato.mail`, `ato.responses`, `assistant.reports`, `email.mailbox`; other queues are 400 `source_queue_not_replayable`) matching the optional filters, republishes each unchanged envelope to the source queue with fresh retry headers and a replay id, confirmed before the dead letter is removed. Non-matching and invalid messages stay in the queue. A replayed event that was already processed is a ledger duplicate, so replays are safe to repeat. `dryRun` changes nothing. One replay at a time platform-wide (409 `replay_in_progress`); audited as `platform.dead_letters_replayed`. 503 `dead_letter_replay_unavailable` without RABBITMQ_OPS_URL or when the broker fails (the audit row then says `partial`).
      */
     post: operations['DeadLettersController_replay_v1'];
     delete?: never;
@@ -5111,7 +5375,7 @@ export interface paths {
     put?: never;
     /**
      * Grant read-only access to the provider tenant
-     * @description `{ profile, authMethod }` → a `pending_consent` grant (one per profile: `409 grant_exists`; a revoked grant is reused). `platform_app` (Microsoft 365, user sessions only): `consent.consentUrl`, the admin-consent URL of the operator’s read-only app with a single-use state (10 minutes; only its SHA-256 is stored). `platform_service_account` (Google): `delegation` with the client id and scopes to authorize under domain-wide delegation, then `POST …/grants/{profile}/verify { subjectEmail }`. Customer methods: upload the credential next (`PUT …/grants/{profile}/credentials`). Platform methods need the operator’s app (`422 auth_method_unavailable`); the method must belong to the profile and provider (`422 auth_method_not_allowed`). Audited `integration.grant_created`. `consent.consentUrl` is shown ONLY in this response: the stored response under the Idempotency-Key carries `consent.consentUrl: null`, so a replay returns it redacted (ADR-0057). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     * @description `{ profile, authMethod }` → a `pending_consent` grant (one per profile: `409 grant_exists`; a revoked grant is reused). `platform_app` (Microsoft 365, user sessions only): `consent.consentUrl`, the admin-consent URL of the operator’s read-only app with a single-use state (10 minutes; only its SHA-256 is stored). `platform_service_account` (Google): `delegation` with the client id and scopes to authorize under domain-wide delegation, then `POST …/grants/{profile}/verify { subjectEmail }`. Customer methods: upload the credential next (`PUT …/grants/{profile}/credentials`). Platform methods need the operator’s app (`422 auth_method_unavailable`); the method must belong to the profile and provider (`422 auth_method_not_allowed`). Audited `integration.grant_created`. Step API-1: a `*.mailbox_remediation` profile (API-mode mailbox access) also needs `remediation:write` (`403 remediation_permission_required`). `consent.consentUrl` is shown ONLY in this response: the stored response under the Idempotency-Key carries `consent.consentUrl: null`, so a replay returns it redacted (ADR-0057). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
      */
     post: operations['ProviderGrantsController_create_v1'];
     delete?: never;
@@ -5132,7 +5396,7 @@ export interface paths {
     post?: never;
     /**
      * Revoke a grant
-     * @description The grant becomes `revoked` and its credential ciphertext is wiped; open consent states are closed; a connection without a live grant releases its tenant binding. Refused while outbound routing is on (`409 outbound_active`: turn it off first). The gateway cannot revoke consent at the provider (it holds no write permission): the response lists the provider-side removal steps. Audited `integration.grant_revoked`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     * @description The grant becomes `revoked` and its credential ciphertext is wiped; open consent states are closed; a connection without a live grant releases its tenant binding. Refused while outbound routing is on (`409 outbound_active`: turn it off first). The gateway cannot revoke consent at the provider (it holds no write permission): the response lists the provider-side removal steps. Audited `integration.grant_revoked`. Step API-1: a `*.mailbox_remediation` profile (API-mode mailbox access) also needs `remediation:write` (`403 remediation_permission_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
      */
     delete: operations['ProviderGrantsController_revoke_v1'];
     options?: never;
@@ -5150,7 +5414,7 @@ export interface paths {
     get?: never;
     /**
      * Upload the credential of a customer-owned app or service account
-     * @description Customer methods only (`422 auth_method_not_allowed`). Microsoft 365 (`customer_app_secret`): `{ tenantId, clientId, clientSecret, expiresAt? }`; Google (`customer_service_account`): `{ serviceAccountKey, subjectEmail }` (unknown key fields are dropped; `token_uri` must be the platform’s Google token URL; RSA ≥ 2048 bits). The credential is validated (`422 credential_invalid` naming the field, never the value), encrypted with AES-256-GCM under the dedicated provider key bound to this grant and version (ADR-0077), never returned, logged or audited; the response shows only a 12-character fingerprint and dates. The grant goes `verifying` (the integration-worker verifies it). Redacted replay (ADR-0057): the stored response never contains the credential and the request fingerprint is an HMAC of it. Audited `integration.grant_credentials_set`. Rate class `sensitive`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     * @description Customer methods only (`422 auth_method_not_allowed`). Microsoft 365 (`customer_app_secret`): `{ tenantId, clientId, clientSecret, expiresAt? }`; Google (`customer_service_account`): `{ serviceAccountKey, subjectEmail }` (unknown key fields are dropped; `token_uri` must be the platform’s Google token URL; RSA ≥ 2048 bits). The credential is validated (`422 credential_invalid` naming the field, never the value), encrypted with AES-256-GCM under the dedicated provider key bound to this grant and version (ADR-0077), never returned, logged or audited; the response shows only a 12-character fingerprint and dates. The grant goes `verifying` (the integration-worker verifies it). Redacted replay (ADR-0057): the stored response never contains the credential and the request fingerprint is an HMAC of it. Audited `integration.grant_credentials_set`. Rate class `sensitive`. Step API-1: a `*.mailbox_remediation` profile (API-mode mailbox access) also needs `remediation:write` (`403 remediation_permission_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
      */
     put: operations['ProviderGrantsController_setCredentials_v1'];
     post?: never;
@@ -5171,7 +5435,7 @@ export interface paths {
     put?: never;
     /**
      * Verify a grant again
-     * @description Asks the integration-worker to verify the grant (`verifying`): token acquisition for the tenant, tenant identity and granted permissions. Google platform service account: `{ subjectEmail }` (the delegated administrator) is required the first time (it confirms the delegation). A customer grant needs its credential, a Microsoft platform grant its consent (`422 credential_invalid`). Audited `integration.grant_consented` (delegation confirmed) or `integration.grant_verification_requested`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     * @description Asks the integration-worker to verify the grant (`verifying`): token acquisition for the tenant, tenant identity and granted permissions. Google platform service account: `{ subjectEmail }` (the delegated administrator) is required the first time (it confirms the delegation). A customer grant needs its credential, a Microsoft platform grant its consent (`422 credential_invalid`). Audited `integration.grant_consented` (delegation confirmed) or `integration.grant_verification_requested`. Step API-1: a `*.mailbox_remediation` profile (API-mode mailbox access) also needs `remediation:write` (`403 remediation_permission_required`). Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
      */
     post: operations['ProviderGrantsController_verify_v1'];
     delete?: never;
@@ -5398,6 +5662,46 @@ export interface paths {
     get: operations['ProviderCatalogController_get_v1'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-notifications/graph': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Receive Microsoft Graph change notifications
+     * @description The `notificationUrl` of API-mode Graph subscriptions. With `?validationToken=…` (Graph’s subscription validation handshake; 1-1024 printable characters) the token is echoed as `200 text/plain; charset=utf-8` with `X-Content-Type-Options: nosniff`. Otherwise the body is a Graph notification collection `{ value: [1..1000 items] }`; each item selects a mailbox only through its stored subscription id plus a constant-time match of its `clientState` against the stored hash and, when present, its `tenantId` against the connection’s bound tenant, and only requests a delta sync of that mailbox (resource data and content are ignored). The answer is always `202` with an empty body, whatever matched (no oracle about subscriptions). JSON bodies up to 256 KiB (`413` above); API_MODE_NOTIFICATION_RATE_PER_MINUTE requests per minute per client IP (`429 rate_limited` with `Retry-After`). Public: no credential (called by Microsoft Graph).
+     */
+    post: operations['ProviderNotificationsController_graph_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/provider-notifications/graph/lifecycle': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Receive Microsoft Graph lifecycle notifications
+     * @description The `lifecycleNotificationUrl` of API-mode Graph subscriptions: `reauthorizationRequired` (the worker renews the subscription), `subscriptionRemoved` (it is re-created) and `missed` (a delta sync catches up); each also requests a sync. With `?validationToken=…` (Graph’s subscription validation handshake; 1-1024 printable characters) the token is echoed as `200 text/plain; charset=utf-8` with `X-Content-Type-Options: nosniff`. Otherwise the body is a Graph notification collection `{ value: [1..1000 items] }`; each item selects a mailbox only through its stored subscription id plus a constant-time match of its `clientState` against the stored hash and, when present, its `tenantId` against the connection’s bound tenant, and only requests a delta sync of that mailbox (resource data and content are ignored). The answer is always `202` with an empty body, whatever matched (no oracle about subscriptions). JSON bodies up to 256 KiB (`413` above); API_MODE_NOTIFICATION_RATE_PER_MINUTE requests per minute per client IP (`429 rate_limited` with `Retry-After`). Public: no credential (called by Microsoft Graph).
+     */
+    post: operations['ProviderNotificationsController_lifecycle_v1'];
     delete?: never;
     options?: never;
     head?: never;
@@ -7639,6 +7943,2557 @@ export interface operations {
       };
     };
   };
+  ApiModeController_listConnections_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The connections */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /**
+               * Format: uuid
+               * @description The API-mode row (null until first used)
+               */
+              apiConnectionId: string | null;
+              /** @description The connection is bound to its tenant */
+              bound: boolean;
+              displayName: string;
+              /** @enum {string} */
+              feedMode: 'poll' | 'notify';
+              feedsEnabled: boolean;
+              /** Format: date-time */
+              feedsEnabledAt: string | null;
+              /** @description The `*.mailbox_remediation` grant of the connection (null: none) */
+              grant: {
+                authMethod: string;
+                profile: string;
+                /** @enum {string} */
+                status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+              } | null;
+              health: {
+                /** Format: date-time */
+                changedAt: string | null;
+                /** @enum {string} */
+                status: 'unknown' | 'healthy' | 'degraded' | 'failing';
+              };
+              /**
+               * Format: uuid
+               * @description The 8.2 provider connection public id
+               */
+              id: string;
+              /** Format: date-time */
+              inventoryRequestedAt: string | null;
+              /** @enum {string} */
+              inventoryStatus: 'never' | 'ok' | 'failed' | 'unavailable';
+              /** Format: date-time */
+              inventorySyncedAt: string | null;
+              /** @description Provider journal intake sources bound to it */
+              journalSources: {
+                displayName: string;
+                health: string;
+                /** Format: uuid */
+                id: string;
+                kind: string;
+                status: string;
+                verified: boolean;
+              }[];
+              lastErrorCode: string | null;
+              mailboxesTotal: number | null;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @description CAS version of the settings (send it with PUT …/settings) */
+              rowVersion: number;
+              /**
+               * @description The 8.2 connection status
+               * @enum {string}
+               */
+              status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+              /** Format: date-time */
+              throttledUntil: string | null;
+            }[];
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_getConnection_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The 8.2 provider connection public id (UUID) */
+        connectionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The connection */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /**
+             * Format: uuid
+             * @description The API-mode row (null until first used)
+             */
+            apiConnectionId: string | null;
+            /** @description The connection is bound to its tenant */
+            bound: boolean;
+            /** @description The last 7 UTC days, newest first */
+            counters: {
+              cursorResets: number;
+              /** @description UTC day (YYYY-MM-DD) */
+              day: string;
+              duplicates: number;
+              feedCopies: number;
+              journalCopies: number;
+              lagCount: number;
+              lagP95Seconds: number | null;
+              providerErrors: number;
+              providerRequests: number;
+              skippedInternal: number;
+              throttled429: number;
+              throttled503: number;
+              tooLarge: number;
+            }[];
+            coverage: {
+              covered: number;
+              gap: number;
+              /** @description covered / (covered + gap) × 100 (null without inventory) */
+              percent: number | null;
+              /** @description In-scope mailboxes of the last inventory (null = unknown: no inventory yet) */
+              total: number | null;
+            };
+            displayName: string;
+            /** @enum {string} */
+            feedMode: 'poll' | 'notify';
+            feedsEnabled: boolean;
+            /** Format: date-time */
+            feedsEnabledAt: string | null;
+            /** @description The `*.mailbox_remediation` grant of the connection (null: none) */
+            grant: {
+              authMethod: string;
+              profile: string;
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+            } | null;
+            health: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'failing';
+            };
+            /** @description `api-mode-health/1` checks of the last evaluation */
+            healthChecks: {
+              code: string;
+              evidence: string | null;
+              /** @enum {string} */
+              status: 'pass' | 'warn' | 'fail';
+            }[];
+            /**
+             * Format: uuid
+             * @description The 8.2 provider connection public id
+             */
+            id: string;
+            /** Format: date-time */
+            inventoryRequestedAt: string | null;
+            /** @enum {string} */
+            inventoryStatus: 'never' | 'ok' | 'failed' | 'unavailable';
+            /** Format: date-time */
+            inventorySyncedAt: string | null;
+            /** @description Provider journal intake sources bound to it */
+            journalSources: {
+              displayName: string;
+              health: string;
+              /** Format: uuid */
+              id: string;
+              kind: string;
+              status: string;
+              verified: boolean;
+            }[];
+            lastErrorCode: string | null;
+            mailboxesTotal: number | null;
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** @description CAS version of the settings (send it with PUT …/settings) */
+            rowVersion: number;
+            /**
+             * @description The 8.2 connection status
+             * @enum {string}
+             */
+            status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            /** Format: date-time */
+            throttledUntil: string | null;
+            wizard: {
+              nextAction: {
+                action: string;
+                /** @enum {string} */
+                step: 'domains' | 'connection' | 'journal' | 'mailbox_access' | 'feeds' | 'monitor';
+              } | null;
+              steps: {
+                blockers: string[];
+                /** @enum {string} */
+                status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'skipped';
+                /** @enum {string} */
+                step: 'domains' | 'connection' | 'journal' | 'mailbox_access' | 'feeds' | 'monitor';
+              }[];
+            };
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown provider connection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_inventorySync_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description The 8.2 provider connection public id (UUID) */
+        connectionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Requested */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** Format: date-time */
+            inventoryRequestedAt: string;
+            /** Format: date-time */
+            nextInventoryAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown provider connection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_mailbox_access_required`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_mailbox_access_required' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_updateSettings_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description The 8.2 provider connection public id (UUID) */
+        connectionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          expectedRowVersion: number;
+          /**
+           * @description `poll` (default) or `notify` (Microsoft 365 with a platform notification URL)
+           * @enum {string}
+           */
+          feedMode?: 'poll' | 'notify';
+          feedsEnabled: boolean;
+        };
+      };
+    };
+    responses: {
+      /** @description The updated connection */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /**
+             * Format: uuid
+             * @description The API-mode row (null until first used)
+             */
+            apiConnectionId: string | null;
+            /** @description The connection is bound to its tenant */
+            bound: boolean;
+            displayName: string;
+            /** @enum {string} */
+            feedMode: 'poll' | 'notify';
+            feedsEnabled: boolean;
+            /** Format: date-time */
+            feedsEnabledAt: string | null;
+            /** @description The `*.mailbox_remediation` grant of the connection (null: none) */
+            grant: {
+              authMethod: string;
+              profile: string;
+              /** @enum {string} */
+              status: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked';
+            } | null;
+            health: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @enum {string} */
+              status: 'unknown' | 'healthy' | 'degraded' | 'failing';
+            };
+            /**
+             * Format: uuid
+             * @description The 8.2 provider connection public id
+             */
+            id: string;
+            /** Format: date-time */
+            inventoryRequestedAt: string | null;
+            /** @enum {string} */
+            inventoryStatus: 'never' | 'ok' | 'failed' | 'unavailable';
+            /** Format: date-time */
+            inventorySyncedAt: string | null;
+            /** @description Provider journal intake sources bound to it */
+            journalSources: {
+              displayName: string;
+              health: string;
+              /** Format: uuid */
+              id: string;
+              kind: string;
+              status: string;
+              verified: boolean;
+            }[];
+            lastErrorCode: string | null;
+            mailboxesTotal: number | null;
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** @description CAS version of the settings (send it with PUT …/settings) */
+            rowVersion: number;
+            /**
+             * @description The 8.2 connection status
+             * @enum {string}
+             */
+            status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            /** Format: date-time */
+            throttledUntil: string | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown provider connection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_connection_conflict` (`currentRowVersion`), `api_mode_mailbox_access_required`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_connection_conflict'
+              | 'api_mode_mailbox_access_required'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_notifications_unavailable` (`reason`); `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_setupGuide_v1: {
+    parameters: {
+      query?: {
+        /** @description `json` (default) or `markdown` */
+        format?: 'json' | 'markdown';
+      };
+      header?: never;
+      path: {
+        /** @description The 8.2 provider connection public id (UUID) */
+        connectionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The guide (JSON) or its Markdown rendering */
+      200: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          /**
+           * @example {
+           *       "schema": "api-mode-guide/1",
+           *       "provider": "microsoft_365",
+           *       "connection": {
+           *         "id": "0192f3a0-3333-7000-8000-000000000003",
+           *         "displayName": "Contoso Microsoft 365"
+           *       },
+           *       "notice": "The gateway never changes your Microsoft 365 configuration.",
+           *       "sections": [
+           *         {
+           *           "id": "overview",
+           *           "number": 1,
+           *           "title": "Overview",
+           *           "paragraphs": [
+           *             "API mode scans a copy of each message; mail flow never changes."
+           *           ],
+           *           "steps": []
+           *         }
+           *       ],
+           *       "attestations": [],
+           *       "permissions": [
+           *         "Mail.ReadWrite",
+           *         "User.Read.All"
+           *       ],
+           *       "generatedAt": "2026-11-26T09:00:00.000Z"
+           *     }
+           */
+          'application/json': {
+            attestations: {
+              attested: boolean;
+              attestedAt: string | null;
+              code: string;
+              statement: string;
+            }[];
+            connection: {
+              displayName: string;
+              /** Format: uuid */
+              id: string;
+            };
+            /** Format: date-time */
+            generatedAt: string;
+            journalSource?: {
+              addressMasked: string;
+              /** Format: uuid */
+              id: string;
+              kind: string;
+            };
+            notice: string;
+            permissions: string[];
+            platformClientId?: string;
+            /** @enum {string} */
+            provider: 'microsoft_365' | 'google_workspace';
+            /** @enum {string} */
+            schema: 'api-mode-guide/1';
+            sections: {
+              id: string;
+              number: number;
+              paragraphs: string[];
+              steps: {
+                attestation?: {
+                  attested: boolean;
+                  attestedAt: string | null;
+                  code: string;
+                  statement: string;
+                };
+                commands?: {
+                  code: string;
+                  /** @enum {string} */
+                  language: 'powershell' | 'dns' | 'text';
+                }[];
+                id: string;
+                paragraphs: string[];
+                title: string;
+                values?: {
+                  label: string;
+                  value: string;
+                }[];
+                warning?: string;
+              }[];
+              title: string;
+            }[];
+          };
+          /** @example # API-mode setup guide: Contoso Microsoft 365 */
+          'text/markdown': string;
+        };
+      };
+      /** @description The id is not a UUID or the query is invalid (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown provider connection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_connection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_listDetections_v1: {
+    parameters: {
+      query?: {
+        /** @description The 8.2 provider connection public id */
+        connectionId?: string;
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Start of the receipt window (default `to` − 7 days; at most 31 days) */
+        from?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description A mailbox public id */
+        mailboxId?: string;
+        /** @description Lowest risk score (0-1000) */
+        minRiskScore?: string;
+        /** @description `-receivedAt` (newest first) */
+        sort?: '-receivedAt';
+        /** @description `journal`, `graph`, `gmail` (the copy that was scanned); comma list */
+        source?: string;
+        /** @description `pending`, `scanned`, `scan_failed`, `parse_failed`, `too_large`; comma list */
+        status?: string;
+        /** @description End of the receipt window (exclusive; default now) */
+        to?: string;
+        /** @description `clean`, `spam`, `bulk`, `phishing`, `malware`, `bec`, `dlp_violation`, `suspicious`, `unknown`; comma list */
+        verdict?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of detections */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** Format: uuid */
+              connectionId: string;
+              /** @description The header From address, local part masked (ADR-0062) */
+              headerFrom: string | null;
+              /** Format: uuid */
+              id: string;
+              lagMs: number | null;
+              mailboxAddress: string;
+              /** Format: uuid */
+              mailboxId: string;
+              /** Format: date-time */
+              providerDeliveredAt: string | null;
+              /** Format: date-time */
+              receivedAt: string;
+              riskScore: number | null;
+              seenApi: boolean;
+              seenJournal: boolean;
+              /** @enum {string} */
+              source: 'journal' | 'graph' | 'gmail';
+              /** @enum {string} */
+              status: 'pending' | 'scanned' | 'scan_failed' | 'parse_failed' | 'too_large';
+              /**
+               * @description Always withheld (ADR-0062)
+               * @enum {string|null}
+               */
+              subject: null;
+              /** @description The copy has a subject */
+              subjectMasked: boolean;
+              /** @enum {string|null} */
+              verdict:
+                | 'clean'
+                | 'spam'
+                | 'bulk'
+                | 'phishing'
+                | 'malware'
+                | 'bec'
+                | 'dlp_violation'
+                | 'suspicious'
+                | 'unknown'
+                | null;
+              /** Format: date-time */
+              verdictAt: string | null;
+              /** @enum {string} */
+              verdictAuthority: 'copy' | 'inline';
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_getDetection_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Detection (copy) public id (UUID) */
+        detectionId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The detection */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** @enum {string|null} */
+            deliveredBasis:
+              'received_header' | 'graph_received' | 'gmail_internal' | 'ingest' | null;
+            /** @enum {string} */
+            direction: 'inbound' | 'internal';
+            /** @description The header From address, local part masked (ADR-0062) */
+            headerFrom: string | null;
+            /** Format: uuid */
+            id: string;
+            lagMs: number | null;
+            mailboxAddress: string;
+            /** Format: uuid */
+            mailboxId: string;
+            /** Format: date-time */
+            providerDeliveredAt: string | null;
+            /** @description Up to 10 risk reason codes of the copy (codes only) */
+            reasonCodes: string[];
+            /** Format: date-time */
+            receivedAt: string;
+            riskScore: number | null;
+            seenApi: boolean;
+            seenJournal: boolean;
+            /** @enum {string} */
+            source: 'journal' | 'graph' | 'gmail';
+            /** @enum {string} */
+            status: 'pending' | 'scanned' | 'scan_failed' | 'parse_failed' | 'too_large';
+            /**
+             * @description Always withheld (ADR-0062)
+             * @enum {string|null}
+             */
+            subject: null;
+            /** @description The copy has a subject */
+            subjectMasked: boolean;
+            /** @enum {string|null} */
+            verdict:
+              | 'clean'
+              | 'spam'
+              | 'bulk'
+              | 'phishing'
+              | 'malware'
+              | 'bec'
+              | 'dlp_violation'
+              | 'suspicious'
+              | 'unknown'
+              | null;
+            /** Format: date-time */
+            verdictAt: string | null;
+            /** @enum {string} */
+            verdictAuthority: 'copy' | 'inline';
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown detection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_detection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_listMailboxes_v1: {
+    parameters: {
+      query?: {
+        /** @description The 8.2 provider connection public id */
+        connectionId?: string;
+        /** @description `covered`, `gap`, `out_of_scope`; comma list */
+        coverage?: string;
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description A domain public id */
+        domainId?: string;
+        /** @description `off`, `pending`, `active`, `error`, `throttled`, `revoked`; comma list */
+        feedStatus?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description Prefix of an address of the mailbox (primary or alias), case-insensitive */
+        q?: string;
+        /** @description `-id` (newest first) */
+        sort?: '-id';
+        /** @description `active`, `discovered`, `disabled`, `deleted`; comma list */
+        status?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of mailboxes */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @description Primary address (lower case) */
+              address: string;
+              /**
+               * Format: uuid
+               * @description The 8.2 provider connection public id
+               */
+              connectionId: string;
+              /** @enum {string} */
+              coverage: 'covered' | 'gap' | 'out_of_scope';
+              /** Format: date-time */
+              coverageChangedAt: string | null;
+              domain: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+              } | null;
+              /** @enum {string} */
+              feedStatus: 'off' | 'pending' | 'active' | 'error' | 'throttled' | 'revoked';
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              journalLastSeenAt: string | null;
+              lastErrorCode: string | null;
+              /** Format: date-time */
+              lastSyncAt: string | null;
+              /** @enum {string} */
+              status: 'active' | 'discovered' | 'disabled' | 'deleted';
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_getMailbox_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Mailbox public id (UUID) */
+        mailboxId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The mailbox */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Primary address (lower case) */
+            address: string;
+            aliases: string[];
+            /**
+             * Format: uuid
+             * @description The 8.2 provider connection public id
+             */
+            connectionId: string;
+            consecutiveFailures: number;
+            /** @enum {string} */
+            coverage: 'covered' | 'gap' | 'out_of_scope';
+            /** Format: date-time */
+            coverageChangedAt: string | null;
+            domain: {
+              /** Format: uuid */
+              id: string;
+              name: string;
+            } | null;
+            /** Format: date-time */
+            feedStartedAt: string | null;
+            /** @enum {string} */
+            feedStatus: 'off' | 'pending' | 'active' | 'error' | 'throttled' | 'revoked';
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            journalLastSeenAt: string | null;
+            /** Format: date-time */
+            lastChangeAt: string | null;
+            lastErrorCode: string | null;
+            /** Format: date-time */
+            lastGapAt: string | null;
+            /** Format: date-time */
+            lastSyncAt: string | null;
+            notifications: {
+              /** Format: date-time */
+              expiresAt: string | null;
+              /** @description A Graph change-notification subscription exists */
+              subscribed: boolean;
+            };
+            /** @description Its last 20 copies, newest first */
+            recentDetections: {
+              /** Format: uuid */
+              connectionId: string;
+              /** @description The header From address, local part masked (ADR-0062) */
+              headerFrom: string | null;
+              /** Format: uuid */
+              id: string;
+              lagMs: number | null;
+              mailboxAddress: string;
+              /** Format: uuid */
+              mailboxId: string;
+              /** Format: date-time */
+              providerDeliveredAt: string | null;
+              /** Format: date-time */
+              receivedAt: string;
+              riskScore: number | null;
+              seenApi: boolean;
+              seenJournal: boolean;
+              /** @enum {string} */
+              source: 'journal' | 'graph' | 'gmail';
+              /** @enum {string} */
+              status: 'pending' | 'scanned' | 'scan_failed' | 'parse_failed' | 'too_large';
+              /**
+               * @description Always withheld (ADR-0062)
+               * @enum {string|null}
+               */
+              subject: null;
+              /** @description The copy has a subject */
+              subjectMasked: boolean;
+              /** @enum {string|null} */
+              verdict:
+                | 'clean'
+                | 'spam'
+                | 'bulk'
+                | 'phishing'
+                | 'malware'
+                | 'bec'
+                | 'dlp_violation'
+                | 'suspicious'
+                | 'unknown'
+                | null;
+              /** Format: date-time */
+              verdictAt: string | null;
+              /** @enum {string} */
+              verdictAuthority: 'copy' | 'inline';
+            }[];
+            /** @enum {string} */
+            status: 'active' | 'discovered' | 'disabled' | 'deleted';
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown mailbox, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_mailbox_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_resyncMailbox_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Mailbox public id (UUID) */
+        mailboxId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Requested */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            mailboxId: string;
+            /** Format: date-time */
+            syncRequestedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown mailbox, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_mailbox_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_mailbox_access_required`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_mailbox_access_required' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeController_overview_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The overview */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            active: boolean;
+            connections: {
+              copiesToday: number;
+              coverage: {
+                covered: number;
+                gap: number;
+                /** @description covered / (covered + gap) × 100 (null without inventory) */
+                percent: number | null;
+                /** @description In-scope mailboxes of the last inventory (null = unknown: no inventory yet) */
+                total: number | null;
+              };
+              displayName: string;
+              failingChecks: string[];
+              /** @enum {string} */
+              feedMode: 'poll' | 'notify';
+              feedsEnabled: boolean;
+              /** @enum {string|null} */
+              grantStatus: 'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked' | null;
+              /** @enum {string} */
+              health: 'unknown' | 'healthy' | 'degraded' | 'failing';
+              /** Format: uuid */
+              id: string;
+              /** @enum {string} */
+              inventoryStatus: 'never' | 'ok' | 'failed' | 'unavailable';
+              lag: {
+                p50Seconds1h: number | null;
+                p50Seconds24h: number | null;
+                p95Seconds1h: number | null;
+                p95Seconds24h: number | null;
+              };
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** Format: date-time */
+              throttledUntil: string | null;
+              throttling: {
+                /** @description 429 and 503 answers in the last hour */
+                events1h: number;
+                events24h: number;
+              };
+            }[];
+            connectionsByHealth: {
+              degraded: number;
+              failing: number;
+              healthy: number;
+              unknown: number;
+            };
+            /** @description Journal and feed copies recorded since 00:00 UTC */
+            copiesToday: number;
+            /** @description Summed over the connections (total null when one is unknown) */
+            coverage: {
+              covered: number;
+              gap: number;
+              /** @description covered / (covered + gap) × 100 (null without inventory) */
+              percent: number | null;
+              /** @description In-scope mailboxes of the last inventory (null = unknown: no inventory yet) */
+              total: number | null;
+            };
+            domainsByEffectiveMode: {
+              api: number;
+              hybrid: number;
+              inline: number;
+            };
+            entitled: boolean;
+            /** Format: date-time */
+            generatedAt: string;
+            lag: {
+              p50Seconds1h: number | null;
+              p50Seconds24h: number | null;
+              p95Seconds1h: number | null;
+              p95Seconds24h: number | null;
+            };
+            /** @enum {string} */
+            organizationMode: 'inline' | 'api' | 'hybrid';
+            throttling: {
+              /** @description 429 and 503 answers in the last hour */
+              events1h: number;
+              events24h: number;
+            };
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   ArchiveAdminController_captureIssues_v1: {
     parameters: {
       query?: {
@@ -9555,8 +12410,11 @@ export interface operations {
               recipientsAdded: number;
               sha256: string;
               sizeBytes: number;
-              /** @enum {string} */
-              source: 'gateway' | 'journal_intake';
+              /**
+               * @description Where the merged copy came from. Step API-1: `mailbox_api` (API-mode feed copies) is accepted for completeness; such copies are never captured (D7.6)
+               * @enum {string}
+               */
+              source: 'gateway' | 'journal_intake' | 'mailbox_api';
             }[];
             /** Format: uuid */
             messageId: string;
@@ -47741,6 +50599,22 @@ export interface operations {
               /** Format: date-time */
               nextCheckAt: string | null;
               outboundEnabled: boolean;
+              /** @description Step API-1: the configured (null = inherit) and effective protection mode */
+              protectionMode: {
+                /** Format: date-time */
+                changedAt: string | null;
+                /**
+                 * @description The domain’s own mode; null = inherit
+                 * @enum {string|null}
+                 */
+                configured: 'inline' | 'api' | 'hybrid' | null;
+                /**
+                 * @description configured ?? the organization’s mode
+                 * @enum {string}
+                 */
+                effective: 'inline' | 'api' | 'hybrid';
+                inherited: boolean;
+              };
               /** @enum {string} */
               status:
                 | 'pending_verification'
@@ -47883,6 +50757,11 @@ export interface operations {
           inboundEnabled?: boolean;
           /** @description Domain name; IDN allowed (stored as punycode), one trailing dot ignored */
           name: string;
+          /**
+           * @description Step API-1: the domain’s own protection mode (absent = inherit the organization’s). `api` needs inbound mail flow off (`inboundEnabled: false`, the default for an effective `api` domain; `true` is `422 protection_mode_inbound_conflict`); `api` and `hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`)
+           * @enum {string}
+           */
+          protectionMode?: 'inline' | 'api' | 'hybrid';
         };
       };
     };
@@ -47957,6 +50836,22 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            /** @description Step API-1: the configured (null = inherit) and effective protection mode */
+            protectionMode: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /**
+               * @description The domain’s own mode; null = inherit
+               * @enum {string|null}
+               */
+              configured: 'inline' | 'api' | 'hybrid' | null;
+              /**
+               * @description configured ?? the organization’s mode
+               * @enum {string}
+               */
+              effective: 'inline' | 'api' | 'hybrid';
+              inherited: boolean;
+            };
             /** @enum {string} */
             status:
               'pending_verification' | 'verified' | 'failed' | 'disabled' | 'active' | 'suspended';
@@ -48028,7 +50923,7 @@ export interface operations {
           };
         };
       };
-      /** @description Missing permission (`forbidden`), or `inboundEnabled: true` for an archive-only organization (`mail_filtering_not_enabled`, step 8.6) */
+      /** @description Missing permission (`forbidden`), or `inboundEnabled: true` for an archive-only organization (`mail_filtering_not_enabled`, step 8.6), or `api`/`hybrid` without the plan feature `api_mode_protection` (`api_mode_not_enabled`, step API-1) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -48041,7 +50936,7 @@ export interface operations {
         content: {
           'application/json': {
             /** @enum {string} */
-            code: 'forbidden' | 'mail_filtering_not_enabled';
+            code: 'forbidden' | 'mail_filtering_not_enabled' | 'api_mode_not_enabled';
             correlationId?: string;
             error: string;
             message: string;
@@ -48071,7 +50966,7 @@ export interface operations {
           };
         };
       };
-      /** @description `domain_reserved`: the platform probe domain (step 8.2), the journal intake domain (step 8.6) or a name under them */
+      /** @description `domain_reserved`: the platform probe domain (step 8.2), the journal intake domain (step 8.6) or a name under them; `protection_mode_inbound_conflict` (step API-1) */
       422: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -48084,7 +50979,7 @@ export interface operations {
         content: {
           'application/json': {
             /** @enum {string} */
-            code: 'domain_reserved';
+            code: 'domain_reserved' | 'protection_mode_inbound_conflict';
             correlationId?: string;
             error: string;
             message: string;
@@ -48150,6 +51045,262 @@ export interface operations {
       };
     };
   };
+  ProtectionModeController_putDomain_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Domain public id (UUID) */
+        domainId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /**
+           * @description `inherit` clears the domain’s own mode
+           * @enum {string}
+           */
+          mode: 'inline' | 'api' | 'hybrid' | 'inherit';
+          /** @description Why the mode changes (1-500 characters; stored in the audit row only) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Changed */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description false: the domain already had this value (no audit row) */
+            changed: boolean;
+            /** Format: uuid */
+            domainId: string;
+            name: string;
+            protectionMode: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /**
+               * @description The domain’s own mode; null = inherit
+               * @enum {string|null}
+               */
+              configured: 'inline' | 'api' | 'hybrid' | null;
+              /**
+               * @description configured ?? the organization’s mode
+               * @enum {string}
+               */
+              effective: 'inline' | 'api' | 'hybrid';
+              inherited: boolean;
+            };
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), `api_mode_not_enabled` */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'api_mode_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown domain, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `protection_mode_mx_points_to_gateway` (`domains`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'protection_mode_mx_points_to_gateway' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            domains?: unknown[];
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   DomainsController_get_v1: {
     parameters: {
       query?: never;
@@ -48205,6 +51356,22 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            /** @description Step API-1: the configured (null = inherit) and effective protection mode */
+            protectionMode: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /**
+               * @description The domain’s own mode; null = inherit
+               * @enum {string|null}
+               */
+              configured: 'inline' | 'api' | 'hybrid' | null;
+              /**
+               * @description configured ?? the organization’s mode
+               * @enum {string}
+               */
+              effective: 'inline' | 'api' | 'hybrid';
+              inherited: boolean;
+            };
             /** @enum {string} */
             status:
               'pending_verification' | 'verified' | 'failed' | 'disabled' | 'active' | 'suspended';
@@ -50718,6 +53885,22 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            /** @description Step API-1: the configured (null = inherit) and effective protection mode */
+            protectionMode: {
+              /** Format: date-time */
+              changedAt: string | null;
+              /**
+               * @description The domain’s own mode; null = inherit
+               * @enum {string|null}
+               */
+              configured: 'inline' | 'api' | 'hybrid' | null;
+              /**
+               * @description configured ?? the organization’s mode
+               * @enum {string}
+               */
+              effective: 'inline' | 'api' | 'hybrid';
+              inherited: boolean;
+            };
             /** @enum {string} */
             status:
               'pending_verification' | 'verified' | 'failed' | 'disabled' | 'active' | 'suspended';
@@ -58894,6 +62077,8 @@ export interface operations {
             sourceId: string;
             steps: {
               blockers: string[];
+              /** @description Step API-1: why a step is skipped beyond the kind (`api_mode`: the archiving step, when active API mode entitles the source without archiving) */
+              reason?: string;
               /** @enum {string} */
               status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'skipped';
               /** @enum {string} */
@@ -70448,6 +73633,26 @@ export interface operations {
                 code: string;
                 name: string;
               };
+              /** @description Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), entitlement, whether API mode is active and the domains per effective mode */
+              protectionMode: {
+                /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+                active: boolean;
+                /** Format: date-time */
+                changedAt: string | null;
+                /** @description Non-deleted domains per effective mode */
+                domainsByEffectiveMode: {
+                  api: number;
+                  hybrid: number;
+                  inline: number;
+                };
+                /** @description The plan feature `api_mode_protection` is effective */
+                entitled: boolean;
+                /**
+                 * @description The organization’s mode: the default of every domain without its own
+                 * @enum {string}
+                 */
+                mode: 'inline' | 'api' | 'hybrid';
+              };
               /**
                * @description Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but neither inbound nor outbound filtering (journal intake, journaling and archive only)
                * @enum {string}
@@ -70669,6 +73874,26 @@ export interface operations {
               code: string;
               name: string;
             };
+            /** @description Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), entitlement, whether API mode is active and the domains per effective mode */
+            protectionMode: {
+              /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+              active: boolean;
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @description Non-deleted domains per effective mode */
+              domainsByEffectiveMode: {
+                api: number;
+                hybrid: number;
+                inline: number;
+              };
+              /** @description The plan feature `api_mode_protection` is effective */
+              entitled: boolean;
+              /**
+               * @description The organization’s mode: the default of every domain without its own
+               * @enum {string}
+               */
+              mode: 'inline' | 'api' | 'hybrid';
+            };
             /**
              * @description Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but neither inbound nor outbound filtering (journal intake, journaling and archive only)
              * @enum {string}
@@ -70868,6 +74093,26 @@ export interface operations {
             plan: {
               code: string;
               name: string;
+            };
+            /** @description Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), entitlement, whether API mode is active and the domains per effective mode */
+            protectionMode: {
+              /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+              active: boolean;
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @description Non-deleted domains per effective mode */
+              domainsByEffectiveMode: {
+                api: number;
+                hybrid: number;
+                inline: number;
+              };
+              /** @description The plan feature `api_mode_protection` is effective */
+              entitled: boolean;
+              /**
+               * @description The organization’s mode: the default of every domain without its own
+               * @enum {string}
+               */
+              mode: 'inline' | 'api' | 'hybrid';
             };
             /**
              * @description Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but neither inbound nor outbound filtering (journal intake, journaling and archive only)
@@ -71075,6 +74320,26 @@ export interface operations {
             plan: {
               code: string;
               name: string;
+            };
+            /** @description Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), entitlement, whether API mode is active and the domains per effective mode */
+            protectionMode: {
+              /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+              active: boolean;
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @description Non-deleted domains per effective mode */
+              domainsByEffectiveMode: {
+                api: number;
+                hybrid: number;
+                inline: number;
+              };
+              /** @description The plan feature `api_mode_protection` is effective */
+              entitled: boolean;
+              /**
+               * @description The organization’s mode: the default of every domain without its own
+               * @enum {string}
+               */
+              mode: 'inline' | 'api' | 'hybrid';
             };
             /**
              * @description Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but neither inbound nor outbound filtering (journal intake, journaling and archive only)
@@ -72175,7 +75440,8 @@ export interface operations {
           | 'webhooks'
           | 'ato_detection'
           | 'journal_intake'
-          | 'ai_assistant';
+          | 'ai_assistant'
+          | 'api_mode_protection';
         /** @description Organization public id */
         id: string;
       };
@@ -72374,7 +75640,8 @@ export interface operations {
           | 'webhooks'
           | 'ato_detection'
           | 'journal_intake'
-          | 'ai_assistant';
+          | 'ai_assistant'
+          | 'api_mode_protection';
         /** @description Organization public id */
         id: string;
       };
@@ -73061,6 +76328,449 @@ export interface operations {
       };
     };
   };
+  ProtectionModeController_getOrganization_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Organization public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The mode */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+            active: boolean;
+            /** Format: date-time */
+            changedAt: string | null;
+            /** @description Non-deleted domains per effective mode */
+            domainsByEffectiveMode: {
+              api: number;
+              hybrid: number;
+              inline: number;
+            };
+            /** @description The plan feature `api_mode_protection` is effective */
+            entitled: boolean;
+            /**
+             * @description The organization’s mode: the default of every domain without its own
+             * @enum {string}
+             */
+            mode: 'inline' | 'api' | 'hybrid';
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Not your organization, or unknown */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'organization_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ProtectionModeController_putOrganization_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Organization public id (UUID) */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          mode: 'inline' | 'api' | 'hybrid';
+          /** @description Why the mode changes (1-500 characters; stored in the audit row only) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Changed */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+            active: boolean;
+            /** @description false: the mode already had this value (no audit row) */
+            changed: boolean;
+            /** Format: date-time */
+            changedAt: string | null;
+            /** @description Non-deleted domains per effective mode */
+            domainsByEffectiveMode: {
+              api: number;
+              hybrid: number;
+              inline: number;
+            };
+            /** @description The plan feature `api_mode_protection` is effective */
+            entitled: boolean;
+            /** @description Domains whose effective mode follows the organization */
+            inheritingDomains: number;
+            /**
+             * @description The organization’s mode: the default of every domain without its own
+             * @enum {string}
+             */
+            mode: 'inline' | 'api' | 'hybrid';
+            /** Format: uuid */
+            organizationId: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), `api_mode_not_enabled` */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'api_mode_not_enabled';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Not your organization, or unknown */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'organization_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `protection_mode_mx_points_to_gateway` (`domains`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'protection_mode_mx_points_to_gateway' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            domains?: unknown[];
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   OrganizationConfigurationController_getSettings_v1: {
     parameters: {
       query?: never;
@@ -73494,6 +77204,26 @@ export interface operations {
               code: string;
               name: string;
             };
+            /** @description Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), entitlement, whether API mode is active and the domains per effective mode */
+            protectionMode: {
+              /** @description Entitled and at least one domain is effective `api` or `hybrid` (API mode active) */
+              active: boolean;
+              /** Format: date-time */
+              changedAt: string | null;
+              /** @description Non-deleted domains per effective mode */
+              domainsByEffectiveMode: {
+                api: number;
+                hybrid: number;
+                inline: number;
+              };
+              /** @description The plan feature `api_mode_protection` is effective */
+              entitled: boolean;
+              /**
+               * @description The organization’s mode: the default of every domain without its own
+               * @enum {string}
+               */
+              mode: 'inline' | 'api' | 'hybrid';
+            };
             /**
              * @description Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but neither inbound nor outbound filtering (journal intake, journaling and archive only)
              * @enum {string}
@@ -73696,12 +77426,14 @@ export interface operations {
               value: number;
             }[];
             messages: {
+              /** @description Step API-1: API-mode feed copies (`mailbox_api`) since 00:00 UTC (detect mode, never delivered; journal copies are in journalIntakeToday) */
+              apiCopiesToday: number;
               inbound: number;
               internal: number;
               /** @description Step 8.6: journal intake messages since 00:00 UTC (archive only, never filtered) */
               journalIntakeToday: number;
               outbound: number;
-              /** @description Gateway messages since 00:00 UTC (journal intake excluded) */
+              /** @description Gateway messages since 00:00 UTC (journal intake and API-mode copies excluded) */
               today: number;
               /** @description Gateway messages of the period (journal intake excluded) */
               total: number;
@@ -75153,7 +78885,7 @@ export interface operations {
           organizationId?: string;
           /** @description Why the operator replays (audited) */
           reason: string;
-          /** @description The work queue whose dead letters are replayed: email.received, scan.spam, scan.url, scan.url.inspect, scan.url.results, scan.attachment, scan.bec, scan.dlp, scan.sandbox, scan.sandbox.submissions, scan.sandbox.results, email.policy.evaluate, email.delivery.pending, email.quarantine, email.archive, email.notifications, email.webhooks, ato.events, ato.mail, ato.responses, assistant.reports */
+          /** @description The work queue whose dead letters are replayed: email.received, scan.spam, scan.url, scan.url.inspect, scan.url.results, scan.attachment, scan.bec, scan.dlp, scan.sandbox, scan.sandbox.submissions, scan.sandbox.results, email.policy.evaluate, email.delivery.pending, email.quarantine, email.archive, email.notifications, email.webhooks, ato.events, ato.mail, ato.responses, assistant.reports, email.mailbox */
           sourceQueue: string;
         };
       };
@@ -85139,7 +88871,7 @@ export interface operations {
           };
         };
       };
-      /** @description Missing permission, or an API key with `platform_app` */
+      /** @description Missing permission, an API key with `platform_app`, or a mailbox-access profile without `remediation:write` (`remediation_permission_required`, step API-1) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -85152,7 +88884,7 @@ export interface operations {
         content: {
           'application/json': {
             /** @enum {string} */
-            code: 'forbidden' | 'user_principal_required';
+            code: 'forbidden' | 'user_principal_required' | 'remediation_permission_required';
             correlationId?: string;
             error: string;
             message: string;
@@ -85316,7 +89048,7 @@ export interface operations {
       path: {
         /** @description Provider connection public id (UUID) */
         id: string;
-        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`, the 8.5 ATO profiles, step API-1 `m365.mailbox_remediation`, `google.mailbox_remediation`) */
         profile: string;
       };
       cookie?: never;
@@ -85424,7 +89156,7 @@ export interface operations {
           };
         };
       };
-      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      /** @description Missing permission (`forbidden`), or a mailbox-access profile without `remediation:write` (`remediation_permission_required`, step API-1) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -85436,10 +89168,15 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'remediation_permission_required';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
           };
         };
       };
@@ -85596,7 +89333,7 @@ export interface operations {
       path: {
         /** @description Provider connection public id (UUID) */
         id: string;
-        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`, the 8.5 ATO profiles, step API-1 `m365.mailbox_remediation`, `google.mailbox_remediation`) */
         profile: string;
       };
       cookie?: never;
@@ -85726,7 +89463,7 @@ export interface operations {
           };
         };
       };
-      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      /** @description Missing permission (`forbidden`), or a mailbox-access profile without `remediation:write` (`remediation_permission_required`, step API-1) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -85738,10 +89475,15 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'remediation_permission_required';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
           };
         };
       };
@@ -85897,7 +89639,7 @@ export interface operations {
       path: {
         /** @description Provider connection public id (UUID) */
         id: string;
-        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`) */
+        /** @description Permission profile key (`m365.mail_flow`, `google.mail_flow`, the 8.5 ATO profiles, step API-1 `m365.mailbox_remediation`, `google.mailbox_remediation`) */
         profile: string;
       };
       cookie?: never;
@@ -86009,7 +89751,7 @@ export interface operations {
           };
         };
       };
-      /** @description Authenticated but not allowed (permission, MFA, enrollment restriction) */
+      /** @description Missing permission (`forbidden`), or a mailbox-access profile without `remediation:write` (`remediation_permission_required`, step API-1) */
       403: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -86021,10 +89763,15 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'remediation_permission_required';
             correlationId?: string;
             error: string;
-            message: string | string[];
-            statusCode: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
           };
         };
       };
@@ -89152,6 +92899,256 @@ export interface operations {
             /** @enum {integer} */
             statusCode: 503;
           };
+        };
+      };
+    };
+  };
+  ProviderNotificationsController_graph_v1: {
+    parameters: {
+      query?: {
+        /** @description Graph’s validation token (echoed as text/plain) */
+        validationToken?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        'application/json': {
+          value: {
+            changeType?: string;
+            clientState?: string;
+            /** @enum {string} */
+            lifecycleEvent?: 'reauthorizationRequired' | 'subscriptionRemoved' | 'missed';
+            subscriptionExpirationDateTime?: string;
+            subscriptionId: string;
+            tenantId?: string;
+          }[];
+        };
+      };
+    };
+    responses: {
+      /** @description The validation handshake: the token echoed */
+      200: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          /** @example example-validation-token */
+          'text/plain': string;
+        };
+      };
+      /** @description Accepted (always; no body) */
+      202: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description The body is larger than 256 KiB */
+      413: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
+      /** @description Too many requests from this client IP (`Retry-After`) */
+      429: {
+        headers: {
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A dependency is unavailable (service_unavailable or a specific code) */
+      503: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+    };
+  };
+  ProviderNotificationsController_lifecycle_v1: {
+    parameters: {
+      query?: {
+        /** @description Graph’s validation token (echoed as text/plain) */
+        validationToken?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        'application/json': {
+          value: {
+            changeType?: string;
+            clientState?: string;
+            /** @enum {string} */
+            lifecycleEvent?: 'reauthorizationRequired' | 'subscriptionRemoved' | 'missed';
+            subscriptionExpirationDateTime?: string;
+            subscriptionId: string;
+            tenantId?: string;
+          }[];
+        };
+      };
+    };
+    responses: {
+      /** @description The validation handshake: the token echoed */
+      200: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          /** @example example-validation-token */
+          'text/plain': string;
+        };
+      };
+      /** @description Accepted (always; no body) */
+      202: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Invalid request (validation_failed or a specific code) */
+      400: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ValidationErrorBody'];
+        };
+      };
+      /** @description The body is larger than 256 KiB */
+      413: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'payload_too_large';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 413;
+          };
+        };
+      };
+      /** @description Too many requests from this client IP (`Retry-After`) */
+      429: {
+        headers: {
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'rate_limited';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 429;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description A dependency is unavailable (service_unavailable or a specific code) */
+      503: {
+        headers: {
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
         };
       };
     };
@@ -109368,7 +113365,8 @@ export interface operations {
            *         "outbound": 10902,
            *         "internal": 210,
            *         "today": 1204,
-           *         "journalIntakeToday": 0
+           *         "journalIntakeToday": 0,
+           *         "apiCopiesToday": 0
            *       },
            *       "quarantine": {
            *         "active": 57
@@ -109422,12 +113420,14 @@ export interface operations {
               value: number;
             }[];
             messages: {
+              /** @description Step API-1: API-mode feed copies (`mailbox_api`) since 00:00 UTC (detect mode, never delivered; journal copies are in journalIntakeToday) */
+              apiCopiesToday: number;
               inbound: number;
               internal: number;
               /** @description Step 8.6: journal intake messages since 00:00 UTC (archive only, never filtered) */
               journalIntakeToday: number;
               outbound: number;
-              /** @description Gateway messages since 00:00 UTC (journal intake excluded) */
+              /** @description Gateway messages since 00:00 UTC (journal intake and API-mode copies excluded) */
               today: number;
               /** @description Gateway messages of the period (journal intake excluded) */
               total: number;

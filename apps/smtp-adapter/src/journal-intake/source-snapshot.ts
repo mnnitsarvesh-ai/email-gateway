@@ -5,8 +5,14 @@ import { isRelayProvider, JOURNAL_INTAKE_KINDS } from '@email-gateway/mail-routi
 import { z } from 'zod';
 import { normalizeFingerprint } from '../connectors/addresses';
 
-/** Feature keys an organization needs for journal intake (D1 entitlement). */
-export const INTAKE_FEATURE_KEYS = ['archiving', 'journal_intake'] as const;
+/**
+ * Feature keys of the journal intake entitlement (8.6 D1; step API-1 D6: `journal_intake` and
+ * either `archiving` with archiving enabled or API mode active, which needs
+ * `api_mode_protection`).
+ */
+export const INTAKE_FEATURE_KEYS = ['archiving', 'journal_intake', 'api_mode_protection'] as const;
+/** Effective protection modes that make API mode active for a domain (step API-1 D1). */
+export const API_MODE_PROTECTION_MODES = ['api', 'hybrid'] as const;
 /** Plan / organization limit keys of journal intake (D13). */
 export const INTAKE_LIMIT_KEYS = {
   messagesPerMinute: 'journal_intake_messages_per_minute',
@@ -59,6 +65,14 @@ export const intakeSourceSnapshotSchema = z.object({
     archivingFeature: z.boolean(),
     journalIntakeFeature: z.boolean(),
     archivingEnabled: z.boolean(),
+    /**
+     * Step API-1 D1/D6: "API mode active" = the `api_mode_protection` feature is effective and at
+     * least one non-deleted domain has an effective protection mode (`COALESCE(domains.
+     * protection_mode, organizations.protection_mode)`) of `api` or `hybrid`. Entitles the intake
+     * without archiving and forces `scan_requested` (detect mode). Absent in an entry cached
+     * before API-1: false (the 30 s cache bound applies).
+     */
+    apiDetect: z.boolean().default(false),
     /** Plan / organization limit `journal_intake_messages_per_minute` (missing = 0, none). */
     messagesPerMinute: z.number().int().nonnegative(),
     /** Plan / organization limit `journal_intake_max_message_bytes` (missing = 0, none). */
@@ -183,6 +197,7 @@ export class JournalIntakeSourceRepository {
         organization: {
           select: {
             status: true,
+            protectionMode: true,
             plan: { select: { defaultFeatures: true, defaultLimits: true } },
           },
         },
@@ -190,7 +205,10 @@ export class JournalIntakeSourceRepository {
     });
     if (!source) return null;
     const organizationId = source.organizationId;
-    const [features, limits, settings, connection, domains] = await Promise.all([
+    const organizationApiMode = (API_MODE_PROTECTION_MODES as readonly string[]).includes(
+      source.organization.protectionMode,
+    );
+    const [features, limits, settings, connection, domains, apiModeDomains] = await Promise.all([
       this.prisma.organizationFeature.findMany({
         where: { organizationId, featureKey: { in: [...INTAKE_FEATURE_KEYS] } },
         select: { featureKey: true, enabled: true },
@@ -228,8 +246,22 @@ export class JournalIntakeSourceRepository {
         orderBy: { id: 'asc' },
         take: MAX_SNAPSHOT_DOMAINS,
       }),
+      // Step API-1 D1: non-deleted domains whose effective mode is api/hybrid (own mode, or
+      // inherited from the organization when the domain has none). One is enough.
+      this.prisma.domain.count({
+        where: {
+          organizationId,
+          status: { not: 'deleted' },
+          OR: [
+            { protectionMode: { in: [...API_MODE_PROTECTION_MODES] } },
+            ...(organizationApiMode ? [{ protectionMode: null }] : []),
+          ],
+        },
+        take: 1,
+      }),
     ]);
     const plan = source.organization.plan;
+    const apiModeFeature = featureOf(features, plan.defaultFeatures, 'api_mode_protection');
     const networks = parseIntakeNetworks(source.networks);
     const fingerprints = parseClientCertFingerprints(source.clientCertFingerprints);
     return intakeSourceSnapshotSchema.parse({
@@ -257,6 +289,7 @@ export class JournalIntakeSourceRepository {
         archivingFeature: featureOf(features, plan.defaultFeatures, 'archiving'),
         journalIntakeFeature: featureOf(features, plan.defaultFeatures, 'journal_intake'),
         archivingEnabled: settings?.enabled === true,
+        apiDetect: apiModeFeature && apiModeDomains > 0,
         messagesPerMinute: limitOf(limits, plan.defaultLimits, INTAKE_LIMIT_KEYS.messagesPerMinute),
         maxMessageBytes: limitOf(limits, plan.defaultLimits, INTAKE_LIMIT_KEYS.maxMessageBytes),
       },

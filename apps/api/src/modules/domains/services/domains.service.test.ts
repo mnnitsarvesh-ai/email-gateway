@@ -126,7 +126,12 @@ describe('DomainsService.create', () => {
         resourceId: created.id,
         sourceIp: client.ip,
         actor: expect.objectContaining({ type: 'user' }),
-        metadata: { name: created.name, inboundEnabled: true, algorithms: ['rsa_2048'] },
+        metadata: {
+          name: created.name,
+          inboundEnabled: true,
+          algorithms: ['rsa_2048'],
+          protectionMode: null,
+        },
       }),
     ]);
     expect(bed.store.outbox).toEqual([]); // events are for transitions only
@@ -219,6 +224,67 @@ describe('DomainsService.create', () => {
     expect((err as CodedHttpException).code).toBe('mail_filtering_not_enabled');
     bed.profile.value = 'gateway';
     expect(await createIn(bed, 'gateway.example.com')).toMatchObject({ inboundEnabled: true });
+  });
+
+  it('protection mode (step API-1 D2): absent inherits; api needs the feature and inbound off', async () => {
+    const bed = createDomainTestbed();
+    const inherited = await createIn(bed, 'inherit.example.com');
+    expect(inherited.protectionMode).toEqual({
+      configured: null,
+      effective: 'inline',
+      inherited: true,
+      changedAt: null,
+    });
+    const refuse = async (body: object) => {
+      const err = await bed.service
+        .create(userPrincipal(ORG_A), scopeA, body as never, client)
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CodedHttpException);
+      return {
+        status: (err as CodedHttpException).getStatus(),
+        code: (err as CodedHttpException).code,
+      };
+    };
+    expect(await refuse({ name: 'api.example.com', protectionMode: 'api' })).toEqual({
+      status: 403,
+      code: 'api_mode_not_enabled',
+    });
+    expect(await refuse({ name: 'hybrid.example.com', protectionMode: 'hybrid' })).toEqual({
+      status: 403,
+      code: 'api_mode_not_enabled',
+    });
+    bed.apiModeEntitled.add(ORG_A);
+    expect(
+      await refuse({ name: 'api.example.com', protectionMode: 'api', inboundEnabled: true }),
+    ).toEqual({ status: 422, code: 'protection_mode_inbound_conflict' });
+    const api = await bed.service.create(
+      userPrincipal(ORG_A),
+      scopeA,
+      { name: 'api.example.com', protectionMode: 'api' },
+      client,
+    );
+    expect(api).toMatchObject({
+      inboundEnabled: false,
+      outboundEnabled: false,
+      protectionMode: { configured: 'api', effective: 'api', inherited: false },
+    });
+    expect(api.protectionMode.changedAt).not.toBeNull();
+    const hybrid = await bed.service.create(
+      userPrincipal(ORG_A),
+      scopeA,
+      { name: 'hybrid.example.com', protectionMode: 'hybrid' },
+      client,
+    );
+    expect(hybrid).toMatchObject({ inboundEnabled: true, protectionMode: { effective: 'hybrid' } });
+    expect(bed.store.audits.at(-1)!.metadata).toMatchObject({ protectionMode: 'hybrid' });
+    // An organization in api mode: inheriting domains are created with inbound off.
+    bed.store.organizationModes.set(ORG_A, 'api');
+    expect(
+      await bed.service.create(userPrincipal(ORG_A), scopeA, { name: 'later.example.com' }, client),
+    ).toMatchObject({
+      inboundEnabled: false,
+      protectionMode: { configured: null, effective: 'api', inherited: true },
+    });
   });
 
   it('rejects the gateway SPF include host and names under it', () => {

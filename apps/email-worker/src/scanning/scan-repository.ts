@@ -5,7 +5,12 @@ import {
   uuidv7,
   withTransactionDefaults,
 } from '@email-gateway/common';
-import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/database';
+import {
+  type MessageVerdict,
+  type Prisma,
+  processOnce,
+  type PrismaClient,
+} from '@email-gateway/database';
 import {
   attachmentSandboxRequestedV1,
   EventTypes,
@@ -18,10 +23,12 @@ import {
   type LifecycleMetrics,
   type LifecycleSnapshot,
   lockLifecycle,
+  type MessageIngestSourceValue,
   type TransitionActor,
   transitionMessage,
 } from '@email-gateway/message-lifecycle';
 import { aggregateRound, type FinalEngineResult } from './aggregate';
+import { isCopySource, writeCopyScannedOutbox } from './copy-scanned';
 import type {
   AttachmentResultInput,
   BecChildRows,
@@ -493,20 +500,40 @@ export class ScanRepository implements ScanStore {
     });
   }
 
-  /** `email_messages.ingest_source` of the round's message (row already locked; step 8.6). */
+  /**
+   * `email_messages.ingest_source` of the round's message (row already locked; step 8.6, step
+   * API-1 D7.7). Anything but a known copy source of the round's organization is `gateway`.
+   */
   private async ingestSourceOf(
     tx: Prisma.TransactionClient,
     round: ScanRound,
-  ): Promise<'gateway' | 'journal_intake'> {
+  ): Promise<MessageIngestSourceValue> {
     const rows = await tx.$queryRaw<Array<{ ingest_source: string; organization_id: bigint }>>`
       SELECT ingest_source, organization_id FROM email_messages
       WHERE id = ${round.messageId} AND received_at = ${round.receivedAt}`;
     const row = rows[0];
-    return row !== undefined &&
-      BigInt(row.organization_id) === round.organizationId &&
-      row.ingest_source === 'journal_intake'
-      ? 'journal_intake'
-      : 'gateway';
+    if (row === undefined || BigInt(row.organization_id) !== round.organizationId) return 'gateway';
+    const source = row.ingest_source as MessageIngestSourceValue;
+    return isCopySource(source) ? source : 'gateway';
+  }
+
+  /**
+   * The round's risk verdict and score (`email_scans.verdict`, `risk_score`, written by the
+   * revision-0 scoring of this or an earlier attempt), falling back to null (step API-1 D8).
+   */
+  private async roundVerdict(
+    tx: Prisma.TransactionClient,
+    round: ScanRound,
+  ): Promise<{ verdict: MessageVerdict | null; riskScore: number | null }> {
+    const row = await tx.emailScan.findFirst({
+      where: {
+        id: round.scanId,
+        receivedAt: round.receivedAt,
+        organizationId: round.organizationId,
+      },
+      select: { verdict: true, riskScore: true },
+    });
+    return { verdict: row?.verdict ?? null, riskScore: row?.riskScore ?? null };
   }
 
   private async lockScanRow(
@@ -1249,11 +1276,14 @@ export class ScanRepository implements ScanStore {
       };
     }
 
-    if ((await this.ingestSourceOf(tx, round)) === 'journal_intake') {
-      // Step 8.6 D4: a journal intake message (scan requested by its organization) ends in
-      // `journaled` in the round's own transaction: E31 after `scanned`, E32 after `scan_failed`
-      // (a failed or timed-out round). E31/E32 replace `mail.message.scanned.v1`: nothing reaches
-      // the policy engine, ATO or webhooks. The risk score above is recorded as for any round.
+    const ingestSource = await this.ingestSourceOf(tx, round);
+    if (isCopySource(ingestSource)) {
+      // Step 8.6 D4, step API-1 D8 (detect mode): a copy (`journal_intake` with its scan
+      // requested, `mailbox_api` always) ends in `journaled` in the round's own transaction: E31
+      // after `scanned`, E32 after `scan_failed` (a failed or timed-out round). E31/E32 replace
+      // `mail.message.scanned.v1`: nothing reaches the policy engine, ATO, webhooks or the
+      // `threat_detected` alert. The risk score above is recorded as for any round, and the
+      // copy's verdict goes to the per-mailbox record as `mail.message.copy_scanned.v1`.
       const journaled = await transitionMessage(
         tx,
         {
@@ -1272,6 +1302,27 @@ export class ScanRepository implements ScanStore {
         },
         this.lifecycleMetrics ? { metrics: this.lifecycleMetrics } : {},
       );
+      let copyScannedEventId: string | null = null;
+      if (journaled.result === 'applied') {
+        const { verdict, riskScore } = await this.roundVerdict(tx, round);
+        const copyOutcome = aggregate.outcome === 'scanned' ? 'scanned' : 'scan_failed';
+        copyScannedEventId = await writeCopyScannedOutbox(tx, {
+          message: {
+            id: round.messageId,
+            receivedAt: round.receivedAt,
+            organizationId: round.organizationId,
+          },
+          ingestSource,
+          lifecycleRound: round.round,
+          scanId: round.scanId,
+          outcome: copyOutcome,
+          // `scanned` always carries a verdict (contract): `unknown` when none was scored.
+          verdict: verdict ?? (copyOutcome === 'scanned' ? 'unknown' : null),
+          riskScore,
+          completedAt: ctx.now,
+          correlationId: ctx.correlationId,
+        });
+      }
       return {
         kind: 'completed',
         aggregate,
@@ -1282,6 +1333,7 @@ export class ScanRepository implements ScanStore {
           journaled.result === 'applied' || journaled.result === 'duplicate'
             ? 'journaled'
             : 'transition_skipped',
+        copyScannedEventId,
       };
     }
 

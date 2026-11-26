@@ -15,6 +15,7 @@ import { useCursorList } from '@/lib/api/hooks';
 import { Can } from '@/lib/auth/can';
 import { useCan } from '@/lib/auth/me';
 import { RouteGate } from '@/lib/auth/route-gate';
+import { ProtectionModeBadge } from '@/features/api-mode/model';
 import { FilterSelect } from './kit';
 import {
   DOMAIN_STATUSES,
@@ -87,6 +88,18 @@ function DomainsList() {
         header: 'Status',
         meta: { label: 'Status' },
         cell: ({ row }) => <DomainStatusBadge status={row.original.status} />,
+      },
+      {
+        // Step API-1 (D14): the effective protection mode, "inherited" when the domain has none.
+        id: 'protectionMode',
+        header: 'Protection mode',
+        meta: { label: 'Protection mode' },
+        cell: ({ row }) => (
+          <ProtectionModeBadge
+            mode={row.original.protectionMode.effective}
+            inherited={row.original.protectionMode.inherited}
+          />
+        ),
       },
       {
         id: 'flow',
@@ -190,6 +203,10 @@ function DomainsList() {
             </Link>
             <div className="flex flex-wrap items-center gap-2">
               <DomainStatusBadge status={row.status} />
+              <ProtectionModeBadge
+                mode={row.protectionMode.effective}
+                inherited={row.protectionMode.inherited}
+              />
               <FlowFlags domain={row} />
             </div>
           </div>

@@ -1,7 +1,15 @@
 import type { IntegrationProvider, ProviderAuthMethod } from '../types';
 
-/** `mail_flow` in 8.2; step 8.5 registers `ato_telemetry` and `ato_response` profiles. */
-export const PERMISSION_PURPOSES = ['mail_flow', 'ato_telemetry', 'ato_response'] as const;
+/**
+ * `mail_flow` in 8.2; step 8.5 registers `ato_telemetry` and `ato_response` profiles; step API-1
+ * `mailbox_remediation` (API-mode mailbox access, ADR-0099).
+ */
+export const PERMISSION_PURPOSES = [
+  'mail_flow',
+  'ato_telemetry',
+  'ato_response',
+  'mailbox_remediation',
+] as const;
 export type PermissionPurpose = (typeof PERMISSION_PURPOSES)[number];
 
 /**

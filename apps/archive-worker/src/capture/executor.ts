@@ -294,6 +294,9 @@ export class CaptureExecutor {
     }
     const sourceKey = assertKeyOfOrganization(m.emlObjectKey, org, 'eml');
     const dedupe = this.options.dedupe;
+    // Step API-1 D7.6: a mailbox API copy is never captured (`decideCapture` skips it with
+    // `api_copy`); refuse it here too (defence in depth: never an archive record of it).
+    if (m.ingestSource === 'mailbox_api') throw new DeterministicCaptureError('facts_invalid');
     const source: IngestSource = m.ingestSource ?? 'gateway';
     // Step 8.6 D7 (review fix): the copy's trusted facts that a merge must agree with.
     const incomingFacts = { source, direction: m.direction, receivedAt: m.receivedAt };

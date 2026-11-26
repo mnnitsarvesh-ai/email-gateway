@@ -42,6 +42,7 @@ const commit: IntakeCommit = {
   proof: JOURNAL_INTAKE_PROOF_EXAMPLE,
   reportSha256: '2'.repeat(64),
   reportSizeBytes: 400,
+  apiDetect: false,
 };
 
 function fakeWriter(settings: unknown = null) {
@@ -173,6 +174,22 @@ describe('JournalIntakeRepository.commit (D2.6 pass, D3)', () => {
     expect(data(w.calls, 'emailMessage').recipientCount).toBe(0);
     const payload = data(w.calls, 'messageOutbox').payload as { recipientCount: number };
     expect(payload.recipientCount).toBe(1);
+  });
+
+  it('API mode active (step API-1 D6): scan_requested even with intake scanning off', async () => {
+    for (const settings of [null, { intake: { scanEnabled: false } }]) {
+      const w = fakeWriter(settings);
+      const result = await new JournalIntakeRepository(w.prisma).commit(
+        { ...commit, apiDetect: true },
+        5000,
+      );
+      expect(result.scanRequested).toBe(true);
+      expect(data(w.calls, 'journalIntakeMessage').scanRequested).toBe(true);
+    }
+    const off = fakeWriter({ intake: { scanEnabled: false } });
+    expect((await new JournalIntakeRepository(off.prisma).commit(commit, 5000)).scanRequested).toBe(
+      false,
+    );
   });
 
   it('scanRequestedOf: off by default and for a document that does not parse', () => {

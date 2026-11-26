@@ -132,7 +132,8 @@ export function AlertSettingsPanel() {
 /**
  * Alerts without an organization setting (sent whenever their condition holds, throttled by the
  * platform). Step 8.6 adds `journal_intake_silent`: a journal intake source went silent or
- * started failing.
+ * started failing; step API-1 `api_mode_unhealthy`: an API-mode connection became degraded or
+ * failing.
  */
 export const ALWAYS_ON_ALERTS: readonly { kind: string; label: string; detail: string }[] = [
   {
@@ -140,6 +141,12 @@ export const ALWAYS_ON_ALERTS: readonly { kind: string; label: string; detail: s
     label: 'Journal intake source silent or failing',
     detail:
       'When a journal intake source receives no copy for its silence period, or its copies are refused or dropped. Sent to users with journal:manage and the organization contact, at most once a day per source. Names the source and links its setup guide; never shows the intake address.',
+  },
+  {
+    kind: 'api_mode_unhealthy',
+    label: 'Mailbox protection (API mode) degraded or failing',
+    detail:
+      'When the health of an API-mode connection becomes degraded (medium) or failing (high): missing mailbox access, coverage gaps, detection lag, throttling or feed errors. Sent to users with remediation:read and the organization contact, at most once a day per connection. Names the connection and the failing checks and links Mailbox protection; never shows a mailbox address.',
   },
 ];
 

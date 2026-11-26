@@ -63,13 +63,17 @@
  * (`NEW_IN_AI_6`, examples required, the assistant manifest): the three tenant-key routes
  * `sensitive` without an Idempotency-Key (`SENSITIVE_UNKEYED_AI_6`: CAS on the settings
  * `rowVersion`, validate changes a status only), the content search `expensive` and a v1 list,
- * and the four admin/audit lists v1.
+ * and the four admin/audit lists v1. Step API-1 (docs/plan/steps/35-api-mode-protection.md D12)
+ * adds 16 operations (`NEW_IN_API_1`, examples required, the api-mode manifest): five keyed
+ * `sensitive` mutations, two v1 lists (mailboxes, detections) and the two public Graph callbacks
+ * (`PROVIDER_CALLBACKS`: documented public routes, an empty `202`, a deliberately non-strict body).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ROUTE_ARGS_METADATA } from '@nestjs/common/constants';
 import { RouteParamtypes } from '@nestjs/common/enums/route-paramtypes.enum';
 import { DiscoveryService } from '@nestjs/core';
+import { graphNotificationSchema } from '@email-gateway/mailbox-api';
 import type { OpenAPIObject } from '@nestjs/swagger';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { z } from 'zod';
@@ -101,6 +105,11 @@ import {
   CreateIntakeSourceBodySchema,
   UpdateIntakeSourceBodySchema,
 } from '../src/modules/journaling/dto/journaling.schemas';
+import {
+  PutDomainModeBodySchema,
+  PutOrganizationModeBodySchema,
+  UpdateSettingsBodySchema,
+} from '../src/modules/api-mode/dto/api-mode.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -111,6 +120,17 @@ const REPO_ROOT = resolve(__dirname, '../../..');
 
 /** D13: the only routes outside `/api/v1` (internal port; never in an Ingress or the document). */
 const INTERNAL_ROUTES = ['get /health/live', 'get /health/ready', 'get /metrics'];
+
+/**
+ * Step API-1 D12.4: the public Graph callbacks. Their body is Graph's notification collection,
+ * parsed in the service with `graphNotificationSchema`, which deliberately ALLOWS unknown keys
+ * (Graph sends `resource`, `resourceData` and more; they are dropped, never refused), so it is
+ * exempt from the strict-schema rule (D1); they answer `202` without a body.
+ */
+const PROVIDER_CALLBACKS = [
+  'post /api/v1/provider-notifications/graph',
+  'post /api/v1/provider-notifications/graph/lifecycle',
+];
 
 /** D7: the documented `@Public()` routes (unchanged by 6.1) and the internal endpoints. */
 const PUBLIC_ROUTES = [
@@ -124,6 +144,8 @@ const PUBLIC_ROUTES = [
   'post /api/v1/auth/email/verify',
   'post /api/v1/auth/invitations/inspect',
   'post /api/v1/auth/invitations/accept',
+  // Step API-1 D12.4: the Microsoft Graph change and lifecycle notification callbacks.
+  ...PROVIDER_CALLBACKS,
 ];
 
 /**
@@ -213,6 +235,12 @@ const SECRET_BEARING_REDACTED_REPLAY = [
 
 /** §3.5: sensitive mutations keyed transactionally (IdempotencyService.execute). */
 const SENSITIVE_TRANSACTIONAL = [
+  // Step API-1 D12 (the keyed protection-mode and API-mode mutations).
+  'put /api/v1/organizations/:id/protection-mode',
+  'put /api/v1/domains/:domainId/protection-mode',
+  'put /api/v1/api-mode/connections/:connectionId/settings',
+  'post /api/v1/api-mode/connections/:connectionId/inventory-sync',
+  'post /api/v1/api-mode/mailboxes/:mailboxId/resync',
   'post /api/v1/messages/:messageId/rescan',
   'post /api/v1/messages/:messageId/release',
   'post /api/v1/quarantine/bulk',
@@ -575,6 +603,27 @@ const NEW_IN_AI_6 = [
 ];
 
 /**
+ * Step API-1 D12 (docs/plan/steps/35-api-mode-protection.md): the 14 protection-mode and
+ * API-mode operations (examples required; with PROVIDER_CALLBACKS exactly the api-mode manifest).
+ */
+const NEW_IN_API_1 = [
+  'get /api/v1/organizations/:id/protection-mode',
+  'put /api/v1/organizations/:id/protection-mode',
+  'put /api/v1/domains/:domainId/protection-mode',
+  'get /api/v1/api-mode/overview',
+  'get /api/v1/api-mode/connections',
+  'get /api/v1/api-mode/connections/:connectionId',
+  'get /api/v1/api-mode/connections/:connectionId/setup-guide',
+  'put /api/v1/api-mode/connections/:connectionId/settings',
+  'post /api/v1/api-mode/connections/:connectionId/inventory-sync',
+  'get /api/v1/api-mode/mailboxes',
+  'get /api/v1/api-mode/mailboxes/:mailboxId',
+  'post /api/v1/api-mode/mailboxes/:mailboxId/resync',
+  'get /api/v1/api-mode/detections',
+  'get /api/v1/api-mode/detections/:detectionId',
+];
+
+/**
  * Step AI-6 D7, I27: request bodies that carry a write-only secret and therefore no example (an
  * example would be a key-shaped value in the published document); the schema describes it.
  */
@@ -662,6 +711,8 @@ const EXPENSIVE = [
 const EMPTY_ACCEPTED = [
   'post /api/v1/auth/password/forgot',
   'post /api/v1/auth/email/verification',
+  // Step API-1 D12.4: the Graph callbacks always answer 202 with an empty body (no oracle).
+  ...PROVIDER_CALLBACKS,
 ];
 
 /**
@@ -693,6 +744,13 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['IntakeSourcesController.create', CreateIntakeSourceBodySchema],
   ['IntakeSourcesController.update', UpdateIntakeSourceBodySchema],
   ['IntakeSourcesController.attest', IntakeAttestationBodySchema],
+  // Step API-1: the keyed API-mode mutations parse after the key checks; the Graph callbacks
+  // parse with the non-strict notification schema (PROVIDER_CALLBACKS).
+  ['ProtectionModeController.putOrganization', PutOrganizationModeBodySchema],
+  ['ProtectionModeController.putDomain', PutDomainModeBodySchema],
+  ['ApiModeController.updateSettings', UpdateSettingsBodySchema],
+  ['ProviderNotificationsController.graph', graphNotificationSchema],
+  ['ProviderNotificationsController.lifecycle', graphNotificationSchema],
 ]);
 
 const BODY: number = RouteParamtypes.BODY;
@@ -825,7 +883,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (439 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (455 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
@@ -837,8 +895,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8), plus the
     // report read of step AI-R (§4.1), plus the four single-item reads of step AI-4 (D8), plus
     // the capture-issue read of step AI-5 (D8), plus the 11 hardening operations of step AI-6
-    // (§4.1, contracts §35.6).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(439);
+    // (§4.1, contracts §35.6), plus the 16 operations of step API-1 (D12: 14 API-mode and
+    // protection-mode operations and the 2 public Graph callbacks).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(455);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -952,6 +1011,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_AI_4,
       ...NEW_IN_AI_5,
       ...NEW_IN_AI_6,
+      ...NEW_IN_API_1,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -1033,6 +1093,11 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [...NEW_IN_8_5].sort(),
     );
     expect(NEW_IN_8_5).toHaveLength(13);
+    // NEW_IN_API_1 + PROVIDER_CALLBACKS is exactly the step API-1 manifest (16 operations).
+    expect(COVERAGE_BY_AREA['api-mode'].map((c) => c.route).sort()).toEqual(
+      [...NEW_IN_API_1, ...PROVIDER_CALLBACKS].sort(),
+    );
+    expect(NEW_IN_API_1).toHaveLength(14);
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
@@ -1133,7 +1198,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_AI_2.includes(key) ||
           NEW_IN_AI_R.includes(key) ||
           NEW_IN_AI_5.includes(key) ||
-          NEW_IN_AI_6.includes(key)) &&
+          NEW_IN_AI_6.includes(key) ||
+          NEW_IN_API_1.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -1148,8 +1214,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
     // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
     // sources list of 8.6 and the 2 of AI-1 (conversations, messages) and the 5 of AI-6 (search,
-    // usage per user, admin feedback, audit conversations and executions) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 43 });
+    // usage per user, admin feedback, audit conversations and executions) and the 2 of API-1
+    // (mailboxes, detections) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 45 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1161,6 +1228,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       }
       for (const { kind, schema } of schemas) {
         checked += 1;
+        if (PROVIDER_CALLBACKS.includes(key) && kind === 'body') continue;
         for (const path of isStrictRequestSchema(schema)) offenders.push(`${key} ${kind} ${path}`);
       }
     }
@@ -1223,8 +1291,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // 42 before step 8.1, plus its 15 keyed archive, legal hold and eDiscovery mutations, plus
     // the 14 keyed ATO and incident mutations of step 8.4, plus the 12 keyed provider-connection
     // mutations of step 8.2, plus the 8 keyed identity-provider and mailbox state mutations of
-    // step 8.5, plus the 4 keyed journaling mutations of step 8.6.
-    expect(operations).toHaveLength(95);
+    // step 8.5, plus the 4 keyed journaling mutations of step 8.6, plus the 5 keyed
+    // protection-mode and API-mode mutations of step API-1.
+    expect(operations).toHaveLength(100);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

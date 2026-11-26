@@ -584,7 +584,7 @@ describe('omitInputs (design 33 D7)', () => {
   };
   const components = openapi.components?.schemas ?? {};
 
-  it('the manifest omits reveal and body.subjectEmail', () => {
+  it('the manifest omits reveal, body.subjectEmail and (step API-1 D15) body.protectionMode', () => {
     expect(
       Object.fromEntries(
         Object.entries(OPERATION_OVERRIDES)
@@ -594,6 +594,7 @@ describe('omitInputs (design 33 D7)', () => {
     ).toEqual({
       IntakeSourcesController_get_v1: ['reveal'],
       ProviderGrantsController_verify_v1: ['body.subjectEmail'],
+      DomainsController_create_v1: ['body.protectionMode'],
     });
   });
 

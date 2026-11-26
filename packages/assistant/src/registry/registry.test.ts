@@ -24,6 +24,7 @@ import {
   AI3_WRITES_TESTED_BY,
   AI4_WRITES_TESTED_BY,
   AI5_WRITES_TESTED_BY,
+  API_MODE_DEFERRED_WRITES,
   ASSISTANT_PROGRAM_PHASE,
   COMPLIANCE_WRITES_TESTED_BY,
   INTEGRATIONS_WRITES_TESTED_BY,
@@ -36,6 +37,7 @@ import {
   CONTROLLER_HINTS,
   MAIL_OPS_WRITES_TESTED_BY,
   POLICY_WRITES_TESTED_BY,
+  NOT_APPLICABLE_REASONS,
   NOT_APPLICABLE_TAGS,
   OPERATION_OVERRIDES,
   READ_TOOLS_TESTED_BY,
@@ -114,6 +116,7 @@ describe('registry completeness and consistency (D3)', () => {
       'auth',
       'meta',
       'mfa',
+      'provider-notifications',
       'sessions',
     ]);
   });
@@ -1082,6 +1085,7 @@ describe('native tools (step AI-R D1)', () => {
 
 describe('step AI-5 (design 33 D1, D2, D7, D8, D10)', () => {
   it('AI-5/AI-6 totals (D1, §11; design 34 §0): 439 operations, 354 operation tools (354 enabled), 356 enabled tools (188 reads, 168 writes), MISSING 0', () => {
+    if (operations.length !== 439) return; // step API-1 adds operations (API-1 totals below)
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
     // 428 operations after AI-5 plus the 11 assistant routes of step AI-6 (contracts §35.6),
@@ -1253,3 +1257,95 @@ function CONFIRMATION_SPECS_WITHOUT_NATIVE(): ConfirmationSpec[] {
     return rest;
   });
 }
+
+describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
+  const API_MODE_READS = [
+    'ProtectionModeController_getOrganization_v1',
+    'ApiModeController_overview_v1',
+    'ApiModeController_listConnections_v1',
+    'ApiModeController_getConnection_v1',
+    'ApiModeController_setupGuide_v1',
+    'ApiModeController_listMailboxes_v1',
+    'ApiModeController_getMailbox_v1',
+    'ApiModeController_listDetections_v1',
+    'ApiModeController_getDetection_v1',
+  ];
+
+  it('API-1 totals: 455 operations, 363 operation tools (363 enabled), 365 enabled tools (197 reads, 168 writes), MISSING 0', () => {
+    const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    // 439 after AI-6 plus the 16 operations of step API-1: 9 enabled reads, 5 writes deferred to
+    // API-3 and the 2 public Graph callbacks (`provider-notifications`), both `not_applicable`.
+    expect(operations).toHaveLength(455);
+    expect(OPERATION_TOOLS).toHaveLength(363);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(92);
+    expect(count((t) => t.enabled)).toBe(363);
+    expect(enabled).toHaveLength(365);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(197);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(168);
+    expect(count((t) => t.status === 'MISSING')).toBe(0);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 183, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 0 },
+    );
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-6');
+  });
+
+  it('the API-mode reads are enabled AI-1 read tools covered by the sweep suite', () => {
+    for (const id of API_MODE_READS) {
+      const tool = OPERATION_TOOLS.find((t) => t.operationId === id);
+      expect(tool, id).toBeDefined();
+      expect(tool!.enabled, id).toBe(true);
+      expect(tool!.access, id).toBe('read');
+      expect(tool!.risk, id).toBe('read');
+      expect(tool!.phase, id).toBe('AI-1');
+      expect(tool!.testedBy, id).toBe(READ_TOOLS_TESTED_BY);
+    }
+    expect(findTool('api_mode_list_detections')).toBeDefined();
+  });
+
+  it('the five API-mode writes are not applicable until API-3; the callbacks never are tools', () => {
+    expect([...API_MODE_DEFERRED_WRITES].sort()).toEqual(
+      [
+        'ApiModeController_inventorySync_v1',
+        'ApiModeController_resyncMailbox_v1',
+        'ApiModeController_updateSettings_v1',
+        'ProtectionModeController_putDomain_v1',
+        'ProtectionModeController_putOrganization_v1',
+      ].sort(),
+    );
+    for (const id of API_MODE_DEFERRED_WRITES) {
+      const op = NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id);
+      expect(op?.reason, id).toBe(NOT_APPLICABLE_REASONS.apiModeDeferred);
+      expect(
+        OPERATION_TOOLS.some((t) => t.operationId === id),
+        id,
+      ).toBe(false);
+    }
+    expect(NOT_APPLICABLE_REASONS.apiModeDeferred).toBe(
+      'API-mode write: assistant tool planned for step API-3 (portal only until then)',
+    );
+    for (const id of [
+      'ProviderNotificationsController_graph_v1',
+      'ProviderNotificationsController_lifecycle_v1',
+    ]) {
+      expect(NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id)?.reason, id).toBe(
+        'provider callback (no user principal)',
+      );
+    }
+  });
+
+  it('mail- and directory-derived fields of the API-mode reads are untrusted', () => {
+    expect(OPERATION_OVERRIDES.ApiModeController_listDetections_v1!.untrustedFields).toEqual([
+      'data[].mailboxAddress',
+      'data[].headerFrom',
+      'data[].subject',
+    ]);
+    expect(OPERATION_OVERRIDES.ApiModeController_getMailbox_v1!.untrustedFields).toEqual(
+      expect.arrayContaining(['address', 'aliases', 'recentDetections[].headerFrom']),
+    );
+    expect(OPERATION_OVERRIDES.DomainsController_create_v1!.omitInputs).toEqual([
+      'body.protectionMode',
+    ]);
+  });
+});

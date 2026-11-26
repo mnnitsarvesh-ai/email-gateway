@@ -6,7 +6,9 @@ import { Prisma } from '@email-gateway/database';
  * — the Email Explorer list drivers and saved views, the message detail and its sub-routes,
  * lifecycle operations (rescan, release), reports, usage and incident message links — reads
  * gateway messages only; an intake message's id answers `404 message_not_found` there. This is
- * the one predicate those reads share.
+ * the one predicate those reads share. Step API-1 D7.7 (ADR-0098): the same holds for every
+ * non-gateway copy — API-mode feed copies (`mailbox_api`) are detection copies shown only on the
+ * API-mode pages — so the predicate is "gateway", never "not journal intake".
  */
 export const GATEWAY_INGEST_SOURCE = 'gateway' as const;
 

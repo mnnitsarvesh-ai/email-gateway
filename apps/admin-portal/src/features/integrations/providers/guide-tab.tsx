@@ -12,7 +12,23 @@ import { useApiQuery } from '@/lib/api/hooks';
 import { MutationError, QueryView, Section } from '@/features/domains/kit';
 import { PROVIDER_LABEL, type Connection, type SetupGuide } from './model';
 
-type GuideStep = SetupGuide['sections'][number]['steps'][number];
+/**
+ * One guide step as the 8.2 setup guide and the API-mode guide (`api-mode-guide/1`, step API-1)
+ * both carry it: paragraphs, copyable values and commands, a warning and an attestation.
+ */
+export interface GuideStepContent {
+  readonly id: string;
+  readonly title: string;
+  readonly paragraphs: readonly string[];
+  readonly values?: readonly { readonly label: string; readonly value: string }[];
+  readonly commands?: readonly { readonly language: string; readonly code: string }[];
+  readonly warning?: string;
+  readonly attestation?: {
+    readonly statement: string;
+    readonly attested: boolean;
+    readonly attestedAt: string | null;
+  };
+}
 
 /** `setup-<provider>-<slug>.md`, the api's download name (D14) when no header names one. */
 export function guideFileName(connection: Pick<Connection, 'provider' | 'displayName'>): string {
@@ -56,7 +72,7 @@ export async function downloadGuideMarkdown(connection: Connection): Promise<voi
   URL.revokeObjectURL(url);
 }
 
-function Step({ step }: { step: GuideStep }) {
+export function GuideStepView({ step }: { step: GuideStepContent }) {
   return (
     <li id={step.id} className="grid scroll-mt-20 gap-2 rounded-md border p-3">
       <h4 className="font-medium">{step.title}</h4>
@@ -190,7 +206,7 @@ function GuideView({ connection, guide }: { connection: Connection; guide: Setup
           {section.steps.length > 0 ? (
             <ol className="grid gap-3">
               {section.steps.map((step) => (
-                <Step key={step.id} step={step} />
+                <GuideStepView key={step.id} step={step} />
               ))}
             </ol>
           ) : null}

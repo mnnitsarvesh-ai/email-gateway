@@ -1,8 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GOOGLE_MAIL_FLOW_PROFILE,
+  GOOGLE_MAILBOX_REMEDIATION_PROFILE,
   M365_ATO_RESPONSE_PROFILE,
   M365_ATO_TELEMETRY_PROFILE,
   M365_MAIL_FLOW_PROFILE,
+  M365_MAILBOX_REMEDIATION_PROFILE,
   testing,
 } from '@email-gateway/provider-integrations';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -551,5 +556,178 @@ describe('grant verification', () => {
     expect(m.missingPermissions).not.toContain('ActivityFeed.Read');
     const e = await h.prisma.providerConnectionGrant.findUniqueOrThrow({ where: { id: early.id } });
     expect(e).toMatchObject({ status: 'error', lastErrorCode: 'tenant_not_bound' });
+  });
+});
+
+describe('step API-1 mailbox-access grants (D4, ADR-0099): verifyAuxiliary', () => {
+  let keyDir: string;
+  beforeAll(() => {
+    keyDir = mkdtempSync(join(tmpdir(), 'it-mailbox-sa-'));
+  });
+  afterAll(() => {
+    rmSync(keyDir, { recursive: true, force: true });
+  });
+
+  it('m365.mailbox_remediation (platform app from the config keys): Mail.ReadWrite + User.Read.All observed, connection unchanged', async () => {
+    const domainName = h.name('m365-mbx');
+    const tenant = h.m365Tenant({ domains: [{ name: domainName }] });
+    const domain = await h.domain(org, domainName);
+    const connection = await h.connection(org, 'microsoft_365');
+    await h.link(connection, domain.id);
+    await h.grant(connection, {
+      authMethod: 'customer_app_secret',
+      clientId: tenant.clientId,
+      claimedTenantId: tenant.tenantId,
+      credential: { method: 'customer_app_secret', clientSecret: tenant.secret },
+    });
+    await h.worker().components.verifier.runOnce(10, signal());
+    const bound = await h.prisma.providerConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
+    expect(bound.status).toBe('active');
+
+    // The operator's separate mailbox app, consented in the bound tenant.
+    const mailboxClientId = testing.testGuid();
+    const mailboxSecret = testing.testClientSecret();
+    h.fake.addMicrosoftApp({ clientId: mailboxClientId, secret: mailboxSecret });
+    h.fake.consent(tenant.tenantId, mailboxClientId, [
+      ...M365_MAILBOX_REMEDIATION_PROFILE.permissions,
+    ]);
+    const config = {
+      PROVIDER_M365_MAILBOX_APP_CLIENT_ID: mailboxClientId,
+      PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET: mailboxSecret,
+      PROVIDER_M365_ALLOW_PLATFORM_SECRET: 'true',
+    };
+    const grant = await h.grant(connection, {
+      authMethod: 'platform_app',
+      claimedTenantId: tenant.tenantId,
+      profile: M365_MAILBOX_REMEDIATION_PROFILE,
+    });
+    // No `platform` override: the worker builds its platform credentials from the config keys.
+    await h.worker({ config }).components.verifier.runOnce(10, signal());
+    const after = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(after).toMatchObject({
+      status: 'active',
+      lastErrorCode: null,
+      missingPermissions: null,
+    });
+    expect(after.observedPermissions).toEqual(['Mail.ReadWrite', 'User.Read.All']);
+    const unchanged = await h.prisma.providerConnection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
+    expect(unchanged).toMatchObject({
+      externalTenantId: bound.externalTenantId,
+      activeTenantKey: bound.activeTenantKey,
+      rowVersion: bound.rowVersion,
+    });
+    expect(await auditActions(connection.publicId, [mailboxSecret])).toContain(
+      'integration.grant_verified',
+    );
+
+    // Consent without Mail.ReadWrite: permissions_missing names it.
+    h.fake.consent(tenant.tenantId, mailboxClientId, ['User.Read.All']);
+    await h.prisma.providerConnectionGrant.update({
+      where: { id: grant.id },
+      data: { status: 'verifying', verifyClaimedUntil: null, verifyRequestedAt: new Date() },
+    });
+    await h.worker({ config }).components.verifier.runOnce(10, signal());
+    const missing = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(missing).toMatchObject({ status: 'error', lastErrorCode: 'permissions_missing' });
+    expect(missing.missingPermissions).toEqual(['Mail.ReadWrite']);
+
+    // Without the platform app configured the platform grant cannot be verified.
+    await h.prisma.providerConnectionGrant.update({
+      where: { id: grant.id },
+      data: { status: 'verifying', verifyClaimedUntil: null, verifyRequestedAt: new Date() },
+    });
+    h.fake.consent(tenant.tenantId, mailboxClientId, [
+      ...M365_MAILBOX_REMEDIATION_PROFILE.permissions,
+    ]);
+    await h.worker().components.verifier.runOnce(10, signal());
+    const noApp = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(noApp.status).not.toBe('active');
+  });
+
+  it('google.mailbox_remediation (platform service account from the config keys): token for the delegated admin', async () => {
+    const domainName = h.name('google-mbx');
+    const admin = `admin@${domainName}`;
+    const customerId = `C1${h.suffix.replace(/[^0-9a-z]/g, '').slice(0, 6)}m`;
+    const tokenUrl = h.fake.endpoints().googleTokenUrl;
+    const reader = testing.testServiceAccountKey(`reader@${h.name('sa-mbx')}`, tokenUrl);
+    h.fake.addGoogleCustomer({
+      customerId,
+      primaryDomain: domainName,
+      organizationName: 'Google Mailbox Org',
+      domains: [{ domainName, verified: true, isPrimary: true }],
+      admins: [admin],
+    });
+    h.fake.addGoogleServiceAccount(reader.account);
+    h.fake.delegate(customerId, reader.account.clientId, [...GOOGLE_MAIL_FLOW_PROFILE.permissions]);
+    const domain = await h.domain(org, domainName);
+    const connection = await h.connection(org, 'google_workspace');
+    await h.link(connection, domain.id);
+    await h.grant(connection, {
+      authMethod: 'customer_service_account',
+      subjectEmail: admin,
+      credential: { method: 'customer_service_account', key: reader.document },
+    });
+    await h.worker().components.verifier.runOnce(10, signal());
+    expect(
+      (await h.prisma.providerConnection.findUniqueOrThrow({ where: { id: connection.id } }))
+        .activeTenantKey,
+    ).toBe(`google_workspace:${customerId}`);
+
+    // The operator's mailbox service account, delegated the two mailbox scopes.
+    const platformSa = testing.testServiceAccountKey(`mailbox@${h.name('sa-platform')}`, tokenUrl);
+    h.fake.addGoogleServiceAccount(platformSa.account);
+    h.fake.delegate(customerId, platformSa.account.clientId, [
+      ...GOOGLE_MAILBOX_REMEDIATION_PROFILE.permissions,
+    ]);
+    const keyPath = join(keyDir, 'google-mailbox-sa.json');
+    writeFileSync(keyPath, JSON.stringify(platformSa.document), { mode: 0o600 });
+    const config = {
+      PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: platformSa.account.clientId,
+      PROVIDER_GOOGLE_MAILBOX_SA_KEY_PATH: keyPath,
+    };
+    const grant = await h.grant(connection, {
+      authMethod: 'platform_service_account',
+      subjectEmail: admin,
+      profile: GOOGLE_MAILBOX_REMEDIATION_PROFILE,
+    });
+    await h.worker({ config }).components.verifier.runOnce(10, signal());
+    const after = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(after).toMatchObject({
+      status: 'active',
+      lastErrorCode: null,
+      missingPermissions: null,
+    });
+    expect(after.observedPermissions).toEqual(
+      [...GOOGLE_MAILBOX_REMEDIATION_PROFILE.permissions].sort(),
+    );
+
+    // A subject outside the bound customer is refused by the provider (the token is always for
+    // the grant's own delegated subject, never another tenant's).
+    await h.prisma.providerConnectionGrant.update({
+      where: { id: grant.id },
+      data: {
+        status: 'verifying',
+        subjectEmail: `admin@${h.name('unrelated')}`,
+        verifyClaimedUntil: null,
+        verifyRequestedAt: new Date(),
+      },
+    });
+    await h.worker({ config }).components.verifier.runOnce(10, signal());
+    const refused = await h.prisma.providerConnectionGrant.findUniqueOrThrow({
+      where: { id: grant.id },
+    });
+    expect(refused.status).not.toBe('active');
   });
 });

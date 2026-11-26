@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService } from '@email-gateway/common';
-import { type DomainStatus, Prisma } from '@email-gateway/database';
+import { type DomainStatus, Prisma, type ProtectionMode } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 
 type Client = Prisma.TransactionClient;
@@ -21,6 +21,10 @@ const domainSelect = {
   nextCheckAt: true,
   lastCheckedAt: true,
   checkFailures: true,
+  // Step API-1 D2: the own mode (NULL = inherit) and the organization's, for the views.
+  protectionMode: true,
+  protectionModeChangedAt: true,
+  organization: { select: { protectionMode: true } },
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.DomainSelect;
@@ -156,7 +160,14 @@ export class DomainsRepository {
   create(
     tx: Client,
     scope: TenantScope,
-    data: { name: string; inboundEnabled: boolean; nextCheckAt: Date; now: Date },
+    data: {
+      name: string;
+      inboundEnabled: boolean;
+      nextCheckAt: Date;
+      now: Date;
+      /** Step API-1: the own mode (null = inherit the organization's). */
+      protectionMode?: ProtectionMode | null;
+    },
   ): Promise<DomainRow> {
     return tx.domain.create({
       data: {
@@ -165,12 +176,28 @@ export class DomainsRepository {
         status: 'pending_verification',
         statusChangedAt: data.now,
         inboundEnabled: data.inboundEnabled,
+        ...(data.protectionMode != null && {
+          protectionMode: data.protectionMode,
+          protectionModeChangedAt: data.now,
+        }),
         outboundEnabled: false,
         nextCheckAt: data.nextCheckAt,
         settings: { create: { organizationId: scope.organizationId } },
       },
       select: domainSelect,
     });
+  }
+
+  /** Step API-1 D1: the organization's protection mode (the default of its domains). */
+  async organizationMode(
+    scope: TenantScope,
+    client: Client = this.prisma,
+  ): Promise<ProtectionMode> {
+    const row = await client.organization.findUnique({
+      where: { id: scope.organizationId },
+      select: { protectionMode: true },
+    });
+    return row?.protectionMode ?? 'inline';
   }
 
   /** Updates the scope's domain; returns false when no row matched. */

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ArchiveRecordsRepository } from '../archive/repositories/archive-records.repository';
 import { DlpEvidenceStore } from '../dlp/services/dlp-evidence-store';
+import { ApiModeTenantDataRepository } from './api-mode-tenant-data.repository';
 import { ArchiveTenantDataRepository } from './archive-tenant-data.repository';
 import { AssistantTenantDataRepository } from './assistant-tenant-data.repository';
 import { AtoProviderTenantDataRepository } from './ato-provider-tenant-data.repository';
@@ -32,7 +33,9 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * AtoProviderTenantDataRepository its ATO identity-provider rows (mailbox items, stream rows,
  * account identities, integrations) and their export (never a token or an address); step 8.6:
  * JournalIntakeTenantDataRepository its journal intake counters, intake messages and sources
- * (before the provider connections, which the sources reference); step AI-1:
+ * (before the provider connections, which the sources reference); step API-1:
+ * ApiModeTenantDataRepository its API-mode copies, dedupe keys, mailboxes with their addresses,
+ * counters and connections (before the provider connections, which they reference); step AI-1:
  * AssistantTenantDataRepository its AI assistant tool executions, messages, turns,
  * conversations, daily usage and settings (step AI-2: and its action confirmations, first).
  */
@@ -53,6 +56,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
     JournalIntakeTenantDataRepository,
+    ApiModeTenantDataRepository,
     AssistantTenantDataRepository,
   ],
   exports: [
@@ -69,6 +73,7 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
     ProviderTenantDataRepository,
     AtoProviderTenantDataRepository,
     JournalIntakeTenantDataRepository,
+    ApiModeTenantDataRepository,
     AssistantTenantDataRepository,
   ],
 })

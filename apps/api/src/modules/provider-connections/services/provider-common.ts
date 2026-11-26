@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { profileByKey } from '@email-gateway/provider-integrations';
 import type { z } from 'zod';
 import type { Principal } from '../../../auth-contracts/principal';
 import { CodedForbiddenException } from '../../../http/coded-exception';
@@ -49,5 +50,26 @@ export function principalType(principal: Principal): 'user' | 'api_key' {
 export function requirePermission(principal: Principal, permission: string): void {
   if (!principal.permissions.has(permission)) {
     throw new CodedForbiddenException('forbidden', `Missing permission ${permission}`);
+  }
+}
+
+/** Step API-1 D4 (ADR-0099): the extra permission of mailbox-access grants. */
+export const REMEDIATION_WRITE = 'remediation:write';
+export const REMEDIATION_PERMISSION_REQUIRED = 'remediation_permission_required';
+
+/**
+ * Step API-1 D4: creating, uploading credentials for, verifying or revoking a grant whose profile
+ * purpose is `mailbox_remediation` also needs `remediation:write` (`403
+ * remediation_permission_required`), in addition to the route's `integration:manage`. Unknown
+ * profile keys are left to the operation (its own `404`/`422`).
+ */
+export function requireMailboxGrantPermission(principal: Principal, profileKey: string): void {
+  if (profileByKey(profileKey)?.purpose !== 'mailbox_remediation') return;
+  if (!principal.permissions.has(REMEDIATION_WRITE)) {
+    throw new CodedForbiddenException(
+      REMEDIATION_PERMISSION_REQUIRED,
+      'Mailbox access grants (mailbox_remediation profiles) also need the permission ' +
+        'remediation:write',
+    );
   }
 }

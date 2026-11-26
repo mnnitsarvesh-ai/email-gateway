@@ -51,6 +51,14 @@ function mockResume(
 
 const pending = { status: 'pending_verification' as const, verifiedAt: null, activatedAt: null };
 
+const ORG_MODE = {
+  mode: 'inline' as const,
+  changedAt: null,
+  entitled: true,
+  active: false,
+  domainsByEffectiveMode: { inline: 1, api: 0, hybrid: 0 },
+};
+
 describe('DomainOnboardingPage', () => {
   it('adds a domain with the mirrored name rules (contract) and continues to the DNS step', async () => {
     let body: unknown = null;
@@ -61,11 +69,17 @@ describe('DomainOnboardingPage', () => {
         okJson({ ...domainDetail(pending), dnsRecords: dnsRecords().records }, 201)
       ),
     });
+    mockApi({ ProtectionModeController_getOrganization_v1: () => okJson(ORG_MODE) });
     const { user, container, router } = renderWithProviders(<DomainOnboardingPage />, {
       route: '/domains/onboarding',
     });
+    // Step API-1: the protection mode comes first (Inline preselected: the organization mode).
+    expect(await screen.findByRole('heading', { name: '1. Protection mode' })).toBeInTheDocument();
+    expect(await screen.findByRole('radio', { name: /Inline \(MX\)/ })).toBeChecked();
     await expectNoAxeViolations(container);
-    const name = screen.getByLabelText('Domain name (required)');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    const name = await screen.findByLabelText('Domain name (required)');
+    await expectNoAxeViolations(container);
     await user.type(name, 'bad_name.example.org');
     await user.click(screen.getByRole('button', { name: 'Add domain' }));
     expect(await screen.findByText(/letters, digits and hyphens only/)).toBeInTheDocument();
@@ -78,6 +92,7 @@ describe('DomainOnboardingPage', () => {
         name: 'alpha.example.test',
         inboundEnabled: true,
         dkim: { ed25519: false },
+        protectionMode: 'inline',
       }),
     );
     expectRequestMatchesContract('DomainsController_create_v1', body);
@@ -85,7 +100,7 @@ describe('DomainOnboardingPage', () => {
       `/domains/onboarding?domainId=${DOMAIN_ID}&step=dns`,
     );
     expect(
-      await screen.findByRole('heading', { name: '2. Publish DNS records' }),
+      await screen.findByRole('heading', { name: '3. Publish DNS records' }),
     ).toBeInTheDocument();
   });
 
@@ -95,9 +110,9 @@ describe('DomainOnboardingPage', () => {
         apiErrorJson(409, 'domain_exists', 'Domain already exists', { requestId: 'req-o-1' }),
     });
     const { user } = renderWithProviders(<DomainOnboardingPage />, {
-      route: '/domains/onboarding',
+      route: '/domains/onboarding?mode=inline&step=add',
     });
-    await user.type(screen.getByLabelText('Domain name (required)'), 'alpha.example.test');
+    await user.type(await screen.findByLabelText('Domain name (required)'), 'alpha.example.test');
     await user.click(screen.getByRole('button', { name: 'Add domain' }));
     expect(await screen.findByText('Domain already exists')).toBeInTheDocument();
     expect(screen.getByText('req-o-1')).toBeInTheDocument();
@@ -109,7 +124,7 @@ describe('DomainOnboardingPage', () => {
       route: `/domains/onboarding?domainId=${DOMAIN_ID}`,
     });
     expect(
-      await screen.findByRole('heading', { name: '2. Publish DNS records' }),
+      await screen.findByRole('heading', { name: '3. Publish DNS records' }),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Publish DNS records/ })).toHaveAttribute(
       'aria-current',
@@ -124,7 +139,7 @@ describe('DomainOnboardingPage', () => {
     renderWithProviders(<DomainOnboardingPage />, {
       route: `/domains/onboarding?domainId=${DOMAIN_ID}`,
     });
-    expect(await screen.findByRole('heading', { name: '3. Verify ownership' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '4. Verify ownership' })).toBeInTheDocument();
     expect(screen.getByText(/propagate/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   });
@@ -135,7 +150,7 @@ describe('DomainOnboardingPage', () => {
       route: `/domains/onboarding?domainId=${DOMAIN_ID}`,
     });
     expect(
-      await screen.findByRole('heading', { name: '4. Destination mail server' }),
+      await screen.findByRole('heading', { name: '5. Destination mail server' }),
     ).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Save destinations' })).toBeInTheDocument();
   });
@@ -156,7 +171,7 @@ describe('DomainOnboardingPage', () => {
     const { user } = renderWithProviders(<DomainOnboardingPage />, {
       route: `/domains/onboarding?domainId=${DOMAIN_ID}`,
     });
-    expect(await screen.findByRole('heading', { name: '6. Activate' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '8. Activate' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Activate domain' }));
     await user.click(
       within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Activate' }),
@@ -202,7 +217,7 @@ describe('DomainOnboardingPage', () => {
 
   it('derives the resume step from server state only', () => {
     const base = { hasDestinations: false, recipientMode: null };
-    expect(resumeStep({ ...base, domain: null })).toBe('add');
+    expect(resumeStep({ ...base, domain: null })).toBe('mode');
     expect(resumeStep({ ...base, domain: domainDetail({ ...pending, lastCheckedAt: null }) })).toBe(
       'dns',
     );

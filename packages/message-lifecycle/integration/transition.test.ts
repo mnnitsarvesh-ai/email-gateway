@@ -372,7 +372,11 @@ describe('applyDerivedDeliveryState (L9)', () => {
 describe('transitionMessage: journaled only for journal intake messages (step 8.6 D4, ADR-0087)', () => {
   const journal = (
     m: MessageFixture,
-    reason: 'intake_unscanned' | 'intake_scan_complete' = 'intake_unscanned',
+    reason:
+      | 'intake_unscanned'
+      | 'intake_parse_failed'
+      | 'intake_scan_complete'
+      | 'intake_scan_failed' = 'intake_unscanned',
   ): TransitionRequest => {
     const eventId = randomUUID();
     return {
@@ -429,6 +433,40 @@ describe('transitionMessage: journaled only for journal intake messages (step 8.
     expect(
       await transitionMessageWithRetry(prisma, journal(scanned, 'intake_scan_complete'), TX),
     ).toMatchObject({ result: 'applied', from: 'scanned', to: 'journaled' });
+  });
+
+  it('applies E30-E32 to an ingest_source = mailbox_api copy (step API-1 D8)', async () => {
+    const unscanned = await fx.message(org, { ingestSource: 'mailbox_api' });
+    expect(
+      await transitionMessageWithRetry(prisma, journal(unscanned, 'intake_parse_failed'), TX),
+    ).toMatchObject({ result: 'applied', from: 'persisted', to: 'journaled' });
+    expect(await fx.row(unscanned)).toMatchObject({
+      status: 'journaled',
+      version: 2,
+      statusReason: 'intake_parse_failed',
+    });
+    const outbox = await fx.outbox(unscanned);
+    expect(outbox).toHaveLength(1);
+    expect(messageStateChangedV1.parse(outbox[0]!.payload)).toMatchObject({
+      previousState: 'persisted',
+      state: 'journaled',
+      reasonCode: 'intake_parse_failed',
+    });
+
+    const scanned = await fx.message(org, { ingestSource: 'mailbox_api', state: 'scanned' });
+    expect(
+      await transitionMessageWithRetry(prisma, journal(scanned, 'intake_scan_complete'), TX),
+    ).toMatchObject({ result: 'applied', from: 'scanned', to: 'journaled' });
+    const failed = await fx.message(org, { ingestSource: 'mailbox_api', state: 'scan_failed' });
+    expect(
+      await transitionMessageWithRetry(prisma, journal(failed, 'intake_scan_failed'), TX),
+    ).toMatchObject({ result: 'applied', from: 'scan_failed', to: 'journaled' });
+    expect((await fx.history(failed)).at(-1)).toMatchObject({
+      fromStatus: 'scan_failed',
+      toStatus: 'journaled',
+      reasonCode: 'intake_scan_failed',
+      actorRole: 'scanner',
+    });
   });
 
   it('refuses journaled for a gateway message: invalid, recorded, row unchanged', async () => {

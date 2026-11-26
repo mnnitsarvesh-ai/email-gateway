@@ -400,12 +400,15 @@ function MethodCard({
   profile,
   onChoose,
   pending,
+  permitted = true,
 }: {
   method: AuthMethod;
   available: boolean;
   profile: CatalogProfile;
   onChoose: () => void;
   pending: boolean;
+  /** `false`: the user's role may not grant this access (the label says so). */
+  permitted?: boolean;
 }) {
   const info = AUTH_METHOD_INFO[method];
   return (
@@ -415,9 +418,11 @@ function MethodCard({
         {info.recommended ? <ToneBadge tone="success">Recommended</ToneBadge> : null}
         {info.secret ? <ToneBadge tone="neutral">Advanced</ToneBadge> : null}
       </div>
-      <p className="text-sm text-muted-foreground">{info.summary}</p>
+      <p className="text-sm text-muted-foreground">
+        {profile.readOnly ? info.summary : info.summary.replace('read-only ', '')}
+      </p>
       <PermissionList
-        title={`Read-only permissions requested (${profile.title})`}
+        title={`${profile.readOnly ? 'Read-only permissions' : 'Permissions'} requested (${profile.title})`}
         items={profile.permissions}
       />
       <Button
@@ -426,7 +431,11 @@ function MethodCard({
         disabled={!available || pending}
         onClick={onChoose}
       >
-        {available ? `Use ${info.title.toLowerCase()}` : 'Not offered by this gateway'}
+        {available
+          ? `Use ${info.title.toLowerCase()}`
+          : permitted
+            ? 'Not offered by this gateway'
+            : 'Your role cannot grant this access'}
       </Button>
     </li>
   );
@@ -495,18 +504,26 @@ function GrantDetails({ grant, connection }: { grant: Grant; connection: Connect
 /**
  * Wizard step "Connect" (D2, D3): auth method cards, the admin-consent button (same tab),
  * credential forms for customer-owned methods, Google delegation steps, grant status, re-verify
- * and start over.
+ * and start over. Step API-1 reuses it for the mailbox-access grant (`profileKey` of a
+ * `mailbox_remediation` profile, `intro`, and `allowed` for its extra `remediation:write` gate).
  */
 export function ConnectStep({
   connection,
   profile,
+  profileKey: givenProfileKey,
+  intro,
+  allowed = true,
 }: {
   connection: Connection;
   profile: CatalogProfile | undefined;
+  profileKey?: string;
+  intro?: string;
+  /** Extra condition of the manage controls (the api decides; UI only). */
+  allowed?: boolean;
 }) {
-  const profileKey = MAIL_FLOW_PROFILE[connection.provider];
+  const profileKey = givenProfileKey ?? MAIL_FLOW_PROFILE[connection.provider];
   const grant = connection.grants.find((g) => g.profile === profileKey && g.status !== 'revoked');
-  const canManage = useCan('ProviderGrantsController_create_v1');
+  const canManage = useCan('ProviderGrantsController_create_v1') && allowed;
   const [delegation, setDelegation] = useState<Delegation | null>(null);
   const create = useApiMutation('ProviderGrantsController_create_v1', {
     invalidates: CONNECTION_QUERIES,
@@ -554,10 +571,16 @@ export function ConnectStep({
     return (
       <div className="grid gap-3">
         <p className="text-sm">
-          Choose how the gateway gets read-only access to your{' '}
-          {connection.provider === 'microsoft_365' ? 'Microsoft 365 tenant' : 'Google Workspace'}.
-          The gateway reads the tenant identity and domain verification only; it never reads mail or
-          changes settings.
+          {intro ?? (
+            <>
+              Choose how the gateway gets read-only access to your{' '}
+              {connection.provider === 'microsoft_365'
+                ? 'Microsoft 365 tenant'
+                : 'Google Workspace'}
+              . The gateway reads the tenant identity and domain verification only; it never reads
+              mail or changes settings.
+            </>
+          )}
         </p>
         <ErrorHint error={create.error} />
         <ul className="grid gap-3 lg:grid-cols-2">
@@ -573,6 +596,7 @@ export function ConnectStep({
                 profile={profile}
                 available={canManage && !disabled && profile.availableAuthMethods.includes(method)}
                 pending={create.isPending}
+                permitted={canManage}
                 onChoose={() => void choose(method)}
               />
             ))}

@@ -2439,3 +2439,45 @@ describe('loadApiConfig: AI assistant hardening (step AI-6 §4.3)', () => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });
 });
+
+describe('loadApiConfig: API-mode protection (step API-1 D16)', () => {
+  it('defaults: 1200 callbacks per minute and IP, notify unavailable, no mailbox apps', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg.API_MODE_NOTIFICATION_RATE_PER_MINUTE).toBe(1200);
+    expect(cfg.API_MODE_GRAPH_NOTIFICATION_URL).toBeUndefined();
+    expect(cfg.PROVIDER_M365_MAILBOX_APP_CLIENT_ID).toBeUndefined();
+    expect(cfg.PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID).toBeUndefined();
+  });
+
+  it('reads the notification URL (presence) and the mailbox-access client ids', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      APP_ENV: 'local',
+      API_MODE_NOTIFICATION_RATE_PER_MINUTE: '30',
+      API_MODE_GRAPH_NOTIFICATION_URL: 'http://api:3000/api/v1/provider-notifications/graph',
+      PROVIDER_M365_MAILBOX_APP_CLIENT_ID: '11111111-2222-3333-4444-555555555555',
+      PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: '123456789012345678901',
+    });
+    expect(cfg.API_MODE_NOTIFICATION_RATE_PER_MINUTE).toBe(30);
+    expect(cfg.API_MODE_GRAPH_NOTIFICATION_URL).toBe(
+      'http://api:3000/api/v1/provider-notifications/graph',
+    );
+    expect(cfg.PROVIDER_M365_MAILBOX_APP_CLIENT_ID).toBe('11111111-2222-3333-4444-555555555555');
+  });
+
+  it('refuses an http notification URL outside local/ci and malformed client ids', () => {
+    expect(
+      rejection({
+        ...valid,
+        APP_ENV: 'production',
+        API_MODE_GRAPH_NOTIFICATION_URL: 'http://api.example/api/v1/provider-notifications/graph',
+      }),
+    ).toMatch(/API_MODE_GRAPH_NOTIFICATION_URL/);
+    expect(rejection({ ...valid, PROVIDER_M365_MAILBOX_APP_CLIENT_ID: 'not-a-guid' })).toMatch(
+      /PROVIDER_M365_MAILBOX_APP_CLIENT_ID/,
+    );
+    expect(rejection({ ...valid, API_MODE_NOTIFICATION_RATE_PER_MINUTE: '0' })).toMatch(
+      /API_MODE_NOTIFICATION_RATE_PER_MINUTE/,
+    );
+  });
+});

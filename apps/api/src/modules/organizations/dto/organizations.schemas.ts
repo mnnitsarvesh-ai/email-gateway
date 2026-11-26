@@ -1,5 +1,6 @@
 import { FEATURE_KEYS, LIMIT_KEYS } from '@email-gateway/database';
 import { z } from 'zod';
+import { OrganizationProtectionModeSchema } from '../../api-mode/dto/api-mode.schemas';
 import { PageQuerySchema } from '../../../http/pagination';
 import {
   isValidCron,
@@ -256,6 +257,10 @@ export const OrganizationResponseSchema = z.object({
       'Step 8.6 (ADR-0090): `archive_only` when the effective features have `archiving` but ' +
         'neither inbound nor outbound filtering (journal intake, journaling and archive only)',
     ),
+  protectionMode: OrganizationProtectionModeSchema.describe(
+    'Step API-1 (ADR-0098): the organization’s protection mode (the default of its domains), ' +
+      'entitlement, whether API mode is active and the domains per effective mode',
+  ),
   deploymentMode: DeploymentModeSchema,
   dataRegion: z.string(),
   deployments: z.array(DeploymentResponseSchema),
@@ -341,11 +346,21 @@ export const UsageResponseSchema = z.object({
     inbound: z.number().int(),
     outbound: z.number().int(),
     internal: z.number().int(),
-    today: z.number().int().describe('Gateway messages since 00:00 UTC (journal intake excluded)'),
+    today: z
+      .number()
+      .int()
+      .describe('Gateway messages since 00:00 UTC (journal intake and API-mode copies excluded)'),
     journalIntakeToday: z
       .number()
       .int()
       .describe('Step 8.6: journal intake messages since 00:00 UTC (archive only, never filtered)'),
+    apiCopiesToday: z
+      .number()
+      .int()
+      .describe(
+        'Step API-1: API-mode feed copies (`mailbox_api`) since 00:00 UTC (detect mode, never ' +
+          'delivered; journal copies are in journalIntakeToday)',
+      ),
   }),
   quarantine: z.object({ active: z.number().int() }),
   apiKeys: z.object({ active: z.number().int() }),

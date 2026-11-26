@@ -3,7 +3,9 @@
  * (`roles.test.ts` parses the document and asserts equality, so a catalogue change fails here).
  * Used by tests (navigation gating, `<Can>`) and by the dev fixture `me` of each role. Step 8.6
  * added `compliance_officer` (archive access) and `journal:read` / `journal:manage`; step AI-1
- * `assistant:use` (every role but `mailbox_user`) and `assistant:configure`.
+ * `assistant:use` (every role but `mailbox_user`) and `assistant:configure`; step API-1
+ * `remediation:read` (the read set, domain_admin, security_analyst) and `remediation:write`
+ * (organization_admin, security_analyst).
  */
 export const SYSTEM_ROLE_KEYS = [
   'super_admin',
@@ -99,6 +101,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'journal:manage',
     'assistant:use',
     'assistant:configure',
+    'remediation:read',
+    'remediation:write',
   ],
   platform_admin: [
     'organization:read',
@@ -126,6 +130,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:read',
     'journal:read',
     'assistant:use',
+    'remediation:read',
   ],
   organization_admin: [
     'organization:read',
@@ -189,6 +194,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'journal:manage',
     'assistant:use',
     'assistant:configure',
+    'remediation:read',
+    'remediation:write',
   ],
   domain_admin: [
     'organization:read',
@@ -210,6 +217,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'journal:read',
     'journal:manage',
     'assistant:use',
+    'remediation:read',
   ],
   security_analyst: [
     'organization:read',
@@ -247,6 +255,8 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:read',
     'journal:read',
     'assistant:use',
+    'remediation:read',
+    'remediation:write',
   ],
   quarantine_reviewer: [
     'organization:read',
@@ -289,6 +299,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:read',
     'journal:read',
     'assistant:use',
+    'remediation:read',
   ],
   read_only_user: [
     'organization:read',
@@ -306,6 +317,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'integration:read',
     'journal:read',
     'assistant:use',
+    'remediation:read',
   ],
   mailbox_user: ['quarantine:self'],
   compliance_officer: [

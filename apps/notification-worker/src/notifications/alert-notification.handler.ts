@@ -30,10 +30,16 @@ export type AlertKind = NotificationAlertRequestedV1['kind'];
 
 /**
  * Permission a user must hold to receive an alert kind (N3): the shared map plus the step 8.6
- * `journal_intake_silent` → `journal:manage` (the users who can fix a journal rule or source).
+ * `journal_intake_silent` → `journal:manage` (the users who can fix a journal rule or source)
+ * and the step API-1 `api_mode_unhealthy` → `remediation:read` (D11.3: the users who see the
+ * API-mode coverage and health page).
  */
 export const SECURITY_ALERT_RECIPIENT_PERMISSION: Readonly<Record<SecurityAlertKind, string>> =
-  Object.freeze({ ...ALERT_RECIPIENT_PERMISSION, journal_intake_silent: 'journal:manage' });
+  Object.freeze({
+    ...ALERT_RECIPIENT_PERMISSION,
+    journal_intake_silent: 'journal:manage',
+    api_mode_unhealthy: 'remediation:read',
+  });
 
 export interface AlertNotificationOptions {
   maxRecipients: number;
@@ -154,8 +160,9 @@ export class AlertNotificationHandler {
     p: NotificationAlertRequestedV1,
   ): boolean {
     // Step 8.6 D9: `journal_intake_silent` has no tenant setting (always on, like
-    // `integration_unhealthy`; throttled per source by the producer).
-    if (p.kind === 'journal_intake_silent') return true;
+    // `integration_unhealthy`; throttled per source by the producer). Step API-1 D11.3: nor has
+    // `api_mode_unhealthy` (throttled per API-mode connection by the mailbox-worker).
+    if (p.kind === 'journal_intake_silent' || p.kind === 'api_mode_unhealthy') return true;
     if (!alertKindSettings(settings, p.kind).enabled) return false;
     if (p.kind === 'threat_detected') {
       return severityRank(p.severity) >= severityRank(settings.alerts.threatDetected.minSeverity);
@@ -306,6 +313,33 @@ export class AlertNotificationHandler {
               healthNow: source.healthStatus,
               lastAcceptedAt: source.lastAcceptedAt?.toISOString() ?? null,
               silenceAlertMinutes: source.silenceAlertMinutes,
+            },
+          },
+        };
+      }
+      case 'api_mode_unhealthy': {
+        // Step API-1 D11.3: the API-mode connection at send time (provider, name, health, the
+        // checks failing now); never a mailbox address.
+        const { apiModeConnectionId } = p.refs;
+        if (!apiModeConnectionId) return this.deadLetter(p.kind, 'alert_refs_missing');
+        const connection = await this.reads.apiModeConnection(
+          tx,
+          organizationId,
+          apiModeConnectionId,
+        );
+        if (connection === null) return this.deadLetter(p.kind, 'api_mode_connection_not_found');
+        return {
+          scopeKey: alertScopeKey(p.kind, { apiModeConnectionPublicId: connection.publicId }),
+          facts: {
+            kind: p.kind,
+            severity: p.severity,
+            ...counts,
+            apiMode: {
+              connectionPublicId: connection.publicId,
+              name: connection.displayName,
+              provider: connection.provider,
+              healthNow: connection.healthStatus,
+              failingChecks: connection.failingChecks,
             },
           },
         };

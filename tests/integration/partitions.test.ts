@@ -43,11 +43,33 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 41 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2, 8.1, 8.4 and 8.6 tables (none added by 5.3)', () => {
+  it('manages the 42 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2, 8.1, 8.4, 8.6 and API-1 tables (none added by 5.3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
-    expect(PARTITION_REGISTRY).toHaveLength(41);
+    expect(PARTITION_REGISTRY).toHaveLength(42);
+    // Step API-1 §3.2: the per-mailbox API-mode copy records (core, 6 months like
+    // email_messages); the five other API-mode tables are unpartitioned.
+    expect(PARTITION_REGISTRY.find((s) => s.table === 'api_message_copies')).toEqual({
+      table: 'api_message_copies',
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    for (const table of [
+      'api_mode_connections',
+      'api_mailboxes',
+      'api_mailbox_addresses',
+      'api_copy_dedupe_keys',
+      'api_mode_counters',
+    ]) {
+      expect(
+        PARTITION_REGISTRY.map((s) => s.table),
+        table,
+      ).not.toContain(table);
+    }
     // Step 8.6 §3.2: journal intake messages (core, 6 months like email_messages) and the merged
     // copies of archive records (compliance, never dropped, like email_archives).
     expect(PARTITION_REGISTRY.find((s) => s.table === 'journal_intake_messages')).toMatchObject({

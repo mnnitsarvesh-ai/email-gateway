@@ -96,10 +96,12 @@ const GuideQuerySchema = z.strictObject({ format: z.enum(['json', 'markdown']).o
 type GuideQuery = z.output<typeof GuideQuerySchema>;
 
 const SOURCE_RULES =
-  ' Creating or resuming a source needs the plan features `archiving` and `journal_intake` (`403 ' +
-  'journal_intake_not_enabled`), archiving enabled with a live default retention policy (`409 ' +
-  'archiving_not_enabled`) and a TXT-verified domain (provider kinds: linked to the connection; ' +
-  '`409 journal_intake_domain_required`, `reason`).';
+  ' Creating or resuming a source needs the plan feature `journal_intake` and either archiving ' +
+  '(the feature `archiving`, enabled with a live default retention policy) or, since step ' +
+  'API-1, active API mode (`api_mode_protection` and a domain in `api` or `hybrid` mode; ' +
+  'ADR-0098) — otherwise `403 journal_intake_not_enabled` without `archiving`, `409 ' +
+  'archiving_not_enabled` with it — and a TXT-verified domain (provider kinds: linked to the ' +
+  'connection; `409 journal_intake_domain_required`, `reason`).';
 
 /**
  * Journal intake sources (step 8.6 D1, D10, D11; ADR-0087). Translation only: the services own
@@ -401,7 +403,8 @@ export class IntakeSourcesController {
     summary: 'Get the setup wizard of a source',
     description:
       'Computed from the rows (never stored): `archiving` (entitled, enabled, default ' +
-      'retention), `domains` (a TXT-verified domain; provider kinds: linked to the ' +
+      'retention; `skipped` with `reason: api_mode` when active API mode entitles the source ' +
+      'without archiving, step API-1), `domains` (a TXT-verified domain; provider kinds: linked to the ' +
       'connection), `connection` (provider kinds: bound and not disabled; `skipped` otherwise), ' +
       '`configure` (the customer-side attestations of the kind’s guide), `verify` (first ' +
       'accepted message), `monitor` (health). Each step `not_started`, `in_progress`, `done`, ' +

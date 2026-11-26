@@ -85,11 +85,11 @@ describe('parseEvent', () => {
     expect(event.payload.direction).toBe('inbound');
   });
 
-  it('accepts the optional ingestSource of message.received (step 8.6, absent = gateway)', () => {
+  it('accepts the optional ingestSource of message.received (step 8.6, API-1; absent = gateway)', () => {
     expect(parseEvent(envelope(receivedPayload()), messageReceivedV1).payload.ingestSource).toBe(
       undefined,
     );
-    for (const ingestSource of ['gateway', 'journal_intake'] as const) {
+    for (const ingestSource of ['gateway', 'journal_intake', 'mailbox_api'] as const) {
       const event = parseEvent(envelope(receivedPayload({ ingestSource })), messageReceivedV1);
       expect(event.payload.ingestSource).toBe(ingestSource);
     }

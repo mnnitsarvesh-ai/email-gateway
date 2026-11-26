@@ -147,7 +147,7 @@ function PanelBody({
           />
         </div>
       ) : null}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div ref={scrollRef} className="relative min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <ConversationView onNavigate={onNavigate} />
       </div>
       <div className="border-t p-3">

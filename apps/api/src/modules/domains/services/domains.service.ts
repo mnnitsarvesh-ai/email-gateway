@@ -45,6 +45,9 @@ import {
 import { domainReserved } from '../../provider-connections/provider-connections.errors';
 import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
 import { mailFilteringNotEnabled } from '../domains.errors';
+import { API_MODE_FEATURE } from '../../../tenancy/api-mode-status.service';
+import { apiModeNotEnabled, inboundConflict } from '../../api-mode/api-mode.errors';
+import { decideCreateMode } from '../../api-mode/domain/protection-mode';
 import { VerificationsRepository } from '../repositories/verifications.repository';
 import { DomainConfigurationService } from './domain-configuration.service';
 import { DomainEventsService } from './domain-events.service';
@@ -168,7 +171,24 @@ export class DomainsService {
     const archiveOnly =
       (await this.features.serviceProfile(scope.organizationId)) === 'archive_only';
     if (archiveOnly && input.inboundEnabled === true) throw mailFilteringNotEnabled();
-    const inboundEnabled = archiveOnly ? false : (input.inboundEnabled ?? true);
+    // Step API-1 D2: the optional own protection mode (absent = inherit). An effective `api`
+    // domain is created with inbound off; explicit `api` with inbound on is refused.
+    const requested = input.protectionMode;
+    const mode = decideCreateMode({
+      requested,
+      inboundEnabled: input.inboundEnabled,
+      organizationMode: await this.domains.organizationMode(scope),
+      entitled:
+        requested === 'api' || requested === 'hybrid'
+          ? await this.features.isEffectivelyEnabled(scope.organizationId, API_MODE_FEATURE)
+          : false,
+    });
+    if (mode.kind === 'refused') {
+      throw mode.code === 'protection_mode_inbound_conflict'
+        ? inboundConflict()
+        : apiModeNotEnabled();
+    }
+    const inboundEnabled = archiveOnly ? false : mode.inboundEnabled;
     await this.transactions.run((tx) => this.assertCanAdd(tx, scope, name));
     const pairs = await Promise.all([
       generateDkimKeyPair('rsa_2048'),
@@ -183,6 +203,7 @@ export class DomainsService {
         const domain = await this.domains.create(tx, scope, {
           name,
           inboundEnabled,
+          protectionMode: mode.configured,
           nextCheckAt: new Date(now.getTime() + FIRST_CHECK_DELAY_SECONDS * 1000),
           now,
         });
@@ -196,6 +217,7 @@ export class DomainsService {
           metadata: {
             inboundEnabled: domain.inboundEnabled,
             algorithms: pairs.map((p) => p.algorithm),
+            protectionMode: mode.configured,
           },
         });
         return domain;

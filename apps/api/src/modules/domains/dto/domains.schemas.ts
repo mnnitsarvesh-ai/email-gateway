@@ -5,6 +5,7 @@ import {
 } from '@email-gateway/database';
 import { z } from 'zod';
 import { PageQuerySchema } from '../../../http/pagination';
+import { DomainProtectionModeSchema } from '../../api-mode/dto/api-mode.schemas';
 
 /** Request and response shapes of `/domains` (§4 of docs/plan/steps/03-domain-onboarding.md). */
 
@@ -54,6 +55,15 @@ export const CreateDomainSchema = z.strictObject({
       ed25519: z.boolean().default(false).describe('Also create an Ed25519 key (RFC 8463)'),
     })
     .optional(),
+  protectionMode: z
+    .enum(['inline', 'api', 'hybrid'])
+    .optional()
+    .describe(
+      'Step API-1: the domain’s own protection mode (absent = inherit the organization’s). ' +
+        '`api` needs inbound mail flow off (`inboundEnabled: false`, the default for an ' +
+        'effective `api` domain; `true` is `422 protection_mode_inbound_conflict`); `api` and ' +
+        '`hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`)',
+    ),
 });
 export type CreateDomainInput = z.output<typeof CreateDomainSchema>;
 
@@ -115,6 +125,9 @@ export const DomainSummarySchema = z.object({
   activatedAt: IsoDate.nullable(),
   lastCheckedAt: IsoDate.nullable(),
   nextCheckAt: IsoDate.nullable(),
+  protectionMode: DomainProtectionModeSchema.describe(
+    'Step API-1: the configured (null = inherit) and effective protection mode',
+  ),
   createdAt: IsoDate,
   updatedAt: IsoDate,
 });

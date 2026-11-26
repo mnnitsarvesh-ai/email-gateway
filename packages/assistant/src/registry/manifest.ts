@@ -374,7 +374,22 @@ export const NOT_APPLICABLE_REASONS = {
   consent: 'credential or OAuth consent ceremony (portal only)',
   fileExport: 'file export stream (portal only; chat links to the page)',
   critical: 'critical: portal only by policy (chat links to the page)',
+  apiModeDeferred: 'API-mode write: assistant tool planned for step API-3 (portal only until then)',
 } as const;
+
+/**
+ * Step API-1 D15 (docs/plan/steps/35-api-mode-protection.md): the five API-mode writes (protection
+ * mode of the organization and of a domain, change-feed settings, inventory sync, mailbox
+ * resync) are `not_applicable` until step API-3 adds their confirmed write tools (API-3 removes
+ * the entries and adds the specs). The API-mode reads are ordinary enabled read tools.
+ */
+export const API_MODE_DEFERRED_WRITES: ReadonlySet<string> = new Set([
+  'ProtectionModeController_putOrganization_v1',
+  'ProtectionModeController_putDomain_v1',
+  'ApiModeController_updateSettings_v1',
+  'ApiModeController_inventorySync_v1',
+  'ApiModeController_resyncMailbox_v1',
+]);
 
 /** Tags whose operations are never tools (D3 consistency rule). */
 export const NOT_APPLICABLE_TAGS: Readonly<Record<string, string>> = {
@@ -383,6 +398,8 @@ export const NOT_APPLICABLE_TAGS: Readonly<Record<string, string>> = {
   sessions: NOT_APPLICABLE_REASONS.ceremony,
   meta: NOT_APPLICABLE_REASONS.ceremony,
   assistant: NOT_APPLICABLE_REASONS.assistant,
+  // Step API-1 D12.4: the public Microsoft Graph notification callbacks.
+  'provider-notifications': 'provider callback (no user principal)',
 };
 
 /**
@@ -553,6 +570,8 @@ function notApplicableReason(facts: OperationFacts): string | null {
     const reason = NOT_APPLICABLE_TAGS[tag];
     if (reason) return reason;
   }
+  if (API_MODE_DEFERRED_WRITES.has(facts.operationId))
+    return NOT_APPLICABLE_REASONS.apiModeDeferred;
   const { method, path } = facts;
   if (path.startsWith('/platform/overrides')) return NOT_APPLICABLE_REASONS.identity;
   if (facts.returnsSecret) return NOT_APPLICABLE_REASONS.secret;
@@ -647,6 +666,7 @@ export const FEATURE_PAGES: Readonly<Record<string, string>> = {
   incidents: '/incidents',
   integrations: '/integrations',
   journaling: '/settings (Journaling)',
+  'api-mode': '/api-mode (Mailbox protection)',
   'mail-servers': '/mail-servers',
   messages: '/messages',
   organizations: '/organizations',
@@ -671,6 +691,8 @@ export const CONTROLLER_HINTS: Readonly<
   Record<string, { portalRoute: string; resourceType: string }>
 > = {
   ApiKeysController: { portalRoute: '/integrations/api-keys', resourceType: 'api_key' },
+  // Step API-1: API-mode coverage, connections, mailboxes and detections.
+  ApiModeController: { portalRoute: '/api-mode', resourceType: 'api_mode' },
   ArchiveAdminController: { portalRoute: '/archive', resourceType: 'archive' },
   ArchiveMessagesController: {
     portalRoute: '/archive/{messageId}',
@@ -772,6 +794,10 @@ export const CONTROLLER_HINTS: Readonly<
     resourceType: 'policy_evaluation',
   },
   PolicySettingsController: { portalRoute: '/policies', resourceType: 'policy_settings' },
+  ProtectionModeController: {
+    portalRoute: '/organizations/{organizationId}',
+    resourceType: 'protection_mode',
+  },
   PolicyToolsController: { portalRoute: '/policies', resourceType: 'policy_execution' },
   ProviderAttestationsController: {
     portalRoute: '/integrations/providers/{connectionId}',
@@ -1116,6 +1142,9 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
       'dnsRecords[].lastError',
       'dnsRecords[].warnings',
     ],
+    // Step API-1 D15: a chat-created domain inherits the organization's protection mode; mode
+    // changes in chat come with step API-3.
+    omitInputs: ['body.protectionMode'],
   },
 
   // --- identity and tenant administration writes (step AI-3) ---
@@ -1239,7 +1268,42 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   // The Google delegation confirmation is part of the consent ceremony (portal only, A5-4).
   ProviderGrantsController_verify_v1: { omitInputs: ['body.subjectEmail'] },
 
+  // --- API-mode protection (step API-1 D15): enabled reads; the writes are deferred to API-3 ---
+  // Mailbox addresses and aliases come from the customer's directory and journal envelopes; the
+  // copy's sender is mail-derived (masked, still untrusted); connection, source and guide texts
+  // carry tenant-authored names; health evidence quotes worker observations.
+  ApiModeController_overview_v1: { untrustedFields: ['connections[].displayName'] },
+  ApiModeController_listConnections_v1: {
+    display: columns('displayName', 'provider', 'status', 'feedsEnabled', 'inventoryStatus'),
+    untrustedFields: ['data[].displayName', 'data[].journalSources[].displayName'],
+  },
+  ApiModeController_getConnection_v1: {
+    untrustedFields: ['displayName', 'journalSources[].displayName', 'healthChecks[].evidence'],
+  },
+  ApiModeController_setupGuide_v1: { untrustedFields: ['connection.displayName', 'sections'] },
+  ApiModeController_listMailboxes_v1: {
+    display: columns('address', 'status', 'coverage', 'feedStatus', 'lastSyncAt'),
+    untrustedFields: ['data[].address', 'data[].domain.name'],
+  },
+  ApiModeController_getMailbox_v1: {
+    untrustedFields: [
+      'address',
+      'aliases',
+      'domain.name',
+      'recentDetections[].mailboxAddress',
+      'recentDetections[].headerFrom',
+    ],
+  },
+  ApiModeController_listDetections_v1: {
+    display: columns('receivedAt', 'mailboxAddress', 'verdict', 'riskScore', 'status', 'source'),
+    untrustedFields: ['data[].mailboxAddress', 'data[].headerFrom', 'data[].subject'],
+  },
+  ApiModeController_getDetection_v1: {
+    untrustedFields: ['mailboxAddress', 'headerFrom', 'subject'],
+  },
+
   // --- own organization (bind {id}) ---
+  ProtectionModeController_getOrganization_v1: { bind: SELF_ORGANIZATION },
   OrganizationsController_get_v1: { bind: SELF_ORGANIZATION },
   OrganizationsController_getUsage_v1: { bind: SELF_ORGANIZATION },
   OrganizationDeletionController_get_v1: { bind: SELF_ORGANIZATION },

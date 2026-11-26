@@ -1,0 +1,251 @@
+# API-mode protection (step API-1 D5, D16; ADR-0098..0100; docs/deployment/mailbox-worker.md): the
+# mailbox-worker image with MAILBOX_WORKER_ROLES=copies,feeds,inventory,health.
+#   copies:    consumes email.mailbox (topology v17) as the role user eg-mailbox (ledger
+#              mailbox-worker.copies, reconciled by the event-relay) and records per-mailbox copies.
+#   feeds:     claims due mailboxes (FOR UPDATE SKIP LOCKED, lease 120 s) and runs the Graph Inbox
+#              delta / Gmail history; fetched copies go to the mail bucket and the registry.
+#   inventory: mailbox directory sync per API connection.
+#   health:    leader-elected (GET_LOCK('eg:mailbox:health')): coverage, connection health and
+#              api_mode_unhealthy alerts (outbox), pruning and the Redis counter flush.
+# Every replica runs every role (claims and leases make that safe; health waits for the lock). The
+# writer-only MySQL (ADR-0014), Redis (budgets mbx:rb:*, throttle pauses mbx:throttle:*, counters
+# mbx:cnt:*), RabbitMQ, S3 (mail bucket: PutObject of fetched copies, ranged GetObject of journal
+# copies) and HTTPS to the provider APIs and 8.2's token endpoints. Holder of 8.2's credential key
+# (decrypting *.mailbox_remediation grants, ADR-0099) and of API_MODE_NOTIFICATION_SECRET (Graph
+# client states). Never receives inbound traffic except Prometheus.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailbox-worker
+  labels: { app.kubernetes.io/name: mailbox-worker, app.kubernetes.io/part-of: email-gateway }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: mailbox-worker }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: mailbox-worker, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: mailbox-worker
+      automountServiceAccountToken: false
+      # Longer than one sync lease's useful part (the feed run aborts at 110 s) plus the stop grace;
+      # an interrupted run is replayed idempotently by the next claim.
+      terminationGracePeriodSeconds: 150
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: mailbox-worker }
+      containers:
+        - name: mailbox-worker
+          image: email-gateway/mailbox-worker:latest
+          ports:
+            - { name: http, containerPort: 3087 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: MAILBOX_WORKER_HTTP_PORT, value: '3087' }
+            - { name: MAILBOX_WORKER_ROLES, value: 'copies,feeds,inventory,health' }
+            - { name: INGEST_HEADER_MAX_BYTES, value: '65536' }
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            - {
+                name: RABBITMQ_MAILBOX_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-mailbox-url,
+              }
+            # Graph client states are HMACs of this secret (only SHA-256 hashes are stored).
+            - {
+                name: API_MODE_NOTIFICATION_SECRET_FILE,
+                value: /var/run/secrets/api-mode-notification/secret,
+              }
+            # Production uses certificates for the platform app; a client secret is refused.
+            - { name: PROVIDER_M365_ALLOW_PLATFORM_SECRET, value: 'false' }
+            # 8.2's credential key: decrypts customer-owned mailbox-access credentials (the
+            # previous key only during a rotation).
+            - {
+                name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/provider-credential-key/key,
+              }
+            - name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-credential-key, key: previous-key, optional: true }
+            # The mailbox-access platform app (profile m365.mailbox_remediation): its certificate
+            # (read only while PROVIDER_M365_MAILBOX_APP_CLIENT_ID in the ConfigMap is set; a set
+            # client id with an unreadable file stops the worker, fail closed). The Google platform
+            # service account key (PROVIDER_GOOGLE_MAILBOX_SA_KEY_PATH) is added by an overlay
+            # patch only where that method is offered (the path is read whenever it is set).
+            - {
+                name: PROVIDER_M365_MAILBOX_APP_CERT_PATH,
+                value: /var/run/secrets/provider-mailbox-platform/m365-mailbox-cert.pem,
+              }
+            - name: PROVIDER_M365_MAILBOX_APP_CERT_THUMBPRINT
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-provider-mailbox-platform,
+                    key: m365-mailbox-cert-thumbprint,
+                    optional: true,
+                  }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - {
+                name: api-mode-notification,
+                mountPath: /var/run/secrets/api-mode-notification,
+                readOnly: true,
+              }
+            - {
+                name: provider-credential-key,
+                mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-mailbox-platform,
+                mountPath: /var/run/secrets/provider-mailbox-platform,
+                readOnly: true,
+              }
+            - { name: tmp, mountPath: /tmp }
+          # Readiness: mysql, redis, s3 and rabbitmq (email.mailbox verified passively). Provider
+          # APIs are deliberately not readiness checks (an outage degrades API-mode health only).
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          # Streams MIME bodies (≤ 50 MiB each, never buffered whole) for ≤ 16 concurrent syncs.
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 768Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret:
+            secretName: email-gateway-secrets
+            items:
+              - { key: database-url, path: database-url }
+              - { key: redis-url, path: redis-url }
+              - { key: rabbitmq-mailbox-url, path: rabbitmq-mailbox-url }
+        - name: api-mode-notification
+          secret:
+            secretName: email-gateway-api-mode-notification-secret
+            items: [{ key: secret, path: secret }]
+        - name: provider-credential-key
+          secret:
+            secretName: email-gateway-provider-credential-key
+            items: [{ key: key, path: key }]
+        # Optional: only the files of the platform methods the operator offers.
+        - name: provider-mailbox-platform
+          secret:
+            secretName: email-gateway-provider-mailbox-platform
+            optional: true
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mailbox-worker
+  # Production: IRSA role with s3:PutObject on org/*/eml/* and s3:GetObject (ranged reads) on
+  # org/*/eml/* of the mail bucket only (docs/deployment/mailbox-worker.md).
+---
+# Metrics (/metrics) and health on the http port (Prometheus target).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailbox-worker
+  labels: { app.kubernetes.io/name: mailbox-worker }
+spec:
+  selector: { app.kubernetes.io/name: mailbox-worker }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mailbox-worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: mailbox-worker }
+---
+# Egress: MySQL, Redis, RabbitMQ, DNS, OTLP and HTTPS to public addresses (S3 and the provider
+# APIs: Microsoft Graph, Gmail, Google Admin SDK, and 8.2's token endpoints). Private, shared-address
+# and link-local ranges are excluded; the provider client also refuses any origin that is not a
+# configured API family (API_MODE_*_URL, production origins only outside local/ci).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mailbox-worker
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: mailbox-worker }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3087 }]
+  egress:
+    # MySQL writer (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Redis (ElastiCache subnet).
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    # RabbitMQ (Amazon MQ subnet).
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    # S3 and the provider APIs: HTTPS to public addresses only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.0.0.0/24
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10
+      ports: [{ protocol: TCP, port: 443 }]

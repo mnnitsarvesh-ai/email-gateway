@@ -49,6 +49,13 @@ const org = (over: Partial<Organization> = {}): Organization => ({
     },
   ],
   deletion: null,
+  protectionMode: {
+    mode: 'inline',
+    changedAt: null,
+    entitled: true,
+    active: false,
+    domainsByEffectiveMode: { inline: 3, api: 0, hybrid: 0 },
+  },
   createdAt: '2026-07-01T00:00:00.000Z',
   updatedAt: '2026-11-01T00:00:00.000Z',
   ...over,
@@ -264,6 +271,7 @@ describe('Organizations: tenant view of the own organization', () => {
   it('shows the profile (id from /auth/me), edit form for organization:manage, no platform actions', async () => {
     let updateBody: unknown = null;
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: ({ params }) =>
         params.id === TEST_ORG.id ? okJson(org()) : apiErrorJson(404, 'not_found', 'Not found'),
       OrganizationsController_update_v1: ({ body, request }) => {
@@ -297,6 +305,7 @@ describe('Organizations: tenant view of the own organization', () => {
 
   it('read-only users see the profile without the edit form; settings tab shows a summary', async () => {
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: () => okJson(org()),
       OrganizationConfigurationController_getSettings_v1: () => okJson(settings),
     });
@@ -313,6 +322,7 @@ describe('Organizations: tenant view of the own organization', () => {
 
   it('usage tab and entitlements without override actions', async () => {
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: () => okJson(org()),
       OrganizationsController_getUsage_v1: () =>
         okJson({
@@ -364,6 +374,7 @@ describe('Organizations: platform detail', () => {
     let body: unknown = null;
     let key: string | null = null;
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: () => okJson(org()),
       OrganizationsController_changeStatus_v1: ({ body: b, request }) => {
         body = b;
@@ -397,7 +408,10 @@ describe('Organizations: platform detail', () => {
   });
 
   it('opens the override dialog for the organization (tenant switch is only the audited override)', async () => {
-    mockApi({ OrganizationsController_get_v1: () => okJson(org()) });
+    mockApi({
+      OrganizationsController_get_v1: () => okJson(org()),
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
+    });
     const { user } = renderWithProviders(<OrganizationDetailPage organizationId={TEST_ORG.id} />, {
       route: `/organizations/${TEST_ORG.id}`,
       role: 'platform_admin',
@@ -412,6 +426,7 @@ describe('Organizations: platform detail', () => {
     const calls: string[] = [];
     let limitBody: unknown = null;
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: () => okJson(org()),
       OrganizationConfigurationController_listFeatures_v1: () =>
         okJson({
@@ -490,6 +505,7 @@ describe('Organizations: platform detail', () => {
     let state: 'none' | 'pending_deletion' = 'none';
     let requestBody: unknown = null;
     mockApi({
+      ProtectionModeController_getOrganization_v1: () => okJson(org().protectionMode),
       OrganizationsController_get_v1: () => okJson(org()),
       OrganizationDeletionController_get_v1: () =>
         okJson({

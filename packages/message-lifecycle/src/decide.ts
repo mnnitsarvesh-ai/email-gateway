@@ -1,5 +1,6 @@
 import { FINAL_STATES, STATE_RANK, type ActorRole, type MessageState } from './states';
 import {
+  COPY_INGEST_SOURCES,
   findEdge,
   INTAKE_ONLY_STATES,
   TRANSITIONS,
@@ -31,8 +32,9 @@ export interface LifecycleCurrent {
   version: number;
   round: number;
   /**
-   * `email_messages.ingest_source` (step 8.6). Absent = `gateway`: only a `journal_intake`
-   * message may enter `journaled` (INTAKE_ONLY_STATES).
+   * `email_messages.ingest_source` (step 8.6, API-1). Absent = `gateway`: only a copy
+   * (`COPY_INGEST_SOURCES`: `journal_intake`, `mailbox_api`) may enter `journaled`
+   * (INTAKE_ONLY_STATES).
    */
   ingestSource?: MessageIngestSourceValue;
 }
@@ -69,8 +71,8 @@ const hasNewRoundEdge = (
  *    reason the edge pairs with other roles only (`reasonRoles`, step 4.2 A13: E19 `scanner` only
  *    with `signature_rescan`, `operator` only with `admin_rescan`) → `invalid/reason_not_allowed`;
  * 7. an edge into an intake-only state (`journaled`, step 8.6) for a message whose ingest source
- *    is not `journal_intake` → `invalid/ingest_source_not_allowed` (gateway messages can never
- *    become `journaled`);
+ *    is not a copy source (`journal_intake`, step API-1 `mailbox_api`) →
+ *    `invalid/ingest_source_not_allowed` (gateway messages can never become `journaled`);
  * 8. `apply` (round + 1 on a re-entry edge).
  *
  * Occurrence times are never compared (different clocks, ADR-0025).
@@ -128,7 +130,7 @@ export function decideTransition(
   // 7.
   if (
     INTAKE_ONLY_STATES.includes(edge.to) &&
-    (current.ingestSource ?? 'gateway') !== 'journal_intake'
+    !COPY_INGEST_SOURCES.includes(current.ingestSource ?? 'gateway')
   ) {
     return { result: 'invalid', why: 'ingest_source_not_allowed' };
   }

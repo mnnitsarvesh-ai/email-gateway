@@ -9,8 +9,9 @@
  * (seed/ato.ts); step AI-1: the assistant tenants `delta` (assistant on, policies and messages)
  * and `epsilon` (feature on, tenant setting off) (seed/assistant.ts); step AI-4: `ato_detection`
  * for delta with one compromised mailbox and its incident, and two delta analysts with MFA and
- * `ato:respond` (four eyes through chat). Idempotent: the previous run's data is removed first
- * (cleanup.ts).
+ * `ato:respond` (four eyes through chat); step API-1: the API-mode tenant `zeta` (enterprise plan,
+ * protection modes, a bound Microsoft 365 connection with mailbox access, mailboxes, detections;
+ * seed/api-mode.ts). Idempotent: the previous run's data is removed first (cleanup.ts).
  *
  * Rows are written on the writer as the api integration helpers do (preconditions, metadata
  * only; message content lives only in MinIO). Reserved `.test` domains only. Passwords are
@@ -55,6 +56,15 @@ import {
   seedAto,
   seedAtoTenant,
 } from './ato';
+import {
+  ZETA,
+  ZETA_DETECTIONS,
+  ZETA_DOMAINS,
+  ZETA_GOOGLE_NAME,
+  ZETA_M365_NAME,
+  ZETA_MAILBOXES,
+  seedApiMode,
+} from './api-mode';
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
@@ -570,6 +580,9 @@ export async function seed(): Promise<SeedSummary> {
     // Step AI-1: the assistant tenants (seed/assistant.ts).
     const delta = await createOrganization(p, DELTA.slug, DELTA.name);
     const epsilon = await createOrganization(p, EPSILON.slug, EPSILON.name);
+    // Step API-1: the API-mode tenant (enterprise: `api_mode_protection` is on).
+    const zeta = await createOrganization(p, ZETA.slug, ZETA.name);
+    const zetaApiMode = await seedApiMode(p, zeta);
     // The suite drives alpha's whole traffic through ten users within minutes (step 7.2 adds 14
     // details sections per role): the tenant budget of the standard plan (300 requests per
     // minute for the whole organization) would answer `429` to later specs. Alpha gets the
@@ -596,7 +609,7 @@ export async function seed(): Promise<SeedSummary> {
       {
         email: string;
         roles: string[];
-        org: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'platform';
+        org: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'platform';
         name: string;
       }
     > = {
@@ -741,6 +754,18 @@ export async function seed(): Promise<SeedSummary> {
         org: 'epsilon',
         name: 'Epsilon Admin',
       },
+      zetaAdmin: {
+        email: `admin@${ZETA_DOMAINS.api}`,
+        roles: ['organization_admin'],
+        org: 'zeta',
+        name: 'Zeta Admin',
+      },
+      zetaReadOnly: {
+        email: `readonly@${ZETA_DOMAINS.api}`,
+        roles: ['read_only_user'],
+        org: 'zeta',
+        name: 'Zeta Read-only',
+      },
       platformAdmin: {
         email: 'platform-admin@e2e-portal.test',
         roles: ['platform_admin'],
@@ -748,7 +773,7 @@ export async function seed(): Promise<SeedSummary> {
         name: 'E2E Platform Admin',
       },
     };
-    const orgOf = { alpha, beta, gamma, delta, epsilon, platform } as const;
+    const orgOf = { alpha, beta, gamma, delta, epsilon, zeta, platform } as const;
     const users = {} as Record<UserKey, E2eUser>;
     const userIds = new Map<string, bigint>();
     const userPublicIds = new Map<string, string>();
@@ -1199,6 +1224,9 @@ export async function seed(): Promise<SeedSummary> {
         deltaAtoAccounts,
         deltaRetention,
         deltaHolds,
+        zetaMailboxes,
+        zetaCopies,
+        zetaUsers,
       ] = await Promise.all([
         r.emailMessage.count({ where: { organizationId: alpha.id } }),
         r.auditLog.count({
@@ -1215,6 +1243,9 @@ export async function seed(): Promise<SeedSummary> {
         r.atoAccount.count({ where: { organizationId: delta.id } }),
         r.archiveRetentionPolicy.count({ where: { organizationId: delta.id } }),
         r.archiveLegalHold.count({ where: { organizationId: delta.id, status: 'active' } }),
+        r.apiMailbox.count({ where: { organizationId: zeta.id } }),
+        r.apiMessageCopy.count({ where: { organizationId: zeta.id } }),
+        r.user.count({ where: { organizationId: zeta.id } }),
       ]);
       return (
         messages === alphaMessages.length &&
@@ -1229,7 +1260,10 @@ export async function seed(): Promise<SeedSummary> {
         deltaEntries === deltaPlans.filter((m) => m.quarantine).length &&
         deltaAtoAccounts >= DELTA_ATO_PLAN.length &&
         deltaRetention === 2 &&
-        deltaHolds === 1
+        deltaHolds === 1 &&
+        zetaMailboxes === ZETA_MAILBOXES.length &&
+        zetaCopies === ZETA_DETECTIONS &&
+        zetaUsers === 2
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 
@@ -1243,6 +1277,7 @@ export async function seed(): Promise<SeedSummary> {
         gamma: { id: gamma.publicId, name: gamma.name, slug: gamma.slug },
         delta: { id: delta.publicId, name: delta.name, slug: delta.slug },
         epsilon: { id: epsilon.publicId, name: epsilon.name, slug: epsilon.slug },
+        zeta: { id: zeta.publicId, name: zeta.name, slug: zeta.slug },
       },
       alpha: {
         domainId: alphaDomain.publicId,
@@ -1299,6 +1334,13 @@ export async function seed(): Promise<SeedSummary> {
         },
       },
       expected: { dashboard7d },
+      apiMode: {
+        ...zetaApiMode,
+        domainNames: { ...ZETA_DOMAINS },
+        m365Name: ZETA_M365_NAME,
+        googleName: ZETA_GOOGLE_NAME,
+        mailboxes: ZETA_MAILBOXES.map((m) => m.address),
+      },
       archive: {
         custodian: ARCHIVE_CUSTODIAN,
         policyId: archive.alphaPolicyId,

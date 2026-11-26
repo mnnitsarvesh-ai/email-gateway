@@ -2,6 +2,7 @@ import { type INestApplication, Logger, RequestMethod } from '@nestjs/common';
 import type { ApiConfig } from '../config';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { ApiConventionMetrics, TRUSTED_FORWARDER_OUTCOMES } from './api-metrics';
+import { useNotificationBodyLimit } from './notification-body-limit';
 import { usePolicyBodyLimit } from './policy-body-limit';
 import { trustedForwarderMiddleware } from './trusted-forwarder.middleware';
 
@@ -45,6 +46,8 @@ export function configureApiApp(
   // Step 7.3 §14.8 (B16): the policy routes accept JSON bodies up to the DSL's document limit
   // plus the request wrapper; registered before Nest's global 100 KiB parser (at init).
   usePolicyBodyLimit(app);
+  // Step API-1 D12.4: the public Graph callbacks accept JSON bodies up to 256 KiB.
+  useNotificationBodyLimit(app);
   app.setGlobalPrefix(API_GLOBAL_PREFIX, {
     exclude: [
       { path: 'health/live', method: RequestMethod.GET },

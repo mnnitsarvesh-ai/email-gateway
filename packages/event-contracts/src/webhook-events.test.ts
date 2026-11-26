@@ -60,6 +60,7 @@ describe('step 6.2 vocabularies', () => {
       'webhook_disabled',
       'integration_unhealthy',
       'journal_intake_silent',
+      'api_mode_unhealthy',
     ]);
     expect(NOTIFICATION_ALERT_SEVERITY_VALUES).toEqual(['info', 'low', 'medium', 'high']);
   });
@@ -225,6 +226,26 @@ describe('notification.alert_requested.v1 (N2, §4.1)', () => {
       okAlert({ ...base, kind: 'journal_intake_silent', refs: { intakeSourceId: '17' } }),
     ).toBe(false);
     expect(okAlert({ ...base, kind: 'journal_intake_silent', refs: { connectionId: uuid } })).toBe(
+      false,
+    );
+    // Step API-1 D11.3: api_mode_unhealthy names the API-mode connection (public id).
+    expect(
+      okAlert({ ...base, kind: 'api_mode_unhealthy', refs: { apiModeConnectionId: uuid } }),
+    ).toBe(true);
+    expect(
+      okAlert({
+        ...base,
+        kind: 'api_mode_unhealthy',
+        severity: 'medium',
+        refs: { apiModeConnectionId: uuid },
+      }),
+    ).toBe(true);
+    expect(okAlert({ ...base, kind: 'api_mode_unhealthy', refs: {} })).toBe(false);
+    expect(
+      okAlert({ ...base, kind: 'api_mode_unhealthy', refs: { apiModeConnectionId: '17' } }),
+    ).toBe(false);
+    // The 8.2 provider connection ref is not the API-mode connection ref.
+    expect(okAlert({ ...base, kind: 'api_mode_unhealthy', refs: { connectionId: uuid } })).toBe(
       false,
     );
     // messageId and receivedAt go together, whatever the kind.

@@ -36,10 +36,19 @@ const daily = (...names: string[]): ExistingPartition[] => [
 const utc = (iso: string) => new Date(iso);
 
 describe('registry', () => {
-  it('lists the 41 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2, 8.1, 8.4 and 8.6) with their retention', () => {
-    expect(PARTITION_REGISTRY).toHaveLength(41);
-    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(41);
+  it('lists the 42 partitioned tables (D3, steps 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 6.2, 8.1, 8.4, 8.6 and API-1) with their retention', () => {
+    expect(PARTITION_REGISTRY).toHaveLength(42);
+    expect(new Set(PARTITION_REGISTRY.map((s) => s.table)).size).toBe(42);
     const byTable = Object.fromEntries(PARTITION_REGISTRY.map((s) => [s.table, s]));
+    // Step API-1 (§3.2): the per-mailbox copy records live as long as email_messages (core).
+    expect(byTable.api_message_copies).toMatchObject({
+      column: 'received_at',
+      granularity: 'month',
+      retention: 6,
+      drop: true,
+      tier: 'core',
+    });
+    expect(byTable.api_message_copies!.guard).toBeUndefined();
     // Step 8.6 (§3.2): journal intake messages live as long as email_messages (core); the
     // merged copies of an archive record are compliance data, never dropped.
     expect(byTable.journal_intake_messages).toMatchObject({

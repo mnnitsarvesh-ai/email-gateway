@@ -3,6 +3,7 @@ import type { SuccessBody } from '@/lib/api/types';
 import { SeededRandom, fixtureAnchor, hashString, paginate, stableUuid } from '../generator';
 import { apiError, noContent, ok, type FixtureHandlers, type FixtureRequest } from '../types';
 import { bodyOf, withPrincipal, type Principal, str } from './reports';
+import { attachOrganizationMode, entitledPlan, registerPlanSource } from './protection-modes';
 import { CUSTOMER_ORGS, PLATFORM_ORG } from './session';
 
 export { DEV_MOCK_MARKER } from '../types';
@@ -172,6 +173,8 @@ function defaultSettings(org: Organization): Settings {
   };
 }
 
+registerPlanSource((organizationId) => orgState().orgs.get(organizationId)?.plan.code ?? null);
+
 export function orgState(): OrgState {
   if (store.__egDevFixtureOrgState) return store.__egDevFixtureOrgState;
   const state: OrgState = {
@@ -223,7 +226,7 @@ export function orgState(): OrgState {
           createdAt: org.createdAt,
         },
       ];
-    state.orgs.set(org.id, org);
+    state.orgs.set(org.id, attachOrganizationMode(org));
     state.settings.set(org.id, defaultSettings(org));
     seedEntitlements(state, org);
   }
@@ -342,6 +345,7 @@ export function usageOf(org: Organization, request: FixtureRequest) {
       internal,
       today,
       journalIntakeToday: 0,
+      apiCopiesToday: 0,
     },
     quarantine: { active: empty ? 0 : r.int(5, 40) },
     apiKeys: { active: r.int(0, 3) },
@@ -432,10 +436,17 @@ export const fixtures: FixtureHandlers = {
           },
         ],
         deletion: null,
+        protectionMode: {
+          mode: 'inline',
+          changedAt: null,
+          entitled: entitledPlan(planCode),
+          active: false,
+          domainsByEffectiveMode: { inline: 0, api: 0, hybrid: 0 },
+        },
         createdAt,
         updatedAt: createdAt,
       };
-      state.orgs.set(org.id, org);
+      state.orgs.set(org.id, attachOrganizationMode(org));
       state.settings.set(org.id, defaultSettings(org));
       seedEntitlements(state, org);
       const admin = b.initialAdmin as { email?: string } | undefined;

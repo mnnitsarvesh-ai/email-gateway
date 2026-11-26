@@ -97,7 +97,7 @@ function ConnectionContent({
           {tab === 'guide' ? <GuideTab connection={connection} /> : null}
         </TabsContent>
         <TabsContent value="settings" className="min-w-0">
-          {tab === 'settings' ? <SettingsTab connection={connection} /> : null}
+          {tab === 'settings' ? <SettingsTab connection={connection} catalog={provider} /> : null}
         </TabsContent>
       </Tabs>
     </div>

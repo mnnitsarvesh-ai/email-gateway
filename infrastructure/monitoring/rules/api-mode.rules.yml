@@ -1,0 +1,83 @@
+# API-mode protection alerts (step API-1 D11.5; docs/plan/steps/35-api-mode-protection.md;
+# ADR-0100). Series of the mailbox-worker (job `mailbox-worker`): api_mode_connections{health},
+# api_mode_mailboxes{coverage} (health-leader gauges: 0 on the other replicas, aggregated with
+# max()), api_mode_lag_seconds{source} (histogram), api_mode_throttled_total{provider,family},
+# api_mode_cursor_resets_total{provider}; and RabbitMQ's per-queue series (job
+# `rabbitmq-detailed`) for the email.mailbox backlog. Labels are bounded enums only: never an
+# organization, connection, mailbox or address (the API-mode page and the api_mode_unhealthy
+# customer alert name those). API mode never delivers, delays or bounces mail: every alert is
+# about detection coverage and latency. Every alert links its section of docs/runbooks/api-mode.md.
+# Validate with `promtool check rules` and `promtool test rules tests/api-mode.rules.test.yml`.
+groups:
+  - name: api-mode
+    rules:
+      - alert: ApiModeConnectionsFailing
+        expr: max(api_mode_connections{health="failing"}) > 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: API-mode connections are failing
+          description: >-
+            {{ $value }} API-mode connection(s) have been failing for 15 minutes (connection
+            inactive or unbound, no intake, revoked mailbox access with feeds enabled, journal
+            source failing, coverage or lag beyond the fail thresholds). Their organizations were
+            alerted (api_mode_unhealthy); see the failing checks on the connection.
+          runbook_url: docs/runbooks/api-mode.md#apimodeconnectionsfailing
+      - alert: ApiModeCoverageGaps
+        expr: max(api_mode_mailboxes{coverage="gap"}) > 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode mailboxes have coverage gaps
+          description: >-
+            {{ $value }} in-scope mailbox(es) have had neither a healthy feed nor a journal copy
+            within the coverage window for 6 hours.
+          runbook_url: docs/runbooks/api-mode.md#apimodecoveragegaps
+      - alert: ApiModeLagHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(api_mode_lag_seconds_bucket[15m]))) > 900
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode detection lag p95 is above 15 minutes
+          description: >-
+            The p95 lag from provider delivery to the copy verdict has been above 900 s for 15
+            minutes (journal delays, feed polling, throttling or a scanning backlog).
+          runbook_url: docs/runbooks/api-mode.md#apimodelaghigh
+      - alert: ApiModeThrottlingSustained
+        expr: sum by (provider, family) (rate(api_mode_throttled_total[5m])) > 0.1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Provider throttling of API mode is sustained ({{ $labels.provider }} {{ $labels.family }})
+          description: >-
+            More than one throttling answer per 10 seconds from {{ $labels.provider }}
+            ({{ $labels.family }}) for 30 minutes: connection families are paused for their
+            Retry-After and feeds fall behind.
+          runbook_url: docs/runbooks/api-mode.md#apimodethrottlingsustained
+      - alert: ApiModeCursorResets
+        expr: sum by (provider) (increase(api_mode_cursor_resets_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode feed cursors expired ({{ $labels.provider }})
+          description: >-
+            Mailbox feed cursors of {{ $labels.provider }} expired in the last hour and were
+            re-initialized without backfill: mail delivered while the cursor was invalid is only
+            covered by the journal (gaps are recorded per mailbox).
+          runbook_url: docs/runbooks/api-mode.md#apimodecursorresets
+      - alert: ApiModeCopyQueueBacklog
+        expr: max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="email.mailbox"}) > 10000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The email.mailbox queue has a backlog
+          description: >-
+            {{ $value }} copy_scanned events have been waiting in email.mailbox for 15 minutes:
+            per-mailbox copies stay pending (the mailbox-worker copies role is down, slow or
+            failing).
+          runbook_url: docs/runbooks/api-mode.md#apimodecopyqueuebacklog

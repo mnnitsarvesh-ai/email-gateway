@@ -1,5 +1,10 @@
 import type { z } from 'zod';
 import { toIso, toIsoOrNull } from '../../http/serialization';
+import {
+  API_MODE_FEATURE,
+  effectiveModeCounts,
+  type ProtectionModeValue,
+} from '../../tenancy/api-mode-status.service';
 import { type ServiceProfile, serviceProfileOf } from '../../tenancy/service-profile';
 import type {
   DeletionStateResponseSchema,
@@ -47,9 +52,26 @@ export function serviceProfileOfOrganization(
   });
 }
 
+/** Step API-1 D2: the organization's grouped domain modes (own mode, NULL = inherit). */
+export type DomainModeRows = ReadonlyArray<{ mode: ProtectionModeValue | null; count: number }>;
+
+/** Step API-1 D1: `api_mode_protection` from the feature row, else the plan default. */
+export function apiModeEntitledOf(org: Pick<OrganizationRecord, 'features' | 'plan'>): boolean {
+  const defaults = jsonObjectOrNull(org.plan.defaultFeatures) ?? {};
+  return (
+    org.features.find((f) => f.featureKey === API_MODE_FEATURE)?.enabled ??
+    defaults[API_MODE_FEATURE] === true
+  );
+}
+
 /** D12 response: explicit fields only; numeric ids and internal user ids never leave. */
-export function toOrganizationResponse(org: OrganizationRecord): OrganizationResponse {
+export function toOrganizationResponse(
+  org: OrganizationRecord,
+  domainModes: DomainModeRows = [],
+): OrganizationResponse {
   const deletionState = deletionStateOf(org.status);
+  const entitled = apiModeEntitledOf(org);
+  const counts = effectiveModeCounts(org.protectionMode, domainModes);
   return {
     id: org.publicId,
     slug: org.slug,
@@ -60,6 +82,13 @@ export function toOrganizationResponse(org: OrganizationRecord): OrganizationRes
     statusChangedAt: toIsoOrNull(org.statusChangedAt),
     plan: { code: org.plan.code, name: org.plan.name },
     serviceProfile: serviceProfileOfOrganization(org),
+    protectionMode: {
+      mode: org.protectionMode,
+      changedAt: toIsoOrNull(org.protectionModeChangedAt),
+      entitled,
+      active: entitled && counts.api + counts.hybrid > 0,
+      domainsByEffectiveMode: counts,
+    },
     deploymentMode: org.deploymentMode,
     dataRegion: org.dataRegion,
     deployments: org.deployments.map((d) => ({

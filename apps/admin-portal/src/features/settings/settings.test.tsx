@@ -41,6 +41,13 @@ const organization: SuccessBody<'OrganizationsController_get_v1'> = {
   dataRegion: 'eu-west-1',
   deployments: [],
   deletion: null,
+  protectionMode: {
+    mode: 'inline',
+    changedAt: null,
+    entitled: true,
+    active: false,
+    domainsByEffectiveMode: { inline: 3, api: 0, hybrid: 0 },
+  },
   createdAt: '2026-07-01T00:00:00.000Z',
   updatedAt: '2026-11-01T00:00:00.000Z',
 };
@@ -186,6 +193,8 @@ describe('Settings: notifications and preferences', () => {
     await screen.findByRole('form', { name: 'Organization alerts' });
     // Step 8.6: the journal intake silence alert is listed (always on).
     expect(screen.getByText('journal_intake_silent')).toBeInTheDocument();
+    // Step API-1: the API-mode health alert is listed too (always on).
+    expect(screen.getByText('api_mode_unhealthy')).toBeInTheDocument();
     await expectNoAxeViolations(container);
     await user.click(screen.getByRole('switch', { name: 'Send webhook alerts' }));
     await user.click(screen.getByRole('button', { name: 'Save alert settings' }));

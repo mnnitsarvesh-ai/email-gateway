@@ -85,7 +85,7 @@ function SearchResults({
           : `${hits.length}${search.data?.nextCursor ? '+' : ''} ${hits.length === 1 ? 'match' : 'matches'} in your conversations`}
       </p>
       {hits.length > 0 ? (
-        <ul className="grid min-h-0 gap-1 overflow-y-auto" aria-label="Search results">
+        <ul className="relative grid min-h-0 gap-1 overflow-y-auto" aria-label="Search results">
           {hits.map((hit) => (
             <li key={`${hit.messageId}`}>
               <button
@@ -305,7 +305,7 @@ export function ConversationList({
               : 'No conversations yet.'}
         </p>
       ) : (
-        <ul className="grid min-h-0 gap-1 overflow-y-auto" aria-label="Conversations">
+        <ul className="relative grid min-h-0 gap-1 overflow-y-auto" aria-label="Conversations">
           {rows.map((conversation) => {
             const current = conversation.id === conversationId;
             const title = conversationTitle(conversation.title);

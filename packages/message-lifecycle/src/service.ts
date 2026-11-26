@@ -23,6 +23,7 @@ import { noopLifecycleMetrics, type LifecycleMetrics } from './metrics';
 import { isActorRole, isMessageState, type ActorRole, type MessageState } from './states';
 import {
   isLifecycleReasonCode,
+  MESSAGE_INGEST_SOURCES,
   type LifecycleReasonCode,
   type MessageIngestSourceValue,
 } from './transitions';
@@ -138,7 +139,10 @@ interface LifecycleRow {
   status_reason: string | null;
   direction: MessageDirection;
   eml_object_key: string;
-  /** Step 8.6: `gateway` | `journal_intake` (asserted for edges into `journaled`). */
+  /**
+   * Step 8.6 / API-1: `gateway` | `journal_intake` | `mailbox_api` (asserted for edges into
+   * `journaled`).
+   */
   ingest_source: string;
 }
 
@@ -241,7 +245,9 @@ export async function lockLifecycle(
 }
 
 const toIngestSource = (value: string): MessageIngestSourceValue => {
-  if (value === 'gateway' || value === 'journal_intake') return value;
+  if ((MESSAGE_INGEST_SOURCES as readonly string[]).includes(value)) {
+    return value as MessageIngestSourceValue;
+  }
   throw new LifecycleContractError('email_messages.ingest_source', 'unknown stored ingest source');
 };
 

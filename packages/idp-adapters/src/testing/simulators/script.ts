@@ -38,6 +38,19 @@ export interface SimCall {
   subject?: string;
 }
 
+/** One outbound callback of the Graph simulator (step API-1 D13): handshake or notification. */
+export interface SimNotification {
+  kind: 'validation' | 'change' | 'lifecycle';
+  subscriptionId: string | null;
+  /** Lifecycle event name (`reauthorizationRequired`, `subscriptionRemoved`, `missed`). */
+  event?: string;
+  /** HTTP status of the receiver's answer; 0 when unreachable or refused before sending. */
+  status: number;
+  /** Validation handshakes: the receiver echoed the token exactly as `text/plain`. */
+  ok: boolean;
+  at: string;
+}
+
 export interface StaleView {
   value: unknown;
   remaining: number;
@@ -46,6 +59,8 @@ export interface StaleView {
 export class SimScript {
   private injections: (SimInjection & { remaining: number })[] = [];
   private readonly log: SimCall[] = [];
+  /** Outbound callbacks (validation handshakes, change and lifecycle notifications). */
+  readonly notifications: SimNotification[] = [];
   private pendingReadBackDelay = 0;
   /** Stale read-back views per resource key (set by writes after `delayReadBack`). */
   readonly staleViews = new Map<string, StaleView>();
@@ -101,6 +116,7 @@ export class SimScript {
   reset(dataset?: SimDataset): void {
     this.injections = [];
     this.log.length = 0;
+    this.notifications.length = 0;
     this.pendingReadBackDelay = 0;
     this.staleViews.clear();
     if (dataset) this.dataset = dataset;

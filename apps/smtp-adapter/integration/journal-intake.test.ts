@@ -461,3 +461,118 @@ describe('journal intake counters (D2.8)', () => {
     expect(onpremCounter!.refusedNetwork).toBe(1);
   });
 });
+
+describe('journal intake entitlement and detect scanning with API mode (step API-1 D6)', () => {
+  /**
+   * One organization with archiving disabled, its own bound Microsoft 365 connection, a linked
+   * domain and an active journal source; `protectionMode` / `features` decide API mode.
+   */
+  async function apiOrganization(
+    label: string,
+    options: {
+      organizationMode?: 'inline' | 'api' | 'hybrid';
+      domainMode?: 'inline' | 'api' | 'hybrid';
+      apiFeature?: boolean;
+    },
+  ) {
+    const id = await fx.organization(label, {
+      archivingEnabled: false,
+      ...(options.organizationMode ? { protectionMode: options.organizationMode } : {}),
+      ...(options.apiFeature === undefined
+        ? {}
+        : { features: { api_mode_protection: options.apiFeature } }),
+    });
+    const tenant = randomUUID();
+    const domainName = `${label}-${orgDomain}`;
+    const domainId = await fx.domain(id, domainName, {
+      ...(options.domainMode ? { protectionMode: options.domainMode } : {}),
+    });
+    const connection = await fx.connection(id, 'microsoft_365', tenant, domainId);
+    const source = await fx.source({
+      organizationId: id,
+      kind: 'microsoft_365_journal',
+      domain: DOMAIN,
+      providerConnectionId: connection,
+      status: 'active',
+    });
+    return { id, tenant, domainName, source };
+  }
+
+  async function send(target: Awaited<ReturnType<typeof apiOrganization>>) {
+    const original = originalMessage({
+      messageId: `<api-${randomBytes(4).toString('hex')}@example.org>`,
+      from: 'Carol <carol@example.org>',
+      to: [`bob@${target.domainName}`],
+    });
+    const report = m365JournalReport({
+      intakeAddress: target.source.credentials.address,
+      tenantId: target.tenant,
+      original,
+      envelope: { sender: 'carol@example.org', to: [`bob@${target.domainName}`] },
+    });
+    return journal({
+      client: M365_CLIENT,
+      to: [target.source.credentials.address],
+      message: report,
+    });
+  }
+
+  it('API-only organization (no archiving, domain in api mode): accepted, scan_requested', async () => {
+    const target = await apiOrganization('apionly', { domainMode: 'api', apiFeature: true });
+    const result = await send(target);
+    expect(result).toMatchObject({ rcpt: ['DUNNO'], eom: 'DUNNO', lmtp: ['250 2.0.0 Ok'] });
+    const [message] = await fx.prisma.emailMessage.findMany({
+      where: { organizationId: target.id, mtaQueueId: result.queue },
+    });
+    expect(message).toMatchObject({ ingestSource: 'journal_intake', status: 'persisted' });
+    const intake = await fx.prisma.journalIntakeMessage.findFirstOrThrow({
+      where: { organizationId: target.id, messageId: message!.id },
+    });
+    // Detect mode: scanned although `intake.scanEnabled` is off (no settings document).
+    expect(intake.scanRequested).toBe(true);
+  });
+
+  it('hybrid inherited from the organization also activates API mode', async () => {
+    const target = await apiOrganization('hybridorg', {
+      organizationMode: 'hybrid',
+      apiFeature: true,
+    });
+    const result = await send(target);
+    expect(result.lmtp).toEqual(['250 2.0.0 Ok']);
+    const [message] = await fx.prisma.emailMessage.findMany({
+      where: { organizationId: target.id, mtaQueueId: result.queue },
+    });
+    const intake = await fx.prisma.journalIntakeMessage.findFirstOrThrow({
+      where: { organizationId: target.id, messageId: message!.id },
+    });
+    expect(intake.scanRequested).toBe(true);
+  });
+
+  it('neither archiving nor API mode: 450 4.7.1 at RCPT, nothing stored', async () => {
+    const inline = await apiOrganization('inlineonly', { domainMode: 'inline', apiFeature: true });
+    const noFeature = await apiOrganization('nofeature', { domainMode: 'api' });
+    for (const target of [inline, noFeature]) {
+      const result = await send(target);
+      expect(result.rcpt).toEqual(['450 4.7.1 Journal intake temporarily unavailable']);
+      expect(await fx.prisma.messageIdentity.count({ where: { organizationId: target.id } })).toBe(
+        0,
+      );
+    }
+  });
+
+  it('archiving entitled and enabled without API mode keeps scan_requested off (8.6)', async () => {
+    // The suite's main organization: archiving on, inline, scanning not enabled.
+    const report = m365JournalReport({ intakeAddress: m365b.credentials.address, tenantId });
+    const result = await journal({
+      client: M365_CLIENT,
+      to: [m365b.credentials.address],
+      message: report,
+    });
+    expect(result.lmtp).toEqual(['250 2.0.0 Ok']);
+    const [message] = await messagesOf(result.queue);
+    const intake = await fx.prisma.journalIntakeMessage.findFirstOrThrow({
+      where: { organizationId: org, messageId: message!.id },
+    });
+    expect(intake.scanRequested).toBe(false);
+  });
+});

@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-11-19, after the step 8.2 local verification against the provider simulators: the stack suite `provider-integrations` 10/10, the worker, library, api and smtp-adapter integration suites, the regression stack suites, Playwright 112/112, the 3-node RabbitMQ cluster suite on topology v14; record [docs/plan/steps/25-m365-google-connectors.md](../../plan/steps/25-m365-google-connectors.md) §13 WP6, §14; live verification against real Microsoft 365 and Google Workspace tenants, CI and a cluster apply not done). Proposed by the step 8.2 architect on 2026-11-17. Design: 25-m365-google-connectors.md D5, D17.
 
+Superseded in part by [ADR-0099](0099-mailbox-access-consent-and-custody.md) (step API-1, 2026-11-26): the mailbox-worker also decrypts `mailbox_remediation` grants (besides the integration-worker for verification); tokens stay in process memory.
+
 **Context.** Customer-owned methods require storing a Microsoft client secret or a Google service-account key; platform methods require the operator's own app secrets or keys. Access tokens are short-lived bearer credentials. The repository already encrypts webhook secrets with a dedicated AES-256-GCM key and row-bound associated data, and MFA secrets with `DATA_ENCRYPTION_KEY`.
 
 **Decision.**

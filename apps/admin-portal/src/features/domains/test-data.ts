@@ -24,6 +24,7 @@ export function domainDetail(overrides: Partial<Domain> = {}): Domain {
     createdAt: '2026-11-01T09:00:00.000Z',
     updatedAt: T,
     statusChangedAt: T,
+    protectionMode: { configured: null, effective: 'inline', inherited: true, changedAt: null },
     verification: {
       method: 'dns_txt',
       host: '_emailgateway-verify.alpha.example.test',
@@ -73,6 +74,7 @@ export function domainSummary(i: number, overrides: Partial<Domain> = {}) {
     nextCheckAt: d.nextCheckAt,
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
+    protectionMode: d.protectionMode,
   };
 }
 

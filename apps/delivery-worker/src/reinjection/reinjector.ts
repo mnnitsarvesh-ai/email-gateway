@@ -158,18 +158,20 @@ export class Reinjector {
     const context = await this.checkedRead(row, () => this.deps.store.context(row));
     if (context === INCONSISTENT) return 'retry';
     if (!context) return this.contextMissing(row);
-    if (context.ingestSource === 'journal_intake') {
-      // Step 8.6 D4 (defence in depth): an intake message is never handed to postfix-outbound.
-      // The reinjection row ends `failed`; the message and its deliveries are not touched.
+    const ingestSource = context.ingestSource ?? 'gateway';
+    if (ingestSource !== 'gateway') {
+      // Step 8.6 D4, step API-1 D7.7 (defence in depth, N1): a copy (journal intake, mailbox
+      // API) is never handed to postfix-outbound. The reinjection row ends `failed`; the message
+      // and its deliveries are not touched.
       this.deps.metrics.intakeRefusals.inc({ stage: 'reinjection' });
       this.logger.error(
-        { ...ids, reason: INTAKE_NOT_DELIVERABLE },
-        'reinjection of a journal intake message refused: intake messages are never delivered',
+        { ...ids, ingestSource, reason: INTAKE_NOT_DELIVERABLE },
+        'reinjection of a non-gateway copy refused: copies are never delivered',
       );
       await this.deps.store.markFailed(
         row,
         INTAKE_NOT_DELIVERABLE,
-        'journal intake messages are never delivered',
+        'non-gateway copies (journal intake, mailbox API) are never delivered',
       );
       return 'failed';
     }

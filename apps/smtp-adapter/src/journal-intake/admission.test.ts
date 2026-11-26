@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { EgressIndexUnavailableError } from '../provider-relay/egress-index.service';
-import { type AdmissionFacts, addressUsable, admitIntakeRecipient } from './admission';
+import {
+  type AdmissionFacts,
+  addressUsable,
+  admitIntakeRecipient,
+  intakeEntitled,
+} from './admission';
 import {
   snapshotFixture,
   TEST_GOOGLE_CLIENT,
@@ -19,6 +24,41 @@ const facts = (overrides: Partial<AdmissionFacts> = {}): AdmissionFacts => ({
   certFingerprints: [],
   egress: testEgressIndex,
   ...overrides,
+});
+
+describe('intakeEntitled (8.6 D1, step API-1 D6)', () => {
+  it.each([
+    // [journalIntake, archivingFeature, archivingEnabled, apiDetect, expected]
+    [true, true, true, false, true],
+    [true, false, false, true, true],
+    [true, true, false, true, true],
+    [true, false, true, true, true],
+    [true, true, false, false, false],
+    [true, false, true, false, false],
+    [true, false, false, false, false],
+    [false, true, true, true, false],
+    [false, true, true, false, false],
+  ] as const)('intake=%s archiving=%s enabled=%s api=%s → %s', (j, a, e, api, expected) => {
+    expect(
+      intakeEntitled({
+        journalIntakeFeature: j,
+        archivingFeature: a,
+        archivingEnabled: e,
+        apiDetect: api,
+      }),
+    ).toBe(expected);
+  });
+
+  it('admits an API-only organization (no archiving) through the whole decision', () => {
+    const snapshot = snapshotFixture('microsoft_365_journal', {
+      organization: { archivingFeature: false, archivingEnabled: false, apiDetect: true },
+    });
+    expect(admitIntakeRecipient(snapshot, facts())).toEqual({
+      ok: true,
+      network: 'provider_egress',
+      clientCertMatched: false,
+    });
+  });
 });
 
 describe('admitIntakeRecipient (D2.2 steps 1-4)', () => {
@@ -126,6 +166,22 @@ describe('admitIntakeRecipient (D2.2 steps 1-4)', () => {
     [
       'archiving disabled',
       { organization: { archivingEnabled: false } },
+      {},
+      'unavailable',
+      'refused_unavailable',
+      'refused_unavailable',
+    ],
+    [
+      'API mode active but no journal_intake feature (step API-1 D6)',
+      { organization: { journalIntakeFeature: false, apiDetect: true } },
+      {},
+      'unavailable',
+      'refused_unavailable',
+      'refused_unavailable',
+    ],
+    [
+      'neither archiving nor API mode (step API-1 D6)',
+      { organization: { archivingFeature: false, archivingEnabled: false, apiDetect: false } },
       {},
       'unavailable',
       'refused_unavailable',

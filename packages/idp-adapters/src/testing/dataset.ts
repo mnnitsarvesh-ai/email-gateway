@@ -17,8 +17,11 @@ export type {
   MsRiskDetection,
   MsServicePrincipal,
   MsSignIn,
+  MsSubscription,
   MsUser,
   SimDataset,
+  SimMailbox,
+  SimMailMessage,
   SimLicense,
 } from './simulators/types';
 

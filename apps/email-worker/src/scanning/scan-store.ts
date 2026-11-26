@@ -142,11 +142,16 @@ export type CompletionResult =
       transition: 'applied' | 'duplicate' | 'stale' | 'invalid' | 'not_found';
       scannedEventId: string | null;
       /**
-       * Journal intake messages only (step 8.6 D4): `journaled` = E31/E32 applied in the round's
-       * transaction in place of `scanned.v1`; `transition_skipped` = no event, the E31/E32 edge
-       * was not applied.
+       * Copies only (`journal_intake`, `mailbox_api`; step 8.6 D4, step API-1 D8): `journaled` =
+       * E31/E32 applied in the round's transaction in place of `scanned.v1`;
+       * `transition_skipped` = no event, the E31/E32 edge was not applied.
        */
       intake?: 'journaled' | 'transition_skipped';
+      /**
+       * Copies only (step API-1 D8): the `mail.message.copy_scanned.v1` outbox event id written
+       * with E31/E32 (null when E31/E32 was not applied by this transaction).
+       */
+      copyScannedEventId?: string | null;
     };
 
 export interface FinalizeInput {

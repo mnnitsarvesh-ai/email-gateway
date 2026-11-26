@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { bareAddress, outboundFindings } from './mail.handler';
+import { describe, expect, it, vi } from 'vitest';
+import { bareAddress, isAtoSignalSource, MailHandler, outboundFindings } from './mail.handler';
 
 const none = {
   reasonCodes: [],
@@ -85,4 +85,52 @@ describe('bareAddress', () => {
     expect(bareAddress('<>')).toBeNull();
     expect(bareAddress(null)).toBeNull();
   });
+});
+
+describe('non-gateway copies are never ATO signals (step 8.6 D4, step API-1 D7.7)', () => {
+  it.each([
+    ['gateway', true],
+    ['journal_intake', false],
+    ['mailbox_api', false],
+  ])('%s → %s', (source, expected) => {
+    expect(isAtoSignalSource(source)).toBe(expected);
+  });
+
+  it.each(['journal_intake', 'mailbox_api'])(
+    'process() skips a %s message before reading anything else',
+    async (ingestSource) => {
+      const receivedAt = new Date('2026-11-26T09:00:00.000Z');
+      const other = vi.fn();
+      const prisma = {
+        emailMessage: {
+          findUnique: vi.fn(() =>
+            Promise.resolve({
+              id: 5n,
+              receivedAt,
+              organizationId: 7n,
+              direction: 'outbound',
+              envelopeFrom: 'alice@corp.example',
+              ingestSource,
+            }),
+          ),
+          findFirst: other,
+        },
+        emailRecipient: { findMany: other },
+        emailAttachment: { findMany: other },
+      };
+      const handler = new MailHandler({ prisma } as never, {} as never);
+      await expect(
+        handler.process(
+          { id: 7n } as never,
+          {
+            messageId: 5n,
+            receivedAt,
+            scanId: 9n,
+            direction: 'outbound',
+          } as never,
+        ),
+      ).resolves.toBe('skipped_source');
+      expect(other).not.toHaveBeenCalled();
+    },
+  );
 });

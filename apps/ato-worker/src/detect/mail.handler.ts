@@ -134,6 +134,15 @@ export function bareAddress(value: string | null): string | null {
  * stored (registrable domains and counts only). The mailbox account is the lower-cased envelope
  * sender; the attributed connector (submission telemetry, D4) is a second account.
  */
+/**
+ * Only gateway mail is an ATO signal (step 8.6 D4, step API-1 D7.7, ADR-0098 N1): a copy
+ * (`journal_intake`, `mailbox_api`) was delivered by the provider, not sent through the gateway.
+ * Pure.
+ */
+export function isAtoSignalSource(ingestSource: string): boolean {
+  return ingestSource === 'gateway';
+}
+
 export class MailHandler {
   constructor(
     private readonly deps: DetectDeps,
@@ -183,9 +192,10 @@ export class MailHandler {
       },
     });
     if (!msg) return 'skipped_org';
-    // Step 8.6 D4 (defence in depth): a journal intake message never writes `scanned.v1` and the
-    // catch-up excludes it; one reaching here is still never an ATO signal.
-    if (msg.ingestSource === 'journal_intake') return 'skipped_source';
+    // Step 8.6 D4, step API-1 D7.7 (defence in depth): a copy (journal intake, mailbox API)
+    // never writes `scanned.v1` and the catch-up excludes it; one reaching here is still never an
+    // ATO signal.
+    if (!isAtoSignalSource(msg.ingestSource)) return 'skipped_source';
     if (
       msg.organizationId !== orgId ||
       msg.id !== messageId ||

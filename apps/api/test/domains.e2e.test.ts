@@ -319,6 +319,11 @@ describe('domain endpoints (e2e, services stubbed)', () => {
       ],
       [{ name: 'acme.test', dkim: { rsa4096: true } }, 'dkim: Unrecognized key: "rsa4096"'],
       [{ name: 'acme.test', status: 'active' }, '(root): Unrecognized key: "status"'],
+      // Step API-1 D2: the optional protection mode (`inherit` is the absence of the field).
+      [
+        { name: 'acme.test', protectionMode: 'inherit' },
+        'protectionMode: Invalid option: expected one of "inline"|"api"|"hybrid"',
+      ],
     ])('POST /domains %j → 400', async (body, message) => {
       const res = await http()
         .post('/api/v1/domains')
@@ -414,6 +419,20 @@ describe('domain endpoints (e2e, services stubbed)', () => {
         // Step 8.6: `inboundEnabled` defaults in the service (false for archive-only).
         { name: 'Acme.test.' },
         expect.objectContaining({ ip: expect.any(String) }),
+      );
+    });
+
+    it('passes the optional protection mode to the service (step API-1 D2)', async () => {
+      await http()
+        .post('/api/v1/domains')
+        .set(await bearer())
+        .send({ name: 'api.acme.test', protectionMode: 'api', inboundEnabled: false })
+        .expect(201);
+      expect(domains.create).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({ organizationId: 2n }),
+        { name: 'api.acme.test', protectionMode: 'api', inboundEnabled: false },
+        expect.anything(),
       );
     });
 

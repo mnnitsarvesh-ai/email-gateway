@@ -25,7 +25,8 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     sizeBytes: 1024,
     envelopeFrom: 'sender@example.com',
     recipientCount: 1,
-    // Step 8.6 (optional; absent = gateway): `journal_intake` for journal intake copies.
+    // Step 8.6 (optional; absent = gateway): `journal_intake` for journal intake copies; step
+    // API-1: `mailbox_api` for provider mailbox feed copies.
     ingestSource: 'gateway',
   },
   'mail.message.parsed.v1': {
@@ -603,7 +604,33 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     reportId: '01890a5d-ac96-774b-bcce-b302099a80c0',
     requestedAt: '2026-11-26T08:00:00.000Z',
   },
+  // Step API-1 D8: ids, the outcome, verdict, risk score and times only (no address or subject).
+  'mail.message.copy_scanned.v1': {
+    messageId,
+    messagePublicId: '01890a5d-ac96-774b-bcce-b302099a80d0',
+    receivedAt,
+    ingestSource: 'mailbox_api',
+    lifecycleRound: 0,
+    scanId: '11',
+    outcome: 'scanned',
+    verdict: 'phishing',
+    riskScore: 870,
+    completedAt: '2026-11-01T10:15:31.456Z',
+  },
 };
+
+/**
+ * Step API-1 (D11.3): the `api_mode_unhealthy` variant of `notification.alert_requested.v1` (an
+ * API-mode connection became degraded or failing; refs name the API-mode connection only).
+ */
+export const EXAMPLE_API_MODE_UNHEALTHY_ALERT_PAYLOAD = Object.freeze({
+  kind: 'api_mode_unhealthy',
+  severity: 'high',
+  refs: { apiModeConnectionId: '01890a5d-ac96-774b-bcce-b302099a80d1' },
+  window: { from: '2026-11-26T08:00:00.000Z', to: '2026-11-27T08:00:00.000Z' },
+  counts: { suppressedBefore: 0 },
+  requestedAt: '2026-11-26T08:00:01.000Z',
+});
 
 /**
  * Step 8.5 (D11): the `provider_unhealthy` variant of `ato.notification.requested.v1` (an ATO

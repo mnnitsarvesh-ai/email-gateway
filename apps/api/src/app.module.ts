@@ -17,6 +17,7 @@ import { API_CONFIG } from './api-config.token';
 import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
+import { ApiModeModule } from './modules/api-mode/api-mode.module';
 import { AssistantModule } from './modules/assistant/assistant.module';
 import { AssistantInsightsModule } from './modules/assistant-insights/assistant-insights.module';
 import { ArchiveModule } from './modules/archive/archive.module';
@@ -146,6 +147,9 @@ export class AppModule {
         // Step 8.2: Microsoft 365 and Google Workspace connections (wizard, grants, mail flow,
         // validation, health, setup guides; the api never calls a provider).
         ProviderConnectionsModule,
+        // Step API-1: API-mode protection (protection modes, coverage and health, change-feed
+        // settings, mailboxes, detections, the public Graph notification callbacks).
+        ApiModeModule,
         // Step AI-1: the AI assistant (conversations, turns, loopback tools over the routes
         // above; registered after every feature module).
         AssistantModule,

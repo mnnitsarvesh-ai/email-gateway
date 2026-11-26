@@ -76,6 +76,9 @@ test('users: invite → edit roles → disable → delete', async ({ page }) => 
 test('domains: onboarding wizard to the DNS step, verify pending, delete', async ({ page }) => {
   const name = `onboard-${suffix()}.alpha.e2e-portal.test`;
   await signIn(page, 'alphaDomainAdmin', { next: '/domains/onboarding' });
+  // Step API-1: the protection mode comes first (Inline, the organization mode, preselected).
+  await expect(page.getByRole('radio', { name: /^Inline \(MX\)/ })).toBeChecked();
+  await page.getByRole('button', { name: 'Continue' }).click();
   const add = page.getByRole('form', { name: 'Add domain' });
   await add.getByLabel('Domain name (required)').fill(name);
   await add.getByRole('button', { name: 'Add domain' }).click();

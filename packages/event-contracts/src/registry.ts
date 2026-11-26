@@ -27,6 +27,7 @@ import {
   EventTypes,
   integrationHealthChangedV1,
   messageArchiveRequestedV1,
+  messageCopyScannedV1,
   messageDlpIncidentV1,
   messageParsedV1,
   messageParseFailedV1,
@@ -422,6 +423,15 @@ export const EVENT_REGISTRY = {
     'email.policy',
     assistantReportGenerateRequestedV1,
     'assistant_report_job',
+  ),
+  // Step API-1 D8 (§5, ADR-0100): producer email-worker (E30–E32 transaction of a non-gateway
+  // copy) through the outbox, on the exchange of mail.message.scanned.v1; bound to email.mailbox
+  // (consumer: mailbox-worker copies role, topology v17).
+  [EventTypes.MessageCopyScanned]: define(
+    EventTypes.MessageCopyScanned,
+    'email.security',
+    messageCopyScannedV1,
+    'message',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

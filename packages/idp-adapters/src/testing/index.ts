@@ -6,6 +6,7 @@
 export * from './dataset';
 export * from './datasets/microsoft';
 export * from './datasets/google';
+export * from './datasets/mail';
 export * from './harness';
 export * from './google-harness';
 export * from './in-memory-connections';
@@ -41,7 +42,28 @@ export {
   startSimulators,
   type RunningSimulators,
 } from './simulators/main';
-export { SimScript, type SimCall, type SimInjection } from './simulators/script';
+export {
+  SimScript,
+  type SimCall,
+  type SimInjection,
+  type SimNotification,
+} from './simulators/script';
+export {
+  GRAPH_SUBSCRIPTION_MAX_MINUTES,
+  LIFECYCLE_EVENTS,
+  SimMailboxNotFoundError,
+  deliverMessage,
+  expireCursors,
+  findMailboxOwner,
+  isLocalCallbackTarget,
+  pushLifecycle,
+  removeMessage,
+  type DeliverMessageInput,
+  type DeliverMessageResult,
+  type LifecycleEvent,
+} from './simulators/mail';
+export { GMAIL_MAIL_SCOPES } from './simulators/gmail-mail';
+export { GRAPH_MAIL_READ_PERMISSIONS } from './simulators/graph-mail';
 export {
   SimulatorServer,
   json,

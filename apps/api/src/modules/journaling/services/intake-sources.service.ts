@@ -21,6 +21,7 @@ import {
   IdempotencyService,
 } from '../../../http/idempotency/idempotency.service';
 import { decideKeysetPage } from '../../../http/listing/scan-budget';
+import { ApiModeStatusService } from '../../../tenancy/api-mode-status.service';
 import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
 import { OrganizationLimitsService } from '../../../tenancy/organization-limits.service';
 import { formatZodIssues } from '../../../validation/zod-validation.pipe';
@@ -173,6 +174,7 @@ export class IntakeSourcesService {
     private readonly runner: TransactionRunner,
     private readonly audit: AuditService,
     private readonly codec: CursorCodec,
+    private readonly apiMode: ApiModeStatusService,
   ) {}
 
   now(): Date {
@@ -304,9 +306,12 @@ export class IntakeSourcesService {
   // ---- rules -------------------------------------------------------------------------------------
 
   /**
-   * D1 entitlement on the writer: features `archiving` and `journal_intake` (`403
-   * journal_intake_not_enabled`), archiving enabled with a live default retention policy (`409
-   * archiving_not_enabled`).
+   * D1 entitlement on the writer, relaxed by step API-1 D6 (ADR-0098 supersedes ADR-0087 D1 in
+   * part): the feature `journal_intake` (`403 journal_intake_not_enabled`) and either archiving
+   * (feature `archiving`, enabled with a live default retention policy, as 8.6) or API mode
+   * active (`api_mode_protection` effective and a domain effective `api`/`hybrid`). Without
+   * either: `403 journal_intake_not_enabled` when `archiving` is not entitled, else `409
+   * archiving_not_enabled`.
    */
   private async requireEntitled(tx: Tx, scope: TenantScope): Promise<void> {
     const f = await this.features.effective(
@@ -314,15 +319,21 @@ export class IntakeSourcesService {
       [ARCHIVING_FEATURE, JOURNAL_INTAKE_FEATURE],
       tx,
     );
-    if (f[ARCHIVING_FEATURE] !== true || f[JOURNAL_INTAKE_FEATURE] !== true) {
-      throw journalIntakeNotEnabled();
-    }
+    if (f[JOURNAL_INTAKE_FEATURE] !== true) throw journalIntakeNotEnabled();
+    if (f[ARCHIVING_FEATURE] === true && (await this.archivingReady(tx, scope))) return;
+    if (await this.apiMode.isActive(scope.organizationId, tx)) return;
+    if (f[ARCHIVING_FEATURE] !== true) throw journalIntakeNotEnabled();
+    throw archivingNotEnabledForIntake();
+  }
+
+  /** Archiving enabled with a live default retention policy (8.6 D1). */
+  private async archivingReady(tx: Tx, scope: TenantScope): Promise<boolean> {
     const settings = await this.configs.settingsOnWriter(scope, tx);
     if (settings === null || !settings.enabled || settings.defaultRetentionPolicyId === null) {
-      throw archivingNotEnabledForIntake();
+      return false;
     }
     const policy = await this.configs.policyById(tx, scope, settings.defaultRetentionPolicyId);
-    if (policy === null || policy.deletedAt !== null) throw archivingNotEnabledForIntake();
+    return policy !== null && policy.deletedAt === null;
   }
 
   /** D1 domain requirement: a TXT-verified domain; provider kinds: one linked to the connection. */
@@ -761,13 +772,15 @@ export class IntakeSourcesService {
   /** `GET /journaling/intake-sources/{id}/wizard` (D10), from replica rows. */
   async wizard(scope: TenantScope, rawId: unknown): Promise<IntakeWizardView> {
     const row = await this.load(scope, rawId);
-    const [features, settings, verifiedDomains, connection] = await Promise.all([
+    const [features, settings, verifiedDomains, connection, apiModeActive] = await Promise.all([
       this.features.effective(scope.organizationId, [ARCHIVING_FEATURE, JOURNAL_INTAKE_FEATURE]),
       this.configs.settings(scope),
       this.sources.verifiedDomainCount(scope),
       row.providerConnectionId === null
         ? Promise.resolve(null)
         : this.sources.connectionById(scope, row.providerConnectionId),
+      // Step API-1 D6: API mode entitles the source without archiving.
+      this.apiMode.isActive(scope.organizationId),
     ]);
     const linked =
       row.providerConnectionId === null
@@ -781,6 +794,7 @@ export class IntakeSourcesService {
         intakeEntitled: features[JOURNAL_INTAKE_FEATURE] === true,
         enabled: settings?.enabled ?? false,
         defaultRetention: settings?.defaultRetentionPolicyPublicId != null,
+        apiModeActive,
       },
       verifiedDomains,
       linkedVerifiedDomains: linked,

@@ -280,6 +280,9 @@ describe('route security (e2e, dependencies stubbed)', () => {
         'post /api/v1/auth/email/verify',
         'post /api/v1/auth/invitations/inspect',
         'post /api/v1/auth/invitations/accept',
+        // Step API-1 D12.4: the Microsoft Graph notification callbacks.
+        'post /api/v1/provider-notifications/graph',
+        'post /api/v1/provider-notifications/graph/lifecycle',
       ].sort(),
     );
   });
@@ -938,6 +941,63 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route.returnsSecret, key).toBe(flags?.secret ?? false);
       expect(route.secretRedactedReplay, key).toBe(flags?.secret ?? false);
       expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+  });
+
+  it('the step API-1 protection-mode and API-mode routes: exact permissions, keys, classes, cursors; the callbacks are public (D12)', () => {
+    type Flags = { any?: boolean; cls?: string; cursor?: boolean };
+    const READ = 'remediation:read';
+    const WRITE = 'remediation:write';
+    const expected: Record<string, [string[], Flags?]> = {
+      'get /api/v1/organizations/:id/protection-mode': [
+        ['organization:read', 'platform:organizations'],
+        { any: true },
+      ],
+      'put /api/v1/organizations/:id/protection-mode': [
+        ['organization:manage', 'platform:organizations'],
+        { any: true, cls: 'sensitive' },
+      ],
+      'put /api/v1/domains/:domainId/protection-mode': [['domain:manage'], { cls: 'sensitive' }],
+      'get /api/v1/api-mode/overview': [[READ]],
+      'get /api/v1/api-mode/connections': [[READ]],
+      'get /api/v1/api-mode/connections/:connectionId': [[READ]],
+      'get /api/v1/api-mode/connections/:connectionId/setup-guide': [[READ]],
+      'put /api/v1/api-mode/connections/:connectionId/settings': [[WRITE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/connections/:connectionId/inventory-sync': [
+        [WRITE],
+        { cls: 'sensitive' },
+      ],
+      'get /api/v1/api-mode/mailboxes': [[READ], { cursor: true }],
+      'get /api/v1/api-mode/mailboxes/:mailboxId': [[READ]],
+      'post /api/v1/api-mode/mailboxes/:mailboxId/resync': [[WRITE], { cls: 'sensitive' }],
+      'get /api/v1/api-mode/detections': [[READ], { cursor: true }],
+      'get /api/v1/api-mode/detections/:detectionId': [[READ]],
+    };
+    const apiMode = routes.filter(
+      (r) => /^\/api\/v1\/api-mode(\/|$)/.test(r.path) || /\/protection-mode$/.test(r.path),
+    );
+    expect(apiMode.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [key, [permissions, flags]] of Object.entries(expected)) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(false);
+      expect(route.requirement, key).toEqual({ mode: flags?.any ? 'any' : 'all', permissions });
+      expect(route.requireMfa, key).toBe(false);
+      expect(route.userOnly, key).toBe(false);
+      expect(route.rateClass, key).toBe(flags?.cls ?? null);
+      // Transactional keys (IdempotencyService.execute), never the reservation interceptor.
+      expect(route.idempotency, key).toBeNull();
+      expect(route.returnsSecret, key).toBe(false);
+      expect(route.cursor, key).toBe(flags?.cursor ? 'v1' : null);
+    }
+    for (const key of [
+      'post /api/v1/provider-notifications/graph',
+      'post /api/v1/provider-notifications/graph/lifecycle',
+    ]) {
+      const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+      expect(route.isPublic, key).toBe(true);
+      expect(route.requirement, key).toBeUndefined();
     }
   });
 

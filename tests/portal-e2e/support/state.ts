@@ -45,6 +45,10 @@ export const USER_KEYS = [
   // chat; seed/assistant.ts prepareAssistantCompliance).
   'deltaCompliance',
   'epsilonAdmin',
+  // Step API-1: the API-mode tenant zeta (seed/api-mode.ts): an organization admin (mode changes,
+  // feeds) and a read-only user (no write control).
+  'zetaAdmin',
+  'zetaReadOnly',
   'platformAdmin',
 ] as const;
 export type UserKey = (typeof USER_KEYS)[number];
@@ -53,7 +57,7 @@ export interface E2eUser {
   email: string;
   password: string;
   roles: string[];
-  organization: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'platform';
+  organization: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'platform';
   /** Base32 TOTP secret once MFA is enabled (seeded, or enrolled through the UI). */
   totpSecret?: string;
   /** Last TOTP step sent to the api (each step is accepted once). */
@@ -90,7 +94,7 @@ export interface E2eState {
   seededAt: string;
   users: Record<UserKey, E2eUser>;
   orgs: Record<
-    'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon',
+    'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta',
     { id: string; name: string; slug: string }
   >;
   alpha: {
@@ -186,6 +190,16 @@ export interface E2eState {
       /** Step AI-4: delta's ATO account with an open incident (seed/ato.ts DELTA_ATO_PLAN). */
       ato: { accountId: string; address: string; incidentId: string };
     };
+  };
+  /** Step API-1: the API-mode tenant zeta (seed/api-mode.ts). */
+  apiMode: {
+    domains: Record<'api' | 'hybrid' | 'inline' | 'switch', string>;
+    domainNames: Record<'api' | 'hybrid' | 'inline' | 'switch', string>;
+    m365ConnectionId: string;
+    googleConnectionId: string;
+    m365Name: string;
+    googleName: string;
+    mailboxes: string[];
   };
   archive: {
     custodian: string;

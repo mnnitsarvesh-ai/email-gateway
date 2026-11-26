@@ -56,6 +56,7 @@ import {
 } from '../dto/domains.schemas';
 import { DomainsService } from '../services/domains.service';
 import { MAIL_FILTERING_NOT_ENABLED } from '../domains.errors';
+import { API_MODE_ERROR_CODES } from '../../api-mode/api-mode.errors';
 
 /** Domains of the caller's organization (§4). The tenant always comes from the credential. */
 @ApiTags('domains')
@@ -79,7 +80,12 @@ export class DomainsController {
       '(`PROVIDER_PROBE_DOMAIN`, step 8.2), the journal intake domain (`JOURNAL_INTAKE_DOMAIN`, ' +
       'step 8.6) and names under them are `422 domain_reserved`. Step 8.6: an archive-only ' +
       'organization (`serviceProfile: archive_only`) gets the domain with inbound mail flow off; ' +
-      '`inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`).',
+      '`inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`). Step API-1 ' +
+      '(ADR-0098): optional `protectionMode` (`inline`, `api`, `hybrid`; absent = inherit the ' +
+      'organization’s mode); `api` and `hybrid` need the plan feature `api_mode_protection` (`403 ' +
+      'api_mode_not_enabled`); a domain whose effective mode is `api` is created with inbound ' +
+      'mail flow off, and `protectionMode: api` with `inboundEnabled: true` is `422 ' +
+      'protection_mode_inbound_conflict`.',
   })
   @ApiBody({ schema: zodToOpenApi(CreateDomainSchema, { io: 'input' }) })
   @ApiCreatedResponse({ schema: zodToOpenApi(CreatedDomainSchema) })
@@ -87,14 +93,15 @@ export class DomainsController {
   @ApiCodedError(
     422,
     '`domain_reserved`: the platform probe domain (step 8.2), the journal intake domain (step ' +
-      '8.6) or a name under them',
-    [PROVIDER_ERROR_CODES.domainReserved],
+      '8.6) or a name under them; `protection_mode_inbound_conflict` (step API-1)',
+    [PROVIDER_ERROR_CODES.domainReserved, API_MODE_ERROR_CODES.inboundConflict],
   )
   @ApiCodedError(
     403,
     'Missing permission (`forbidden`), or `inboundEnabled: true` for an archive-only ' +
-      'organization (`mail_filtering_not_enabled`, step 8.6)',
-    ['forbidden', MAIL_FILTERING_NOT_ENABLED],
+      'organization (`mail_filtering_not_enabled`, step 8.6), or `api`/`hybrid` without the ' +
+      'plan feature `api_mode_protection` (`api_mode_not_enabled`, step API-1)',
+    ['forbidden', MAIL_FILTERING_NOT_ENABLED, API_MODE_ERROR_CODES.notEnabled],
   )
   create(
     @CurrentPrincipal() principal: Principal,

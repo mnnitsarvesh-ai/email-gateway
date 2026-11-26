@@ -16,12 +16,15 @@
  * - `ato-providers.ts` (step 8.5): ATO identity-provider integrations and mailbox state;
  * - `journaling.ts` (step 8.6): journaling settings, status and journal intake sources;
  * - `assistant.ts` (step AI-1): the AI assistant (status, settings, usage, tools, conversations,
- *   messages, turns, executions).
+ *   messages, turns, executions);
+ * - `api-mode.ts` (step API-1): protection modes, API-mode coverage, connections, mailboxes,
+ *   detections and the public Graph callbacks.
  *
  * Consumed by `test/route-inventory.e2e.test.ts`, which fails when a served route has no entry,
  * when an entry names a route that does not exist, or when a named test file is missing or does
  * not carry the marker comment `@covers <method> <path>`.
  */
+import { COVERAGE as API_MODE } from './api-mode';
 import { COVERAGE as ARCHIVE } from './archive';
 import { COVERAGE as ASSISTANT } from './assistant';
 import { COVERAGE as ATO } from './ato';
@@ -63,7 +66,8 @@ export type CoverageArea =
   | 'provider-connections'
   | 'ato-providers'
   | 'journaling'
-  | 'assistant';
+  | 'assistant'
+  | 'api-mode';
 
 export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCoverage[]>> =
   Object.freeze({
@@ -80,6 +84,7 @@ export const COVERAGE_BY_AREA: Readonly<Record<CoverageArea, readonly RouteCover
     'ato-providers': ATO_PROVIDERS,
     journaling: JOURNALING,
     assistant: ASSISTANT,
+    'api-mode': API_MODE,
   });
 
 export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
@@ -96,4 +101,5 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   ...ATO_PROVIDERS,
   ...JOURNALING,
   ...ASSISTANT,
+  ...API_MODE,
 ]);

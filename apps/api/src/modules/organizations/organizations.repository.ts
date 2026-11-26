@@ -5,6 +5,7 @@ import {
   type OrganizationDeploymentStatus,
   type OrganizationStatus,
   Prisma,
+  type ProtectionMode,
   type SettingSource,
 } from '@email-gateway/database';
 import type { OrganizationAccess } from './domain/organization-access';
@@ -24,9 +25,16 @@ const organizationSelect = {
   plan: { select: { code: true, name: true, defaultFeatures: true } },
   // Step 8.6 D13: the features the service profile is derived from (row or plan default).
   features: {
-    where: { featureKey: { in: ['inbound_filtering', 'outbound_filtering', 'archiving'] } },
+    where: {
+      featureKey: {
+        in: ['inbound_filtering', 'outbound_filtering', 'archiving', 'api_mode_protection'],
+      },
+    },
     select: { featureKey: true, enabled: true },
   },
+  // Step API-1 D2: the organization's protection mode (default of its domains).
+  protectionMode: true,
+  protectionModeChangedAt: true,
   deploymentMode: true,
   dataRegion: true,
   deletionRequestedAt: true,
@@ -235,6 +243,31 @@ export class OrganizationsRepository {
       orderBy: { id: 'desc' },
       take: filter.take,
     });
+  }
+
+  /**
+   * Step API-1 D2: the non-deleted domains of the organizations grouped by their own protection
+   * mode (NULL = inherit), for the `protectionMode` block of the views. One grouped query per
+   * response (list pages included).
+   */
+  async domainModeRows(
+    organizationIds: readonly bigint[],
+    client: Client = this.reader.client,
+  ): Promise<Map<bigint, Array<{ mode: ProtectionMode | null; count: number }>>> {
+    const out = new Map<bigint, Array<{ mode: ProtectionMode | null; count: number }>>();
+    if (organizationIds.length === 0) return out;
+    const rows = await client.domain.groupBy({
+      by: ['organizationId', 'protectionMode'],
+      where: { organizationId: { in: [...organizationIds] }, status: { not: 'deleted' } },
+      _count: { _all: true },
+    });
+    for (const r of rows) {
+      out.set(r.organizationId, [
+        ...(out.get(r.organizationId) ?? []),
+        { mode: r.protectionMode, count: r._count._all },
+      ]);
+    }
+    return out;
   }
 
   async slugExists(slug: string, client: Client = this.prisma): Promise<boolean> {

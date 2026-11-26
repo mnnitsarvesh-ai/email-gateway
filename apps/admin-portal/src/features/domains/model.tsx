@@ -75,6 +75,10 @@ export const PURPOSE_LABEL: Record<DnsRecord['purpose'], string> = {
 export const ARCHIVE_ONLY_NOT_REQUIRED: readonly DnsRecord['purpose'][] = ['mx', 'spf', 'dkim'];
 export const ARCHIVE_ONLY_LABEL = 'Not required for archive-only';
 
+/** Records a domain in API mode does not need (step API-1 D3): its MX stays with the provider. */
+export const API_MODE_NOT_REQUIRED: readonly DnsRecord['purpose'][] = ['mx'];
+export const API_MODE_LABEL = 'Not required in API mode';
+
 export const REQUIREMENT_LABEL: Record<DnsRecord['requirement'], string> = {
   activation: 'Required to activate',
   inbound: 'Required for inbound mail',

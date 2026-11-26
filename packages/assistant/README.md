@@ -82,7 +82,8 @@ and exports, provider connections; the reads `provider_mail_flow_preview` and `a
   credential-key input rule only because it is server-filled; no state or display field may hold a credential-pattern
   key (`CREDENTIAL_FIELD_EXCEPTIONS` names the identifiers that match the pattern).
 - **`omitInputs` (D7)**: `OperationOverride.omitInputs` removes optional inputs from the generated input schema
-  (`intake_sources_get`: `reveal`; `provider_grants_verify`: `body.subjectEmail`); the generator refuses required,
+  (`intake_sources_get`: `reveal`; `provider_grants_verify`: `body.subjectEmail`; step API-1 `domains_create`:
+  `body.protectionMode`); the generator refuses required,
   path or missing inputs; the matrix row notes `(omitted: …)`.
 - **Outcomes (D11)**: `QUEUED_202_TOOLS` adds the search, export and provider health check; `QUEUED_202_LINES` holds
   the export and search lines. `ImpactInput.archiveExportTtlHours` lets the api name the export's download period.
@@ -162,6 +163,22 @@ D9, D12):
   report-job action-update line.
 - The generator also writes [`docs/assistant/CHAT_CAPABILITY_REPORT.md`](../../docs/assistant/CHAT_CAPABILITY_REPORT.md)
   (`renderCapabilityReport`, checked by `registry:check`); program phase `AI-6`.
+
+## API-mode protection (step API-1)
+
+Design [`35-api-mode-protection.md`](../../docs/plan/steps/35-api-mode-protection.md) D15. `ASSISTANT_PROGRAM_PHASE`
+stays `AI-6` and the prompt is unchanged (`assistant-system/7`). The 16 new operations: the 9 reads (organization
+protection mode, API-mode overview, connections, connection detail, setup guide, mailboxes, mailbox detail,
+detections, detection detail) are ordinary enabled `read` tools (phase AI-1) covered by the read sweep
+(`READ_TOOLS_TESTED_BY`), with display hints and `untrustedFields` (mailbox addresses and aliases, the masked sender
+and withheld subject of copies, tenant-authored connection and source names, health evidence, guide sections); the
+5 writes (organization and domain protection mode, change-feed settings, inventory sync, mailbox resync) are
+`not_applicable` through `API_MODE_DEFERRED_WRITES` with `NOT_APPLICABLE_REASONS.apiModeDeferred` ("API-mode write:
+assistant tool planned for step API-3 (portal only until then)"); the public Graph callbacks (tag
+`provider-notifications`) are in `NOT_APPLICABLE_TAGS` ("provider callback (no user principal)").
+`DomainsController_create_v1` omits `body.protectionMode` (a chat-created domain inherits the organization's mode).
+Totals: **455 operations, 363 operation tools (all enabled) + 2 native = 365 enabled tools (197 reads, 168 writes),
+92 not applicable, `MISSING` 0**.
 
 ## Meta tools
 

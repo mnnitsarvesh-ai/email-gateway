@@ -39,7 +39,18 @@ import { nextOutcomeCheckAt, nextWaitCheckAt } from './schedule';
  * or sent it); in every other state (`persisted`, `scanning`, `scanned`, `scan_failed`, …) it
  * waits. Policy sources never exist for intake messages. Gateway messages (no `ingestSource`, or
  * `gateway`) are decided exactly as before.
+ *
+ * Step API-1 (D7.6, ADR-0098): a mailbox API copy (`ingestSource = 'mailbox_api'`, fetched per
+ * mailbox by the mailbox-worker) is a detection copy, never the compliance record (the journal
+ * copy is): it is always skipped (`api_copy`), before any entitlement or state check (defence in
+ * depth; the journal sweep never creates its intent).
  */
+
+/**
+ * `email_messages.ingest_source` as the capture decision sees it: the archive sources
+ * (`IngestSource`) plus `mailbox_api` (step API-1), which is never captured.
+ */
+export type CaptureIngestSource = IngestSource | 'mailbox_api';
 
 export const FINAL_MESSAGE_STATUSES: readonly MessageStatus[] = [
   'delivered',
@@ -53,6 +64,7 @@ export const CAPTURE_SKIP_REASONS = [
   'policy_archive_disabled',
   'category_excluded',
   'max_age',
+  'api_copy',
 ] as const;
 export type CaptureSkipReason = (typeof CAPTURE_SKIP_REASONS)[number];
 export const CAPTURE_LOST_REASONS = ['message_missing', 'original_missing'] as const;
@@ -84,8 +96,8 @@ export interface CaptureMessageFacts {
   direction: MessageDirection;
   /** Recipient directions; NULL = unknown (an external recipient of an external intake sender, D3). */
   recipients: ReadonlyArray<{ status: RecipientStatus; direction: MessageDirection | null }>;
-  /** `email_messages.ingest_source` (step 8.6); undefined = `gateway`. */
-  ingestSource?: IngestSource;
+  /** `email_messages.ingest_source` (step 8.6, step API-1); undefined = `gateway`. */
+  ingestSource?: CaptureIngestSource;
   /**
    * Whether the original EML object exists (HEAD of `eml_object_key`); undefined = not checked
    * (assumed present; the capture itself detects a missing object).
@@ -138,6 +150,8 @@ export function isFinalMessageStatus(status: MessageStatus): boolean {
 export function categoryOf(
   message: Pick<CaptureMessageFacts, 'status' | 'statusReason' | 'recipients' | 'ingestSource'>,
 ): ArchiveCategory | null {
+  // Step API-1 D7.6: a mailbox API copy has no archive category (never captured).
+  if (message.ingestSource === 'mailbox_api') return null;
   if (message.ingestSource === 'journal_intake') {
     // D6: only the final state counts; recipients are `journaled`, never `delivered`.
     return message.status === 'journaled' ? 'delivered' : null;
@@ -159,6 +173,7 @@ export function categoryOf(
 export function decideCapture(input: CaptureDecisionInput): CaptureDecision {
   const m = input.message;
   if (m === null) return { action: 'lost', reason: 'message_missing' };
+  if (m.ingestSource === 'mailbox_api') return { action: 'skip', reason: 'api_copy' };
   if (m.originalAvailable === false) return { action: 'lost', reason: 'original_missing' };
   if (!input.entitled) return { action: 'skip', reason: 'not_entitled' };
   if (!input.enabled) return { action: 'skip', reason: 'archiving_disabled' };

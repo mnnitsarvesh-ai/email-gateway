@@ -59,9 +59,16 @@ const approval = (
 /** The approval's outbox row (provenance): by default the one the gateway wrote for `approval()`. */
 const issued = (payload: unknown = approval().payload) => ({ payload });
 
+// `email_messages.ingest_source` is NOT NULL (default `gateway`): a fixture without it is gateway.
 const tx = (message: unknown, recipients: unknown[] = [], outbox: unknown = issued()) => ({
   messageOutbox: { findFirst: vi.fn(() => Promise.resolve(outbox)) },
-  emailMessage: { findFirst: vi.fn(() => Promise.resolve(message)) },
+  emailMessage: {
+    findFirst: vi.fn(() =>
+      Promise.resolve(
+        message && typeof message === 'object' ? { ingestSource: 'gateway', ...message } : message,
+      ),
+    ),
+  },
   emailRecipient: { findMany: vi.fn(() => Promise.resolve(recipients)) },
 });
 
@@ -318,6 +325,25 @@ describe('DeliveryPlanner journal intake guard (step 8.6 D4)', () => {
     expect(text).toMatch(/delivery_intake_refusals_total\{[^}]*stage="planning"[^}]*\} 1/);
     expect(text).toMatch(
       /delivery_approvals_rejected_total\{[^}]*reason="intake_not_deliverable"[^}]*\} 1/,
+    );
+  });
+
+  it('refuses an approval of a mailbox API copy (step API-1 D7.7): rejected, nothing planned', async () => {
+    const registry = new MetricsService({ service: 't-mailbox-api' });
+    const metrics = new DeliveryMetrics(registry);
+    const t = tx({ id: 100n, direction: 'inbound', ingestSource: 'mailbox_api' });
+    expect(await planner(metrics).plan(approval(), t as never)).toMatchObject({
+      status: 'rejected',
+      reason: 'intake_not_deliverable',
+      deliveries: 0,
+      reinjections: 0,
+    });
+    expect(t.messageOutbox.findFirst).not.toHaveBeenCalled();
+    expect(t.emailRecipient.findMany).not.toHaveBeenCalled();
+    expect(lock).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+    expect(await registry.metrics()).toMatch(
+      /delivery_intake_refusals_total\{[^}]*stage="planning"[^}]*\} 1/,
     );
   });
 

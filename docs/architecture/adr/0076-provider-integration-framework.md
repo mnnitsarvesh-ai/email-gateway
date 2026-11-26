@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-11-19, after the step 8.2 local verification against the provider simulators: the stack suite `provider-integrations` 10/10, the worker, library, api and smtp-adapter integration suites, the regression stack suites, Playwright 112/112, the 3-node RabbitMQ cluster suite on topology v14; record [docs/plan/steps/25-m365-google-connectors.md](../../plan/steps/25-m365-google-connectors.md) §13 WP6, §14; live verification against real Microsoft 365 and Google Workspace tenants, CI and a cluster apply not done). Proposed by the step 8.2 architect on 2026-11-17. Design: [docs/plan/steps/25-m365-google-connectors.md](../../plan/steps/25-m365-google-connectors.md) D1–D6.
 
+Superseded in part by [ADR-0099](0099-mailbox-access-consent-and-custody.md) (step API-1, 2026-11-26): a third purpose `mailbox_remediation` (profiles `m365.mailbox_remediation`, `google.mailbox_remediation`: Graph `Mail.ReadWrite` + `User.Read.All`, Gmail `gmail.modify` + `admin.directory.user.readonly`) with its own operator apps, consented through the unchanged grant routes and additionally gated by `remediation:write`.
+
 **Context.** Step 8.2 must connect an organization's Microsoft 365 tenant or Google Workspace customer to the gateway with OAuth2 where applicable and least-privilege permissions, and step 8.5 must reuse the same connections for identity-provider telemetry and response actions. Microsoft multi-tenant applications receive every permission they declare at admin consent; Google domain-wide delegation is granted per service-account client id and scope list. The gateway has no outbound HTTP client to either provider and no notion of a provider tenant.
 
 **Decision.**

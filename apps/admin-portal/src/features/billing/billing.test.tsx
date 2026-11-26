@@ -52,6 +52,7 @@ const usage: SuccessBody<'UsageController_get_v1'> = {
     internal: 76,
     today: 120,
     journalIntakeToday: 0,
+    apiCopiesToday: 0,
   },
   quarantine: { active: 17 },
   apiKeys: { active: 2 },

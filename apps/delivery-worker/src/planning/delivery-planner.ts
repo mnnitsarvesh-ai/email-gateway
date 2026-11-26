@@ -47,10 +47,11 @@ export function approvalObjectLabel(key: string, organizationId: bigint): Approv
 }
 
 /**
- * Step 8.6 D4 (ADR-0087, defence in depth): a journal intake message (`email_messages.
- * ingest_source = journal_intake`) is never planned or reinjected. Upstream it never reaches the
- * policy engine, so an approval for one is a fault or a forgery: refused with this code, an error
- * log and `delivery_intake_refusals_total{stage}`, the message untouched.
+ * Step 8.6 D4 (ADR-0087, defence in depth), generalized by step API-1 D7.7 (ADR-0098, N1): a copy
+ * (`email_messages.ingest_source` other than `gateway`: `journal_intake`, `mailbox_api`) is never
+ * planned or reinjected. Upstream it never reaches the policy engine, so an approval for one is a
+ * fault or a forgery: refused with this code, an error log and
+ * `delivery_intake_refusals_total{stage}`, the message untouched.
  */
 export const INTAKE_NOT_DELIVERABLE = 'intake_not_deliverable';
 
@@ -212,11 +213,11 @@ export class DeliveryPlanner {
       this.logger.warn(ids, 'approved message not found for the organization; rejected');
       return empty('rejected', 'message_not_found');
     }
-    if (message.ingestSource === 'journal_intake') {
+    if (message.ingestSource !== 'gateway') {
       this.deps.metrics.intakeRefusals.inc({ stage: 'planning' });
       this.logger.error(
-        { ...ids, reason: INTAKE_NOT_DELIVERABLE },
-        'approval of a journal intake message refused: intake messages are never delivered',
+        { ...ids, ingestSource: message.ingestSource, reason: INTAKE_NOT_DELIVERABLE },
+        'approval of a non-gateway copy refused: copies (journal intake, mailbox API) are never delivered',
       );
       return empty('rejected', INTAKE_NOT_DELIVERABLE);
     }

@@ -60,6 +60,7 @@ export function snapshotFixture(
       archivingFeature: true,
       journalIntakeFeature: true,
       archivingEnabled: true,
+      apiDetect: false,
       messagesPerMinute: 6000,
       maxMessageBytes: 50 * 1024 * 1024,
       ...overrides.organization,

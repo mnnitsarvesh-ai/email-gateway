@@ -76,6 +76,14 @@ function organization(
     deploymentMode: 'saas',
     deployments: [],
     deletion: null,
+    // Step API-1: replaced by a live view in the organizations fixture (protection-modes.ts).
+    protectionMode: {
+      mode: 'inline',
+      changedAt: null,
+      entitled: plan !== 'starter' && plan !== 'archive_only',
+      active: false,
+      domainsByEffectiveMode: { inline: 0, api: 0, hybrid: 0 },
+    },
     createdAt: created,
     updatedAt: created,
   };

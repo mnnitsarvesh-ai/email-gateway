@@ -14,7 +14,7 @@
 // - Timestamps are DATETIME(3) UTC. Append-only tables have no `updated_at`.
 // - snake_case table and column names via @@map / @map. Enum values are only ever appended.
 // - No email bodies or attachment content: only S3 object keys, sizes and hashes.
-// - Partitioned tables (41, marked PARTITIONED below) use a composite primary key
+// - Partitioned tables (42, marked PARTITIONED below) use a composite primary key
 //   (id, <partition column>), have no foreign keys in either direction, and every unique key
 //   ends with the partition column. The PARTITION BY clause is hand-written in the migration
 //   SQL; Prisma does not model partitions. Child rows of a message copy the message's
@@ -236,10 +236,14 @@ enum MessageStatus {
 /// `gateway` = the SMTP gateway's inbound/outbound LMTP ingestion (every message before 8.6);
 /// `journal_intake` = a journal report or copy received on a journal intake address (never
 /// delivered, never evaluated by policy; excluded from every gateway view). Also the source of a
-/// merged archive copy (`archive_record_sources.source`, ADR-0088). Append-only.
+/// merged archive copy (`archive_record_sources.source`, ADR-0088). Step API-1 (D7, D10.3,
+/// ADR-0098, ADR-0100) appended `mailbox_api`: a per-mailbox copy fetched by the mailbox-worker
+/// from a provider mailbox change feed (Graph delta / Gmail history); scanned in detect mode,
+/// ends in `journaled`, never delivered, never archived. Append-only.
 enum MessageIngestSource {
   gateway
   journal_intake
+  mailbox_api
 }
 
 enum MessageVerdict {
@@ -1636,6 +1640,12 @@ model Organization {
   deletedAt                 DateTime?           @map("deleted_at") @db.DateTime(3)
   createdAt                 DateTime            @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt                 DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-1 (D1, ADR-0098): the organization's protection mode, the default of every domain
+  /// without its own mode (`domains.protection_mode` NULL). `api` / `hybrid` need the feature
+  /// `api_mode_protection`. Changed only through `PUT /organizations/{id}/protection-mode`
+  /// (audited); never changes inline mail flow.
+  protectionMode            ProtectionMode      @default(inline) @map("protection_mode")
+  protectionModeChangedAt   DateTime?           @map("protection_mode_changed_at") @db.DateTime(3)
 
   plan OrganizationPlan @relation(fields: [planId], references: [id], onDelete: Restrict)
 
@@ -1742,6 +1752,7 @@ model Organization {
   aiChatPseudonyms         AiChatPseudonym[]
   aiChatProviderKey        AiChatProviderKey?
   aiChatReportJobs         AiChatReportJob[]
+  apiModeConnections       ApiModeConnection[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -2146,39 +2157,45 @@ model LoginAuditLog {
 /// row stays as history (DKIM keys, audit linkage) until the organization purge. A deleted row
 /// frees both the global name (`verified_name`) and the per-organization name (`live_name`).
 model Domain {
-  id              BigInt       @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId        String       @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId  BigInt       @map("organization_id") @db.UnsignedBigInt
+  id                      BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String          @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt          @map("organization_id") @db.UnsignedBigInt
   /// Lower-cased ASCII (punycode). Unique per organization among non-deleted rows only (see
   /// `liveName`): several organizations may hold a pending claim on the same name, so an
   /// unverified claim cannot squat a domain.
-  name            String       @db.VarChar(253)
-  status          DomainStatus @default(pending_verification)
+  name                    String          @db.VarChar(253)
+  status                  DomainStatus    @default(pending_verification)
   /// Why the domain is in its status (e.g. `claimed_by_another_organization`, a suspension reason).
-  statusReason    String?      @map("status_reason") @db.VarChar(512)
-  statusChangedAt DateTime?    @map("status_changed_at") @db.DateTime(3)
-  inboundEnabled  Boolean      @default(true) @map("inbound_enabled")
-  outboundEnabled Boolean      @default(false) @map("outbound_enabled")
-  verifiedAt      DateTime?    @map("verified_at") @db.DateTime(3)
+  statusReason            String?         @map("status_reason") @db.VarChar(512)
+  statusChangedAt         DateTime?       @map("status_changed_at") @db.DateTime(3)
+  inboundEnabled          Boolean         @default(true) @map("inbound_enabled")
+  outboundEnabled         Boolean         @default(false) @map("outbound_enabled")
+  verifiedAt              DateTime?       @map("verified_at") @db.DateTime(3)
   /// First activation (`verified` → `active`).
-  activatedAt     DateTime?    @map("activated_at") @db.DateTime(3)
-  deletedAt       DateTime?    @map("deleted_at") @db.DateTime(3)
+  activatedAt             DateTime?       @map("activated_at") @db.DateTime(3)
+  deletedAt               DateTime?       @map("deleted_at") @db.DateTime(3)
   /// When the background job checks the DNS records next; NULL for `failed` and `deleted`.
-  nextCheckAt     DateTime?    @map("next_check_at") @db.DateTime(3)
-  lastCheckedAt   DateTime?    @map("last_checked_at") @db.DateTime(3)
+  nextCheckAt             DateTime?       @map("next_check_at") @db.DateTime(3)
+  lastCheckedAt           DateTime?       @map("last_checked_at") @db.DateTime(3)
   /// Consecutive checks with an indeterminate result (drives the retry backoff).
-  checkFailures   Int          @default(0) @map("check_failures") @db.UnsignedInt
+  checkFailures           Int             @default(0) @map("check_failures") @db.UnsignedInt
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status IN ('verified', 'active',
   /// 'suspended'), name, NULL)) STORED`. Its unique key makes verified ownership globally unique
   /// (one owner per name, in every post-verification state; a deleted domain frees it). Tenant
   /// resolution on the mail path looks up by this column, never by `name`. Never write it.
-  verifiedName    String?      @unique @map("verified_name") @db.VarChar(253)
+  verifiedName            String?         @unique @map("verified_name") @db.VarChar(253)
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status = 'deleted', NULL, name))
   /// STORED`. UNIQUE (organization_id, live_name): one non-deleted row per name and organization;
   /// an organization can re-add a name it deleted. Never write it.
-  liveName        String?      @map("live_name") @db.VarChar(253)
-  createdAt       DateTime     @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt       DateTime     @updatedAt @map("updated_at") @db.DateTime(3)
+  liveName                String?         @map("live_name") @db.VarChar(253)
+  createdAt               DateTime        @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-1 (D1, D2, ADR-0098): the domain's own protection mode; NULL = inherit the
+  /// organization's. Effective mode = COALESCE(domains.protection_mode,
+  /// organizations.protection_mode). A change to effective `api` is refused while the domain's MX
+  /// points to the gateway; never changes `inbound_enabled` / `outbound_enabled`.
+  protectionMode          ProtectionMode? @map("protection_mode")
+  protectionModeChangedAt DateTime?       @map("protection_mode_changed_at") @db.DateTime(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
@@ -2541,8 +2558,9 @@ model EmailMessage {
   /// 255))) VIRTUAL`: the Message-ID without angle brackets. Never write it.
   messageIdKey      String?             @map("message_id_key") @db.VarChar(255)
   /// Step 8.6 (D3, D5, ADR-0087): `journal_intake` = a journal intake copy (status ends in
-  /// `journaled`; details in `journal_intake_messages`). Every gateway-facing read filters
-  /// `ingest_source = 'gateway'`.
+  /// `journaled`; details in `journal_intake_messages`). Step API-1 (ADR-0098): `mailbox_api` = a
+  /// copy fetched from a provider mailbox feed (its per-mailbox record is `api_message_copies`).
+  /// Every gateway-facing read filters `ingest_source = 'gateway'`.
   ingestSource      MessageIngestSource @default(gateway) @map("ingest_source")
 
   @@id([id, receivedAt])
@@ -7288,6 +7306,8 @@ model ProviderConnection {
   smtpConnector        SmtpConnector?
   /// Step 8.6: journal intake sources bound to this connection (provider kinds).
   journalIntakeSources JournalIntakeSource[]
+  /// Step API-1: the connection's API-mode row (created lazily).
+  apiModeConnection    ApiModeConnection?
 
   @@unique([organizationId, displayName])
   @@index([organizationId, status])
@@ -8619,4 +8639,340 @@ model AiChatReportJob {
   @@index([conversationId, status, reportedAt])
   @@index([organizationId, createdAt])
   @@map("ai_chat_report_jobs")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step API-1: API-mode protection (docs/plan/steps/35-api-mode-protection.md §3; ADR-0098 ..
+// ADR-0100). Protection modes live on `organizations` / `domains`; six tables, one partitioned
+// (`api_message_copies`). Ids, hashes, addresses, verdicts and timings only: copies are EMLs in
+// the mail bucket, provider cursors are opaque and never returned by the api, Graph client-state
+// values are stored as SHA-256 only. Written by the mailbox-worker (and the api for settings and
+// sync requests); purged with the organization (copies and dedupe keys before mailboxes,
+// counters and mailboxes before connections).
+// ---------------------------------------------------------------------------------------------
+
+/// Protection mode of an organization (default of its domains) or a domain (step API-1 D1,
+/// ADR-0098): `inline` = MX through the gateway (every existing tenant); `api` = the gateway sees
+/// mail only as copies from the provider and never delivers or bounces it; `hybrid` = inline
+/// plus API post-delivery. Append-only.
+enum ProtectionMode {
+  inline
+  api
+  hybrid
+}
+
+/// How the change feeds of an API-mode connection learn of new mail (D10): `poll` = delta /
+/// history polling every API_MODE_FEED_POLL_SECONDS; `notify` = Graph change notifications as
+/// wake-up hints plus a safety poll (Microsoft 365 only).
+enum ApiModeFeedMode {
+  poll
+  notify
+}
+
+/// Last mailbox inventory of an API-mode connection (D11.1); `unavailable` = no active
+/// `*.mailbox_remediation` grant.
+enum ApiModeInventoryStatus {
+  never
+  ok
+  failed
+  unavailable
+}
+
+/// Health of an API-mode connection (D11.3, `api-mode-health/1`); `unknown` before the first
+/// evaluation.
+enum ApiModeHealthStatus {
+  unknown
+  healthy
+  degraded
+  failing
+}
+
+/// Directory status of an API-mode mailbox (D7.3, D11.1): `discovered` = only seen in journal
+/// envelopes (no provider id yet); `deleted` rows are purged after 30 days.
+enum ApiMailboxStatus {
+  active
+  discovered
+  disabled
+  deleted
+}
+
+/// Coverage of a mailbox (D11.2): healthy feed or a journal sighting within
+/// API_MODE_JOURNAL_COVERAGE_DAYS = `covered`.
+enum ApiMailboxCoverageState {
+  covered
+  gap
+  out_of_scope
+}
+
+/// Change-feed state of a mailbox (D10).
+enum ApiMailboxFeedStatus {
+  off
+  pending
+  active
+  error
+  throttled
+  revoked
+}
+
+enum ApiMailboxAddressKind {
+  primary
+  alias
+}
+
+/// Which copy of a message was recorded for a mailbox (`api_message_copies.source`) or holds a
+/// dedupe claim (`api_copy_dedupe_keys.claimed_by`): the journal copy, a Graph or a Gmail feed copy.
+enum ApiCopySource {
+  journal
+  graph
+  gmail
+}
+
+/// Recipient direction of a copy (D7.4); API-1 records `inbound` only (`internal` is API-3).
+enum ApiCopyDirection {
+  inbound
+  internal
+}
+
+/// Basis of `api_message_copies.provider_delivered_at` (D7.8).
+enum ApiCopyDeliveredBasis {
+  received_header
+  graph_received
+  gmail_internal
+  ingest
+}
+
+/// Processing state of a per-mailbox copy (D7, D10.3): `pending` until the email-worker's
+/// `mail.message.copy_scanned.v1`; `too_large` = above API_MODE_MAX_MESSAGE_BYTES, never fetched.
+enum ApiCopyStatus {
+  pending
+  scanned
+  scan_failed
+  parse_failed
+  too_large
+}
+
+/// Whose verdict a copy carries (D7.5): its own detect-mode scan, or the inline (gateway) verdict
+/// of the same message in a hybrid domain.
+enum ApiCopyVerdictAuthority {
+  copy
+  inline
+}
+
+/// One row per step 8.2 provider connection used for API mode (step API-1 §3.2, ADR-0100),
+/// created lazily by the api or the mailbox-worker. Feeds are off by default (P3). `health_checks`
+/// = `api-mode-health/1`; `throttled_until` mirrors the Redis throttle pause; `mailboxes_total` =
+/// in-scope mailboxes of the last inventory (NULL = unknown). CAS on `row_version` (settings).
+/// `created_by_user_id` has no FK (the trail survives the user).
+model ApiModeConnection {
+  id                   BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId             String                 @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId       BigInt                 @map("organization_id") @db.UnsignedBigInt
+  providerConnectionId BigInt                 @unique @map("provider_connection_id") @db.UnsignedBigInt
+  provider             IntegrationProvider
+  feedsEnabled         Boolean                @default(false) @map("feeds_enabled")
+  feedMode             ApiModeFeedMode        @default(poll) @map("feed_mode")
+  feedsEnabledAt       DateTime?              @map("feeds_enabled_at") @db.DateTime(3)
+  inventoryStatus      ApiModeInventoryStatus @default(never) @map("inventory_status")
+  inventorySyncedAt    DateTime?              @map("inventory_synced_at") @db.DateTime(3)
+  inventoryRequestedAt DateTime?              @map("inventory_requested_at") @db.DateTime(3)
+  nextInventoryAt      DateTime?              @map("next_inventory_at") @db.DateTime(3)
+  /// In-scope mailboxes of the last inventory; NULL = unknown.
+  mailboxesTotal       Int?                   @map("mailboxes_total") @db.UnsignedInt
+  healthStatus         ApiModeHealthStatus    @default(unknown) @map("health_status")
+  /// `api-mode-health/1` `{ v: 1, checks: [{ code, status, evidence? }] }` (non-secret evidence).
+  healthChecks         Json?                  @map("health_checks")
+  healthChangedAt      DateTime?              @map("health_changed_at") @db.DateTime(3)
+  healthAlertedAt      DateTime?              @map("health_alerted_at") @db.DateTime(3)
+  throttledUntil       DateTime?              @map("throttled_until") @db.DateTime(3)
+  /// Classified `ProviderCallError` code only.
+  lastErrorCode        String?                @map("last_error_code") @db.VarChar(64)
+  createdByUserId      BigInt?                @map("created_by_user_id") @db.UnsignedBigInt
+  rowVersion           Int                    @default(1) @map("row_version") @db.UnsignedInt
+  createdAt            DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt            DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  providerConnection ProviderConnection @relation(fields: [providerConnectionId], references: [id], onDelete: Restrict)
+  mailboxes          ApiMailbox[]
+  counters           ApiModeCounter[]
+
+  @@index([organizationId])
+  @@index([healthStatus])
+  @@index([nextInventoryAt])
+  @@map("api_mode_connections")
+}
+
+/// A provider mailbox under an API-mode connection (step API-1 §3.2, D7.3, D10, D11). Created by
+/// the inventory (`provider_user_id` set) or discovered from a journal envelope (`discovered`,
+/// `provider_user_id` NULL; adopted by the inventory by address). `primary_address` lower case.
+/// `feed_cursor` = Graph delta link or Gmail history id (opaque, never returned by the api);
+/// `client_state_hash` = SHA-256 hex of the derived Graph client state (the value is never
+/// stored); `lease_until` = feed claim lease. `domain_id` has no FK.
+model ApiMailbox {
+  id                    BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId              String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId        BigInt                  @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId       BigInt                  @map("api_connection_id") @db.UnsignedBigInt
+  /// Graph user id / Google user id; NULL for a mailbox only seen in journal envelopes.
+  providerUserId        String?                 @map("provider_user_id") @db.VarChar(128)
+  primaryAddress        String                  @map("primary_address") @db.VarChar(320)
+  domainId              BigInt?                 @map("domain_id") @db.UnsignedBigInt
+  status                ApiMailboxStatus        @default(discovered)
+  coverageState         ApiMailboxCoverageState @default(out_of_scope) @map("coverage_state")
+  coverageChangedAt     DateTime?               @map("coverage_changed_at") @db.DateTime(3)
+  journalLastSeenAt     DateTime?               @map("journal_last_seen_at") @db.DateTime(3)
+  feedStatus            ApiMailboxFeedStatus    @default(off) @map("feed_status")
+  /// Opaque provider cursor; never returned by the api, never logged.
+  feedCursor            String?                 @map("feed_cursor") @db.Text
+  feedStartedAt         DateTime?               @map("feed_started_at") @db.DateTime(3)
+  subscriptionId        String?                 @unique @map("subscription_id") @db.VarChar(128)
+  subscriptionExpiresAt DateTime?               @map("subscription_expires_at") @db.DateTime(3)
+  clientStateHash       String?                 @map("client_state_hash") @db.Char(64)
+  clientStateVersion    Int                     @default(0) @map("client_state_version") @db.UnsignedSmallInt
+  syncRequestedAt       DateTime?               @map("sync_requested_at") @db.DateTime(3)
+  nextSyncAt            DateTime?               @map("next_sync_at") @db.DateTime(3)
+  lastSyncAt            DateTime?               @map("last_sync_at") @db.DateTime(3)
+  lastChangeAt          DateTime?               @map("last_change_at") @db.DateTime(3)
+  lastGapAt             DateTime?               @map("last_gap_at") @db.DateTime(3)
+  consecutiveFailures   Int                     @default(0) @map("consecutive_failures") @db.UnsignedSmallInt
+  lastErrorCode         String?                 @map("last_error_code") @db.VarChar(64)
+  leaseUntil            DateTime?               @map("lease_until") @db.DateTime(3)
+  deletedAt             DateTime?               @map("deleted_at") @db.DateTime(3)
+  createdAt             DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt             DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+
+  apiConnection ApiModeConnection   @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
+  addresses     ApiMailboxAddress[]
+
+  @@unique([apiConnectionId, providerUserId])
+  @@index([organizationId, status])
+  @@index([apiConnectionId, coverageState])
+  @@index([feedStatus, nextSyncAt])
+  @@index([syncRequestedAt])
+  @@map("api_mailboxes")
+}
+
+/// Addresses (primary and aliases, lower case) of an API-mode mailbox; resolves a recipient
+/// address to a mailbox, unique per organization (step API-1 §3.2, D7.3, D11.1).
+model ApiMailboxAddress {
+  id             BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt                @map("organization_id") @db.UnsignedBigInt
+  mailboxId      BigInt                @map("mailbox_id") @db.UnsignedBigInt
+  address        String                @db.VarChar(320)
+  kind           ApiMailboxAddressKind
+  createdAt      DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+
+  mailbox ApiMailbox @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, address])
+  @@index([mailboxId])
+  @@map("api_mailbox_addresses")
+}
+
+/// PARTITIONED by RANGE COLUMNS(received_at), monthly (6 months, core, like email_messages; step
+/// API-1 §3.2, D7, D10.3, ADR-0100). One row per scanned copy and mailbox: which copy was scanned
+/// (`source`), whether the journal and/or a feed saw it, the verdict, risk score, lag from provider
+/// delivery to verdict and the hybrid inline link. `received_at` = the copy registry message's.
+/// `message_id_hash` = `api-copy/1` dedupe hash (NULL without a Message-ID). `public_id` is
+/// app-generated UUIDv7, indexed but not unique (partitioned-table practice). The unique key
+/// `(message_id, received_at, mailbox_id)` includes the partition column but, as designed, does
+/// not end with it (one row per message and mailbox). Written by the mailbox-worker; API-2 acts on
+/// these rows. No foreign keys.
+model ApiMessageCopy {
+  id                  BigInt                  @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt          DateTime                @map("received_at") @db.DateTime(3)
+  publicId            String                  @map("public_id") @db.Char(36)
+  organizationId      BigInt                  @map("organization_id") @db.UnsignedBigInt
+  /// api_mode_connections.id (no FK: partitioned).
+  apiConnectionId     BigInt                  @map("api_connection_id") @db.UnsignedBigInt
+  /// api_mailboxes.id (no FK: partitioned).
+  mailboxId           BigInt                  @map("mailbox_id") @db.UnsignedBigInt
+  /// email_messages.id of the scanned copy (registry id).
+  messageId           BigInt                  @map("message_id") @db.UnsignedBigInt
+  source              ApiCopySource
+  seenJournal         Boolean                 @default(false) @map("seen_journal")
+  seenApi             Boolean                 @default(false) @map("seen_api")
+  direction           ApiCopyDirection        @default(inbound)
+  messageIdHash       String?                 @map("message_id_hash") @db.Char(64)
+  providerMessageId   String?                 @map("provider_message_id") @db.VarChar(256)
+  providerDeliveredAt DateTime?               @map("provider_delivered_at") @db.DateTime(3)
+  deliveredBasis      ApiCopyDeliveredBasis?  @map("delivered_basis")
+  status              ApiCopyStatus
+  verdict             MessageVerdict?
+  riskScore           Int?                    @map("risk_score") @db.UnsignedSmallInt
+  verdictAt           DateTime?               @map("verdict_at") @db.DateTime(3)
+  lagMs               Int?                    @map("lag_ms") @db.UnsignedInt
+  verdictAuthority    ApiCopyVerdictAuthority @default(copy) @map("verdict_authority")
+  /// The gateway message of a hybrid domain whose verdict is authoritative (no FK).
+  inlineMessageId     BigInt?                 @map("inline_message_id") @db.UnsignedBigInt
+  inlineReceivedAt    DateTime?               @map("inline_received_at") @db.DateTime(3)
+  createdAt           DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt           DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@id([id, receivedAt])
+  @@unique([messageId, receivedAt, mailboxId])
+  @@index([organizationId, receivedAt, id])
+  @@index([organizationId, publicId])
+  @@index([organizationId, mailboxId, receivedAt])
+  @@index([organizationId, messageIdHash])
+  @@index([organizationId, verdict, receivedAt])
+  @@map("api_message_copies")
+}
+
+/// Dedupe claims of copies by Message-ID plus mailbox (step API-1 D7.6, D10.3; transient, pruned
+/// after API_MODE_DEDUPE_WINDOW_HOURS). `copy_id` / `copy_received_at` reference the recorded
+/// `api_message_copies` row; NULL while a feed claim is in flight (`claim_expires_at`). No
+/// foreign keys.
+model ApiCopyDedupeKey {
+  id             BigInt        @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt        @map("organization_id") @db.UnsignedBigInt
+  mailboxId      BigInt        @map("mailbox_id") @db.UnsignedBigInt
+  messageIdHash  String        @map("message_id_hash") @db.Char(64)
+  claimedBy      ApiCopySource @map("claimed_by")
+  copyId         BigInt?       @map("copy_id") @db.UnsignedBigInt
+  copyReceivedAt DateTime?     @map("copy_received_at") @db.DateTime(3)
+  claimExpiresAt DateTime?     @map("claim_expires_at") @db.DateTime(3)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.DateTime(3)
+
+  @@unique([mailboxId, messageIdHash])
+  @@index([createdAt])
+  @@index([organizationId])
+  @@map("api_copy_dedupe_keys")
+}
+
+/// Hourly API-mode counters per connection (step API-1 D7.8, D10.6, D11), upserted additively by
+/// the mailbox-worker's counter flush (`(api_connection_id, hour)`); pruned after 400 days by the
+/// health role. Lag buckets back the overview percentiles.
+model ApiModeCounter {
+  id               BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId   BigInt   @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId  BigInt   @map("api_connection_id") @db.UnsignedBigInt
+  /// UTC hour start.
+  hour             DateTime @db.DateTime(0)
+  journalCopies    Int      @default(0) @map("journal_copies") @db.UnsignedInt
+  feedCopies       Int      @default(0) @map("feed_copies") @db.UnsignedInt
+  duplicates       Int      @default(0) @db.UnsignedInt
+  skippedInternal  Int      @default(0) @map("skipped_internal") @db.UnsignedInt
+  tooLarge         Int      @default(0) @map("too_large") @db.UnsignedInt
+  providerRequests Int      @default(0) @map("provider_requests") @db.UnsignedInt
+  throttled429     Int      @default(0) @map("throttled_429") @db.UnsignedInt
+  throttled503     Int      @default(0) @map("throttled_503") @db.UnsignedInt
+  providerErrors   Int      @default(0) @map("provider_errors") @db.UnsignedInt
+  cursorResets     Int      @default(0) @map("cursor_resets") @db.UnsignedInt
+  lagCount         Int      @default(0) @map("lag_count") @db.UnsignedInt
+  lagLe60s         Int      @default(0) @map("lag_le_60s") @db.UnsignedInt
+  lagLe300s        Int      @default(0) @map("lag_le_300s") @db.UnsignedInt
+  lagLe900s        Int      @default(0) @map("lag_le_900s") @db.UnsignedInt
+  lagLe3600s       Int      @default(0) @map("lag_le_3600s") @db.UnsignedInt
+  lagGt3600s       Int      @default(0) @map("lag_gt_3600s") @db.UnsignedInt
+  lagMaxMs         Int      @default(0) @map("lag_max_ms") @db.UnsignedInt
+  fetchBytes       BigInt   @default(0) @map("fetch_bytes") @db.UnsignedBigInt
+  lagSumMs         BigInt   @default(0) @map("lag_sum_ms") @db.UnsignedBigInt
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Cascade)
+
+  @@unique([apiConnectionId, hour])
+  @@index([organizationId, hour])
+  @@map("api_mode_counters")
 }

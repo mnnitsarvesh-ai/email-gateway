@@ -44,13 +44,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v16', () => {
+describe('TOPOLOGY v17', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-five queues (v16)', () => {
-    expect(TOPOLOGY_VERSION).toBe(16);
+  it('declares exactly the six exchanges and twenty-six queues (v17)', () => {
+    expect(TOPOLOGY_VERSION).toBe(17);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -61,9 +61,9 @@ describe('TOPOLOGY v16', () => {
       'email.events',
     ]);
     expect(EXCHANGE_NAMES).toHaveLength(6);
-    expect(QUEUE_NAMES).toHaveLength(25);
+    expect(QUEUE_NAMES).toHaveLength(26);
     expect(TOPOLOGY.queues.map((q) => q.name)).toEqual([...QUEUE_NAMES]);
-    expect(new Set(QUEUE_NAMES).size).toBe(25);
+    expect(new Set(QUEUE_NAMES).size).toBe(26);
     expect(QUEUE_NAMES).toEqual(
       expect.arrayContaining([
         'scan.url.inspect',
@@ -81,10 +81,18 @@ describe('TOPOLOGY v16', () => {
         'ato.responses',
         // v16 (step AI-6 D5).
         'assistant.reports',
+        // v17 (step API-1 D7).
+        'email.mailbox',
       ]),
     );
-    // v13, v16: no new queue name is a dot-prefix of another (plain retry bindings).
-    for (const name of ['ato.events', 'ato.mail', 'ato.responses', 'assistant.reports']) {
+    // v13, v16, v17: no new queue name is a dot-prefix of another (plain retry bindings).
+    for (const name of [
+      'ato.events',
+      'ato.mail',
+      'ato.responses',
+      'assistant.reports',
+      'email.mailbox',
+    ]) {
       expect(
         QUEUE_NAMES.filter((other) => other.startsWith(`${name}.`)),
         name,
@@ -93,7 +101,7 @@ describe('TOPOLOGY v16', () => {
     }
   });
 
-  it('assigns roles: twenty-one work queues, one delay, one dead-letter, two dormant (v16)', () => {
+  it('assigns roles: twenty-two work queues, one delay, one dead-letter, two dormant (v17)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -123,6 +131,8 @@ describe('TOPOLOGY v16', () => {
       'ato.responses',
       // v16 (step AI-6 D5): the api-assistant report job consumer.
       'assistant.reports',
+      // v17 (step API-1 D7): the mailbox-worker copies role.
+      'email.mailbox',
     ]);
     expect(byRole('delay')).toEqual(['email.delivery.retry']);
     expect(byRole('dead-letter')).toEqual(['email.dead-letter']);
@@ -148,6 +158,8 @@ describe('TOPOLOGY v16', () => {
     expect(queueDefinition('ato.responses').lossy).toBeUndefined();
     // v16 (step AI-6 D5): a queued report job is never dropped.
     expect(queueDefinition('assistant.reports').lossy).toBeUndefined();
+    // v17 (step API-1 D7): a copy event is never dropped (it finalizes a pending copy row).
+    expect(queueDefinition('email.mailbox').lossy).toBeUndefined();
     expect(queueDefinition('ato.mail')).toMatchObject({
       lossy: true,
       lossyMaxLength: ATO_MAIL_QUEUE_MAX_LENGTH,
@@ -314,6 +326,13 @@ describe('TOPOLOGY v16', () => {
         'email.policy',
         'email.policy org.*.assistant.report.generate_requested.v1',
         'email.policy retry.assistant.reports.#',
+      ],
+      // v17 (step API-1 D7, D8): detect-mode scanned copies (home exchange email.security, the
+      // exchange of mail.message.scanned.v1 and mail.message.copy_scanned.v1).
+      'email.mailbox': [
+        'email.security',
+        'email.security org.*.mail.message.copy_scanned.v1',
+        'email.security retry.email.mailbox.#',
       ],
       'email.analytics': [
         'email.events',
@@ -569,6 +588,18 @@ describe('TOPOLOGY v16', () => {
         maxRetryAgeMs: 30 * 60_000,
       },
       policy: policyFor('work', 'assistant.reports'),
+    });
+    // v17 (step API-1 D7, ADR-0100): the mailbox-worker copies role.
+    expect(queueDefinition('email.mailbox')).toMatchObject({
+      consumer: { kind: 'ledger', ledgerName: 'mailbox-worker.copies', service: 'mailbox-worker' },
+      retry: {
+        strategy: 'hold',
+        maxAttempts: 5,
+        baseDelayMs: 10_000,
+        maxDelayMs: 60_000,
+        maxRetryAgeMs: 24 * 3_600_000,
+      },
+      policy: policyFor('work', 'email.mailbox'),
     });
     expect(planned).toEqual({
       'email.analytics': 'not scheduled (ADR-0009)',
@@ -1167,6 +1198,24 @@ describe('routing (topic semantics)', () => {
         retryRoutingKey('assistant.reports', '42', 'assistant.report.generate_requested.v1'),
       ),
     ).toEqual(['assistant.reports']);
+    // Topology v17 (step API-1 D8): copy scans reach only the mailbox-worker copies role and the
+    // firehose (never the policy engine, the webhooks or the ATO mail feed); its retry hop only
+    // its own queue.
+    expect(
+      routeMessage('email.security', eventRoutingKey('42', 'mail.message.copy_scanned.v1')),
+    ).toEqual(['email.analytics', 'email.mailbox']);
+    expect(
+      routeMessage(
+        'email.security',
+        retryRoutingKey('email.mailbox', '42', 'mail.message.copy_scanned.v1'),
+      ),
+    ).toEqual(['email.mailbox']);
+    expect(
+      routeMessage(
+        'email.events',
+        deadLetterRoutingKey('email.mailbox', '42', 'mail.message.copy_scanned.v1'),
+      ),
+    ).toEqual(['email.dead-letter']);
   });
 
   it('keeps the retry hops of dot-prefixed queue names apart (v5 scan.url, scan.url.*)', () => {
@@ -1580,7 +1629,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(16);
+    expect(definitions.topology_version).toBe(17);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1593,7 +1642,7 @@ describe('toRabbitDefinitions (Q5)', () => {
         arguments: {},
       });
     }
-    expect(definitions.queues).toHaveLength(25);
+    expect(definitions.queues).toHaveLength(26);
     for (const queue of definitions.queues) {
       expect(queue).toEqual({
         name: queue.name,
@@ -1628,8 +1677,9 @@ describe('toRabbitDefinitions (Q5)', () => {
     // one (integration.connection.health_changed.v1): 68 queue + 5 exchange = 73. v15 (step AI-R
     // D8): email.notifications adds one (assistant.report.email_requested.v1): 69 queue + 5
     // exchange = 74. v16 (step AI-6 D5): assistant.reports adds two (generate_requested.v1 +
-    // retry): 71 queue + 5 exchange = 76.
-    expect(definitions.bindings).toHaveLength(76);
+    // retry): 71 queue + 5 exchange = 76. v17 (step API-1 D7): email.mailbox adds two
+    // (copy_scanned.v1 + retry): 73 queue + 5 exchange = 78.
+    expect(definitions.bindings).toHaveLength(78);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );
@@ -1657,7 +1707,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   });
 
   it('generates one anchored policy per queue', () => {
-    expect(definitions.policies).toHaveLength(25);
+    expect(definitions.policies).toHaveLength(26);
     for (const policy of definitions.policies) {
       const queue = policy.name.slice('eg.'.length);
       expect(policy).toEqual({

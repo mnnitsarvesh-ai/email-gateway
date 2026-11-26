@@ -17,6 +17,7 @@ import { IdempotencyRepository } from './http/idempotency/idempotency.repository
 import { IdempotencyService } from './http/idempotency/idempotency.service';
 import { RateLimitGuard } from './rate-limit/rate-limit.guard';
 import { TenantRateLimitResolver } from './rate-limit/tenant-rate-limit.resolver';
+import { ApiModeStatusService } from './tenancy/api-mode-status.service';
 import { OrganizationFeaturesService } from './tenancy/organization-features.service';
 import { OrganizationLimitsService } from './tenancy/organization-limits.service';
 
@@ -28,6 +29,8 @@ const shared = [
   TransactionRunner,
   OrganizationLimitsService,
   OrganizationFeaturesService,
+  // Step API-1 D1: "API mode active" (journal intake entitlement, views).
+  ApiModeStatusService,
   RateLimitGuard,
   // Step 6.1 conventions: metrics, v1 cursors, the global limiter's tenant limits and the
   // Idempotency-Key store + reservation interceptor, injectable from every feature module.

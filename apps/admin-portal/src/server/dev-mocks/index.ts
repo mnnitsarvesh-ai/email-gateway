@@ -1,6 +1,7 @@
 import 'server-only';
 import { matchOperation, splitRawPath } from '@/lib/api/operations';
 import type { UpstreamFetch } from '@/server/upstream';
+import { fixtures as apiMode } from './fixtures/api-mode';
 import { fixtures as archive } from './fixtures/archive';
 import { fixtures as ato } from './fixtures/ato';
 import { fixtures as atoProviders } from './fixtures/ato-providers';
@@ -51,7 +52,8 @@ export type { FixtureHandler, FixtureHandlers };
  * `ato-providers` (step 8.5 WP6) the 13 identity-provider operations and the identity-provider
  * behaviour of four 8.4 operations (settings, request, approve, roll back), so it follows `ato`;
  * `journaling` (step 8.6 WP6) the 12 journaling and intake-source operations over the archive
- * settings row of `archive`.
+ * settings row of `archive`; `api-mode` (step API-1 WP6) the 14 protection-mode and API-mode
+ * operations over the connections of `provider-connections` and the domains of `domains`.
  */
 export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   session,
@@ -78,6 +80,7 @@ export const FEATURE_FIXTURES: Readonly<Record<string, FixtureHandlers>> = {
   incidents,
   'provider-connections': providerConnections,
   'ato-providers': atoProviders,
+  'api-mode': apiMode,
   'dlp-bec': dlpBec,
 };
 

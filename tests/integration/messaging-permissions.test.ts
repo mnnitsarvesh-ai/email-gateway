@@ -312,11 +312,12 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
     // Step 4.1 S2 / 4.2 A2 / 4.3 U2 / 4.4 B3 / 4.5 D2 / 4.6 X11: replay of the work queues
     // scan.spam, scan.attachment, scan.url, scan.url.inspect, scan.url.results, scan.bec, scan.dlp,
     // scan.sandbox, scan.sandbox.submissions and scan.sandbox.results (home exchange
-    // email.security); step 8.4 (v13): and of ato.events, ato.mail and ato.responses.
+    // email.security); step 8.4 (v13): and of ato.events, ato.mail and ato.responses; step API-1
+    // (v17): and of email.mailbox.
     {
       exchange: 'email.security',
       write:
-        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses))\\.',
+        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses)|email\\.mailbox)\\.',
       read: '^$',
     },
     // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications; step 5.3 Q27
@@ -509,6 +510,14 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       policyWrite.test('retry.assistant.reports.org.1.assistant.report.generate_requested.v1'),
     ).toBe(true);
     expect(policyWrite.test('org.1.assistant.report.generate_requested.v1')).toBe(false);
+    // v17 (step API-1): email.mailbox is a replayable work queue (home exchange email.security);
+    // never its event key.
+    const securityWrite = new RegExp(
+      ops.find((t) => t.exchange === 'email.security')?.write ?? '^$',
+    );
+    expect(securityWrite.test('retry.email.mailbox.org.1.mail.message.copy_scanned.v1')).toBe(true);
+    expect(securityWrite.test('org.1.mail.message.copy_scanned.v1')).toBe(false);
+    expect(securityWrite.test('retry.email.mailboxes.org.1.x.v1')).toBe(false);
     const opsPermission = await api.get<{ write: string }>(
       `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
     );

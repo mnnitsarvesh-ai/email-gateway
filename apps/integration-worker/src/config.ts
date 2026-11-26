@@ -138,6 +138,16 @@ export const configSchema = baseConfigSchema
     PROVIDER_M365_ALLOW_PLATFORM_SECRET: flag.default(false),
     PROVIDER_GOOGLE_MAILFLOW_SA_KEY_PATH: z.string().max(1024).optional(),
     PROVIDER_GOOGLE_MAILFLOW_SA_CLIENT_ID: z.string().max(128).optional(),
+    // Step API-1 (D4, ADR-0099): platform credentials of the mailbox-access profiles
+    // (`m365.mailbox_remediation`, `google.mailbox_remediation`), verified by `verifyAuxiliary`
+    // like the other non-mail-flow purposes; read by key name (platformCredentialsFromEnv over
+    // PERMISSION_PROFILES). Operator-provided; empty = only customer-owned grants verify.
+    PROVIDER_M365_MAILBOX_APP_CLIENT_ID: z.string().max(128).optional(),
+    PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET: z.string().max(1024).optional(),
+    PROVIDER_M365_MAILBOX_APP_CERT_PATH: z.string().max(1024).optional(),
+    PROVIDER_M365_MAILBOX_APP_CERT_THUMBPRINT: z.string().max(64).optional(),
+    PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: z.string().max(128).optional(),
+    PROVIDER_GOOGLE_MAILBOX_SA_KEY_PATH: z.string().max(1024).optional(),
 
     // Probes (D10).
     PROVIDER_PROBE_DOMAIN: hostName.default('probe.mail-gateway.test'),
@@ -212,14 +222,16 @@ export const configSchema = baseConfigSchema
     ) {
       issue('PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS', 'must differ from the current key');
     }
-    if (
-      cfg.PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET !== undefined &&
-      !cfg.PROVIDER_M365_ALLOW_PLATFORM_SECRET
-    ) {
-      issue(
-        'PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET',
-        'is refused unless PROVIDER_M365_ALLOW_PLATFORM_SECRET=true (use the certificate)',
-      );
+    for (const key of [
+      'PROVIDER_M365_MAILFLOW_APP_CLIENT_SECRET',
+      'PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET',
+    ] as const) {
+      if (cfg[key] !== undefined && !cfg.PROVIDER_M365_ALLOW_PLATFORM_SECRET) {
+        issue(
+          key,
+          'is refused unless PROVIDER_M365_ALLOW_PLATFORM_SECRET=true (use the certificate)',
+        );
+      }
     }
     if (cfg.INTEGRATION_HEALTH_TICK_SECONDS > cfg.INTEGRATION_HEALTH_INTERVAL_SECONDS) {
       issue(

@@ -5,7 +5,7 @@ global:
 # Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
 # scanning.rules.yml; step 4.3 U18: click-service.rules.yml, url-scanning.rules.yml; step 4.6 X20:
 # sandbox-controller.rules.yml; step 5.2 P24: policy-engine.rules.yml; step 6.1 D16:
-# api.rules.yml; step AI-6 D8: assistant.rules.yml). Alertmanager routing is
+# api.rules.yml; step AI-6 D8: assistant.rules.yml; step API-1 D11.5: api-mode.rules.yml). Alertmanager routing is
 # step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
@@ -102,6 +102,16 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['integration-worker:3086']
+  # mailbox-worker (step API-1 D11.5; apps profile): api_mode_* copies, lag histogram, provider
+  # requests, throttling, feed syncs, cursor resets, fetch bytes, inventory runs and the health
+  # leader's gauges (api_mode_connections{health}, api_mode_mailboxes{coverage},
+  # api_mode_subscriptions{state}: 0 on the other replicas), the shared amqp_* consumer series
+  # (copies role) and the process series. Probes and metrics only on 3087. Alerts:
+  # rules/api-mode.rules.yml.
+  - job_name: mailbox-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['mailbox-worker:3087']
   # event-relay (step 3.2 §5.3): outbox relay (outbox_relay_*), outbox health (outbox_*),
   # reconciliation (reconcile_*), AMQP client (amqp_*).
   - job_name: event-relay

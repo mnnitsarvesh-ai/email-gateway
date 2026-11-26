@@ -14,6 +14,7 @@ import {
   LayoutDashboard,
   Link2,
   Mail,
+  MailCheck,
   Paperclip,
   Plug,
   Radar,
@@ -210,6 +211,16 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/attachments',
         icon: Paperclip,
         gate: ['AttachmentsController_search_v1', 'AttachmentRescansController_list_v1'],
+      },
+      {
+        // Step API-1 (D14): API-mode protection (coverage, mailboxes, detections, setup); the
+        // write controls inside are gated per operation (remediation:write).
+        id: 'api-mode',
+        profiles: GATEWAY_ONLY,
+        label: 'Mailbox protection',
+        href: '/api-mode',
+        icon: MailCheck,
+        gate: ['ApiModeController_overview_v1'],
       },
     ],
   },

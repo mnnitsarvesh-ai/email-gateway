@@ -3,7 +3,7 @@ import {
   archiveJournalIntakeSchema,
   type ArchiveParties,
   canonicalJson,
-  type IngestSource,
+  type CaptureIngestSource,
   type IntakeRecipientField,
   type MessageDirection,
   type MessageStatus,
@@ -64,8 +64,11 @@ export interface MessageRow {
   finalVerdict: DbMessageVerdict | null;
   finalAction: DbMessageAction | null;
   riskScore: number | null;
-  /** `email_messages.ingest_source` (step 8.6 D3). */
-  ingestSource: IngestSource;
+  /**
+   * `email_messages.ingest_source` (step 8.6 D3; `mailbox_api` from step API-1, never captured:
+   * `decideCapture` skips it with `api_copy`, D7.6).
+   */
+  ingestSource: CaptureIngestSource;
 }
 
 export interface RecipientRow {

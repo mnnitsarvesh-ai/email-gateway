@@ -1,0 +1,931 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`generateApiModeGuide (api-mode-guide/1) > google_workspace: example guide and Markdown (snapshot) 1`] = `
+{
+  "attestations": [
+    {
+      "attested": false,
+      "attestedAt": null,
+      "code": "api_mode.google.delegation_added",
+      "statement": "Domain-wide delegation lists the mailbox-access client ID with exactly the scopes gmail.modify and admin.directory.user.readonly.",
+    },
+  ],
+  "connection": {
+    "displayName": "Example Google Workspace",
+    "id": "11111111-2222-3333-4444-555555555555",
+  },
+  "generatedAt": "2026-11-26T00:00:00.000Z",
+  "journalSource": {
+    "addressMasked": "journal-••••xamp@journal.gateway.example.net",
+    "id": "11111111-2222-3333-4444-555555555555",
+    "kind": "google_workspace_copy",
+  },
+  "notice": "This guide contains the values of your own provider connection. The gateway never changes your Microsoft 365 or Google Workspace configuration: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. Never send client secrets or service-account keys by email or chat: upload them only in the console.",
+  "permissions": [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/admin.directory.user.readonly",
+  ],
+  "platformClientId": "111122223333444455556",
+  "provider": "google_workspace",
+  "schema": "api-mode-guide/1",
+  "sections": [
+    {
+      "id": "overview",
+      "number": 1,
+      "paragraphs": [
+        "API mode protects the mailboxes of "Example Google Workspace" (Google Workspace) without an MX change. Mail keeps flowing directly to your mailboxes; the gateway receives a copy of each message (a journal copy and, optionally, the mailbox change feeds), scans it with every engine and records a verdict per mailbox. Detections, coverage, intake lag and throttling are shown on the Mailbox protection page.",
+        "What API mode never does: it never changes your MX records or mail flow; it never delivers, forwards, delays, quarantines or bounces a message; it never changes your tenant configuration (you apply every step of this guide); it never reads existing mailbox content (no backfill: only messages that arrive after the feeds start); and it never stores credentials outside the encrypted credential store of the gateway.",
+        "In this release the gateway only reads mailboxes. The mailbox-access permission is write-capable because automatic removal of detected threats (move to a quarantine folder or label, tag) comes in a later release; every such action will be recorded and reversible. Mailbox access is a separate consent from the mail-flow and account takeover grants and can be revoked at any time.",
+      ],
+      "steps": [
+        {
+          "id": "overview-values",
+          "paragraphs": [],
+          "title": "Values for this connection",
+          "values": [
+            {
+              "label": "Connection",
+              "value": "Example Google Workspace",
+            },
+            {
+              "label": "Customer ID",
+              "value": "C0example",
+            },
+            {
+              "label": "Domains",
+              "value": "example.com",
+            },
+            {
+              "label": "Change feeds",
+              "value": "off",
+            },
+          ],
+        },
+      ],
+      "title": "Overview and what API mode never does",
+    },
+    {
+      "id": "journal",
+      "number": 2,
+      "paragraphs": [
+        "The journal copy is the primary intake of API mode: it covers every mailbox, every folder and the full recipient list without per-mailbox API calls. It uses the journal intake source of type "Google Workspace copies" bound to this connection; copies of API-mode domains are scanned in detect mode and never delivered or archived unless journaling is enabled.",
+      ],
+      "steps": [
+        {
+          "id": "journal-source",
+          "paragraphs": [
+            "The source "Example Google Workspace copies" is bound to this connection. Its own setup guide (Settings, Journaling, the source, Setup guide) has the exact steps and reveals the intake address to users with journaling management rights.",
+          ],
+          "title": "Create or check the journal intake source",
+          "values": [
+            {
+              "label": "Journal intake source",
+              "value": "Example Google Workspace copies",
+            },
+            {
+              "label": "Intake address (masked)",
+              "value": "journal-••••xamp@journal.gateway.example.net",
+            },
+          ],
+        },
+        {
+          "id": "journal-route",
+          "paragraphs": [
+            "In the Google Admin console (Apps, Google Workspace, Gmail, Routing), add the routing setting of the source with "Also deliver to" the intake address and the journal headers, exactly as its setup guide shows (template: docs/integrations/journal-intake-google-workspace.md).",
+          ],
+          "title": "Add the "Also deliver to" routing setting",
+        },
+      ],
+      "title": "Journal copies (primary intake): the "Also deliver to" routing",
+    },
+    {
+      "id": "mailbox-access",
+      "number": 3,
+      "paragraphs": [
+        "The gateway reads the user directory (coverage totals, address resolution) as a delegated administrator and the Gmail history and new Inbox messages of each mailbox as that mailbox, through domain-wide delegation of the two OAuth scopes below. Set it up in the console: Integrations, this connection, Grants, "Mailbox access for API mode".",
+        "The mailbox-access grant of this connection uses the operator service account (option A below).",
+      ],
+      "steps": [
+        {
+          "id": "delegation-client",
+          "paragraphs": [
+            "Option A: use the operator service account (its client ID is shown below when offered). Option B: create your own: in the Google Cloud console create a service account, enable the Gmail API and the Admin SDK API for its project, create a JSON key and upload the key in the console. The key is stored only in the encrypted credential store.",
+          ],
+          "title": "Choose the service account",
+          "values": [
+            {
+              "label": "Operator service account client ID",
+              "value": "111122223333444455556",
+            },
+          ],
+        },
+        {
+          "attestation": {
+            "attested": false,
+            "attestedAt": null,
+            "code": "api_mode.google.delegation_added",
+            "statement": "Domain-wide delegation lists the mailbox-access client ID with exactly the scopes gmail.modify and admin.directory.user.readonly.",
+          },
+          "id": "delegation-add",
+          "paragraphs": [
+            "In the Google Admin console open Security, Access and data control, API controls, Manage Domain Wide Delegation, and choose Add new. Enter the client ID and exactly the scopes below (comma-separated, nothing else), then Authorize. Changes can take some time to apply.",
+          ],
+          "title": "Add the client ID to domain-wide delegation",
+          "values": [
+            {
+              "label": "Client ID",
+              "value": "111122223333444455556",
+            },
+            {
+              "label": "OAuth scopes",
+              "value": "https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/admin.directory.user.readonly",
+            },
+          ],
+          "warning": "gmail.modify allows changing messages of every mailbox of the domain. API mode only reads in this release; never add the scopes to a client ID used for anything else.",
+        },
+        {
+          "id": "delegation-admin",
+          "paragraphs": [
+            "Directory reads impersonate an administrator account of your domain that may read users (a super administrator, or a delegated administrator with the Users read privilege). Enter its address with the grant in the console.",
+          ],
+          "title": "Name the delegated administrator",
+          "values": [
+            {
+              "label": "Delegated administrator",
+              "value": "admin@example.com",
+            },
+          ],
+        },
+      ],
+      "title": "Mailbox access: domain-wide delegation",
+    },
+    {
+      "id": "feeds",
+      "number": 4,
+      "paragraphs": [
+        "Change feeds are off by default. When you turn them on for this connection (Mailbox protection, Coverage, Feeds), the gateway follows the Gmail history (new messages with the INBOX label) of every in-scope mailbox by polling every few minutes, starting from the moment the feed starts (no backfill). Content is fetched only for messages no journal copy already delivered for that mailbox.",
+      ],
+      "steps": [
+        {
+          "id": "feeds-state",
+          "paragraphs": [
+            "Feeds need the active mailbox-access grant. Messages larger than the configured limit are recorded as too large and not scanned.",
+          ],
+          "title": "Feed settings of this connection",
+          "values": [
+            {
+              "label": "Feeds",
+              "value": "off",
+            },
+            {
+              "label": "Mode",
+              "value": "polling (Gmail history)",
+            },
+          ],
+        },
+      ],
+      "title": "Optional: mailbox change feeds",
+    },
+    {
+      "id": "verify",
+      "number": 5,
+      "paragraphs": [],
+      "steps": [
+        {
+          "id": "verify-inventory",
+          "paragraphs": [
+            "After the grant is verified, the gateway lists the users of your domain every few hours (or when you choose "Sync inventory") and keeps the mailboxes of your API-mode domains. A mailbox is covered when its change feed synced recently or a journal copy for it arrived within the last seven days; otherwise it is a gap.",
+          ],
+          "title": "Check the mailbox inventory and coverage",
+        },
+        {
+          "id": "verify-message",
+          "paragraphs": [
+            "Send a message from outside your organization to a protected mailbox. Within minutes it appears under Mailbox protection, Detections, with its verdict and the lag from delivery to verdict. It is delivered normally: API mode never holds it.",
+          ],
+          "title": "Send a test message",
+        },
+      ],
+      "title": "Verify coverage",
+    },
+    {
+      "id": "revoke",
+      "number": 6,
+      "paragraphs": [
+        "In the console (Integrations, this connection, Grants, "Mailbox access for API mode", Revoke) the gateway deletes the stored credentials and stops the feeds and the inventory at once; detection of journal copies continues.",
+      ],
+      "steps": [
+        {
+          "id": "revoke-provider",
+          "paragraphs": [
+            "In the Google Admin console open Security, Access and data control, API controls, Manage Domain Wide Delegation, and delete the entry of the client ID. For your own service account, also delete its key in the Google Cloud console.",
+          ],
+          "title": "Remove the client ID from domain-wide delegation",
+          "values": [
+            {
+              "label": "Client ID",
+              "value": "111122223333444455556",
+            },
+          ],
+        },
+      ],
+      "title": "Revoke mailbox access",
+    },
+    {
+      "id": "troubleshooting",
+      "number": 7,
+      "paragraphs": [],
+      "steps": [
+        {
+          "id": "troubleshoot-lag",
+          "paragraphs": [
+            "The lag is the time from provider delivery to the verdict. High lag usually means delayed journal copies (check the journal source health) or a paused feed. Google Workspace routes the copy as an additional delivery; check the routing setting.",
+          ],
+          "title": "Intake lag",
+        },
+        {
+          "id": "troubleshoot-throttling",
+          "paragraphs": [
+            "The Gmail API limits requests per user and project. The gateway keeps a per-connection request budget and, when the provider answers with a throttling response, pauses the calls of that API for this connection for the time the provider asks (at most ten minutes) before it continues. Sustained throttling raises a health warning; other applications using the same quota can be the cause.",
+          ],
+          "title": "Throttling",
+        },
+        {
+          "id": "troubleshoot-cursor",
+          "paragraphs": [
+            "When Gmail no longer has the stored history position of a mailbox, the gateway restarts the feed from the current state without backfill and marks a gap for that mailbox; the journal copy covers the interval.",
+          ],
+          "title": "Feed restarts and gaps",
+        },
+      ],
+      "title": "Troubleshooting lag and throttling",
+    },
+  ],
+}
+`;
+
+exports[`generateApiModeGuide (api-mode-guide/1) > google_workspace: example guide and Markdown (snapshot) 2`] = `
+"# Google Workspace API-mode guide: Example Google Workspace
+
+Generated 2026-11-26T00:00:00.000Z (\`api-mode-guide/1\`).
+Permissions: \`https://www.googleapis.com/auth/gmail.modify\`, \`https://www.googleapis.com/auth/admin.directory.user.readonly\`.
+
+> This guide contains the values of your own provider connection. The gateway never changes your Microsoft 365 or Google Workspace configuration: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. Never send client secrets or service-account keys by email or chat: upload them only in the console.
+
+## Contents
+
+1. [Overview and what API mode never does](#overview)
+2. [Journal copies (primary intake): the "Also deliver to" routing](#journal)
+3. [Mailbox access: domain-wide delegation](#mailbox-access)
+4. [Optional: mailbox change feeds](#feeds)
+5. [Verify coverage](#verify)
+6. [Revoke mailbox access](#revoke)
+7. [Troubleshooting lag and throttling](#troubleshooting)
+
+<a id="overview"></a>
+
+## 1. Overview and what API mode never does
+
+API mode protects the mailboxes of "Example Google Workspace" (Google Workspace) without an MX change. Mail keeps flowing directly to your mailboxes; the gateway receives a copy of each message (a journal copy and, optionally, the mailbox change feeds), scans it with every engine and records a verdict per mailbox. Detections, coverage, intake lag and throttling are shown on the Mailbox protection page.
+
+What API mode never does: it never changes your MX records or mail flow; it never delivers, forwards, delays, quarantines or bounces a message; it never changes your tenant configuration (you apply every step of this guide); it never reads existing mailbox content (no backfill: only messages that arrive after the feeds start); and it never stores credentials outside the encrypted credential store of the gateway.
+
+In this release the gateway only reads mailboxes. The mailbox-access permission is write-capable because automatic removal of detected threats (move to a quarantine folder or label, tag) comes in a later release; every such action will be recorded and reversible. Mailbox access is a separate consent from the mail-flow and account takeover grants and can be revoked at any time.
+
+<a id="overview-values"></a>
+
+### 1.1 Values for this connection
+
+| Item | Value |
+| --- | --- |
+| Connection | \`Example Google Workspace\` |
+| Customer ID | \`C0example\` |
+| Domains | \`example.com\` |
+| Change feeds | \`off\` |
+
+<a id="journal"></a>
+
+## 2. Journal copies (primary intake): the "Also deliver to" routing
+
+The journal copy is the primary intake of API mode: it covers every mailbox, every folder and the full recipient list without per-mailbox API calls. It uses the journal intake source of type "Google Workspace copies" bound to this connection; copies of API-mode domains are scanned in detect mode and never delivered or archived unless journaling is enabled.
+
+<a id="journal-source"></a>
+
+### 2.1 Create or check the journal intake source
+
+The source "Example Google Workspace copies" is bound to this connection. Its own setup guide (Settings, Journaling, the source, Setup guide) has the exact steps and reveals the intake address to users with journaling management rights.
+
+| Item | Value |
+| --- | --- |
+| Journal intake source | \`Example Google Workspace copies\` |
+| Intake address (masked) | \`journal-••••xamp@journal.gateway.example.net\` |
+
+<a id="journal-route"></a>
+
+### 2.2 Add the "Also deliver to" routing setting
+
+In the Google Admin console (Apps, Google Workspace, Gmail, Routing), add the routing setting of the source with "Also deliver to" the intake address and the journal headers, exactly as its setup guide shows (template: docs/integrations/journal-intake-google-workspace.md).
+
+<a id="mailbox-access"></a>
+
+## 3. Mailbox access: domain-wide delegation
+
+The gateway reads the user directory (coverage totals, address resolution) as a delegated administrator and the Gmail history and new Inbox messages of each mailbox as that mailbox, through domain-wide delegation of the two OAuth scopes below. Set it up in the console: Integrations, this connection, Grants, "Mailbox access for API mode".
+
+The mailbox-access grant of this connection uses the operator service account (option A below).
+
+<a id="delegation-client"></a>
+
+### 3.1 Choose the service account
+
+Option A: use the operator service account (its client ID is shown below when offered). Option B: create your own: in the Google Cloud console create a service account, enable the Gmail API and the Admin SDK API for its project, create a JSON key and upload the key in the console. The key is stored only in the encrypted credential store.
+
+| Item | Value |
+| --- | --- |
+| Operator service account client ID | \`111122223333444455556\` |
+
+<a id="delegation-add"></a>
+
+### 3.2 Add the client ID to domain-wide delegation
+
+In the Google Admin console open Security, Access and data control, API controls, Manage Domain Wide Delegation, and choose Add new. Enter the client ID and exactly the scopes below (comma-separated, nothing else), then Authorize. Changes can take some time to apply.
+
+| Item | Value |
+| --- | --- |
+| Client ID | \`111122223333444455556\` |
+| OAuth scopes | \`https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/admin.directory.user.readonly\` |
+
+> **Warning:** gmail.modify allows changing messages of every mailbox of the domain. API mode only reads in this release; never add the scopes to a client ID used for anything else.
+
+> **Attestation \`api_mode.google.delegation_added\`** (your statement, not a gateway check): Domain-wide delegation lists the mailbox-access client ID with exactly the scopes gmail.modify and admin.directory.user.readonly.
+> Status: not confirmed yet
+
+<a id="delegation-admin"></a>
+
+### 3.3 Name the delegated administrator
+
+Directory reads impersonate an administrator account of your domain that may read users (a super administrator, or a delegated administrator with the Users read privilege). Enter its address with the grant in the console.
+
+| Item | Value |
+| --- | --- |
+| Delegated administrator | \`admin@example.com\` |
+
+<a id="feeds"></a>
+
+## 4. Optional: mailbox change feeds
+
+Change feeds are off by default. When you turn them on for this connection (Mailbox protection, Coverage, Feeds), the gateway follows the Gmail history (new messages with the INBOX label) of every in-scope mailbox by polling every few minutes, starting from the moment the feed starts (no backfill). Content is fetched only for messages no journal copy already delivered for that mailbox.
+
+<a id="feeds-state"></a>
+
+### 4.1 Feed settings of this connection
+
+Feeds need the active mailbox-access grant. Messages larger than the configured limit are recorded as too large and not scanned.
+
+| Item | Value |
+| --- | --- |
+| Feeds | \`off\` |
+| Mode | \`polling (Gmail history)\` |
+
+<a id="verify"></a>
+
+## 5. Verify coverage
+
+<a id="verify-inventory"></a>
+
+### 5.1 Check the mailbox inventory and coverage
+
+After the grant is verified, the gateway lists the users of your domain every few hours (or when you choose "Sync inventory") and keeps the mailboxes of your API-mode domains. A mailbox is covered when its change feed synced recently or a journal copy for it arrived within the last seven days; otherwise it is a gap.
+
+<a id="verify-message"></a>
+
+### 5.2 Send a test message
+
+Send a message from outside your organization to a protected mailbox. Within minutes it appears under Mailbox protection, Detections, with its verdict and the lag from delivery to verdict. It is delivered normally: API mode never holds it.
+
+<a id="revoke"></a>
+
+## 6. Revoke mailbox access
+
+In the console (Integrations, this connection, Grants, "Mailbox access for API mode", Revoke) the gateway deletes the stored credentials and stops the feeds and the inventory at once; detection of journal copies continues.
+
+<a id="revoke-provider"></a>
+
+### 6.1 Remove the client ID from domain-wide delegation
+
+In the Google Admin console open Security, Access and data control, API controls, Manage Domain Wide Delegation, and delete the entry of the client ID. For your own service account, also delete its key in the Google Cloud console.
+
+| Item | Value |
+| --- | --- |
+| Client ID | \`111122223333444455556\` |
+
+<a id="troubleshooting"></a>
+
+## 7. Troubleshooting lag and throttling
+
+<a id="troubleshoot-lag"></a>
+
+### 7.1 Intake lag
+
+The lag is the time from provider delivery to the verdict. High lag usually means delayed journal copies (check the journal source health) or a paused feed. Google Workspace routes the copy as an additional delivery; check the routing setting.
+
+<a id="troubleshoot-throttling"></a>
+
+### 7.2 Throttling
+
+The Gmail API limits requests per user and project. The gateway keeps a per-connection request budget and, when the provider answers with a throttling response, pauses the calls of that API for this connection for the time the provider asks (at most ten minutes) before it continues. Sustained throttling raises a health warning; other applications using the same quota can be the cause.
+
+<a id="troubleshoot-cursor"></a>
+
+### 7.3 Feed restarts and gaps
+
+When Gmail no longer has the stored history position of a mailbox, the gateway restarts the feed from the current state without backfill and marks a gap for that mailbox; the journal copy covers the interval.
+"
+`;
+
+exports[`generateApiModeGuide (api-mode-guide/1) > microsoft_365: example guide and Markdown (snapshot) 1`] = `
+{
+  "attestations": [
+    {
+      "attested": false,
+      "attestedAt": null,
+      "code": "api_mode.m365.app_access_scoped",
+      "statement": "An Exchange Online RBAC for Applications scope limits the mailbox-access application to the mailboxes API mode protects; mailboxes outside the scope without journal copies appear as coverage gaps.",
+    },
+  ],
+  "connection": {
+    "displayName": "Example Microsoft 365",
+    "id": "11111111-2222-3333-4444-555555555555",
+  },
+  "generatedAt": "2026-11-26T00:00:00.000Z",
+  "journalSource": {
+    "addressMasked": "journal-••••xamp@journal.gateway.example.net",
+    "id": "11111111-2222-3333-4444-555555555555",
+    "kind": "microsoft_365_journal",
+  },
+  "notice": "This guide contains the values of your own provider connection. The gateway never changes your Microsoft 365 or Google Workspace configuration: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. Never send client secrets or service-account keys by email or chat: upload them only in the console.",
+  "permissions": [
+    "Mail.ReadWrite",
+    "User.Read.All",
+  ],
+  "platformClientId": "11111111-2222-3333-4444-555555555555",
+  "provider": "microsoft_365",
+  "schema": "api-mode-guide/1",
+  "sections": [
+    {
+      "id": "overview",
+      "number": 1,
+      "paragraphs": [
+        "API mode protects the mailboxes of "Example Microsoft 365" (Microsoft 365) without an MX change. Mail keeps flowing directly to your mailboxes; the gateway receives a copy of each message (a journal copy and, optionally, the mailbox change feeds), scans it with every engine and records a verdict per mailbox. Detections, coverage, intake lag and throttling are shown on the Mailbox protection page.",
+        "What API mode never does: it never changes your MX records or mail flow; it never delivers, forwards, delays, quarantines or bounces a message; it never changes your tenant configuration (you apply every step of this guide); it never reads existing mailbox content (no backfill: only messages that arrive after the feeds start); and it never stores credentials outside the encrypted credential store of the gateway.",
+        "In this release the gateway only reads mailboxes. The mailbox-access permission is write-capable because automatic removal of detected threats (move to a quarantine folder or label, tag) comes in a later release; every such action will be recorded and reversible. Mailbox access is a separate consent from the mail-flow and account takeover grants and can be revoked at any time.",
+      ],
+      "steps": [
+        {
+          "id": "overview-values",
+          "paragraphs": [],
+          "title": "Values for this connection",
+          "values": [
+            {
+              "label": "Connection",
+              "value": "Example Microsoft 365",
+            },
+            {
+              "label": "Tenant ID",
+              "value": "11111111-2222-3333-4444-555555555555",
+            },
+            {
+              "label": "Domains",
+              "value": "example.com",
+            },
+            {
+              "label": "Change feeds",
+              "value": "off",
+            },
+          ],
+        },
+      ],
+      "title": "Overview and what API mode never does",
+    },
+    {
+      "id": "journal",
+      "number": 2,
+      "paragraphs": [
+        "The journal copy is the primary intake of API mode: it covers every mailbox, every folder and the full recipient list without per-mailbox API calls. It uses the journal intake source of type "Microsoft 365 journaling" bound to this connection; copies of API-mode domains are scanned in detect mode and never delivered or archived unless journaling is enabled.",
+      ],
+      "steps": [
+        {
+          "id": "journal-source",
+          "paragraphs": [
+            "The source "Example Microsoft 365 journaling" is bound to this connection. Its own setup guide (Settings, Journaling, the source, Setup guide) has the exact steps and reveals the intake address to users with journaling management rights.",
+          ],
+          "title": "Create or check the journal intake source",
+          "values": [
+            {
+              "label": "Journal intake source",
+              "value": "Example Microsoft 365 journaling",
+            },
+            {
+              "label": "Intake address (masked)",
+              "value": "journal-••••xamp@journal.gateway.example.net",
+            },
+          ],
+        },
+        {
+          "id": "journal-rule",
+          "paragraphs": [
+            "In the Microsoft Purview portal (Data lifecycle management, Exchange (legacy), Journal rules), create a journal rule for messages sent or received from everyone that sends journal reports to the intake address of the source, exactly as its setup guide shows (template: docs/integrations/journal-intake-microsoft-365.md). Messages that mailbox rules move out of the Inbox are covered by the journal copy, not by the change feeds.",
+          ],
+          "title": "Create the journal rule",
+        },
+      ],
+      "title": "Journal copies (primary intake): the journal rule",
+    },
+    {
+      "id": "mailbox-access",
+      "number": 3,
+      "paragraphs": [
+        "The gateway reads the user directory (coverage totals, address resolution), the Inbox changes and the content of new messages through Microsoft Graph with the application permissions Mail.ReadWrite and User.Read.All. Grant them in the console: Integrations, this connection, Grants, "Mailbox access for API mode". Granting needs the integration management and API-mode management rights in the console and a Global Administrator or Privileged Role Administrator in Microsoft Entra.",
+        "The mailbox-access grant of this connection uses the operator application (option A below).",
+      ],
+      "steps": [
+        {
+          "id": "access-platform-app",
+          "paragraphs": [
+            "Choose the operator application as the method of the grant. The console opens the Microsoft admin consent page of "Email security gateway mailbox access"; review the two application permissions and accept. The gateway then verifies the permissions in a token for your tenant.",
+          ],
+          "title": "Option A: consent to the operator application",
+          "values": [
+            {
+              "label": "Application (client) ID",
+              "value": "11111111-2222-3333-4444-555555555555",
+            },
+            {
+              "label": "Microsoft Graph application permission",
+              "value": "Mail.ReadWrite",
+            },
+            {
+              "label": "Microsoft Graph application permission",
+              "value": "User.Read.All",
+            },
+          ],
+        },
+        {
+          "id": "access-customer-app",
+          "paragraphs": [
+            "In the Microsoft Entra admin center, open App registrations, New registration, and create a single-tenant application (for example "Email security gateway mailbox access"). Under API permissions add the Microsoft Graph application permissions below and choose "Grant admin consent". Under Certificates & secrets create a client secret, then enter the application (client) ID and the secret in the console. The secret is stored only in the encrypted credential store; renew it before it expires.",
+          ],
+          "title": "Option B: register your own application",
+          "values": [
+            {
+              "label": "Microsoft Graph application permission",
+              "value": "Mail.ReadWrite",
+            },
+            {
+              "label": "Microsoft Graph application permission",
+              "value": "User.Read.All",
+            },
+          ],
+          "warning": "Mail.ReadWrite applies to every mailbox of the tenant unless you scope it (next section). Grant it only to the application used for API mode, never to the mail-flow or account takeover applications.",
+        },
+      ],
+      "title": "Mailbox access consent",
+    },
+    {
+      "id": "mailbox-scope",
+      "number": 4,
+      "paragraphs": [
+        "You can limit which mailboxes the application may access with an Exchange Online management scope instead of the tenant-wide Microsoft Graph consent. Mailboxes outside the scope are not inventoried or followed by the change feeds; unless journal copies for them arrive, they appear as coverage gaps on the Mailbox protection page.",
+      ],
+      "steps": [
+        {
+          "attestation": {
+            "attested": false,
+            "attestedAt": null,
+            "code": "api_mode.m365.app_access_scoped",
+            "statement": "An Exchange Online RBAC for Applications scope limits the mailbox-access application to the mailboxes API mode protects; mailboxes outside the scope without journal copies appear as coverage gaps.",
+          },
+          "commands": [
+            {
+              "code": "New-ServicePrincipal -AppId '11111111-2222-3333-4444-555555555555' -ObjectId '<enterprise-application-object-id>' -DisplayName 'Email security gateway mailbox access'
+New-ManagementScope -Name 'Email security gateway API mode' -RecipientRestrictionFilter "MemberOfGroup -eq '<protected-mailboxes-group-distinguished-name>'"
+New-ManagementRoleAssignment -App '11111111-2222-3333-4444-555555555555' -Role 'Application Mail.ReadWrite' -CustomResourceScope 'Email security gateway API mode'",
+              "language": "powershell",
+            },
+          ],
+          "id": "mailbox-scope-commands",
+          "paragraphs": [
+            "Run these commands in Exchange Online PowerShell (Connect-ExchangeOnline) with the application's client ID, the object ID of its enterprise application and a group that contains the protected mailboxes. Then remove the tenant-wide Mail.ReadWrite consent of the application in Microsoft Entra (keep User.Read.All): RBAC for Applications adds to Entra consents, it does not restrict them.",
+          ],
+          "title": "Create the scope and the role assignment",
+          "warning": "Role assignments of RBAC for Applications are not listed in the access token, so the console's permission check reports Mail.ReadWrite as missing for this grant once the Entra consent is removed. Scoped access is an advanced setup: check the coverage page after the change.",
+        },
+      ],
+      "title": "Optional: limit mailbox access with Exchange Online RBAC for Applications",
+    },
+    {
+      "id": "feeds",
+      "number": 5,
+      "paragraphs": [
+        "Change feeds are off by default. When you turn them on for this connection (Mailbox protection, Coverage, Feeds), the gateway follows the Inbox of every in-scope mailbox with the Microsoft Graph delta query, starting from the moment the feed starts (no backfill). With "polling" each Inbox is checked every few minutes; with "change notifications" Microsoft Graph notifies the gateway of new messages (the gateway still polls hourly as a safety net). Content is fetched only for messages no journal copy already delivered for that mailbox.",
+      ],
+      "steps": [
+        {
+          "id": "feeds-state",
+          "paragraphs": [
+            "Feeds need the active mailbox-access grant. Messages larger than the configured limit are recorded as too large and not scanned.",
+          ],
+          "title": "Feed settings of this connection",
+          "values": [
+            {
+              "label": "Feeds",
+              "value": "off",
+            },
+            {
+              "label": "Mode",
+              "value": "polling",
+            },
+          ],
+        },
+      ],
+      "title": "Optional: mailbox change feeds",
+    },
+    {
+      "id": "verify",
+      "number": 6,
+      "paragraphs": [],
+      "steps": [
+        {
+          "id": "verify-inventory",
+          "paragraphs": [
+            "After the grant is verified, the gateway lists the users of your tenant every few hours (or when you choose "Sync inventory") and keeps the mailboxes of your API-mode domains. A mailbox is covered when its change feed synced recently or a journal copy for it arrived within the last seven days; otherwise it is a gap.",
+          ],
+          "title": "Check the mailbox inventory and coverage",
+        },
+        {
+          "id": "verify-message",
+          "paragraphs": [
+            "Send a message from outside your organization to a protected mailbox. Within minutes it appears under Mailbox protection, Detections, with its verdict and the lag from delivery to verdict. It is delivered normally: API mode never holds it.",
+          ],
+          "title": "Send a test message",
+        },
+      ],
+      "title": "Verify coverage",
+    },
+    {
+      "id": "revoke",
+      "number": 7,
+      "paragraphs": [
+        "In the console (Integrations, this connection, Grants, "Mailbox access for API mode", Revoke) the gateway deletes the stored credentials and stops the feeds and the inventory at once; detection of journal copies continues.",
+      ],
+      "steps": [
+        {
+          "commands": [
+            {
+              "code": "Get-ManagementRoleAssignment -RoleAssignee '11111111-2222-3333-4444-555555555555' | Remove-ManagementRoleAssignment",
+              "language": "powershell",
+            },
+          ],
+          "id": "revoke-provider",
+          "paragraphs": [
+            "Operator application: in the Microsoft Entra admin center open Enterprise applications, "Email security gateway mailbox access", and delete it (or remove its Mail.ReadWrite and User.Read.All permissions under Permissions). Your own application: delete its client secret or the app registration. If you scoped access, also remove the role assignment.",
+          ],
+          "title": "Remove the access in Microsoft Entra",
+          "values": [
+            {
+              "label": "Application (client) ID",
+              "value": "11111111-2222-3333-4444-555555555555",
+            },
+          ],
+        },
+      ],
+      "title": "Revoke mailbox access",
+    },
+    {
+      "id": "troubleshooting",
+      "number": 8,
+      "paragraphs": [],
+      "steps": [
+        {
+          "id": "troubleshoot-lag",
+          "paragraphs": [
+            "The lag is the time from provider delivery to the verdict. High lag usually means delayed journal copies (check the journal source health) or a paused feed. Microsoft 365 may delay journal reports under load.",
+          ],
+          "title": "Intake lag",
+        },
+        {
+          "id": "troubleshoot-throttling",
+          "paragraphs": [
+            "Microsoft Graph limits requests per application and mailbox. The gateway keeps a per-connection request budget and, when the provider answers with a throttling response, pauses the calls of that API for this connection for the time the provider asks (at most ten minutes) before it continues. Sustained throttling raises a health warning; other applications using the same quota can be the cause.",
+          ],
+          "title": "Throttling",
+        },
+        {
+          "id": "troubleshoot-cursor",
+          "paragraphs": [
+            "When Microsoft Graph no longer accepts the stored delta state of an Inbox, the gateway restarts the feed from the current state without backfill and marks a gap for that mailbox; the journal copy covers the interval. With change notifications, the notification endpoint of the gateway must be reachable from Microsoft Graph; missed notifications are caught by the safety poll.",
+          ],
+          "title": "Feed restarts and gaps",
+        },
+      ],
+      "title": "Troubleshooting lag and throttling",
+    },
+  ],
+}
+`;
+
+exports[`generateApiModeGuide (api-mode-guide/1) > microsoft_365: example guide and Markdown (snapshot) 2`] = `
+"# Microsoft 365 API-mode guide: Example Microsoft 365
+
+Generated 2026-11-26T00:00:00.000Z (\`api-mode-guide/1\`).
+Permissions: \`Mail.ReadWrite\`, \`User.Read.All\`.
+
+> This guide contains the values of your own provider connection. The gateway never changes your Microsoft 365 or Google Workspace configuration: you apply every step yourself. Confirmations you record in the console are your statements (attestations), not proofs the gateway has checked. Never send client secrets or service-account keys by email or chat: upload them only in the console.
+
+## Contents
+
+1. [Overview and what API mode never does](#overview)
+2. [Journal copies (primary intake): the journal rule](#journal)
+3. [Mailbox access consent](#mailbox-access)
+4. [Optional: limit mailbox access with Exchange Online RBAC for Applications](#mailbox-scope)
+5. [Optional: mailbox change feeds](#feeds)
+6. [Verify coverage](#verify)
+7. [Revoke mailbox access](#revoke)
+8. [Troubleshooting lag and throttling](#troubleshooting)
+
+<a id="overview"></a>
+
+## 1. Overview and what API mode never does
+
+API mode protects the mailboxes of "Example Microsoft 365" (Microsoft 365) without an MX change. Mail keeps flowing directly to your mailboxes; the gateway receives a copy of each message (a journal copy and, optionally, the mailbox change feeds), scans it with every engine and records a verdict per mailbox. Detections, coverage, intake lag and throttling are shown on the Mailbox protection page.
+
+What API mode never does: it never changes your MX records or mail flow; it never delivers, forwards, delays, quarantines or bounces a message; it never changes your tenant configuration (you apply every step of this guide); it never reads existing mailbox content (no backfill: only messages that arrive after the feeds start); and it never stores credentials outside the encrypted credential store of the gateway.
+
+In this release the gateway only reads mailboxes. The mailbox-access permission is write-capable because automatic removal of detected threats (move to a quarantine folder or label, tag) comes in a later release; every such action will be recorded and reversible. Mailbox access is a separate consent from the mail-flow and account takeover grants and can be revoked at any time.
+
+<a id="overview-values"></a>
+
+### 1.1 Values for this connection
+
+| Item | Value |
+| --- | --- |
+| Connection | \`Example Microsoft 365\` |
+| Tenant ID | \`11111111-2222-3333-4444-555555555555\` |
+| Domains | \`example.com\` |
+| Change feeds | \`off\` |
+
+<a id="journal"></a>
+
+## 2. Journal copies (primary intake): the journal rule
+
+The journal copy is the primary intake of API mode: it covers every mailbox, every folder and the full recipient list without per-mailbox API calls. It uses the journal intake source of type "Microsoft 365 journaling" bound to this connection; copies of API-mode domains are scanned in detect mode and never delivered or archived unless journaling is enabled.
+
+<a id="journal-source"></a>
+
+### 2.1 Create or check the journal intake source
+
+The source "Example Microsoft 365 journaling" is bound to this connection. Its own setup guide (Settings, Journaling, the source, Setup guide) has the exact steps and reveals the intake address to users with journaling management rights.
+
+| Item | Value |
+| --- | --- |
+| Journal intake source | \`Example Microsoft 365 journaling\` |
+| Intake address (masked) | \`journal-••••xamp@journal.gateway.example.net\` |
+
+<a id="journal-rule"></a>
+
+### 2.2 Create the journal rule
+
+In the Microsoft Purview portal (Data lifecycle management, Exchange (legacy), Journal rules), create a journal rule for messages sent or received from everyone that sends journal reports to the intake address of the source, exactly as its setup guide shows (template: docs/integrations/journal-intake-microsoft-365.md). Messages that mailbox rules move out of the Inbox are covered by the journal copy, not by the change feeds.
+
+<a id="mailbox-access"></a>
+
+## 3. Mailbox access consent
+
+The gateway reads the user directory (coverage totals, address resolution), the Inbox changes and the content of new messages through Microsoft Graph with the application permissions Mail.ReadWrite and User.Read.All. Grant them in the console: Integrations, this connection, Grants, "Mailbox access for API mode". Granting needs the integration management and API-mode management rights in the console and a Global Administrator or Privileged Role Administrator in Microsoft Entra.
+
+The mailbox-access grant of this connection uses the operator application (option A below).
+
+<a id="access-platform-app"></a>
+
+### 3.1 Option A: consent to the operator application
+
+Choose the operator application as the method of the grant. The console opens the Microsoft admin consent page of "Email security gateway mailbox access"; review the two application permissions and accept. The gateway then verifies the permissions in a token for your tenant.
+
+| Item | Value |
+| --- | --- |
+| Application (client) ID | \`11111111-2222-3333-4444-555555555555\` |
+| Microsoft Graph application permission | \`Mail.ReadWrite\` |
+| Microsoft Graph application permission | \`User.Read.All\` |
+
+<a id="access-customer-app"></a>
+
+### 3.2 Option B: register your own application
+
+In the Microsoft Entra admin center, open App registrations, New registration, and create a single-tenant application (for example "Email security gateway mailbox access"). Under API permissions add the Microsoft Graph application permissions below and choose "Grant admin consent". Under Certificates & secrets create a client secret, then enter the application (client) ID and the secret in the console. The secret is stored only in the encrypted credential store; renew it before it expires.
+
+| Item | Value |
+| --- | --- |
+| Microsoft Graph application permission | \`Mail.ReadWrite\` |
+| Microsoft Graph application permission | \`User.Read.All\` |
+
+> **Warning:** Mail.ReadWrite applies to every mailbox of the tenant unless you scope it (next section). Grant it only to the application used for API mode, never to the mail-flow or account takeover applications.
+
+<a id="mailbox-scope"></a>
+
+## 4. Optional: limit mailbox access with Exchange Online RBAC for Applications
+
+You can limit which mailboxes the application may access with an Exchange Online management scope instead of the tenant-wide Microsoft Graph consent. Mailboxes outside the scope are not inventoried or followed by the change feeds; unless journal copies for them arrive, they appear as coverage gaps on the Mailbox protection page.
+
+<a id="mailbox-scope-commands"></a>
+
+### 4.1 Create the scope and the role assignment
+
+Run these commands in Exchange Online PowerShell (Connect-ExchangeOnline) with the application's client ID, the object ID of its enterprise application and a group that contains the protected mailboxes. Then remove the tenant-wide Mail.ReadWrite consent of the application in Microsoft Entra (keep User.Read.All): RBAC for Applications adds to Entra consents, it does not restrict them.
+
+\`\`\`powershell
+New-ServicePrincipal -AppId '11111111-2222-3333-4444-555555555555' -ObjectId '<enterprise-application-object-id>' -DisplayName 'Email security gateway mailbox access'
+New-ManagementScope -Name 'Email security gateway API mode' -RecipientRestrictionFilter "MemberOfGroup -eq '<protected-mailboxes-group-distinguished-name>'"
+New-ManagementRoleAssignment -App '11111111-2222-3333-4444-555555555555' -Role 'Application Mail.ReadWrite' -CustomResourceScope 'Email security gateway API mode'
+\`\`\`
+
+> **Warning:** Role assignments of RBAC for Applications are not listed in the access token, so the console's permission check reports Mail.ReadWrite as missing for this grant once the Entra consent is removed. Scoped access is an advanced setup: check the coverage page after the change.
+
+> **Attestation \`api_mode.m365.app_access_scoped\`** (your statement, not a gateway check): An Exchange Online RBAC for Applications scope limits the mailbox-access application to the mailboxes API mode protects; mailboxes outside the scope without journal copies appear as coverage gaps.
+> Status: not confirmed yet
+
+<a id="feeds"></a>
+
+## 5. Optional: mailbox change feeds
+
+Change feeds are off by default. When you turn them on for this connection (Mailbox protection, Coverage, Feeds), the gateway follows the Inbox of every in-scope mailbox with the Microsoft Graph delta query, starting from the moment the feed starts (no backfill). With "polling" each Inbox is checked every few minutes; with "change notifications" Microsoft Graph notifies the gateway of new messages (the gateway still polls hourly as a safety net). Content is fetched only for messages no journal copy already delivered for that mailbox.
+
+<a id="feeds-state"></a>
+
+### 5.1 Feed settings of this connection
+
+Feeds need the active mailbox-access grant. Messages larger than the configured limit are recorded as too large and not scanned.
+
+| Item | Value |
+| --- | --- |
+| Feeds | \`off\` |
+| Mode | \`polling\` |
+
+<a id="verify"></a>
+
+## 6. Verify coverage
+
+<a id="verify-inventory"></a>
+
+### 6.1 Check the mailbox inventory and coverage
+
+After the grant is verified, the gateway lists the users of your tenant every few hours (or when you choose "Sync inventory") and keeps the mailboxes of your API-mode domains. A mailbox is covered when its change feed synced recently or a journal copy for it arrived within the last seven days; otherwise it is a gap.
+
+<a id="verify-message"></a>
+
+### 6.2 Send a test message
+
+Send a message from outside your organization to a protected mailbox. Within minutes it appears under Mailbox protection, Detections, with its verdict and the lag from delivery to verdict. It is delivered normally: API mode never holds it.
+
+<a id="revoke"></a>
+
+## 7. Revoke mailbox access
+
+In the console (Integrations, this connection, Grants, "Mailbox access for API mode", Revoke) the gateway deletes the stored credentials and stops the feeds and the inventory at once; detection of journal copies continues.
+
+<a id="revoke-provider"></a>
+
+### 7.1 Remove the access in Microsoft Entra
+
+Operator application: in the Microsoft Entra admin center open Enterprise applications, "Email security gateway mailbox access", and delete it (or remove its Mail.ReadWrite and User.Read.All permissions under Permissions). Your own application: delete its client secret or the app registration. If you scoped access, also remove the role assignment.
+
+| Item | Value |
+| --- | --- |
+| Application (client) ID | \`11111111-2222-3333-4444-555555555555\` |
+
+\`\`\`powershell
+Get-ManagementRoleAssignment -RoleAssignee '11111111-2222-3333-4444-555555555555' | Remove-ManagementRoleAssignment
+\`\`\`
+
+<a id="troubleshooting"></a>
+
+## 8. Troubleshooting lag and throttling
+
+<a id="troubleshoot-lag"></a>
+
+### 8.1 Intake lag
+
+The lag is the time from provider delivery to the verdict. High lag usually means delayed journal copies (check the journal source health) or a paused feed. Microsoft 365 may delay journal reports under load.
+
+<a id="troubleshoot-throttling"></a>
+
+### 8.2 Throttling
+
+Microsoft Graph limits requests per application and mailbox. The gateway keeps a per-connection request budget and, when the provider answers with a throttling response, pauses the calls of that API for this connection for the time the provider asks (at most ten minutes) before it continues. Sustained throttling raises a health warning; other applications using the same quota can be the cause.
+
+<a id="troubleshoot-cursor"></a>
+
+### 8.3 Feed restarts and gaps
+
+When Microsoft Graph no longer accepts the stored delta state of an Inbox, the gateway restarts the feed from the current state without backfill and marks a gap for that mailbox; the journal copy covers the interval. With change notifications, the notification endpoint of the gateway must be reachable from Microsoft Graph; missed notifications are caught by the safety poll.
+"
+`;

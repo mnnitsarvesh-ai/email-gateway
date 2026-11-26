@@ -7,6 +7,7 @@
  *
  * Simulator sources import only `node:*` modules and each other (import-guard test).
  */
+import type { SimMailbox } from './types';
 
 export interface GsActivityParameter {
   name: string;
@@ -113,6 +114,8 @@ export interface GsCustomer {
   gmail: Record<string, GsGmailSettings>;
   /** Reports retention in days (start times older than this are refused). Default 180. */
   reportsRetentionDays?: number;
+  /** Step API-1: Gmail mailbox state per user id (created on first use). */
+  mailboxes?: Record<string, SimMailbox>;
 }
 
 export interface GoogleSimData {

@@ -86,6 +86,8 @@ describe('EVENT_REGISTRY', () => {
       'assistant.report.email_requested.v1': ['email.policy', 'assistant_report_delivery'],
       // Step AI-6 D5: asynchronous assistant report jobs (aggregate assistant_report_job).
       'assistant.report.generate_requested.v1': ['email.policy', 'assistant_report_job'],
+      // Step API-1 D8: the detect-mode scan of a non-gateway copy (exchange of scanned.v1).
+      'mail.message.copy_scanned.v1': ['email.security', 'message'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

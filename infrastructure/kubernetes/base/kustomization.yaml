@@ -62,6 +62,10 @@ resources:
   # verification, validation runs, health and maintenance; the only workload that decrypts
   # customer provider credentials and holds the platform app/service-account keys.
   - integration-worker.yaml
+  # API-mode protection (step API-1 D5, docs/deployment/mailbox-worker.md): the copies consumer of
+  # email.mailbox (eg-mailbox), mailbox change feeds, inventory and the leader-elected health role;
+  # holder of the credential key for *.mailbox_remediation grants and of the notification secret.
+  - mailbox-worker.yaml
   # Outbox relay and reconciliation (step 3.2, ADR-0023).
   - event-relay.yaml
   - admin-portal.yaml

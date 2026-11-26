@@ -44,14 +44,15 @@ export const journalIntakeNotEnabled = (): CodedHttpException =>
   err(
     HttpStatus.FORBIDDEN,
     C.notEnabled,
-    'Journal intake needs the plan features archiving and journal_intake',
+    'Journal intake needs the plan feature journal_intake and either archiving or active API ' +
+      'mode (api_mode_protection with a domain in api or hybrid mode)',
   );
 
 export const archivingNotEnabledForIntake = (): CodedHttpException =>
   err(
     HttpStatus.CONFLICT,
     C.archivingNotEnabled,
-    'Journal intake needs archiving enabled with a default retention policy',
+    'Journal intake needs archiving enabled with a default retention policy (or active API mode)',
   );
 
 export const intakeSourceNotFound = (): CodedHttpException =>

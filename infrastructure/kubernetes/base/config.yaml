@@ -385,3 +385,50 @@ data:
   ARCHIVE_DEDUPE_WINDOW_HOURS: '72'
   ARCHIVE_MAX_CONTENT_VARIANTS: '4'
   ARCHIVE_MAX_MERGED_COPIES: '8'
+  # API-mode protection (step API-1 D16, docs/plan/steps/35-api-mode-protection.md;
+  # docs/deployment/mailbox-worker.md). Read by the mailbox-worker (feeds, inventory, health,
+  # copies), the api (notification rate, platform client ids for consent URLs) and the
+  # integration-worker (platform client ids). The provider API origins have exactly one legitimate
+  # value each (any other value and http: are refused outside local/ci). Secrets are NOT here:
+  # API_MODE_NOTIFICATION_SECRET (Secret email-gateway-api-mode-notification-secret), the 8.2
+  # credential key and the platform app certificate / service-account key are mounted into the
+  # mailbox-worker (and the integration-worker for verification) only.
+  # Public https URL of the api's Graph notification route (…/api/v1/provider-notifications/graph,
+  # served through the api Ingress). Empty = poll only (feedMode notify refused). Set per overlay.
+  API_MODE_GRAPH_NOTIFICATION_URL: ''
+  API_MODE_GRAPH_URL: https://graph.microsoft.com
+  API_MODE_GMAIL_URL: https://gmail.googleapis.com
+  API_MODE_GOOGLE_ADMIN_URL: https://admin.googleapis.com
+  API_MODE_ALLOW_HTTP_ENDPOINTS: 'false'
+  API_MODE_GRAPH_SUBSCRIPTION_MINUTES: '4230'
+  API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES: '720'
+  API_MODE_FEED_TICK_MS: '5000'
+  API_MODE_FEED_BATCH: '50'
+  API_MODE_FEED_POLL_SECONDS: '300'
+  API_MODE_FEED_SAFETY_POLL_SECONDS: '3600'
+  API_MODE_FETCH_CONCURRENCY: '16'
+  API_MODE_FETCH_CONCURRENCY_PER_CONNECTION: '4'
+  API_MODE_GRAPH_REQUESTS_PER_SECOND: '8'
+  API_MODE_GMAIL_REQUESTS_PER_SECOND: '10'
+  API_MODE_DIRECTORY_REQUESTS_PER_SECOND: '5'
+  API_MODE_MAX_MESSAGE_BYTES: '52428800'
+  API_MODE_INVENTORY_INTERVAL_HOURS: '6'
+  API_MODE_MAX_MAILBOXES_PER_CONNECTION: '50000'
+  API_MODE_HEALTH_INTERVAL_MS: '60000'
+  API_MODE_ALERT_MIN_INTERVAL_HOURS: '24'
+  API_MODE_JOURNAL_COVERAGE_DAYS: '7'
+  API_MODE_COVERAGE_WARN_PERCENT: '95'
+  API_MODE_COVERAGE_FAIL_PERCENT: '50'
+  API_MODE_LAG_WARN_SECONDS: '900'
+  API_MODE_LAG_FAIL_SECONDS: '3600'
+  API_MODE_THROTTLE_WARN_PER_HOUR: '20'
+  API_MODE_DEDUPE_WINDOW_HOURS: '168'
+  API_MODE_HYBRID_LINK_WINDOW_HOURS: '72'
+  API_MODE_COUNTER_FLUSH_SECONDS: '30'
+  # api: Graph notification requests per client IP per minute on the public callback routes.
+  API_MODE_NOTIFICATION_RATE_PER_MINUTE: '1200'
+  # Client ids of the operator's mailbox-access app / service account (profiles
+  # m365.mailbox_remediation, google.mailbox_remediation). Empty = the platform method is
+  # unavailable (customer-owned methods remain). Set per overlay.
+  PROVIDER_M365_MAILBOX_APP_CLIENT_ID: ''
+  PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: ''

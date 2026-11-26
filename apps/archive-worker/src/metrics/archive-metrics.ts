@@ -59,7 +59,7 @@ export class ArchiveMetrics {
     );
     this.captureSkips = metrics.counter(
       'archive_capture_skipped_total',
-      'Capture intents skipped by the scheduler, by reason (not_entitled, archiving_disabled, policy_archive_disabled, category_excluded, max_age); max_age means mail that was never archived',
+      'Capture intents skipped by the scheduler, by reason (not_entitled, archiving_disabled, policy_archive_disabled, category_excluded, max_age, api_copy); max_age means mail that was never archived, api_copy a mailbox API copy (step API-1)',
       ['reason'],
     );
     this.captureDuration = metrics.histogram(

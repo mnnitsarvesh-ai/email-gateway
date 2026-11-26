@@ -302,6 +302,13 @@ export const IntakeWizardSchema = z.object({
       step: z.enum(INTAKE_WIZARD_STEPS),
       status: z.enum(WIZARD_STEP_STATUSES),
       blockers: z.array(z.string()),
+      reason: z
+        .string()
+        .optional()
+        .describe(
+          'Step API-1: why a step is skipped beyond the kind (`api_mode`: the archiving step, ' +
+            'when active API mode entitles the source without archiving)',
+        ),
     }),
   ),
   nextAction: z.object({ step: z.enum(INTAKE_WIZARD_STEPS), action: z.string() }).nullable(),

@@ -180,8 +180,9 @@ export class DlpResultsRepository {
   /**
    * Public ids of the organization's **gateway** messages (`message_identities`) among the
    * results' `(message_id, received_at)` keys. Step 8.6 D5: a journal intake message
-   * (`ingest_source = 'journal_intake'`) is archive-only mail; its results are left out of the
-   * gateway incident list (the caller drops rows without a public id).
+   * (`ingest_source = 'journal_intake'`) is archive-only mail, and (step API-1 D7.7) an API-mode
+   * copy (`mailbox_api`) a detection copy: every non-gateway message's results are left out of
+   * the gateway incident list (the caller drops rows without a public id).
    */
   async messagePublicIds(
     scope: TenantScope,

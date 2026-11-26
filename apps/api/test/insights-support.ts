@@ -211,6 +211,7 @@ export const USAGE_COUNTS: UsageCounts = {
   ]),
   messagesToday: 4,
   journalIntakeToday: 2,
+  apiCopiesToday: 0,
   quarantineActive: 3,
   apiKeysActive: 1,
   sessionsActive: 2,

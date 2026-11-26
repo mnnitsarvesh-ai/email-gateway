@@ -240,4 +240,50 @@ describe('computeIntakeWizard (step 8.6 D10)', () => {
         .missingAttestations,
     ).toEqual(['journal.onprem.journal_recipient_created', 'journal.onprem.send_connector_tls']);
   });
+
+  it('step API-1 D6: active API mode entitles the source without archiving (archiving skipped)', () => {
+    const noArchiving = {
+      ...M365,
+      archiving: {
+        entitled: false,
+        intakeEntitled: true,
+        enabled: false,
+        defaultRetention: false,
+        apiModeActive: true,
+      },
+    };
+    const state = computeIntakeWizard(noArchiving);
+    expect(state.steps[0]).toEqual({
+      step: 'archiving',
+      status: 'skipped',
+      blockers: [],
+      reason: 'api_mode',
+    });
+    expect(state.steps.every((s) => s.status === 'done' || s.status === 'skipped')).toBe(true);
+    expect(state.nextAction).toBeNull();
+    // Archiving entitled but disabled: API mode still entitles.
+    expect(
+      statuses({
+        ...noArchiving,
+        archiving: { ...noArchiving.archiving, entitled: true, enabled: false },
+      }).archiving,
+    ).toBe('skipped');
+    // Ready archiving stays `done` (no reason) even with API mode.
+    expect(
+      computeIntakeWizard({ ...M365, archiving: { ...M365.archiving, apiModeActive: true } })
+        .steps[0],
+    ).toEqual({ step: 'archiving', status: 'done', blockers: [] });
+    // Without journal_intake, API mode does not help.
+    expect(
+      blockersOf(
+        { ...noArchiving, archiving: { ...noArchiving.archiving, intakeEntitled: false } },
+        'archiving',
+      ),
+    ).toEqual(['archiving_not_entitled', 'journal_intake_not_entitled']);
+    // Without API mode the 8.6 rules are unchanged.
+    expect(
+      statuses({ ...noArchiving, archiving: { ...noArchiving.archiving, apiModeActive: false } })
+        .archiving,
+    ).toBe('blocked');
+  });
 });

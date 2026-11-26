@@ -346,6 +346,8 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
   // the MIME commit (scan not requested, or the parse failed), E31 / E32 from the scan
   // finalization of a requested scan (in place of `scanned.v1`). The transition service refuses
   // every edge into `journaled` for a gateway message (`invalid/ingest_source_not_allowed`).
+  // Step API-1 (D8, ADR-0098): the same edges and reasons serve `mailbox_api` copies (always
+  // scanned in detect mode); no new edge or reason.
   {
     id: 'E30',
     from: ['persisted'],
@@ -372,10 +374,33 @@ export const TRANSITIONS: readonly TransitionEdge[] = [
   },
 ];
 
-/** `email_messages.ingest_source` (Prisma `MessageIngestSource`, step 8.6). */
-export type MessageIngestSourceValue = 'gateway' | 'journal_intake';
+/**
+ * `email_messages.ingest_source` (Prisma `MessageIngestSource`): `gateway`, `journal_intake`
+ * (step 8.6) and `mailbox_api` (step API-1, ADR-0098; a per-mailbox copy fetched from a provider
+ * mailbox feed).
+ */
+export type MessageIngestSourceValue = 'gateway' | 'journal_intake' | 'mailbox_api';
 
-/** Target states only a journal intake message may enter (step 8.6 D4). */
+/** Every `MessageIngestSourceValue`, in Prisma enum order. */
+export const MESSAGE_INGEST_SOURCES: readonly MessageIngestSourceValue[] = Object.freeze([
+  'gateway',
+  'journal_intake',
+  'mailbox_api',
+]);
+
+/**
+ * The non-gateway ingest sources (step API-1 D7.7, ADR-0098 supersedes the step 8.6 assertion in
+ * part): copies that are never delivered and end in `journaled` (E30–E32, reasons unchanged).
+ */
+export const COPY_INGEST_SOURCES: readonly MessageIngestSourceValue[] = Object.freeze([
+  'journal_intake',
+  'mailbox_api',
+]);
+
+/**
+ * Target states only a copy (`COPY_INGEST_SOURCES`: a journal intake or mailbox API message) may
+ * enter (step 8.6 D4, step API-1 D8).
+ */
 export const INTAKE_ONLY_STATES: readonly MessageState[] = ['journaled'];
 
 /** The edge from `from` to `to` in `table`, if any (at most one exists per pair). */

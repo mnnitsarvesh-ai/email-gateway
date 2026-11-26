@@ -77,6 +77,40 @@ export interface AlertIntakeSource {
   silenceAlertMinutes: number | null;
 }
 
+/** An API-mode connection of the organization (step API-1 D11.3): display and health only. */
+export interface AlertApiModeConnection {
+  publicId: string;
+  provider: string;
+  healthStatus: string;
+  /** The 8.2 provider connection's display name. */
+  displayName: string;
+  /** `api-mode-health/1` codes of the stored checks with status `warn` or `fail` (≤ 16). */
+  failingChecks: string[];
+}
+
+/** Bound of the stored `api-mode-health/1` checks read for an alert. */
+const MAX_API_MODE_CHECKS = 16;
+const API_MODE_CHECK_CODE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
+
+/**
+ * The codes of the checks that warn or fail in a stored `api-mode-health/1` document
+ * (`{ v: 1, checks: [{ code, status, evidence? }] }`), in stored order; anything malformed is
+ * ignored (never evidence text: it is not rendered). Pure.
+ */
+export function failingApiModeChecks(document: unknown): string[] {
+  if (typeof document !== 'object' || document === null) return [];
+  const checks = (document as { checks?: unknown }).checks;
+  if (!Array.isArray(checks)) return [];
+  const out: string[] = [];
+  for (const check of checks.slice(0, MAX_API_MODE_CHECKS)) {
+    if (typeof check !== 'object' || check === null) continue;
+    const { code, status } = check as { code?: unknown; status?: unknown };
+    if (typeof code !== 'string' || code.length > 64 || !API_MODE_CHECK_CODE.test(code)) continue;
+    if ((status === 'warn' || status === 'fail') && !out.includes(code)) out.push(code);
+  }
+  return out;
+}
+
 /**
  * The writer reads of the security alerts (step 6.2 N3, N4), inside the consumer's idempotency
  * transaction, each scoped to the envelope's organization and echo-checked (4.2 §6, D15 of 6.1):
@@ -271,6 +305,44 @@ export class SecurityAlertReads {
     };
   }
 
+  /**
+   * An API-mode connection of the organization by public id (step API-1 D11.3): provider, health
+   * now, the failing check codes and its provider connection's display name — never the tenant
+   * id, grants, cursors or mailbox addresses.
+   */
+  async apiModeConnection(
+    tx: Tx,
+    organizationId: bigint,
+    publicId: string,
+  ): Promise<AlertApiModeConnection | null> {
+    const row = await tx.apiModeConnection.findFirst({
+      where: { publicId, organizationId },
+      select: {
+        publicId: true,
+        organizationId: true,
+        provider: true,
+        healthStatus: true,
+        healthChecks: true,
+        providerConnection: { select: { organizationId: true, displayName: true } },
+      },
+    });
+    if (row === null) return null;
+    if (
+      row.publicId !== publicId ||
+      row.organizationId !== organizationId ||
+      row.providerConnection.organizationId !== organizationId
+    ) {
+      throw new InconsistentNotificationReadError('api_mode_connection');
+    }
+    return {
+      publicId: row.publicId,
+      provider: row.provider,
+      healthStatus: row.healthStatus,
+      displayName: row.providerConnection.displayName,
+      failingChecks: failingApiModeChecks(row.healthChecks),
+    };
+  }
+
   /** A journal intake source of the organization by public id (step 8.6 D9). */
   intakeSource(
     tx: Tx,
@@ -355,6 +427,7 @@ export function alertScopeKey(
     subscriptionPublicId?: string;
     connectionPublicId?: string;
     intakeSourcePublicId?: string;
+    apiModeConnectionPublicId?: string;
   },
 ): string {
   switch (kind) {
@@ -369,5 +442,8 @@ export function alertScopeKey(
     // Step 8.6 D9: one window per journal intake source (the archive-worker's scope key).
     case 'journal_intake_silent':
       return scope.intakeSourcePublicId ?? ALERT_SCOPE_NONE;
+    // Step API-1 D11.3: one window per API-mode connection (the mailbox-worker's scope key).
+    case 'api_mode_unhealthy':
+      return scope.apiModeConnectionPublicId ?? ALERT_SCOPE_NONE;
   }
 }

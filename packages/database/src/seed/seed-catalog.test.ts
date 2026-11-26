@@ -76,7 +76,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 74 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4, 8.2, 8.6 and AI-1, without duplicates', () => {
+  it('contains the 76 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4, 8.2, 8.6, AI-1 and API-1, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -154,14 +154,16 @@ describe('seed catalog', () => {
         'journal:manage',
         'assistant:use',
         'assistant:configure',
+        'remediation:read',
+        'remediation:write',
       ]),
     );
-    expect(keys).toHaveLength(74);
+    expect(keys).toHaveLength(76);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-42)).toEqual([
+    expect(keys.slice(-44)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -204,6 +206,8 @@ describe('seed catalog', () => {
       'journal:manage',
       'assistant:use',
       'assistant:configure',
+      'remediation:read',
+      'remediation:write',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -240,6 +244,7 @@ describe('seed catalog', () => {
         'delivery:read',
         'integration:read',
         'journal:read',
+        'remediation:read',
       ]),
     );
   });
@@ -516,7 +521,7 @@ describe('seed catalog', () => {
   });
 
   it('keeps ato_detection off in every plan (step 8.4 D21, PO1)', () => {
-    expect(FEATURE_KEYS.at(-3)).toBe('ato_detection');
+    expect(FEATURE_KEYS.at(-4)).toBe('ato_detection');
     expect([...OPERATOR_ENABLED_FEATURE_KEYS]).toEqual(['ato_detection', 'ai_assistant']);
     for (const plan of PLANS) expect(plan.features.ato_detection, plan.code).toBe(false);
     // The full plans still enable every other feature.
@@ -543,8 +548,8 @@ describe('seed catalog', () => {
     // The migration `ai_assistant` writes the same descriptions and category.
     expect(permissionCategoryOf(def('assistant:use'))).toBe('assistant');
     expect(permissionCategoryOf(def('assistant:configure'))).toBe('assistant');
-    // Appended last (append-only catalog order).
-    expect(keys.slice(-2)).toEqual(['assistant:use', 'assistant:configure']);
+    // Appended in catalog order (append-only), before the step API-1 remediation permissions.
+    expect(keys.slice(-4, -2)).toEqual(['assistant:use', 'assistant:configure']);
     // Every system role except mailbox_user may chat; tools stay bounded by its own permissions.
     expect(holders('assistant:use')).toEqual(
       SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user').sort(),
@@ -557,10 +562,65 @@ describe('seed catalog', () => {
       expect(TENANT_READ_PERMISSIONS, key).not.toContain(key);
       expect(ARCHIVE_ACCESS_PERMISSIONS, key).not.toContain(key);
     }
-    // The feature is appended last and never enabled by a plan (a platform operator enables it).
-    expect(FEATURE_KEYS.at(-1)).toBe('ai_assistant');
+    // The feature is appended (before api_mode_protection) and never enabled by a plan (a
+    // platform operator enables it).
+    expect(FEATURE_KEYS.at(-2)).toBe('ai_assistant');
     expect(OPERATOR_ENABLED_FEATURE_KEYS).toContain('ai_assistant');
     for (const plan of PLANS) expect(plan.features.ai_assistant, plan.code).toBe(false);
+  });
+
+  it('grants the step API-1 remediation permissions and the api_mode_protection feature (§3.3)', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const def = (key: string) => PERMISSIONS.find((p) => p.key === key)!;
+    expect(def('remediation:read').description).toBe(
+      'View API-mode protection: mailbox coverage, connection health, intake lag, throttling ' +
+        'and detections (and, from API-2, remediation history)',
+    );
+    expect(def('remediation:write').description).toBe(
+      'Manage API-mode protection: change feeds, mailbox inventory and resync (and, from API-2, ' +
+        'remediation and restore actions)',
+    );
+    // The migration `api_mode_protection` writes the same descriptions and category.
+    expect(permissionCategoryOf(def('remediation:read'))).toBe('remediation');
+    expect(permissionCategoryOf(def('remediation:write'))).toBe('remediation');
+    expect(keys.slice(-2)).toEqual(['remediation:read', 'remediation:write']);
+    // remediation:purge is API-3.
+    expect(keys).not.toContain('remediation:purge');
+    expect(TENANT_READ_PERMISSIONS).toContain('remediation:read');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('remediation:write');
+    expect(holders('remediation:read')).toEqual(
+      [
+        'compliance_auditor',
+        'domain_admin',
+        'organization_admin',
+        'platform_admin',
+        'read_only_user',
+        'security_analyst',
+        'super_admin',
+      ].sort(),
+    );
+    expect(holders('remediation:write')).toEqual(
+      ['organization_admin', 'security_analyst', 'super_admin'].sort(),
+    );
+    for (const key of ['remediation:read', 'remediation:write']) {
+      expect(TENANT_PERMISSIONS, key).toContain(key);
+      expect(PLATFORM_PERMISSIONS, key).not.toContain(key);
+      expect(ARCHIVE_ACCESS_PERMISSIONS, key).not.toContain(key);
+      expect(def(key).description.length).toBeLessThanOrEqual(255);
+    }
+    // Feature: appended last, plan-enabled in enterprise and dedicated only.
+    expect(FEATURE_KEYS.at(-1)).toBe('api_mode_protection');
+    expect(OPERATOR_ENABLED_FEATURE_KEYS).not.toContain('api_mode_protection');
+    expect(Object.fromEntries(PLANS.map((p) => [p.code, p.features.api_mode_protection]))).toEqual({
+      trial: false,
+      standard: false,
+      enterprise: true,
+      dedicated: true,
+      archive_only: false,
+    });
   });
 
   it('grants the step 8.2 integration permissions exactly as D16 says', () => {
@@ -683,6 +743,7 @@ describe('seed catalog', () => {
         'journal:read',
         'journal:manage',
         'assistant:use',
+        'remediation:read',
       ],
       security_analyst: [
         'organization:read',
@@ -720,6 +781,8 @@ describe('seed catalog', () => {
         'integration:read',
         'journal:read',
         'assistant:use',
+        'remediation:read',
+        'remediation:write',
       ],
       quarantine_reviewer: [
         'organization:read',
@@ -1027,7 +1090,7 @@ describe('seed catalog', () => {
   });
 
   it('defines the step 8.6 journal intake feature, limits and the archive_only plan (D13, ADR-0090)', () => {
-    expect(FEATURE_KEYS.at(-2)).toBe('journal_intake');
+    expect(FEATURE_KEYS.at(-3)).toBe('journal_intake');
     expect(OPERATOR_ENABLED_FEATURE_KEYS).not.toContain('journal_intake');
     const byCode = Object.fromEntries(PLANS.map((p) => [p.code, p]));
     expect(

@@ -26,6 +26,12 @@ import { defineListQuery } from '../../../http/listing/list-query';
  * audited `POST /archive/messages/{messageId}/reveal`.
  */
 
+/**
+ * `archive_record_sources.source` values (the Prisma `MessageIngestSource` enum): the 8.6 copy
+ * sources plus step API-1's `mailbox_api` (ADR-0098: never captured, D7.6, but a valid value of
+ * the column every view of a merged copy must accept).
+ */
+export const ARCHIVE_COPY_SOURCES = [...INGEST_SOURCES, 'mailbox_api'] as const;
 export const PublicIdSchema = z.uuid();
 
 const isoInstant = z.iso.datetime({ offset: true });
@@ -491,7 +497,12 @@ export const ArchiveMessageDetailSchema = ArchiveMessageSchema.extend({
             '`contentVariant`)',
         ),
         receivedAt: isoInstant,
-        source: z.enum(INGEST_SOURCES),
+        source: z
+          .enum(ARCHIVE_COPY_SOURCES)
+          .describe(
+            'Where the merged copy came from. Step API-1: `mailbox_api` (API-mode feed copies) ' +
+              'is accepted for completeness; such copies are never captured (D7.6)',
+          ),
         sizeBytes: z.number().int(),
         sha256,
         contentVariant: z

@@ -44,6 +44,15 @@ export const INGEST_SOURCE_LABEL: Record<ArchiveIngestSource, string> = {
   gateway: 'Gateway',
   journal_intake: 'Journal intake',
 };
+/**
+ * Step API-1: a merged copy's `source` may also name an API-mode mailbox copy (`mailbox_api`);
+ * such copies are never captured, so the value is not an archive search filter.
+ */
+export type MergedCopySource = ArchiveIngestSource | 'mailbox_api';
+export const MERGED_COPY_SOURCE_LABEL: Record<MergedCopySource, string> = {
+  ...INGEST_SOURCE_LABEL,
+  mailbox_api: 'Mailbox API copy',
+};
 export const ARCHIVE_RECORD_STATUSES = ['active', 'expiry_review', 'disposing'] as const;
 export const ARCHIVE_VERDICTS = [
   'clean',

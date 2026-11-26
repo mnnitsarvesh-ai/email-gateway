@@ -28,6 +28,11 @@ export interface SimResponse {
   status: number;
   headers?: Record<string, string>;
   body?: unknown;
+  /**
+   * A non-JSON or streamed body (step API-1: Graph `$value`, Gmail `format=raw`), written chunk
+   * by chunk with back-pressure. `length` sets `Content-Length`; without it the answer is chunked.
+   */
+  raw?: { contentType: string; chunks: Iterable<Uint8Array | string>; length?: number };
   /** Token subject for the call log. */
   subject?: string;
 }
@@ -44,7 +49,9 @@ export type SimulatorFactory = (script: SimScript) => Simulator;
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
-export type AdminHandler = (request: SimRequest) => SimResponse | Promise<SimResponse> | null;
+export type AdminHandler = (
+  request: SimRequest,
+) => SimResponse | null | Promise<SimResponse | null>;
 
 export class SimulatorServer {
   private server: Server | null = null;
@@ -88,7 +95,7 @@ export class SimulatorServer {
       const method = (req.method ?? 'GET').toUpperCase();
       const raw = await readBody(req);
       if (raw === null) {
-        send(res, { status: 413, body: { error: { code: 'RequestTooLarge' } } });
+        await send(res, { status: 413, body: { error: { code: 'RequestTooLarge' } } });
         return;
       }
       let body: unknown = undefined;
@@ -96,7 +103,7 @@ export class SimulatorServer {
         try {
           body = JSON.parse(raw);
         } catch {
-          send(res, {
+          await send(res, {
             status: 400,
             body: { error: { code: 'BadRequest', message: 'invalid json' } },
           });
@@ -105,7 +112,7 @@ export class SimulatorServer {
       }
       const host = req.headers.host ?? `127.0.0.1:${this.port}`;
       if (url.pathname === '/health') {
-        send(res, { status: 200, body: { status: 'ok' } });
+        await send(res, { status: 200, body: { status: 'ok' } });
         return;
       }
       if (this.options.admin) {
@@ -118,7 +125,7 @@ export class SimulatorServer {
           publicBase: `http://${host}`,
         });
         if (adminResponse) {
-          send(res, adminResponse);
+          await send(res, adminResponse);
           return;
         }
       }
@@ -126,7 +133,7 @@ export class SimulatorServer {
         (s) => url.pathname === s.prefix || url.pathname.startsWith(`${s.prefix}/`),
       );
       if (!simulator) {
-        send(res, { status: 404, body: { error: { code: 'NotFound' } } });
+        await send(res, { status: 404, body: { error: { code: 'NotFound' } } });
         return;
       }
       const path = url.pathname.slice(simulator.prefix.length) || '/';
@@ -175,9 +182,13 @@ export class SimulatorServer {
         status: response.status,
         ...(response.subject ? { subject: response.subject } : {}),
       });
-      send(res, response);
+      await send(res, response);
     } catch {
-      send(res, { status: 500, body: { error: { code: 'InternalServerError' } } });
+      if (!res.headersSent) {
+        await send(res, { status: 500, body: { error: { code: 'InternalServerError' } } });
+      } else {
+        res.destroy();
+      }
     }
   }
 }
@@ -209,8 +220,29 @@ function readBody(req: IncomingMessage): Promise<string | null> {
   });
 }
 
-function send(res: ServerResponse, response: SimResponse): void {
+async function send(res: ServerResponse, response: SimResponse): Promise<void> {
   const headers: Record<string, string> = { ...(response.headers ?? {}) };
+  if (response.raw) {
+    headers['Content-Type'] = response.raw.contentType;
+    if (response.raw.length !== undefined) headers['Content-Length'] = String(response.raw.length);
+    res.writeHead(response.status, headers);
+    for (const chunk of response.raw.chunks) {
+      if (res.destroyed) return;
+      if (!res.write(chunk)) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            res.off('drain', done);
+            res.off('close', done);
+            resolve();
+          };
+          res.on('drain', done);
+          res.on('close', done);
+        });
+      }
+    }
+    res.end();
+    return;
+  }
   if (response.body === undefined) {
     res.writeHead(response.status, headers);
     res.end();

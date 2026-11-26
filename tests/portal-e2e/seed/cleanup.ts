@@ -21,6 +21,7 @@ export const PLATFORM_EMAIL_SUFFIX = '@e2e-portal.test';
 /** Partitioned tables and their partition column (docs/database/partitioning.md). */
 const PARTITION_COLUMN: Record<string, string> = {
   archive_capture_intents: 'received_at',
+  api_message_copies: 'received_at',
   // Step 8.6: journal intake messages and merged copies.
   archive_record_sources: 'archive_received_at',
   journal_intake_messages: 'received_at',
@@ -84,6 +85,14 @@ const ORDER = [
   'ai_chat_settings',
   // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
   ...ATO_TABLES,
+  // Step API-1: the API-mode tables (copies and dedupe keys before mailboxes, counters and
+  // mailboxes before the API-mode connections, those before the provider connections).
+  'api_message_copies',
+  'api_copy_dedupe_keys',
+  'api_mailbox_addresses',
+  'api_mailboxes',
+  'api_mode_counters',
+  'api_mode_connections',
   // Step 8.2: provider connection rows (ProviderTenantDataRepository purge order, design §3.3);
   // `provider_connections` itself follows `smtp_connectors` (relay connectors reference it).
   'provider_relay_counters',

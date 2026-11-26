@@ -96,6 +96,28 @@ async function outboxTypes(organizationId: bigint, messageId: bigint): Promise<s
   return rows.map((r) => r.eventType);
 }
 
+/** The `mail.message.copy_scanned.v1` payloads of a message (aggregate = its public id). */
+async function copyScanned(
+  prisma: Fixtures['prisma'],
+  message: { messageId: bigint; organizationId: bigint },
+): Promise<unknown[]> {
+  const identity = await prisma.messageIdentity.findUniqueOrThrow({
+    where: { id: message.messageId },
+    select: { publicId: true },
+  });
+  const rows = await prisma.messageOutbox.findMany({
+    where: {
+      organizationId: message.organizationId,
+      aggregateId: identity.publicId,
+      eventType: EventTypes.MessageCopyScanned,
+    },
+    orderBy: { id: 'asc' },
+    select: { aggregateType: true, payload: true },
+  });
+  for (const row of rows) expect(row.aggregateType).toBe('message');
+  return rows.map((r) => r.payload);
+}
+
 async function lifecycle(message: { messageId: bigint; receivedAt: Date }) {
   const row = await fx.prisma.emailMessage.findFirstOrThrow({
     where: { id: message.messageId, receivedAt: message.receivedAt },
@@ -152,6 +174,8 @@ describe('MIME commit of journal intake messages (D4)', () => {
       statusReason: 'intake_parse_failed',
     });
     expect(await outboxTypes(org, message.messageId)).not.toContain(EventTypes.MessageParseFailed);
+    // No scan was requested: nothing for the per-mailbox copy record (step API-1 D8).
+    expect(await copyScanned(fx.prisma, message)).toEqual([]);
   });
 
   it('scan requested: parsed.v1 for the scan stage, the message stays persisted', async () => {
@@ -173,6 +197,10 @@ describe('MIME commit of journal intake messages (D4)', () => {
       status: 'journaled',
       statusReason: 'intake_parse_failed',
     });
+    // Step API-1 D8: the requested scan reports its parse failure (copy_scanned.v1).
+    expect(await copyScanned(fx.prisma, message)).toEqual([
+      expect.objectContaining({ ingestSource: 'journal_intake', outcome: 'parse_failed' }),
+    ]);
   });
 
   it('a missing journal_intake_messages row counts as not requested (fail safe)', async () => {
@@ -288,6 +316,25 @@ describe('scan finalization of journal intake messages (D4)', () => {
     expect(risk.map((r) => r.revision)).toEqual([0]);
     const types = await outboxTypes(scanOrg, message.messageId);
     expect(types).not.toContain(EventTypes.MessageScanned);
+    // Step API-1 D8: the journal copy's detect-mode verdict, written with E31.
+    const verdict = await sfx.prisma.emailScan.findFirstOrThrow({
+      where: { id: scan.scanId, receivedAt: scan.receivedAt },
+      select: { verdict: true, riskScore: true },
+    });
+    expect(await copyScanned(sfx.prisma, message)).toEqual([
+      {
+        messageId: message.messageId.toString(),
+        messagePublicId: expect.any(String) as string,
+        receivedAt: message.receivedAt.toISOString(),
+        ingestSource: 'journal_intake',
+        lifecycleRound: 0,
+        scanId: scan.scanId.toString(),
+        outcome: 'scanned',
+        verdict: verdict.verdict,
+        riskScore: verdict.riskScore,
+        completedAt: expect.any(String) as string,
+      },
+    ]);
   });
 
   it('a timed-out round swept by the deadline sweeper applies E32 (scan_failed → journaled)', async () => {
@@ -320,6 +367,9 @@ describe('scan finalization of journal intake messages (D4)', () => {
       ['journaled', 'intake_scan_failed'],
     ]);
     expect(state.scanned).toEqual([]);
+    expect(await copyScanned(sfx.prisma, message)).toEqual([
+      expect.objectContaining({ ingestSource: 'journal_intake', outcome: 'scan_failed' }),
+    ]);
   });
 
   it('a gateway round still writes scanned.v1 (unchanged)', async () => {
@@ -336,5 +386,128 @@ describe('scan finalization of journal intake messages (D4)', () => {
     const state = await sfx.state(message);
     expect(state.message.status).toBe('scanned');
     expect(state.scanned).toHaveLength(1);
+    expect(await copyScanned(sfx.prisma, message)).toEqual([]);
+  });
+});
+
+/** Turns a fixture message into a mailbox API copy (as the mailbox-worker commits it, API-1 D10). */
+async function asMailboxCopy(
+  prisma: Fixtures['prisma'],
+  message: { messageId: bigint; receivedAt: Date },
+): Promise<void> {
+  await prisma.emailMessage.update({
+    where: { id_receivedAt: { id: message.messageId, receivedAt: message.receivedAt } },
+    data: { ingestSource: 'mailbox_api', status: 'persisted', version: 1 },
+  });
+}
+
+describe('mailbox API copies in detect mode (step API-1 D8)', () => {
+  it('MIME commit: always scan-requested (parsed.v1 for the scan stage, no journal row)', async () => {
+    const message = await fx.message(org, { eml: multipartMessage() });
+    await asMailboxCopy(fx.prisma, message);
+    const { outcome, metrics: text } = await parse(message);
+    expect(outcome).toBe('handled');
+    const state = await fx.state(message);
+    expect(state.outbox.map((o) => o.eventType)).toEqual([EventTypes.MessageParsed]);
+    expect(await lifecycle(message)).toMatchObject({ status: 'persisted', history: [] });
+    expect(await copyScanned(fx.prisma, message)).toEqual([]);
+    expect(text).toMatch(/mime_intake_messages_total\{[^}]*result="scan_requested"[^}]*\} 1/);
+  });
+
+  it('parse failure: E30 intake_parse_failed + copy_scanned.v1 parse_failed, never parse_failed.v1', async () => {
+    const message = await fx.message(org, { eml: 'x', upload: false });
+    await asMailboxCopy(fx.prisma, message);
+    const ingestion = fx.ingestion();
+    const event = fx.received(message);
+    expect(await ingestion.service.handle(event)).toBe('handled');
+    expect((await fx.state(message)).outbox).toEqual([]);
+    const life = await lifecycle(message);
+    expect(life).toMatchObject({ status: 'journaled', statusReason: 'intake_parse_failed' });
+    expect(life.history.map((h) => [h.fromStatus, h.toStatus, h.reasonCode])).toEqual([
+      ['persisted', 'journaled', 'intake_parse_failed'],
+    ]);
+    const identity = await fx.prisma.messageIdentity.findUniqueOrThrow({
+      where: { id: message.messageId },
+      select: { publicId: true },
+    });
+    expect(await copyScanned(fx.prisma, message)).toEqual([
+      {
+        messageId: message.messageId.toString(),
+        messagePublicId: identity.publicId,
+        receivedAt: message.receivedAt.toISOString(),
+        ingestSource: 'mailbox_api',
+        lifecycleRound: 0,
+        scanId: null,
+        outcome: 'parse_failed',
+        verdict: null,
+        riskScore: null,
+        completedAt: expect.any(String) as string,
+      },
+    ]);
+    expect(await outboxTypes(org, message.messageId)).not.toContain(EventTypes.MessageParseFailed);
+    // A redelivery is a duplicate: no second copy_scanned row.
+    expect(await ingestion.service.handle(event)).toBe('duplicate');
+    expect(await copyScanned(fx.prisma, message)).toHaveLength(1);
+  });
+
+  it('scan finalization: journaled (E31) + copy_scanned.v1 with verdict and score; no scanned.v1', async () => {
+    const message = await sfx.message(scanOrg, { eml: Buffer.from('x'), upload: false });
+    await asMailboxCopy(sfx.prisma, message);
+    const scan = await openRound(message);
+    const eventId = uuidv7();
+    const result = await repo.finalize({
+      consumer: sfx.consumer('rspamd'),
+      eventId,
+      round: scan,
+      final: rspamdFinal('spam'),
+      completion: { causationEventId: eventId, correlationId: 'it-apimode', now: new Date() },
+    });
+    expect(result).toMatchObject({
+      kind: 'handled',
+      completion: {
+        kind: 'completed',
+        transition: 'applied',
+        scannedEventId: null,
+        intake: 'journaled',
+        copyScannedEventId: expect.any(String) as string,
+      },
+    });
+    const state = await sfx.state(message);
+    expect(state.message.status).toBe('journaled');
+    expect(state.history.map((h) => [h.toStatus, h.reasonCode])).toEqual([
+      ['scanning', 'scan_started'],
+      ['scanned', 'scan_complete'],
+      ['journaled', 'intake_scan_complete'],
+    ]);
+    expect(state.scanned).toEqual([]);
+    const types = await outboxTypes(scanOrg, message.messageId);
+    expect(types).not.toContain(EventTypes.MessageScanned);
+    expect(types).not.toContain(EventTypes.MessageParsed);
+    const scanRow = await sfx.prisma.emailScan.findFirstOrThrow({
+      where: { id: scan.scanId, receivedAt: scan.receivedAt },
+      select: { verdict: true, riskScore: true },
+    });
+    expect(scanRow.verdict).not.toBeNull();
+    expect(scanRow.riskScore).not.toBeNull();
+    expect(await copyScanned(sfx.prisma, message)).toEqual([
+      expect.objectContaining({
+        ingestSource: 'mailbox_api',
+        lifecycleRound: 0,
+        scanId: scan.scanId.toString(),
+        outcome: 'scanned',
+        verdict: scanRow.verdict,
+        riskScore: scanRow.riskScore,
+      }),
+    ]);
+    // Replaying the same final changes nothing (ledger): still one copy_scanned row.
+    const replay = await repo.finalize({
+      consumer: sfx.consumer('rspamd'),
+      eventId,
+      round: scan,
+      final: rspamdFinal('spam'),
+      completion: { causationEventId: eventId, correlationId: 'it-apimode', now: new Date() },
+    });
+    expect(replay).toEqual({ kind: 'duplicate' });
+    expect(await copyScanned(sfx.prisma, message)).toHaveLength(1);
   });
 });

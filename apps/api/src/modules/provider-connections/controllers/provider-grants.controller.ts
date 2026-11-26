@@ -61,10 +61,24 @@ import {
 } from '../dto/provider-connections.schemas';
 import { INTEGRATION_MANAGE, PROVIDER_OPERATIONS } from '../provider-connections.constants';
 import { PROVIDER_ERROR_CODES as C } from '../provider-connections.errors';
+import { REMEDIATION_PERMISSION_REQUIRED } from '../services/provider-common';
 import { ProviderGrantsService } from '../services/provider-grants.service';
 
 const GRANT_CONFLICTS = [C.connectionDisabled, C.connectionVersionConflict];
 
+/** Step API-1 D4 (ADR-0099): the extra gate of the mailbox-access profiles. */
+const MAILBOX_GRANT_RULE =
+  ' Step API-1: a `*.mailbox_remediation` profile (API-mode mailbox access) also needs ' +
+  '`remediation:write` (`403 remediation_permission_required`).';
+
+/** `403`: permission, or the mailbox-access gate (step API-1 D4). */
+const ApiMailboxGrantForbidden = (): MethodDecorator =>
+  ApiCodedError(
+    403,
+    'Missing permission (`forbidden`), or a mailbox-access profile without `remediation:write` ' +
+      '(`remediation_permission_required`, step API-1)',
+    ['forbidden', REMEDIATION_PERMISSION_REQUIRED],
+  );
 /**
  * Grants of a connection (step 8.2 §5.2 #8–12; D2, D3, D5; ADR-0076, ADR-0077). Translation only
  * (ProviderGrantsService). The static `consent/complete` route is declared before `{id}` routes.
@@ -150,6 +164,7 @@ export class ProviderGrantsController {
       'upload the credential next (`PUT …/grants/{profile}/credentials`). Platform methods need ' +
       'the operator’s app (`422 auth_method_unavailable`); the method must belong to the ' +
       'profile and provider (`422 auth_method_not_allowed`). Audited `integration.grant_created`.' +
+      MAILBOX_GRANT_RULE +
       REDACTED_REPLAY_RULE('consent.consentUrl') +
       KEYED_RULE,
   })
@@ -166,10 +181,12 @@ export class ProviderGrantsController {
   )
   @ApiKeyedBadRequest()
   @ApiErrors(401)
-  @ApiCodedError(403, 'Missing permission, or an API key with `platform_app`', [
-    'forbidden',
-    C.userPrincipalRequired,
-  ])
+  @ApiCodedError(
+    403,
+    'Missing permission, an API key with `platform_app`, or a mailbox-access profile without ' +
+      '`remediation:write` (`remediation_permission_required`, step API-1)',
+    ['forbidden', C.userPrincipalRequired, REMEDIATION_PERMISSION_REQUIRED],
+  )
   @ApiConnectionNotFound()
   @ApiUnavailable()
   @ApiKeyedConflict(
@@ -218,6 +235,7 @@ export class ProviderGrantsController {
       'verifies it). Redacted replay (ADR-0057): the stored response never contains the ' +
       'credential and the request fingerprint is an HMAC of it. Audited ' +
       '`integration.grant_credentials_set`. Rate class `sensitive`.' +
+      MAILBOX_GRANT_RULE +
       KEYED_RULE,
   })
   @ApiConnectionId()
@@ -231,7 +249,8 @@ export class ProviderGrantsController {
   })
   @ApiKeyedResponse(200, GrantSchema, PROVIDER_EXAMPLES.grantWithCredential, 'Stored, verifying')
   @ApiKeyedBadRequest()
-  @ApiErrors(401, 403)
+  @ApiErrors(401)
+  @ApiMailboxGrantForbidden()
   @ApiConnectionNotFound([C.grantNotFound])
   @ApiUnavailable()
   @ApiKeyedConflict(GRANT_CONFLICTS, '`connection_disabled`')
@@ -273,6 +292,7 @@ export class ProviderGrantsController {
       'the delegation). A customer grant needs its credential, a Microsoft platform grant its ' +
       'consent (`422 credential_invalid`). Audited `integration.grant_consented` (delegation ' +
       'confirmed) or `integration.grant_verification_requested`.' +
+      MAILBOX_GRANT_RULE +
       KEYED_RULE,
   })
   @ApiConnectionId()
@@ -288,7 +308,8 @@ export class ProviderGrantsController {
     'Verification requested',
   )
   @ApiKeyedBadRequest()
-  @ApiErrors(401, 403)
+  @ApiErrors(401)
+  @ApiMailboxGrantForbidden()
   @ApiConnectionNotFound([C.grantNotFound])
   @ApiUnavailable()
   @ApiKeyedConflict(GRANT_CONFLICTS, '`connection_disabled`')
@@ -329,13 +350,15 @@ export class ProviderGrantsController {
       'outbound routing is on (`409 outbound_active`: turn it off first). The gateway cannot ' +
       'revoke consent at the provider (it holds no write permission): the response lists the ' +
       'provider-side removal steps. Audited `integration.grant_revoked`.' +
+      MAILBOX_GRANT_RULE +
       KEYED_RULE,
   })
   @ApiConnectionId()
   @ApiProfileParam()
   @ApiKeyedResponse(200, RevokedGrantSchema, PROVIDER_EXAMPLES.revoked, 'Revoked')
   @ApiKeyedBadRequest()
-  @ApiErrors(401, 403)
+  @ApiErrors(401)
+  @ApiMailboxGrantForbidden()
   @ApiConnectionNotFound([C.grantNotFound])
   @ApiUnavailable()
   @ApiKeyedConflict(

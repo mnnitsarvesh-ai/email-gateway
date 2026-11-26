@@ -8,7 +8,8 @@
  *   address or alias, `users.update`, `users.signOut`, `tokens.list`, `tokens.delete`,
  *   `orgunits.get`).
  * - `GmailSimulator` (prefix `/gmail`, production origin `gmail.googleapis.com`): Gmail settings
- *   `autoForwarding` (get, update), `filters` (list, get, delete) and `delegates` (list).
+ *   `autoForwarding` (get, update), `filters` (list, get, delete) and `delegates` (list); step
+ *   API-1 adds the mailbox reads `profile`, `history` and `messages.get` (`gmail-mail.ts`).
  *
  * Bearer tokens are checked against the token registry and every endpoint enforces its OAuth
  * scope, so missing-scope paths are real. Admin SDK calls must impersonate an administrator; Gmail
@@ -17,6 +18,7 @@
  * the throttling and quota reasons `rateLimitExceeded`, `userRateLimitExceeded`,
  * `dailyLimitExceeded` and `quotaExceeded` (injected through the script API).
  */
+import { GMAIL_MAIL_PATH, gmailMail } from './gmail-mail';
 import { json, type SimRequest, type SimResponse, type Simulator } from './server';
 import type { SimScript } from './script';
 import { hasPermission, type ResolvedToken } from './tokens';
@@ -426,8 +428,10 @@ export class GmailSimulator extends GoogleBase implements Simulator {
       /^\/gmail\/v1\/users\/([^/]+)\/settings\/(autoForwarding|filters|delegates)(?:\/([^/]+))?$/.exec(
         request.path,
       );
-    if (!match) return this.error(404, 'notFound', 'NOT_FOUND');
-    const userKey = decodeURIComponent(match[1] as string);
+    // Step API-1 (D13): profile, history and messages of the mailbox.
+    const mail = match ? null : GMAIL_MAIL_PATH.exec(request.path);
+    if (!match && !mail) return this.error(404, 'notFound', 'NOT_FOUND');
+    const userKey = decodeURIComponent(((match ?? mail) as RegExpExecArray)[1] as string);
     // The mailbox owner is impersonated: `me` or the owner's own address/id must match `sub`.
     let user: GsUser | undefined;
     if (userKey === 'me') {
@@ -446,6 +450,16 @@ export class GmailSimulator extends GoogleBase implements Simulator {
     if (user.suspended || user.gmailEnabled === false) {
       return respond(this.error(400, 'failedPrecondition', 'FAILED_PRECONDITION'));
     }
+    if (mail) {
+      const kind = (mail[2] as string).startsWith('messages/') ? 'message' : (mail[2] as string);
+      const messageKey = mail[3] === undefined ? undefined : decodeURIComponent(mail[3]);
+      return respond(
+        gmailMail(request, token, customer, user, kind, messageKey, (status, reason, code) =>
+          this.error(status, reason, code),
+        ),
+      );
+    }
+    if (!match) return respond(this.error(404, 'notFound', 'NOT_FOUND'));
     const settings = (customer.gmail[user.id] ??= {
       autoForwarding: { enabled: false },
       filters: [],

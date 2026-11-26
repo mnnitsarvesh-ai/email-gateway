@@ -1,4 +1,8 @@
-import { validationResultsSchema } from '@email-gateway/provider-integrations';
+import {
+  grantsForCheck,
+  healthCheckByCode,
+  validationResultsSchema,
+} from '@email-gateway/provider-integrations';
 import { describe, expect, it } from 'vitest';
 import { boundResults } from '../tasks/validation-runner';
 import { checkResult } from './checks';
@@ -64,4 +68,25 @@ describe('attestedCodes (provider-attestations/1)', () => {
       'google.reject_non_gateway_enabled',
     ]);
   });
+});
+
+describe('8.2 per-grant checks skip non-mail_flow grants (R2; step API-1 D4)', () => {
+  const grants = [
+    { profile: 'm365.mail_flow' },
+    { profile: 'm365.ato_telemetry' },
+    { profile: 'm365.mailbox_remediation' },
+    { profile: 'google.mailbox_remediation' },
+    { profile: 'google.mail_flow' },
+  ];
+  it.each(['credentials.token', 'permissions.granted'])(
+    '%s covers the mail-flow grants only (mailbox access is verified by verifyAuxiliary)',
+    (code) => {
+      const definition = healthCheckByCode(code);
+      expect(definition).toBeDefined();
+      expect(grantsForCheck(definition!, grants).map((g) => g.profile)).toEqual([
+        'm365.mail_flow',
+        'google.mail_flow',
+      ]);
+    },
+  );
 });

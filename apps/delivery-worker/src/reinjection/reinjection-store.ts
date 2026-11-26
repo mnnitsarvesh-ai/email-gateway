@@ -1,6 +1,7 @@
 import { isUniqueViolation, uuidv7 } from '@email-gateway/common';
 import { type DeliveryReinjection, Prisma, type PrismaClient } from '@email-gateway/database';
 import { recipientSetSha256, reinjectionIdempotencyKey } from '@email-gateway/mail-routing';
+import type { MessageIngestSourceValue } from '@email-gateway/message-lifecycle';
 
 /** A claimed `delivery_reinjections` row (status `in_progress`, attempts already incremented). */
 export type ClaimedReinjection = Pick<
@@ -65,8 +66,11 @@ export interface ActiveDelivery {
 }
 
 export interface ReinjectionContext {
-  /** `email_messages.ingest_source` (step 8.6): `journal_intake` is never reinjected. */
-  ingestSource?: 'gateway' | 'journal_intake';
+  /**
+   * `email_messages.ingest_source` (step 8.6, step API-1 D7.7): only `gateway` messages are
+   * reinjected (`journal_intake` and `mailbox_api` copies never).
+   */
+  ingestSource?: MessageIngestSourceValue;
   envelopeFrom: string;
   clientIp: string | null;
   clientHelo: string | null;

@@ -9,11 +9,13 @@ import {
   type MessageState,
 } from './states';
 import {
+  COPY_INGEST_SOURCES,
   findEdge,
   INTAKE_ONLY_STATES,
   LIFECYCLE_REASON_CODES,
   TRANSITIONS,
   type LifecycleReasonCode,
+  type MessageIngestSourceValue,
   type TransitionEdge,
 } from './transitions';
 
@@ -22,7 +24,7 @@ const current = (
   state: MessageState | null,
   version = 3,
   round = 0,
-  ingestSource: 'gateway' | 'journal_intake' = 'gateway',
+  ingestSource: MessageIngestSourceValue = 'gateway',
 ) => ({ state, version, round, ingestSource });
 /** A journal intake message for edges into an intake-only state (step 8.6), else a gateway one. */
 const currentFor = (state: MessageState | null, to: MessageState) =>
@@ -128,16 +130,23 @@ describe('decideTransition: exhaustive (from ∪ creation) × to × role (§9 it
 describe('decideTransition: the journaled state is for journal intake messages only (step 8.6 D4)', () => {
   const intakeEdges = TRANSITIONS.filter((edge) => INTAKE_ONLY_STATES.includes(edge.to));
 
-  it('applies E30-E32 to a journal intake message', () => {
+  it('applies E30-E32 to a journal intake message and (step API-1 D8) a mailbox API copy', () => {
     expect(intakeEdges.map((e) => e.id)).toEqual(['E30', 'E31', 'E32']);
-    for (const edge of intakeEdges) {
-      for (const reason of edge.reasons) {
-        const d = decideTransition(current(edge.from[0]!, 3, 0, 'journal_intake'), {
-          to: 'journaled',
-          reason,
-          actor: { role: 'scanner' },
-        });
-        expect(d, `${edge.id} ${reason}`).toEqual({ result: 'apply', edge, nextRound: 0 });
+    expect(COPY_INGEST_SOURCES).toEqual(['journal_intake', 'mailbox_api']);
+    for (const source of COPY_INGEST_SOURCES) {
+      for (const edge of intakeEdges) {
+        for (const reason of edge.reasons) {
+          const d = decideTransition(current(edge.from[0]!, 3, 0, source), {
+            to: 'journaled',
+            reason,
+            actor: { role: 'scanner' },
+          });
+          expect(d, `${source} ${edge.id} ${reason}`).toEqual({
+            result: 'apply',
+            edge,
+            nextRound: 0,
+          });
+        }
       }
     }
   });

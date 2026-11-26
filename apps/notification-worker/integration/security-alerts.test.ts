@@ -396,6 +396,8 @@ afterAll(async () => {
   await prisma.notificationUserPreference.deleteMany({ where });
   await prisma.webhookSubscription.deleteMany({ where });
   await prisma.journalIntakeSource.deleteMany({ where });
+  await prisma.apiModeConnection.deleteMany({ where });
+  await prisma.providerConnection.deleteMany({ where });
   await prisma.quarantineMessage.deleteMany({ where });
   await prisma.domainDnsRecord.deleteMany({ where });
   await prisma.domain.deleteMany({ where });
@@ -635,6 +637,86 @@ describe('journal_intake_silent (step 8.6 D9)', () => {
     });
     const count = sink.messages.length;
     await publish(foreign);
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(sink.messages.length).toBe(count);
+  });
+});
+
+describe('api_mode_unhealthy (step API-1 D11.3)', () => {
+  it('remediation:read holders and the contact; provider, connection, check titles and /api-mode link, never an address', async () => {
+    const providerConnection = await prisma.providerConnection.create({
+      data: {
+        organizationId: orgA.id,
+        provider: 'microsoft_365',
+        displayName: `Contoso M365 ${suffix}`,
+        status: 'active',
+      },
+    });
+    const connection = await prisma.apiModeConnection.create({
+      data: {
+        organizationId: orgA.id,
+        providerConnectionId: providerConnection.id,
+        provider: 'microsoft_365',
+        healthStatus: 'failing',
+        healthChecks: {
+          v: 1,
+          checks: [
+            { code: 'connection.active', status: 'pass' },
+            { code: 'mailbox_access.grant', status: 'fail', evidence: 'grant revoked' },
+            { code: 'coverage.percent', status: 'warn', evidence: '80% covered' },
+          ],
+        },
+        healthChangedAt: new Date(),
+      },
+    });
+    const before = sink.messages.length;
+    const e = alertEnvelope(orgA.id, {
+      kind: 'api_mode_unhealthy',
+      severity: 'high',
+      refs: { apiModeConnectionId: connection.publicId },
+    });
+    await publish(e);
+    await eventually(() => sink.messages.length === before + 1, 20_000, 'api-mode alert sent');
+    const mail = sink.messages.at(-1)!;
+    // Every tenant role holding remediation:read (§3.3): organization_admin, security_analyst,
+    // domain_admin, read_only_user; plus the organization contact.
+    expect(mail.recipients.sort()).toEqual(
+      [
+        usersA.admin!.email,
+        usersA.analyst!.email,
+        usersA.analystOptedOut!.email,
+        usersA.domainAdmin!.email,
+        usersA.adminNoPolicyAlerts!.email,
+        usersA.reader!.email,
+        contactA,
+      ]
+        .map((x) => x.toLowerCase())
+        .sort(),
+    );
+    for (const email of orgBEmails) expect(mail.recipients).not.toContain(email.toLowerCase());
+    const body = bodyOf(mail.data);
+    expect(body).toContain('Alert: API-mode protection connection degraded or failing');
+    expect(body).toContain('Provider: Microsoft 365');
+    expect(body).toContain(`Connection: Contoso M365 ${suffix} (${connection.publicId})`);
+    expect(body).toContain('Problem: failing.');
+    expect(body).toContain('- Mailbox access grant active (mailbox_access.grant)');
+    expect(body).toContain('- Mailbox coverage (coverage.percent)');
+    expect(body).not.toContain('connection.active');
+    expect(body).not.toContain('grant revoked');
+    expect(body).toContain(`https://portal.test/api-mode?connection=${connection.publicId}`);
+    assertNoForbiddenContent(mail.data);
+    await eventually(() => handled(e.eventId), 20_000, 'api-mode alert ledgered');
+    // A redelivery of the same alert sends nothing (ledger).
+    const count = sink.messages.length;
+    await publish(e);
+    // Organization B's envelope naming A's connection is dead-lettered (never mailed).
+    await publish(
+      alertEnvelope(orgB.id, {
+        kind: 'api_mode_unhealthy',
+        severity: 'high',
+        refs: { apiModeConnectionId: connection.publicId },
+      }),
+    );
     await new Promise((r) => setTimeout(r, 1_500));
     expect(sink.messages.length).toBe(count);
   });

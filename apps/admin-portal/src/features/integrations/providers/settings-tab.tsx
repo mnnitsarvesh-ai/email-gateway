@@ -21,15 +21,27 @@ import type { SuccessBody } from '@/lib/api/types';
 import { Can } from '@/lib/auth/can';
 import { useCan, useHasPermission } from '@/lib/auth/me';
 import { DetailList, MutationError, Section } from '@/features/domains/kit';
+import { MailboxAccessCard } from '@/features/api-mode/mailbox-access-card';
+import { MAILBOX_PROFILE } from '@/features/api-mode/model';
 import { CONNECTION_QUERIES, MailFlowDialog } from './mail-flow-dialog';
 import {
   AUTH_METHOD_INFO,
   GrantStatusBadge,
   errorHint,
+  type CatalogProvider,
   type Connection,
   type Grant,
   type MailFlowChange,
 } from './model';
+
+const MAILBOX_PROFILES = new Set(Object.values(MAILBOX_PROFILE));
+
+/** Display name of a grant's profile (the key stays visible as code). */
+function profileLabel(profile: string): string | null {
+  if (MAILBOX_PROFILES.has(profile)) return 'Mailbox access for API mode';
+  if (profile.endsWith('.mail_flow')) return 'Mail flow';
+  return null;
+}
 
 type Disconnected = SuccessBody<'ProviderConnectionsController_disconnect_v1'>;
 
@@ -97,6 +109,8 @@ function Grants({ connection }: { connection: Connection }) {
     successMessage: 'Access revoked at the gateway.',
   });
   const grants = connection.grants.filter((g) => g.status !== 'revoked');
+  // Step API-1: revoking the mailbox-access grant also needs remediation:write (D4).
+  const canRevokeMailbox = useHasPermission('remediation:write');
   return (
     <div className="grid gap-3">
       {grants.length === 0 ? (
@@ -105,6 +119,9 @@ function Grants({ connection }: { connection: Connection }) {
         <ul className="grid gap-2">
           {grants.map((g) => (
             <li key={g.id} className="flex flex-wrap items-center gap-2 rounded-md border p-3">
+              {profileLabel(g.profile) ? (
+                <span className="text-sm font-medium">{profileLabel(g.profile)}</span>
+              ) : null}
               <code className="font-mono text-xs">{g.profile}</code>
               <span className="text-sm">{AUTH_METHOD_INFO[g.authMethod].title}</span>
               <GrantStatusBadge status={g.status} />
@@ -113,17 +130,19 @@ function Grants({ connection }: { connection: Connection }) {
                   credential {g.credentialFingerprint}
                 </span>
               ) : null}
-              <Can op="ProviderGrantsController_revoke_v1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="ml-auto"
-                  disabled={connection.status === 'disabled'}
-                  onClick={() => setRevoking(g)}
-                >
-                  Revoke
-                </Button>
-              </Can>
+              {MAILBOX_PROFILES.has(g.profile) && !canRevokeMailbox ? null : (
+                <Can op="ProviderGrantsController_revoke_v1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="ml-auto"
+                    disabled={connection.status === 'disabled'}
+                    onClick={() => setRevoking(g)}
+                  >
+                    Revoke
+                  </Button>
+                </Can>
+              )}
             </li>
           ))}
         </ul>
@@ -175,8 +194,17 @@ function Grants({ connection }: { connection: Connection }) {
   );
 }
 
-/** Tab "Settings": rename, outbound suspension, revoke grants, disconnect (D13). */
-export function SettingsTab({ connection }: { connection: Connection }) {
+/**
+ * Tab "Settings": rename, outbound suspension, revoke grants, disconnect (D13); step API-1 adds
+ * the mailbox-access grant card of API mode.
+ */
+export function SettingsTab({
+  connection,
+  catalog,
+}: {
+  connection: Connection;
+  catalog?: CatalogProvider;
+}) {
   const canDisconnect = useCan('ProviderConnectionsController_disconnect_v1');
   const canConnector = useHasPermission('integration:manage', 'connector:manage');
   const [change, setChange] = useState<{
@@ -217,6 +245,7 @@ export function SettingsTab({ connection }: { connection: Connection }) {
       >
         <Grants connection={connection} />
       </Section>
+      <MailboxAccessCard connection={connection} catalog={catalog} />
       {!disabled && canConnector && (outboundOn || connection.outboundMode === 'suspended') ? (
         <Section
           title="Outbound routing"

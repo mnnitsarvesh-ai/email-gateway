@@ -68,6 +68,11 @@
  *   side-effect-free request allowed), and a forced `intake_sources_get { reveal: 'true' }` is
  *   `denied_schema` with no loopback request and no `journal_intake.address_revealed` audit row.
  *
+ * - Step API-1 (docs/plan/steps/35-api-mode-protection.md D15): the read sweep covers 197 enabled
+ *   reads (the 9 API-mode reads, asserted by name; the sweep organization has an API-mode
+ *   connection with a mailbox and a copy, so the lists answer rows); the 5 API-mode writes are
+ *   not applicable until API-3, so the write sweep is unchanged (168).
+ *
  * Synthetic `it-*` organizations only.
  */
 // @covers get /api/v1/assistant/tools
@@ -107,9 +112,25 @@ import {
   turn,
   withheldColumns,
 } from './support/assistant';
+import { systemScope } from '../src/auth-contracts/tenant-scope';
+import { ApiModeTenantDataRepository } from '../src/modules/tenant-data/api-mode-tenant-data.repository';
+import { ProviderTenantDataRepository } from '../src/modules/tenant-data/provider-tenant-data.repository';
 import { deleteAtoRows } from './support/ato';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { bearer, uniqueIp } from './support/http';
+
+/** Step API-1 (design 35 D15): the nine enabled API-mode read tools. */
+const API_MODE_READS = [
+  'protection_mode_get_organization',
+  'api_mode_overview',
+  'api_mode_list_connections',
+  'api_mode_get_connection',
+  'api_mode_setup_guide',
+  'api_mode_list_mailboxes',
+  'api_mode_get_mailbox',
+  'api_mode_list_detections',
+  'api_mode_get_detection',
+];
 
 /** Turns per conversation (keeps each replayed segment small). */
 const TURNS_PER_CONVERSATION = 5;
@@ -171,7 +192,60 @@ beforeAll(async () => {
   for (let i = 0; i < 4; i += 1) bare.push(await member(ctx, fx, org, [useOnly]));
   reader = await member(ctx, fx, org, ['read_only_user']);
   await enableAssistant(ctx, operator, org, sweepers[0]!);
+  await seedApiMode(org);
 }, 180_000);
+
+/**
+ * Step API-1: one bound Microsoft 365 connection with an API-mode row and a mailbox (the
+ * mailbox-worker's rows), so the API-mode list reads of the sweep answer rows. Purged (API-mode
+ * tables before the provider connections they reference) before the organization.
+ */
+async function seedApiMode(organization: FixtureOrganization): Promise<void> {
+  const p = ctx.prisma;
+  const connection = await p.providerConnection.create({
+    data: {
+      organizationId: organization.id,
+      provider: 'microsoft_365',
+      displayName: `Sweep ${randomUUID().slice(0, 6)}`,
+      status: 'active',
+      externalTenantId: '5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b',
+      activeTenantKey: `microsoft_365:${randomUUID()}`,
+    },
+    select: { id: true },
+  });
+  const api = await p.apiModeConnection.create({
+    data: {
+      publicId: randomUUID(),
+      organizationId: organization.id,
+      providerConnectionId: connection.id,
+      provider: 'microsoft_365',
+    },
+    select: { id: true },
+  });
+  const mailbox = await p.apiMailbox.create({
+    data: {
+      publicId: randomUUID(),
+      organizationId: organization.id,
+      apiConnectionId: api.id,
+      providerUserId: `sweep-${randomUUID()}`,
+      primaryAddress: `sweep-${randomUUID().slice(0, 8)}@tools-it.test`,
+      status: 'active',
+    },
+    select: { id: true, primaryAddress: true },
+  });
+  await p.apiMailboxAddress.create({
+    data: {
+      organizationId: organization.id,
+      mailboxId: mailbox.id,
+      address: mailbox.primaryAddress,
+      kind: 'primary',
+    },
+  });
+  fx.registerCleanup(async () => {
+    await ctx.get(ApiModeTenantDataRepository).purgeOrganization(systemScope(organization.id));
+    await ctx.get(ProviderTenantDataRepository).purgeOrganization(systemScope(organization.id));
+  });
+}
 
 afterAll(async () => {
   if (ctx && org) await clearAssistantCounters(ctx, [org.id]);
@@ -204,10 +278,11 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
     // Step AI-3: 257 enabled tools = 179 reads + 78 confirmable writes; step AI-R: 259 = 180
     // reads + 79 writes with the native `report_generate` and `report_send_email` (design 31 D1).
     // Step AI-4 (design 32 D1): 329 = 186 reads + 143 writes; step AI-5 (design 33 D1): 356 =
-    // 188 reads + 168 writes (every planned tool of the program).
-    expect(ENABLED_READS).toHaveLength(188);
+    // 188 reads + 168 writes (every planned tool of the program); step API-1 (design 35 D15):
+    // 365 = 197 reads (the 9 API-mode reads) + 168 writes (its 5 writes are deferred to API-3).
+    expect(ENABLED_READS).toHaveLength(197);
     expect(ENABLED_WRITES).toHaveLength(168);
-    expect(ENABLED_TOOLS).toHaveLength(356);
+    expect(ENABLED_TOOLS).toHaveLength(365);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -230,6 +305,8 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       // Step AI-5: the new single read and the side-effect-free mail-flow preview.
       'archive_admin_capture_issue',
       'provider_mail_flow_preview',
+      // Step API-1 (D15): the API-mode reads.
+      ...API_MODE_READS,
     ]) {
       expect(
         ENABLED_READS.map((t) => t.name),
@@ -271,6 +348,25 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
     }
     expect(swept).toHaveLength(tenantTools.length);
     assertSwept(swept);
+    // Step API-1: every API-mode read ran through the api (the seeded rows of the sweep
+    // organization answer the lists; unknown ids answer their coded 404).
+    for (const name of API_MODE_READS) {
+      const result = swept.find((r) => r.tool === name);
+      expect(result, name).toBeDefined();
+      expect(
+        result!.status === 'succeeded' || result!.httpStatus === 404,
+        `${name} ${JSON.stringify(result)}`,
+      ).toBe(true);
+    }
+    for (const name of [
+      'api_mode_overview',
+      'api_mode_list_connections',
+      'api_mode_list_mailboxes',
+      'api_mode_list_detections',
+      'protection_mode_get_organization',
+    ]) {
+      expect(swept.find((r) => r.tool === name)?.status, name).toBe('succeeded');
+    }
   }, 600_000);
 
   it('calls every platform-only tool as a platform super_admin through the executor', async () => {

@@ -9,6 +9,7 @@ import {
   type JournalIntakeSourceKind,
   type JournalIntakeSourceStatus,
   PrismaClient,
+  type ProtectionMode,
 } from '@email-gateway/database';
 import { Redis } from 'ioredis';
 import {
@@ -52,7 +53,20 @@ export class JournalFixtures {
     });
   }
 
-  async organization(label: string, options: { scanEnabled?: boolean } = {}): Promise<bigint> {
+  /**
+   * `archivingEnabled` (default true) is `archive_settings.enabled`; `protectionMode` (default
+   * inline) the organization's mode; `features` are `organization_features` rows overriding the
+   * plan (step API-1: e.g. `api_mode_protection`, which the test plan does not grant).
+   */
+  async organization(
+    label: string,
+    options: {
+      scanEnabled?: boolean;
+      archivingEnabled?: boolean;
+      protectionMode?: ProtectionMode;
+      features?: Record<string, boolean>;
+    } = {},
+  ): Promise<bigint> {
     if (this.planId === undefined) {
       const plan = await this.prisma.organizationPlan.create({
         data: {
@@ -73,13 +87,19 @@ export class JournalFixtures {
         name: `Journal intake ${label}`,
         planId: this.planId,
         dataRegion: 'ap-south-1',
+        ...(options.protectionMode ? { protectionMode: options.protectionMode } : {}),
       },
     });
     this.organizationIds.push(org.id);
+    for (const [featureKey, enabled] of Object.entries(options.features ?? {})) {
+      await this.prisma.organizationFeature.create({
+        data: { organizationId: org.id, featureKey, enabled },
+      });
+    }
     await this.prisma.archiveSetting.create({
       data: {
         organizationId: org.id,
-        enabled: true,
+        enabled: options.archivingEnabled ?? true,
         settings: options.scanEnabled ? { intake: { scanEnabled: true } } : undefined,
       },
     });
@@ -89,7 +109,7 @@ export class JournalFixtures {
   async domain(
     organizationId: bigint,
     name: string,
-    options: { inboundEnabled?: boolean } = {},
+    options: { inboundEnabled?: boolean; protectionMode?: ProtectionMode } = {},
   ): Promise<bigint> {
     const row = await this.prisma.domain.create({
       data: {
@@ -97,6 +117,7 @@ export class JournalFixtures {
         name,
         status: 'active',
         inboundEnabled: options.inboundEnabled ?? false,
+        ...(options.protectionMode ? { protectionMode: options.protectionMode } : {}),
       },
       select: { id: true },
     });
@@ -202,6 +223,7 @@ export class JournalFixtures {
         await this.prisma.providerConnectionDomain.deleteMany({ where });
         await this.prisma.providerConnection.deleteMany({ where });
         await this.prisma.archiveSetting.deleteMany({ where });
+        await this.prisma.organizationFeature.deleteMany({ where });
         await this.prisma.domain.deleteMany({ where });
         await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
         for (const id of ids) {

@@ -19,7 +19,14 @@ import type { RedisService } from '@email-gateway/common';
 const HASH = 'a'.repeat(64);
 const PREVIOUS = 'b'.repeat(64);
 
-function prismaFake(overrides: { features?: unknown[]; limits?: unknown[]; source?: object } = {}) {
+function prismaFake(
+  overrides: {
+    features?: unknown[];
+    limits?: unknown[];
+    source?: object;
+    apiModeDomains?: number;
+  } = {},
+) {
   return {
     journalIntakeSource: {
       findFirst: vi.fn(() =>
@@ -42,6 +49,7 @@ function prismaFake(overrides: { features?: unknown[]; limits?: unknown[]; sourc
           verifiedAt: null,
           organization: {
             status: 'active',
+            protectionMode: 'inline',
             plan: {
               defaultFeatures: { archiving: true, journal_intake: true },
               defaultLimits: {
@@ -73,6 +81,7 @@ function prismaFake(overrides: { features?: unknown[]; limits?: unknown[]; sourc
     },
     domain: {
       findMany: vi.fn(() => Promise.resolve([{ id: 100n, name: 'Example.com', status: 'active' }])),
+      count: vi.fn(() => Promise.resolve(overrides.apiModeDomains ?? 0)),
     },
   };
 }
@@ -94,6 +103,7 @@ describe('JournalIntakeSourceRepository.loadByAddressHash', () => {
         archivingFeature: true,
         journalIntakeFeature: true,
         archivingEnabled: true,
+        apiDetect: false,
         messagesPerMinute: 6000,
         maxMessageBytes: 52428800,
       },
@@ -124,7 +134,11 @@ describe('JournalIntakeSourceRepository.loadByAddressHash', () => {
   it('a plan without intake limits allows nothing; a malformed hash looks nothing up', async () => {
     const prisma = prismaFake({
       source: {
-        organization: { status: 'suspended', plan: { defaultFeatures: {}, defaultLimits: {} } },
+        organization: {
+          status: 'suspended',
+          protectionMode: 'inline',
+          plan: { defaultFeatures: {}, defaultLimits: {} },
+        },
       },
     });
     const repository = new JournalIntakeSourceRepository(prisma as unknown as PrismaService);
@@ -133,10 +147,106 @@ describe('JournalIntakeSourceRepository.loadByAddressHash', () => {
       archivingFeature: false,
       journalIntakeFeature: false,
       archivingEnabled: true,
+      apiDetect: false,
       messagesPerMinute: 0,
       maxMessageBytes: 0,
     });
     expect(await repository.loadByAddressHash('not-a-hash')).toBeNull();
+  });
+});
+
+describe('API mode active (step API-1 D1, D6)', () => {
+  const plan = (features: Record<string, boolean>) => ({
+    defaultFeatures: { journal_intake: true, ...features },
+    defaultLimits: {},
+  });
+
+  it('feature (plan default) and an api/hybrid domain → apiDetect', async () => {
+    const prisma = prismaFake({
+      apiModeDomains: 1,
+      source: {
+        organization: {
+          status: 'active',
+          protectionMode: 'inline',
+          plan: plan({ api_mode_protection: true }),
+        },
+      },
+    });
+    const snapshot = await new JournalIntakeSourceRepository(
+      prisma as unknown as PrismaService,
+    ).loadByAddressHash(HASH);
+    expect(snapshot?.organization.apiDetect).toBe(true);
+    // Inline organization: only domains with their own api/hybrid mode count.
+    expect(prisma.domain.count).toHaveBeenCalledWith({
+      where: {
+        organizationId: 7n,
+        status: { not: 'deleted' },
+        OR: [{ protectionMode: { in: ['api', 'hybrid'] } }],
+      },
+      take: 1,
+    });
+    expect(prisma.organizationFeature.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          organizationId: 7n,
+          featureKey: { in: ['archiving', 'journal_intake', 'api_mode_protection'] },
+        },
+      }),
+    );
+  });
+
+  it('an api/hybrid organization: domains without their own mode inherit it', async () => {
+    const prisma = prismaFake({
+      apiModeDomains: 2,
+      source: {
+        organization: {
+          status: 'active',
+          protectionMode: 'hybrid',
+          plan: plan({ api_mode_protection: true }),
+        },
+      },
+    });
+    const snapshot = await new JournalIntakeSourceRepository(
+      prisma as unknown as PrismaService,
+    ).loadByAddressHash(HASH);
+    expect(snapshot?.organization.apiDetect).toBe(true);
+    expect(prisma.domain.count).toHaveBeenCalledWith({
+      where: {
+        organizationId: 7n,
+        status: { not: 'deleted' },
+        OR: [{ protectionMode: { in: ['api', 'hybrid'] } }, { protectionMode: null }],
+      },
+      take: 1,
+    });
+  });
+
+  it.each([
+    ['no api-mode domain', { api_mode_protection: true }, [], 0, false],
+    ['feature off in the plan', {}, [], 1, false],
+    [
+      'feature disabled for the organization',
+      { api_mode_protection: true },
+      [{ featureKey: 'api_mode_protection', enabled: false }],
+      1,
+      false,
+    ],
+    [
+      'feature enabled for the organization over the plan',
+      {},
+      [{ featureKey: 'api_mode_protection', enabled: true }],
+      1,
+      true,
+    ],
+  ] as const)('%s → apiDetect %s', async (_name, features, rows, domains, expected) => {
+    const prisma = prismaFake({
+      apiModeDomains: domains,
+      features: [...rows],
+      source: { organization: { status: 'active', protectionMode: 'api', plan: plan(features) } },
+    });
+    const snapshot = await new JournalIntakeSourceRepository(
+      prisma as unknown as PrismaService,
+    ).loadByAddressHash(HASH);
+    expect(snapshot?.organization.apiDetect).toBe(expected);
   });
 });
 

@@ -23,6 +23,7 @@ const SUBSCRIPTION = '0192f0c4-aaaa-7bbb-8ccc-000000000001';
 const CONNECTION = WEBHOOK_EXAMPLE_DATA['integration.health_changed'].connection.id;
 const RECEIVED = '2026-11-13T09:14:02.481Z';
 const INTAKE_SOURCE = '0192f0c4-bbbb-7ccc-8ddd-000000000086';
+const API_CONNECTION = '0192f0c4-cccc-7ddd-8eee-0000000000a1';
 const WINDOW = { from: '2026-11-13T09:00:00.000Z', to: '2026-11-13T10:00:00.000Z' };
 
 let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
@@ -53,7 +54,9 @@ function alert(
           ? { webhookEventId: integrationStored().eventId, connectionId: CONNECTION }
           : kind === 'journal_intake_silent'
             ? { intakeSourceId: INTAKE_SOURCE }
-            : { subscriptionId: SUBSCRIPTION };
+            : kind === 'api_mode_unhealthy'
+              ? { apiModeConnectionId: API_CONNECTION }
+              : { subscriptionId: SUBSCRIPTION };
   return {
     eventId: EVENT_ID,
     eventType: 'notification.alert_requested.v1',
@@ -62,7 +65,12 @@ function alert(
     organizationId: '7',
     payload: {
       kind,
-      severity: kind === 'webhook_disabled' || kind === 'journal_intake_silent' ? 'medium' : 'high',
+      severity:
+        kind === 'webhook_disabled' ||
+        kind === 'journal_intake_silent' ||
+        kind === 'api_mode_unhealthy'
+          ? 'medium'
+          : 'high',
       refs,
       window: WINDOW,
       counts: { suppressedBefore: 3 },
@@ -150,6 +158,10 @@ const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
   'webhook:manage': [{ id: 14n, email: 'hook@acme.example' }],
   'integration:read': [{ id: 15n, email: 'ops@acme.example' }],
   'journal:manage': [{ id: 16n, email: 'it@acme.example' }],
+  'remediation:read': [
+    { id: 17n, email: 'analyst@acme.example' },
+    { id: 18n, email: 'optout@acme.example' },
+  ],
 };
 
 function setup(options: SetupOptions = {}) {
@@ -218,6 +230,19 @@ function setup(options: SetupOptions = {}) {
               healthStatus: 'silent',
               lastAcceptedAt: new Date('2026-11-13T05:00:00.000Z'),
               silenceAlertMinutes: 240,
+            }
+          : null,
+      ),
+    ),
+    apiModeConnection: vi.fn((_tx: unknown, _org: bigint, publicId: string) =>
+      Promise.resolve(
+        publicId === API_CONNECTION
+          ? {
+              publicId: API_CONNECTION,
+              provider: 'microsoft_365',
+              healthStatus: 'degraded',
+              displayName: 'Contoso tenant',
+              failingChecks: ['coverage.percent', 'lag.p95_1h'],
             }
           : null,
       ),
@@ -342,6 +367,104 @@ describe('AlertNotificationHandler journal_intake_silent (step 8.6 D9)', () => {
   it('no journal:manage holder and no contact: no_recipients', async () => {
     const s = setup({ holders: {}, contact: null });
     expect(await s.handler.handle(alert('journal_intake_silent'), tx)).toBe('no_recipients');
+  });
+});
+
+describe('AlertNotificationHandler api_mode_unhealthy (step API-1 D11.3)', () => {
+  it('degraded (medium): remediation:read holders + contact, provider, checks, api-mode link, no address', async () => {
+    const s = setup();
+    expect(await s.handler.handle(alert('api_mode_unhealthy'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'remediation:read', 50, null);
+    expect(s.reads.apiModeConnection).toHaveBeenCalledWith(tx, 7n, API_CONNECTION);
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual([
+      'analyst@acme.example',
+      'optout@acme.example',
+      'secops@acme.example',
+    ]);
+    expect(mail.subject).toBe(
+      '[Email Gateway] Security alert (medium): API-mode protection needs attention',
+    );
+    expect(mail.text).toContain('Alert: API-mode protection connection degraded or failing');
+    expect(mail.text).toContain('Provider: Microsoft 365');
+    expect(mail.text).toContain(`Connection: Contoso tenant (${API_CONNECTION})`);
+    expect(mail.text).toContain('Problem: degraded.');
+    expect(mail.text).toContain('Health now: degraded');
+    expect(mail.text).toContain('- Mailbox coverage (coverage.percent)');
+    expect(mail.text).toContain('- Detection lag (p95, last hour) (lag.p95_1h)');
+    expect(mail.text).toContain(
+      `Details: https://portal.example/api-mode?connection=${API_CONNECTION}`,
+    );
+    expect(mail.text).not.toContain('@');
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'api_mode_unhealthy',
+      API_CONNECTION,
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'api_mode_unhealthy', result: 'sent' }]);
+  });
+
+  it('failing (high): the failing text', async () => {
+    const s = setup();
+    await s.handler.handle(alert('api_mode_unhealthy', { severity: 'high' }), tx);
+    expect(s.sent[0]!.subject).toContain('(high)');
+    expect(s.sent[0]!.text).toContain('Problem: failing.');
+  });
+
+  it('is sent even when every tenant-configurable alert kind is switched off', async () => {
+    const s = setup({
+      settings: {
+        alerts: {
+          threatDetected: { enabled: false },
+          domainDnsFailed: { enabled: false },
+          webhookDisabled: { enabled: false },
+        },
+      },
+      contact: null,
+    });
+    expect(await s.handler.handle(alert('api_mode_unhealthy'), tx)).toBe('sent');
+  });
+
+  it('recipients pass the preference filter with the kind api_mode_unhealthy', async () => {
+    const s = setup({ contact: null });
+    // An opt-out of another kind never removes a recipient of this one.
+    preferenceRows = [
+      { organizationId: 7n, userId: 18n, preferences: { optOut: ['integration_unhealthy'] } },
+    ];
+    await s.handler.handle(alert('api_mode_unhealthy'), tx);
+    expect(s.sent[0]!.recipients).toEqual(['analyst@acme.example', 'optout@acme.example']);
+    // The shared preference vocabulary (`@email-gateway/webhooks` PREFERENCE_KINDS) does not list
+    // `api_mode_unhealthy` yet: a document naming it does not validate and opts out of nothing
+    // (logged), exactly as for journal_intake_silent, until the vocabulary gains the kind.
+    const t = setup({ contact: null });
+    preferenceRows = [
+      { organizationId: 7n, userId: 18n, preferences: { optOut: ['api_mode_unhealthy'] } },
+    ];
+    await t.handler.handle(alert('api_mode_unhealthy'), tx);
+    expect(t.sent[0]!.recipients).toEqual(['analyst@acme.example', 'optout@acme.example']);
+  });
+
+  it('a missing or foreign connection dead-letters; no mail', async () => {
+    const s = setup();
+    await expect(s.handler.handle(alert('api_mode_unhealthy', { refs: {} }), tx)).rejects.toThrow(
+      'alert_refs_missing',
+    );
+    await expect(
+      s.handler.handle(
+        alert('api_mode_unhealthy', {
+          refs: { apiModeConnectionId: '0192f0c4-cccc-7ddd-8eee-0000000000ff' },
+        }),
+        tx,
+      ),
+    ).rejects.toThrow('api_mode_connection_not_found');
+    expect(s.sent).toEqual([]);
+  });
+
+  it('no remediation:read holder and no contact: no_recipients', async () => {
+    const s = setup({ holders: {}, contact: null });
+    expect(await s.handler.handle(alert('api_mode_unhealthy'), tx)).toBe('no_recipients');
   });
 });
 

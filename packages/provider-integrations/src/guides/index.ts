@@ -2,3 +2,4 @@ export * from './attestations';
 export * from './setup-guide';
 export * from './markdown';
 export * from './journal-intake-guide';
+export * from './api-mode-guide';

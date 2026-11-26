@@ -330,6 +330,26 @@ export const PERMISSIONS = Object.freeze([
       'Enable the AI assistant for the organization, set its budget and retention, view its usage',
     category: 'assistant',
   },
+  // Step API-1 (docs/plan/steps/35-api-mode-protection.md §3.3, ADR-0099): API-mode protection.
+  // organization_admin and super_admin hold both through TENANT_PERMISSIONS / ALL_PERMISSIONS;
+  // remediation:read is in TENANT_READ_PERMISSIONS (platform_admin, compliance_auditor,
+  // read_only_user) and held by security_analyst and domain_admin; security_analyst also holds
+  // remediation:write. Granting mailbox access (`*.mailbox_remediation` grants) additionally
+  // needs remediation:write. remediation:purge is API-3 (not created yet).
+  {
+    key: 'remediation:read',
+    description:
+      'View API-mode protection: mailbox coverage, connection health, intake lag, throttling ' +
+      'and detections (and, from API-2, remediation history)',
+    category: 'remediation',
+  },
+  {
+    key: 'remediation:write',
+    description:
+      'Manage API-mode protection: change feeds, mailbox inventory and resync (and, from API-2, ' +
+      'remediation and restore actions)',
+    category: 'remediation',
+  },
 ] as const satisfies readonly PermissionDef[]);
 
 /** Every permission key of the catalog. */
@@ -373,6 +393,8 @@ export const TENANT_READ_PERMISSIONS: readonly PermissionKey[] = Object.freeze([
   'integration:read',
   // Step 8.6 (D12): journaling configuration and intake source health; never archived records.
   'journal:read',
+  // Step API-1 (§3.3): API-mode coverage, health and detections (masked); no mailbox content.
+  'remediation:read',
 ]);
 
 /**
@@ -506,6 +528,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'journal:manage',
       // Step AI-1 (D13).
       'assistant:use',
+      // Step API-1 (§3.3): API-mode coverage and health of the organization's domains.
+      'remediation:read',
     ],
   },
   {
@@ -550,6 +574,9 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       'journal:read',
       // Step AI-1 (D13).
       'assistant:use',
+      // Step API-1 (§3.3): API-mode detections, feeds, inventory and resync.
+      'remediation:read',
+      'remediation:write',
     ],
   },
   {
@@ -681,6 +708,11 @@ export const FEATURE_KEYS = [
   // Step AI-1 (docs/plan/steps/28-ai-chat-management.md D11, D13, ADR-0092): the AI assistant.
   // Operator-enabled (off in every plan); the tenant setting and assistant:use gate it further.
   'ai_assistant',
+  // Step API-1 (docs/plan/steps/35-api-mode-protection.md §3.3, D1, ADR-0098): protection modes
+  // `api` / `hybrid` (copies from the provider, detect mode, coverage). Enterprise and dedicated
+  // (their lists derive from FEATURE_KEYS); not trial, standard or archive_only; not
+  // operator-enabled (an operator override is still possible per organization).
+  'api_mode_protection',
 ] as const;
 export type FeatureKey = (typeof FEATURE_KEYS)[number];
 

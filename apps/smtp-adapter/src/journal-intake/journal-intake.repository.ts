@@ -50,6 +50,11 @@ export interface IntakeCommit {
   /** SHA-256 and size of the message as received (the report for report kinds). */
   reportSha256: string;
   reportSizeBytes: number;
+  /**
+   * API mode active for the organization in the LMTP's writer snapshot (step API-1 D6): the copy
+   * is scanned in detect mode whatever `intake.scanEnabled` says.
+   */
+  apiDetect: boolean;
 }
 
 /** `details` of the intake message's `received` event (bounded, ids and codes only). */
@@ -98,7 +103,8 @@ export class JournalIntakeRepository {
    * One writer transaction (modelled on `IngestionRepository.commit`): registry row, message
    * (`ingest_source = journal_intake`, born `persisted` with history E1/E2), envelope recipients
    * (status `journaled`), `journal_intake_messages` (envelope, proof, format, report hash and
-   * size, `scan_requested` = the organization's `intake.scanEnabled` read in this transaction),
+   * size, `scan_requested` = the organization's `intake.scanEnabled` read in this transaction OR
+   * API mode active (`apiDetect`, step API-1 D6: detect-mode scanning)),
    * one `received` event (`details.intake`) and the `mail.message.received.v1` outbox row with
    * `ingestSource: 'journal_intake'`, all with one `received_at`. Throws P2002 on a committed
    * ingest key (a concurrent duplicate).
@@ -123,7 +129,7 @@ export class JournalIntakeRepository {
           where: { organizationId: data.organizationId },
           select: { settings: true },
         });
-        const scanRequested = scanRequestedOf(settings?.settings);
+        const scanRequested = scanRequestedOf(settings?.settings) || data.apiDetect;
         const correlationId = `lmtp:${data.queueId}`;
         const lifecycle = initialLifecycle({
           messageId,

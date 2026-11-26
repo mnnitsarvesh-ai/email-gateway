@@ -65,7 +65,8 @@ const sha256 = (b: Buffer | string): string => createHash('sha256').update(b).di
 
 /** One copy of a message for the step 8.6 dedupe suites (gateway or journal intake). */
 export interface CopySpec {
-  ingestSource: 'gateway' | 'journal_intake';
+  /** `mailbox_api` (step API-1): a mailbox API copy, `journaled` like an intake copy, no intake row. */
+  ingestSource: 'gateway' | 'journal_intake' | 'mailbox_api';
   /** The Message-ID header value without angle brackets. */
   messageId: string;
   /** The Date header (RFC 5322). */
@@ -628,7 +629,8 @@ export class Fixtures {
    */
   async copy(organizationId: bigint, spec: CopySpec): Promise<SeededMessage> {
     this.counter += 1;
-    const intake = spec.ingestSource === 'journal_intake';
+    const intake = spec.ingestSource !== 'gateway';
+    const journalIntake = spec.ingestSource === 'journal_intake';
     const now = Date.now();
     const receivedAt = new Date(
       Math.floor((now - (spec.ageSeconds ?? 300) * 1000) / 1000) * 1000 + (this.counter % 1000),
@@ -726,7 +728,7 @@ export class Fixtures {
         sha256: sha256(spec.attachment),
       },
     });
-    if (intake) {
+    if (journalIntake) {
       const fields = recipients.map((r) => ({
         address: r.address,
         field: r.field ?? (spec.cc?.includes(r.address) ? 'cc' : 'to'),

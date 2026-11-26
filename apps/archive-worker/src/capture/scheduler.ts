@@ -486,6 +486,14 @@ export class CaptureScheduler {
     }
     const m = facts.message;
     const copySource = m.ingestSource;
+    if (copySource === 'mailbox_api') {
+      // Step API-1 D7.6: no record is ever built from a mailbox API copy; nothing to refresh.
+      await this.update(
+        intent,
+        Prisma.sql`status = 'closed', closed_at = ${now}, next_check_at = ${now}`,
+      );
+      return 'closed';
+    }
     // Step 8.6 D7: who may change the record's security outcome.
     const authoritative = copySource === 'gateway' || (!intent.merged && !record.sourceGateway);
     const objects = archiveRecordObjectsSchema.parse(record.objects);

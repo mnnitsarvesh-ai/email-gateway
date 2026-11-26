@@ -33,6 +33,7 @@ import type {
 import { type OrganizationResponse, toOrganizationResponse } from '../organization.mapper';
 import {
   isUniqueViolation,
+  type OrganizationRecord,
   OrganizationsRepository,
   type SettingsWrite,
 } from '../organizations.repository';
@@ -201,7 +202,7 @@ export class OrganizationsService {
       };
     }
     this.logger.log({ message: 'Organization created', organizationId: result.org.publicId });
-    return { ...toOrganizationResponse(result.org), initialAdmin };
+    return { ...(await this.respond(result.org)), initialAdmin };
   }
 
   /** `GET /organizations` (reader): the catalog for platform access, else the own organization. */
@@ -217,11 +218,18 @@ export class OrganizationsService {
       ...(query.deploymentMode && { deploymentMode: query.deploymentMode }),
       ...(query.q && { q: query.q.toLowerCase() }),
     });
-    return toPage(rows, query.limit, toOrganizationResponse);
+    const modes = await this.repository.domainModeRows(rows.map((r) => r.id));
+    return toPage(rows, query.limit, (r) => toOrganizationResponse(r, modes.get(r.id) ?? []));
+  }
+
+  /** The view of one organization with its domains per effective mode (step API-1 D2). */
+  private async respond(org: OrganizationRecord): Promise<OrganizationResponse> {
+    const modes = await this.repository.domainModeRows([org.id]);
+    return toOrganizationResponse(org, modes.get(org.id) ?? []);
   }
 
   async get(access: OrganizationAccess, publicId: string): Promise<OrganizationResponse> {
-    return toOrganizationResponse(await requireVisible(this.repository, access, publicId));
+    return this.respond(await requireVisible(this.repository, access, publicId));
   }
 
   /**
@@ -304,7 +312,7 @@ export class OrganizationsService {
     });
     // Features (e.g. api_access) are checked at authentication.
     if (planChanged) await this.principalCache.invalidateOrganization(org.id);
-    return toOrganizationResponse(org);
+    return this.respond(org);
   }
 
   /**
@@ -361,6 +369,6 @@ export class OrganizationsService {
       this.logger.log({ message: 'Organization suspended', sessionsRevoked: revoked });
     }
     await this.principalCache.invalidateOrganization(org.id);
-    return toOrganizationResponse(org);
+    return this.respond(org);
   }
 }

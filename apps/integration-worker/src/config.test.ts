@@ -1,4 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import {
+  PERMISSION_PROFILES,
+  platformCredentialsFromEnv,
+  testing,
+} from '@email-gateway/provider-integrations';
 import { describe, expect, it } from 'vitest';
 import { hasRole, isLocalEnv, loadWorkerConfig, parseGatewayMxHosts, probeHelo } from './config';
 
@@ -109,6 +114,45 @@ describe('integration-worker configuration (§4.4)', () => {
       loadWorkerConfig(base({ INTEGRATION_PROBE_DNS_SERVERS: '172.31.250.53, 127.0.0.1:1053' }))
         .INTEGRATION_PROBE_DNS_SERVERS,
     ).toEqual(['172.31.250.53', '127.0.0.1:1053']);
+  });
+
+  it('step API-1 (D4): loads the mailbox-access platform credentials by key name', () => {
+    const tokenUrl = 'https://oauth2.googleapis.com/token';
+    const sa = testing.testServiceAccountKey('mailbox@platform.example.iam', tokenUrl);
+    const m365ClientId = testing.testGuid();
+    const cfg = loadWorkerConfig(
+      base({
+        PROVIDER_M365_MAILBOX_APP_CLIENT_ID: m365ClientId,
+        PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET: 'platform-secret-placeholder',
+        PROVIDER_M365_ALLOW_PLATFORM_SECRET: 'true',
+        PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: sa.account.clientId,
+        PROVIDER_GOOGLE_MAILBOX_SA_KEY_PATH: '/run/secrets/google-mailbox-sa.json',
+      }),
+    );
+    expect(cfg.PROVIDER_M365_MAILBOX_APP_CLIENT_ID).toBe(m365ClientId);
+    expect(cfg.PROVIDER_GOOGLE_MAILBOX_SA_KEY_PATH).toBe('/run/secrets/google-mailbox-sa.json');
+    const read: string[] = [];
+    const platform = platformCredentialsFromEnv(
+      cfg as unknown as Record<string, string | undefined>,
+      PERMISSION_PROFILES,
+      {
+        readFile: (path) => (read.push(path), JSON.stringify(sa.document)),
+        googleTokenUrl: tokenUrl,
+        allowPlatformSecret: cfg.PROVIDER_M365_ALLOW_PLATFORM_SECRET,
+      },
+    );
+    expect(platform.microsoft.get('m365.mailbox_remediation')).toEqual({
+      clientId: m365ClientId,
+      secret: 'platform-secret-placeholder',
+    });
+    expect(platform.google.get('google.mailbox_remediation')?.client_id).toBe(sa.account.clientId);
+    expect(read).toEqual(['/run/secrets/google-mailbox-sa.json']);
+    // Mail flow keeps its own app: nothing of the mailbox app leaks into its profile.
+    expect(platform.microsoft.has('m365.mail_flow')).toBe(false);
+    // The platform secret rule applies to the mailbox app too.
+    expect(issues(base({ PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET: 'x' }))).toContain(
+      'PROVIDER_M365_MAILBOX_APP_CLIENT_SECRET',
+    );
   });
 
   it('never echoes a secret value in an error', () => {

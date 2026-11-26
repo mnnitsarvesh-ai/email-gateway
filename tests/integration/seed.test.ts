@@ -116,17 +116,18 @@ describe('db:seed', () => {
     expect(await counts()).toEqual(afterFirst);
 
     // Step 8.6: 10 system roles (compliance_officer), two more limits (journal intake). Step AI-1:
-    // 74 permissions (assistant:use, assistant:configure) and one more feature (ai_assistant, off
-    // in every plan).
+    // assistant:use, assistant:configure and one more feature (ai_assistant, off in every plan).
+    // Step API-1: 76 permissions (remediation:read, remediation:write) and one more feature
+    // (api_mode_protection: enterprise and dedicated only).
     expect(afterFirst).toMatchObject({
-      permissions: 74,
+      permissions: 76,
       systemRoles: 10,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
       demoOrganizations: 2,
       demoUsers: 2,
       demoLimits: 13,
-      demoFeatures: 14,
+      demoFeatures: 15,
       demoDeployments: 1,
       demoDomains: 1,
       demoPolicies: 1,
@@ -134,13 +135,67 @@ describe('db:seed', () => {
       platformUserRoles: 1,
       platformSettings: 1,
       platformLimits: 13,
-      platformFeatures: 14,
+      platformFeatures: 15,
       platformDeployments: 1,
     });
     // The demo admin's organization_admin + analyst's role (2); on a schema where the demo admin
     // existed before migration 20261120053633_journal_intake the admin also holds the migrated
     // compliance_officer assignment (3, ADR-0089); a clean CI schema seeds after the migration (2).
     expect([2, 3]).toContain(afterFirst.demoUserRoles);
+
+    // Step API-1 (§3.3): the remediation permissions (category remediation) and their holders,
+    // exactly as the migration api_mode_protection grants them (the seed is a no-op afterwards).
+    const remediation = await prisma.permission.findMany({
+      where: { key: { in: ['remediation:read', 'remediation:write'] } },
+      select: {
+        key: true,
+        category: true,
+        roles: {
+          where: { role: { organizationId: null, isSystem: true } },
+          select: { role: { select: { key: true } } },
+        },
+      },
+      orderBy: { key: 'asc' },
+    });
+    expect(
+      remediation.map((p) => ({
+        key: p.key,
+        category: p.category,
+        roles: p.roles.map((r) => r.role.key).sort(),
+      })),
+    ).toEqual([
+      {
+        key: 'remediation:read',
+        category: 'remediation',
+        roles: [
+          'compliance_auditor',
+          'domain_admin',
+          'organization_admin',
+          'platform_admin',
+          'read_only_user',
+          'security_analyst',
+          'super_admin',
+        ],
+      },
+      {
+        key: 'remediation:write',
+        category: 'remediation',
+        roles: ['organization_admin', 'security_analyst', 'super_admin'],
+      },
+    ]);
+    expect(await prisma.permission.count({ where: { key: 'remediation:purge' } })).toBe(0);
+    // The feature follows the plans: platform = enterprise (on), demo = standard (off).
+    const apiModeFeature = await prisma.organizationFeature.findMany({
+      where: {
+        featureKey: 'api_mode_protection',
+        organization: { slug: { in: ['demo', PLATFORM_ORGANIZATION_SLUG] } },
+      },
+      select: { enabled: true, source: true, organization: { select: { slug: true } } },
+      orderBy: { organizationId: 'asc' },
+    });
+    expect(
+      Object.fromEntries(apiModeFeature.map((f) => [f.organization.slug, [f.enabled, f.source]])),
+    ).toEqual({ demo: [false, 'plan'], [PLATFORM_ORGANIZATION_SLUG]: [true, 'plan'] });
     expect(afterFirst.plans).toBeGreaterThanOrEqual(4);
     // Step 5.2 §3: one policy-dsl/1 version on a fresh database; a database migrated from the
     // step 1.1 seed also keeps its retired legacy version 1 (superseded, never deleted).

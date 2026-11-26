@@ -6,7 +6,11 @@ import {
 } from '@email-gateway/common';
 import { type Prisma, processOnce, type PrismaClient } from '@email-gateway/database';
 import { EventTypes } from '@email-gateway/event-contracts';
-import { type TransitionActor, transitionMessage } from '@email-gateway/message-lifecycle';
+import {
+  type MessageIngestSourceValue,
+  type TransitionActor,
+  transitionMessage,
+} from '@email-gateway/message-lifecycle';
 import type { MimeParseResult } from '@email-gateway/mime-parser';
 import type {
   FinalizeInput,
@@ -17,6 +21,7 @@ import type {
   MimeStore,
   ParseRowState,
 } from './mime-store';
+import { isCopySource, writeCopyScannedOutbox } from '../scanning/copy-scanned';
 import { buildParsedPayload, buildParseFailedPayload } from './payloads';
 
 /** `email_events.source_service` and the producer of the parse events. */
@@ -37,20 +42,33 @@ export const INTAKE_PARSE_ACTOR: TransitionActor = {
 };
 
 /**
- * What the parse commit writes for a message (step 8.6 D4): `gateway` → the 3.1 behaviour (a
- * `parsed.v1` or `parse_failed.v1` outbox row); a journal intake message whose scan was requested
- * → `parsed.v1` on success and E30 `intake_parse_failed` (no outbox row) on failure; a journal
- * intake message without a requested scan → E30 `intake_unscanned` / `intake_parse_failed` and
- * never an outbox row. Pure.
+ * What the parse commit writes for a message (step 8.6 D4, step API-1 D8): `gateway` → the 3.1
+ * behaviour (a `parsed.v1` or `parse_failed.v1` outbox row); a copy (`journal_intake`,
+ * `mailbox_api`) whose scan was requested → `parsed.v1` on success and E30
+ * `intake_parse_failed` plus `mail.message.copy_scanned.v1` (`outcome = parse_failed`, so the
+ * per-mailbox copy record never stays pending) on failure; a copy without a requested scan → E30
+ * `intake_unscanned` / `intake_parse_failed` and never an outbox row. A `mailbox_api` copy has no
+ * `journal_intake_messages` row: its scan is always requested (detect mode). Pure.
  */
 export function intakeGate(
-  ingestSource: 'gateway' | 'journal_intake' | undefined,
+  ingestSource: MessageIngestSourceValue | undefined,
   scanRequested: boolean,
   parseFailed: boolean,
-): { kind: 'outbox' } | { kind: 'journal'; reason: 'intake_unscanned' | 'intake_parse_failed' } {
-  if (ingestSource !== 'journal_intake') return { kind: 'outbox' };
-  if (parseFailed) return { kind: 'journal', reason: 'intake_parse_failed' };
-  return scanRequested ? { kind: 'outbox' } : { kind: 'journal', reason: 'intake_unscanned' };
+):
+  | { kind: 'outbox' }
+  | {
+      kind: 'journal';
+      reason: 'intake_unscanned' | 'intake_parse_failed';
+      /** Write `mail.message.copy_scanned.v1` (`parse_failed`) with E30 (API-1 D8). */
+      copyScanned: boolean;
+    } {
+  if (!isCopySource(ingestSource)) return { kind: 'outbox' };
+  const requested = ingestSource === 'mailbox_api' || scanRequested;
+  if (parseFailed)
+    return { kind: 'journal', reason: 'intake_parse_failed', copyScanned: requested };
+  return requested
+    ? { kind: 'outbox' }
+    : { kind: 'journal', reason: 'intake_unscanned', copyScanned: false };
 }
 
 /**
@@ -180,11 +198,12 @@ export class MimeRepository implements MimeStore {
         this.applyFinal(tx, input, outboxEventId),
       );
       if (result.status === 'duplicate') return { outcome: 'duplicate' };
-      const intake = result.result;
+      const { intake, copyScannedEventId } = result.result;
       return {
         outcome: 'handled',
         ...(intake === null || intake === 'scan_requested' ? { outboxEventId } : {}),
         ...(intake !== null ? { intake } : {}),
+        ...(copyScannedEventId !== null ? { copyScannedEventId } : {}),
       };
     } catch (err) {
       if (err instanceof AlreadyFinalized) return { outcome: 'duplicate' };
@@ -193,9 +212,10 @@ export class MimeRepository implements MimeStore {
   }
 
   /**
-   * `journal_intake_messages.scan_requested` of an intake message (same partition key, step 8.6
-   * D4). A missing row (never written by the intake LMTP, which commits both together) counts as
-   * not requested: the fail-safe never sends an intake message toward the policy engine.
+   * `journal_intake_messages.scan_requested` of a journal intake message (same partition key,
+   * step 8.6 D4; the smtp-adapter sets it for API-mode organizations too, step API-1 D6). A
+   * missing row (never written by the intake LMTP, which commits both together) counts as not
+   * requested: the fail-safe never sends an intake message toward the scan stage.
    */
   private async scanRequested(
     tx: Prisma.TransactionClient,
@@ -213,17 +233,17 @@ export class MimeRepository implements MimeStore {
     tx: Prisma.TransactionClient,
     input: FinalizeInput,
     outboxEventId: string,
-  ): Promise<IntakeGateResult | null> {
+  ): Promise<{ intake: IntakeGateResult | null; copyScannedEventId: string | null }> {
     const { message, outcome } = input;
     const scope = {
       messageId: message.id,
       receivedAt: message.receivedAt,
       organizationId: message.organizationId,
     };
-    const intake = message.ingestSource === 'journal_intake';
+    const intake = isCopySource(message.ingestSource);
     const gate = intakeGate(
       message.ingestSource,
-      intake ? await this.scanRequested(tx, message) : false,
+      message.ingestSource === 'journal_intake' ? await this.scanRequested(tx, message) : false,
       outcome.status === 'parse_failed',
     );
     // Validated before anything is written: a contract violation rolls everything back.
@@ -317,8 +337,8 @@ export class MimeRepository implements MimeStore {
     });
 
     if (gate.kind === 'journal') {
-      // 5'. Step 8.6 D4: a journal intake message ends in `journaled` (E30) instead of an outbox
-      // event; nothing reaches the policy engine (never `parse_failed.v1` and its E5 fail-safe).
+      // 5'. Step 8.6 D4: a copy ends in `journaled` (E30) instead of a parse outbox event;
+      // nothing reaches the policy engine (never `parse_failed.v1` and its E5 fail-safe).
       const transition = await transitionMessage(tx, {
         message: {
           id: message.id,
@@ -333,9 +353,30 @@ export class MimeRepository implements MimeStore {
         correlationId: input.event.correlationId,
         expectedFrom: ['persisted'],
       });
-      return transition.result === 'applied' || transition.result === 'duplicate'
-        ? 'journaled'
-        : 'transition_skipped';
+      // Step API-1 D8: a copy whose scan was requested reports its parse failure to the
+      // per-mailbox copy record (`copy_scanned.v1`, outcome parse_failed) in this transaction,
+      // only when E30 was applied by it (a replay never writes a second row).
+      const copyScannedEventId =
+        gate.copyScanned && transition.result === 'applied' && isCopySource(message.ingestSource)
+          ? await writeCopyScannedOutbox(tx, {
+              message,
+              ingestSource: message.ingestSource,
+              lifecycleRound: transition.round,
+              scanId: null,
+              outcome: 'parse_failed',
+              verdict: null,
+              riskScore: null,
+              completedAt: input.completedAt,
+              correlationId: input.event.correlationId,
+            })
+          : null;
+      return {
+        intake:
+          transition.result === 'applied' || transition.result === 'duplicate'
+            ? 'journaled'
+            : 'transition_skipped',
+        copyScannedEventId,
+      };
     }
 
     // 5. The transactional outbox event (M14).
@@ -354,7 +395,7 @@ export class MimeRepository implements MimeStore {
       },
       select: { id: true },
     });
-    return intake ? 'scan_requested' : null;
+    return { intake: intake ? 'scan_requested' : null, copyScannedEventId: null };
   }
 }
 

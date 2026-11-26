@@ -56,6 +56,12 @@ export function toDomainSummary(row: DomainRow): DomainSummary {
     activatedAt: toIsoOrNull(row.activatedAt),
     lastCheckedAt: toIsoOrNull(row.lastCheckedAt),
     nextCheckAt: toIsoOrNull(row.nextCheckAt),
+    protectionMode: {
+      configured: row.protectionMode,
+      effective: row.protectionMode ?? row.organization.protectionMode,
+      inherited: row.protectionMode === null,
+      changedAt: toIsoOrNull(row.protectionModeChangedAt),
+    },
     createdAt: toIso(row.createdAt),
     updatedAt: toIso(row.updatedAt),
   };

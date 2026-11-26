@@ -67,6 +67,20 @@ describe('projection rules (W3)', () => {
     ).toEqual([{ type: 'email.received', subKey: '', severity: 'info', alert: null }]);
   });
 
+  it('mailbox API copy (step API-1 D7.7): received.v1 with ingestSource mailbox_api projects nothing', () => {
+    expect(
+      projectCandidates(
+        sourceEvent(EventTypes.MessageReceived, {
+          direction: 'inbound',
+          ingestSource: 'mailbox_api',
+        }),
+      ),
+    ).toEqual([]);
+    expect(summary(EventTypes.MessageReceived, { direction: 'inbound' })).toEqual([
+      { type: 'email.received', subKey: '', severity: 'info', alert: null },
+    ]);
+  });
+
   it.each([
     'intake_unscanned',
     'intake_parse_failed',

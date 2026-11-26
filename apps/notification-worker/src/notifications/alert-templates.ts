@@ -16,7 +16,11 @@ import { type RenderedNotice, safeText } from './templates';
  * transition, the failing check titles and `/integrations/providers/<id>?tab=health`; journal
  * intake silent (step 8.6 D9) → the source display name (sanitized, ≤ 80) and kind, whether it
  * is silent (medium) or failing (high), its health now, the last accepted time and
- * `/settings/journaling/intake/<id>` (never the intake address or header token).
+ * `/settings/journaling/intake/<id>` (never the intake address or header token); API-mode
+ * connection unhealthy (step API-1 D11.3) → the provider, the connection name (sanitized, ≤ 80),
+ * whether it is degraded (medium) or failing (high), its health now, the titles of the checks
+ * failing now (`api-mode-health/1` codes) and `/api-mode?connection=<id>` (never a mailbox
+ * address).
  *
  * **Never** a subject, a body, a sender or recipient address, a URL found in mail, a file name,
  * an endpoint URL or a secret. Free text from the database (organization and subscription names)
@@ -106,19 +110,54 @@ export interface JournalIntakeAlertFacts extends AlertCommonFacts {
   };
 }
 
+export interface ApiModeAlertFacts extends AlertCommonFacts {
+  kind: 'api_mode_unhealthy';
+  apiMode: {
+    /** `api_mode_connections.public_id`. */
+    connectionPublicId: string;
+    /** The 8.2 provider connection's display name. */
+    name: string;
+    /** `api_mode_connections.provider` (`microsoft_365`, `google_workspace`). */
+    provider: string;
+    /** `api_mode_connections.health_status` when the alert is sent. */
+    healthNow: string;
+    /** `api-mode-health/1` codes of the checks that warn or fail now (stored order, ≤ 16). */
+    failingChecks: string[];
+  };
+}
+
 export type AlertFacts =
   | ThreatAlertFacts
   | DnsAlertFacts
   | WebhookDisabledAlertFacts
   | IntegrationAlertFacts
-  | JournalIntakeAlertFacts;
+  | JournalIntakeAlertFacts
+  | ApiModeAlertFacts;
 
 /**
  * Alert kinds this worker renders: the `@email-gateway/webhooks` kinds plus the step 8.6
- * `journal_intake_silent` (requested by the archive-worker's intake health loop; the event
- * contract carries it, the shared webhooks vocabulary does not yet).
+ * `journal_intake_silent` (requested by the archive-worker's intake health loop) and the step
+ * API-1 `api_mode_unhealthy` (requested by the mailbox-worker's health role); the event contract
+ * carries both, the shared webhooks vocabulary does not yet.
  */
-export type SecurityAlertKind = AlertKind | 'journal_intake_silent';
+export type SecurityAlertKind = AlertKind | 'journal_intake_silent' | 'api_mode_unhealthy';
+
+/**
+ * Titles of the `api-mode-health/1` check codes (step API-1 D11.3; the codes of
+ * `@email-gateway/mailbox-api` `API_MODE_HEALTH_CHECK_CODES`). An unknown code is shown as is
+ * (when it is a dotted code) so a newer producer never makes an alert unreadable.
+ */
+export const API_MODE_CHECK_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  'connection.active': 'Provider connection active and bound',
+  'intake.present': 'Journal copy or mailbox feeds present',
+  'intake.journal_health': 'Journal intake source healthy',
+  'mailbox_access.grant': 'Mailbox access grant active',
+  'coverage.percent': 'Mailbox coverage',
+  'lag.p95_1h': 'Detection lag (p95, last hour)',
+  'throttling.1h': 'Provider throttling (last hour)',
+  'feeds.errors': 'Mailbox feed errors',
+  'domains.api_mode_mx': 'API-mode domains without gateway MX',
+});
 
 const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
   threat_detected: 'Threat detected',
@@ -126,6 +165,7 @@ const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
   webhook_disabled: 'Webhook endpoint disabled',
   integration_unhealthy: 'Microsoft 365 / Google Workspace connection unhealthy',
   journal_intake_silent: 'Journal intake source silent or failing',
+  api_mode_unhealthy: 'API-mode protection connection degraded or failing',
 };
 
 const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
@@ -134,6 +174,7 @@ const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
   webhook_disabled: 'webhook endpoint disabled',
   integration_unhealthy: 'mail platform connection unhealthy',
   journal_intake_silent: 'journal intake source needs attention',
+  api_mode_unhealthy: 'API-mode protection needs attention',
 };
 
 /** Display names of the journal intake source kinds (step 8.6 D1). */
@@ -182,6 +223,17 @@ const checkLine = (value: string): string =>
   CHECK_CODE.test(value) && value.length <= 64
     ? `- ${integrationCheckTitle(value)} (${value})`
     : '- unknown';
+
+const apiModeCheckLine = (value: string): string =>
+  CHECK_CODE.test(value) && value.length <= 64
+    ? `- ${API_MODE_CHECK_TITLES[value] ?? value} (${value})`
+    : '- unknown';
+
+/** Display names of the API-mode providers (step API-1). */
+const API_MODE_PROVIDER_NAMES: Readonly<Record<string, string>> = {
+  microsoft_365: 'Microsoft 365',
+  google_workspace: 'Google Workspace',
+};
 
 const list = (values: readonly string[]): string =>
   values.length === 0 ? 'none' : [...new Set(values.map(code))].join(', ');
@@ -275,6 +327,25 @@ function body(facts: AlertFacts): string[] {
         '',
         'Check the journal rule or routing at the provider and the source health and setup guide.',
         ...(id ? [`Details: ${facts.portalUrl}/settings/journaling/intake/${id}`] : []),
+      ];
+    }
+    case 'api_mode_unhealthy': {
+      const a = facts.apiMode;
+      const id = publicId(a.connectionPublicId);
+      const failing = facts.severity === 'high';
+      const checks = [...new Set(a.failingChecks)].slice(0, 16);
+      return [
+        `Provider: ${API_MODE_PROVIDER_NAMES[a.provider] ?? 'unknown'}`,
+        `Connection: ${displayName(a.name, 80) || '(name not shown)'} (${id || 'unknown'})`,
+        failing
+          ? 'Problem: failing. Detection copies may not reach the gateway or mailbox access was lost; some mail may not be scanned.'
+          : 'Problem: degraded. Coverage, detection lag, throttling or feeds need attention.',
+        `Health now: ${code(a.healthNow)}`,
+        'Checks needing attention:',
+        ...(checks.length === 0 ? ['- none reported'] : checks.map(apiModeCheckLine)),
+        '',
+        'Mail flow is never changed by API mode: review the checks, the journal rule and the mailbox access grant.',
+        ...(id ? [`Details: ${facts.portalUrl}/api-mode?connection=${id}`] : []),
       ];
     }
   }

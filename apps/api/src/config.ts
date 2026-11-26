@@ -1433,6 +1433,53 @@ export function validateJournalIntakeConfig(
   }
 }
 
+/**
+ * API-mode protection, api side (step API-1, docs/plan/steps/35-api-mode-protection.md D4, D10.1,
+ * D12.4, D16; ADR-0098..0100): the per-client-IP fixed-window limit of the public Graph
+ * notification callbacks, the Graph notification URL (read for its PRESENCE only: change feeds in
+ * `notify` mode are offered only when the platform has a public notification endpoint; the
+ * mailbox-worker reads the same key to create subscriptions) and the client ids of the operator's
+ * mailbox-access platform app / service account (consent URL and delegation steps of the
+ * `*.mailbox_remediation` grants; empty = the platform methods are unavailable for that profile).
+ */
+export const apiModeApiConfigShape = {
+  API_MODE_NOTIFICATION_RATE_PER_MINUTE: int(1, 1_000_000).default(1200),
+  /** `http:` only in APP_ENV local/ci (validateApiModeConfig); empty = `notify` unavailable. */
+  API_MODE_GRAPH_NOTIFICATION_URL: optionalHttpUrl,
+  /** Client id (GUID) of the operator's `m365.mailbox_remediation` app; empty = unavailable. */
+  PROVIDER_M365_MAILBOX_APP_CLIENT_ID: z
+    .string()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'must be a GUID')
+    .optional(),
+  /** OAuth client id of the operator's `google.mailbox_remediation` service account. */
+  PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID: z
+    .string()
+    .regex(/^[0-9]{6,32}$/, 'must be a numeric OAuth client id')
+    .optional(),
+};
+
+export type ApiModeApiConfigKeys = {
+  [K in keyof typeof apiModeApiConfigShape]: z.output<(typeof apiModeApiConfigShape)[K]>;
+};
+
+/** API_MODE_GRAPH_NOTIFICATION_URL: https unless APP_ENV is local or ci (D16). */
+export function validateApiModeConfig(
+  cfg: { API_MODE_GRAPH_NOTIFICATION_URL?: string | undefined; APP_ENV: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (
+    cfg.API_MODE_GRAPH_NOTIFICATION_URL?.startsWith('http://') &&
+    cfg.APP_ENV !== 'local' &&
+    cfg.APP_ENV !== 'ci'
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['API_MODE_GRAPH_NOTIFICATION_URL'],
+      message: 'must be an https:// URL unless APP_ENV is local or ci',
+    });
+  }
+}
+
 /** LLM providers of the AI assistant (step AI-1 D6, ADR-0092); `fake` is the deterministic test stand-in. */
 export const ASSISTANT_PROVIDERS = ['fake', 'anthropic', 'openai', 'azure_openai'] as const;
 export type AssistantProviderId = (typeof ASSISTANT_PROVIDERS)[number];
@@ -1944,6 +1991,8 @@ export const apiConfigSchema = baseConfigSchema
   .extend(providerApiConfigShape)
   // Step 8.6 §4.4: journal intake (address derivation, limits); empty domain = intake off.
   .extend(journalIntakeApiConfigShape)
+  // Step API-1 (D4, D10.1, D12.4): API-mode notification callbacks and mailbox-access apps.
+  .extend(apiModeApiConfigShape)
   // Step AI-1 (D6, D11): the AI assistant (off by default; local/CI use the fake provider).
   .extend(assistantConfigShape)
   .extend({
@@ -1976,6 +2025,7 @@ export const apiConfigSchema = baseConfigSchema
     validateArchiveApiConfig(cfg, ctx);
     validateProviderConfig(cfg, ctx);
     validateJournalIntakeConfig(cfg, ctx);
+    validateApiModeConfig(cfg, ctx);
     validateAssistantConfig(cfg, ctx);
     if (cfg.AUTH_SESSION_MAX_AGE_SECONDS < cfg.AUTH_REFRESH_TOKEN_TTL_SECONDS) {
       ctx.addIssue({

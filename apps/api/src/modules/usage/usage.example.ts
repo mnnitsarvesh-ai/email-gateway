@@ -13,6 +13,7 @@ export const USAGE_EXAMPLE: UsageResponse = {
     internal: 210,
     today: 1_204,
     journalIntakeToday: 0,
+    apiCopiesToday: 0,
   },
   quarantine: { active: 57 },
   apiKeys: { active: 2 },

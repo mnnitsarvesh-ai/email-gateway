@@ -58,6 +58,7 @@ describe('navigation model (design P11)', () => {
     const pendingInventory: Record<string, string[]> = {
       '/assistant': ['assistant:use'],
     };
+    // Step API-1: /api-mode is row 41 of the inventory (gate `remediation:read`).
     for (const item of NAV_ITEMS) {
       const documented =
         inventoryRows.some((r) => (cells(r)[2] ?? '').includes(`\`${item.href}\``)) ||
@@ -117,6 +118,7 @@ describe('navigation model (design P11)', () => {
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'api-mode',
       'ato',
       'ato-accounts',
       'ato-responses',
@@ -150,6 +152,7 @@ describe('navigation model (design P11)', () => {
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'api-mode',
       'ato',
       'ato-accounts',
       'ato-responses',
@@ -179,6 +182,7 @@ describe('navigation model (design P11)', () => {
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'api-mode',
       'ato',
       'ato-accounts',
       'ato-responses',
@@ -206,6 +210,7 @@ describe('navigation model (design P11)', () => {
       'policy-builder',
       'url-protection',
       'attachments',
+      'api-mode',
       'domains',
       'users',
       'organizations',
@@ -226,6 +231,7 @@ describe('navigation model (design P11)', () => {
       'threat-intelligence',
       'url-protection',
       'attachments',
+      'api-mode',
       'ato',
       'ato-accounts',
       'ato-responses',
@@ -267,6 +273,7 @@ describe('navigation model (design P11)', () => {
       'policy-builder',
       'url-protection',
       'attachments',
+      'api-mode',
       'ato',
       'ato-accounts',
       'ato-responses',
@@ -298,6 +305,7 @@ describe('navigation model (design P11)', () => {
       'policy-builder',
       'url-protection',
       'attachments',
+      'api-mode',
       'retention',
       'domains',
       'users',
@@ -360,6 +368,7 @@ describe('navigation model (design P11)', () => {
     'threat-intelligence',
     'url-protection',
     'attachments',
+    'api-mode',
   ];
 
   it.each(SYSTEM_ROLE_KEYS)(

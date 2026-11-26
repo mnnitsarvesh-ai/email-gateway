@@ -73,6 +73,9 @@ const PUBLIC_OPERATIONS = new Set([
   'POST /api/v1/auth/email/verify',
   'POST /api/v1/auth/invitations/inspect',
   'POST /api/v1/auth/invitations/accept',
+  // Step API-1 D12.4: the Microsoft Graph notification callbacks.
+  'POST /api/v1/provider-notifications/graph',
+  'POST /api/v1/provider-notifications/graph/lifecycle',
 ]);
 
 const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'options', 'head'] as const;
@@ -224,8 +227,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D8): 427; plus the capture-issue
     // read of step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8): 428; plus the
     // 11 hardening operations of step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md
-    // §4.1, contracts §35.6): 439, all under /api/v1.
-    expect(count).toBe(439);
+    // §4.1, contracts §35.6): 439; plus the 16 operations of step API-1
+    // (docs/plan/steps/35-api-mode-protection.md D12): 455, all under /api/v1.
+    expect(count).toBe(455);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -323,8 +327,12 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       const schemes = op!.security.flatMap((s) => Object.keys(s)).sort();
       expect(schemes, key).toEqual([ACCESS_TOKEN_SCHEME, API_KEY_SCHEME].sort());
     }
-    const domainOps = operations(doc).filter((op) => op.key.includes(' /api/v1/domains'));
+    // Step API-1 D12 #3: the domain mode change lives in the API-mode area (tag `api-mode`).
+    const domainOps = operations(doc).filter(
+      (op) => op.key.includes(' /api/v1/domains') && !op.key.endsWith('/protection-mode'),
+    );
     expect(domainOps.map((op) => op.key).sort()).toEqual([...expected].sort());
+    expect(byKey.get('PUT /api/v1/domains/{domainId}/protection-mode')?.tags).toEqual(['api-mode']);
   });
 
   it('documents every SMTP connector endpoint of step 2.2 §4.1, with the shared-IP warning', () => {
@@ -936,8 +944,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // transactional account takeover and incident mutations; step 8.2: 12 transactional
     // provider-connection mutations; step 8.5: 8 transactional identity-provider and mailbox
     // state mutations; step 8.6: 4 transactional journaling mutations (settings, source create,
-    // update and address rotation).
-    expect(keyed).toHaveLength(95);
+    // update and address rotation); step API-1: 5 transactional protection-mode and API-mode
+    // mutations (organization and domain mode, settings, inventory sync, mailbox resync).
+    expect(keyed).toHaveLength(100);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1297,6 +1306,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       expect.objectContaining({ name: 'Gateway and platform' }),
       { name: 'Journaling', tags: ['journaling'] },
       { name: 'Archive', tags: ['archive', 'ediscovery'] },
+      { name: 'API-mode protection', tags: ['api-mode'] },
+      { name: 'Callbacks', tags: ['provider-notifications'] },
     ]);
     const journalingDocs = JSON.stringify(
       Object.entries(doc.paths).filter(([path]) => path.startsWith('/api/v1/journaling')),
@@ -1304,6 +1315,109 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(journalingDocs).not.toMatch(
       /whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/,
     );
+  });
+
+  it('documents the 16 step API-1 operations with their ids, permissions, keys, tags and no secret-shaped examples (D12)', () => {
+    const ops = operations(doc).filter(
+      (o) => o.tags.includes('api-mode') || o.tags.includes('provider-notifications'),
+    );
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    expect(ops.map((o) => o.key).sort()).toEqual(
+      [
+        'GET /api/v1/organizations/{id}/protection-mode',
+        'PUT /api/v1/organizations/{id}/protection-mode',
+        'PUT /api/v1/domains/{domainId}/protection-mode',
+        'GET /api/v1/api-mode/overview',
+        'GET /api/v1/api-mode/connections',
+        'GET /api/v1/api-mode/connections/{connectionId}',
+        'GET /api/v1/api-mode/connections/{connectionId}/setup-guide',
+        'PUT /api/v1/api-mode/connections/{connectionId}/settings',
+        'POST /api/v1/api-mode/connections/{connectionId}/inventory-sync',
+        'GET /api/v1/api-mode/mailboxes',
+        'GET /api/v1/api-mode/mailboxes/{mailboxId}',
+        'POST /api/v1/api-mode/mailboxes/{mailboxId}/resync',
+        'GET /api/v1/api-mode/detections',
+        'GET /api/v1/api-mode/detections/{detectionId}',
+        'POST /api/v1/provider-notifications/graph',
+        'POST /api/v1/provider-notifications/graph/lifecycle',
+      ].sort(),
+    );
+    // The operation ids the portal client (WP6) uses.
+    expect(
+      ops
+        .map((o) => {
+          const [method, path] = o.key.split(' ') as [string, string];
+          return raw(method.toLowerCase(), path).operationId as string;
+        })
+        .sort(),
+    ).toEqual(
+      [
+        'ProtectionModeController_getOrganization_v1',
+        'ProtectionModeController_putOrganization_v1',
+        'ProtectionModeController_putDomain_v1',
+        'ApiModeController_overview_v1',
+        'ApiModeController_listConnections_v1',
+        'ApiModeController_getConnection_v1',
+        'ApiModeController_setupGuide_v1',
+        'ApiModeController_updateSettings_v1',
+        'ApiModeController_inventorySync_v1',
+        'ApiModeController_listMailboxes_v1',
+        'ApiModeController_getMailbox_v1',
+        'ApiModeController_resyncMailbox_v1',
+        'ApiModeController_listDetections_v1',
+        'ApiModeController_getDetection_v1',
+        'ProviderNotificationsController_graph_v1',
+        'ProviderNotificationsController_lifecycle_v1',
+      ].sort(),
+    );
+    expect(
+      raw('put', '/api/v1/api-mode/connections/{connectionId}/settings')['x-eg-permissions'],
+    ).toEqual({ mode: 'all', permissions: ['remediation:write'] });
+    expect(raw('get', '/api/v1/api-mode/detections')['x-eg-permissions']).toEqual({
+      mode: 'all',
+      permissions: ['remediation:read'],
+    });
+    for (const [method, path] of [
+      ['put', '/api/v1/organizations/{id}/protection-mode'],
+      ['put', '/api/v1/domains/{domainId}/protection-mode'],
+      ['put', '/api/v1/api-mode/connections/{connectionId}/settings'],
+      ['post', '/api/v1/api-mode/connections/{connectionId}/inventory-sync'],
+      ['post', '/api/v1/api-mode/mailboxes/{mailboxId}/resync'],
+    ] as const) {
+      expect(raw(method, path)['x-eg-idempotency'], path).toBe('required');
+      expect(raw(method, path)['x-eg-rate-class'], path).toBe('sensitive');
+    }
+    expect(raw('get', '/api/v1/api-mode/mailboxes')['x-eg-cursor']).toBe('v1');
+    expect(raw('get', '/api/v1/api-mode/detections')['x-eg-cursor']).toBe('v1');
+    expect(raw('post', '/api/v1/provider-notifications/graph').security ?? []).toEqual([]);
+    // The coded errors of D12.3 are documented where they apply.
+    const all = JSON.stringify(ops.map((o) => doc.paths[o.key.split(' ')[1]!]));
+    for (const code of [
+      'api_mode_not_enabled',
+      'protection_mode_mx_points_to_gateway',
+      'api_mode_mailbox_access_required',
+      'api_mode_notifications_unavailable',
+      'api_mode_connection_conflict',
+      'api_mode_connection_not_found',
+      'api_mode_mailbox_not_found',
+      'api_mode_detection_not_found',
+    ]) {
+      expect(all, code).toContain(code);
+    }
+    expect(JSON.stringify(raw('post', '/api/v1/domains'))).toContain(
+      'protection_mode_inbound_conflict',
+    );
+    expect(JSON.stringify(raw('post', '/api/v1/provider-connections/{id}/grants'))).toContain(
+      'remediation_permission_required',
+    );
+    // API-mode views never document a cursor, a subscription id or a client-state hash (the
+    // callback bodies do name `subscriptionId`: it is Graph's input).
+    const views = JSON.stringify(
+      ops.filter((o) => o.tags.includes('api-mode')).map((o) => doc.paths[o.key.split(' ')[1]!]),
+    );
+    expect(views).not.toMatch(/feedCursor|subscriptionId|clientStateHash|clientState"|deltaLink/);
+    expect(all).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
   });
 
   it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {

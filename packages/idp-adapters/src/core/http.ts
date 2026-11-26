@@ -91,6 +91,49 @@ export interface ProviderRequest<T> {
   requestId?: string;
 }
 
+/**
+ * A streamed GET (step API-1 D9): MIME bodies (Graph `$value`) and Gmail `format=raw` JSON that
+ * cannot be buffered whole. Same rules as `request` (origin allow-list, provider links same-origin
+ * and under the base path only, no redirects, no proxy environment, `401` drop-and-retry-once,
+ * classified errors with `Retry-After`, redaction); the body is never parsed here.
+ */
+export interface ProviderStreamRequest {
+  family: ApiFamily;
+  method: 'GET';
+  /** Path and query relative to the family base URL, or an absolute provider-returned link. */
+  url: string;
+  /** Path template for logs; never the concrete path or query. */
+  pathTemplate: string;
+  token: TokenSource;
+  signal: AbortSignal;
+  /** Byte cap of the body: exceeding it (declared or while streaming) fails `response_too_large`. */
+  maxBytes: number;
+  /** `Accept` header (default `*\/*`). */
+  accept?: string;
+  headers?: Readonly<Record<string, string>>;
+  attempt?: number;
+  requestId?: string;
+  /**
+   * Upper bound for reading the whole body after the headers arrived (default 10 minutes). The
+   * client's `timeoutMs` applies until the headers arrive and as the idle limit between chunks.
+   */
+  bodyTimeoutMs?: number;
+}
+
+export interface ProviderStreamResponse {
+  status: number;
+  requestId: string;
+  headers: { contentType?: string; contentLength?: number };
+  /**
+   * The body, iterable once. Iteration fails with a `ProviderCallError` (`response_too_large`,
+   * `aborted`, `provider_unavailable` on a timeout or a broken connection); breaking out of the
+   * loop cancels the transfer.
+   */
+  body: AsyncIterable<Uint8Array>;
+}
+
+export const DEFAULT_STREAM_BODY_TIMEOUT_MS = 600_000;
+
 export interface ProviderResponse<T> {
   status: number;
   data: T;
@@ -258,17 +301,151 @@ export class ProviderHttpClient {
     }
   }
 
-  private async attempt<T>(request: ProviderRequest<T>): Promise<ProviderResponse<T>> {
+  /**
+   * Streams a GET body (step API-1 D9) under the rules of `request`. The returned body must be
+   * consumed or broken out of; it enforces `maxBytes`, the caller's signal and the timeouts.
+   */
+  async requestStream(request: ProviderStreamRequest): Promise<ProviderStreamResponse> {
+    try {
+      return await this.attemptStream(request);
+    } catch (error) {
+      if (error instanceof ProviderCallError && error.code === 'unauthorized') {
+        request.token.invalidate();
+        return this.attemptStream(request);
+      }
+      throw error;
+    }
+  }
+
+  private async prepare(request: {
+    family: ApiFamily;
+    url: string;
+    token: TokenSource;
+    signal: AbortSignal;
+    headers?: Readonly<Record<string, string>>;
+    requestId?: string;
+    accept: string;
+  }): Promise<{ url: URL; headers: Record<string, string>; requestId: string }> {
     const url = this.resolve(request.family, request.url);
     const token = await request.token.get(request.signal);
     const requestId = request.requestId ?? randomUUID();
     const headers: Record<string, string> = {
       ...(request.headers ?? {}),
-      Accept: 'application/json',
+      Accept: request.accept,
       'User-Agent': USER_AGENT,
       Authorization: `Bearer ${token}`,
     };
     if (request.family === 'graph') headers['client-request-id'] = requestId;
+    return { url, headers, requestId };
+  }
+
+  private async attemptStream(request: ProviderStreamRequest): Promise<ProviderStreamResponse> {
+    const { url, headers, requestId } = await this.prepare({
+      ...request,
+      accept: request.accept ?? '*/*',
+    });
+    // One controller for the whole transfer: the header timeout, then the idle and total body
+    // limits (AbortSignal.timeout cannot be cleared once the headers have arrived).
+    const transfer = new AbortController();
+    const expire = () => transfer.abort();
+    let headerTimer: NodeJS.Timeout | undefined = setTimeout(expire, this.options.timeoutMs);
+    const signal = AbortSignal.any([request.signal, transfer.signal]);
+    const started = this.now();
+    const provider = this.options.provider ?? 'unknown';
+    let status = 0;
+    const clearHeaderTimer = () => {
+      if (headerTimer !== undefined) clearTimeout(headerTimer);
+      headerTimer = undefined;
+    };
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(url, {
+          method: 'GET',
+          headers,
+          redirect: 'error',
+          credentials: 'omit',
+          signal,
+        });
+      } catch (error) {
+        if (request.signal.aborted) throw new ProviderCallError('aborted', { retryable: false });
+        if (isRedirectError(error))
+          throw new ProviderCallError('redirect_refused', { retryable: false });
+        throw new ProviderCallError('provider_unavailable');
+      }
+      status = response.status;
+      if (status >= 300 && status < 400) {
+        await discard(response);
+        throw new ProviderCallError('redirect_refused', { status, retryable: false });
+      }
+      if (status >= 400) {
+        throw await this.classify(response, request);
+      }
+      const declared = Number(response.headers.get('Content-Length') ?? NaN);
+      if (Number.isFinite(declared) && declared > request.maxBytes) {
+        await discard(response);
+        throw new ProviderCallError('response_too_large', { status, retryable: false });
+      }
+      clearHeaderTimer();
+      // The total limit starts now (not on first iteration), so an unconsumed body is released.
+      const totalTimer = setTimeout(
+        expire,
+        request.bodyTimeoutMs ?? DEFAULT_STREAM_BODY_TIMEOUT_MS,
+      );
+      totalTimer.unref();
+      const contentType = response.headers.get('Content-Type') ?? undefined;
+      return {
+        status,
+        requestId,
+        headers: {
+          ...(contentType !== undefined ? { contentType } : {}),
+          ...(Number.isFinite(declared) ? { contentLength: declared } : {}),
+        },
+        body: streamBody(response, {
+          status,
+          maxBytes: request.maxBytes,
+          idleMs: this.options.timeoutMs,
+          totalTimer,
+          callerSignal: request.signal,
+          expire,
+        }),
+      };
+    } catch (error) {
+      clearHeaderTimer();
+      if (error instanceof ProviderCallError) {
+        if (error.code === 'throttled' || error.code === 'quota_exhausted') {
+          this.options.metrics?.throttled?.({ provider, family: request.family });
+        }
+        throw error;
+      }
+      if (request.signal.aborted) throw new ProviderCallError('aborted', { retryable: false });
+      throw new ProviderCallError('provider_unavailable');
+    } finally {
+      const seconds = (this.now() - started) / 1000;
+      const statusClass = status === 0 ? 'error' : `${Math.floor(status / 100)}xx`;
+      this.options.metrics?.httpRequest?.(
+        { provider, family: request.family, statusClass },
+        seconds,
+      );
+      this.logger.debug(
+        {
+          family: request.family,
+          method: 'GET',
+          path: request.pathTemplate,
+          status,
+          durationMs: Math.round(seconds * 1000),
+          stream: true,
+        },
+        'provider request',
+      );
+    }
+  }
+
+  private async attempt<T>(request: ProviderRequest<T>): Promise<ProviderResponse<T>> {
+    const { url, headers, requestId } = await this.prepare({
+      ...request,
+      accept: 'application/json',
+    });
     let body: string | undefined;
     if (request.body !== undefined) {
       body = JSON.stringify(request.body);
@@ -352,7 +529,7 @@ export class ProviderHttpClient {
 
   private async classify(
     response: Response,
-    request: ProviderRequest<unknown>,
+    request: { signal: AbortSignal; attempt?: number },
   ): Promise<ProviderCallError> {
     const status = response.status;
     const nowMs = this.now();
@@ -481,4 +658,70 @@ async function readCapped(
     reader.releaseLock();
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * The streamed body of `requestStream`: enforces the byte cap, the caller's signal, the idle limit
+ * between chunks and the total body limit; cancels the transfer when the consumer stops early.
+ */
+async function* streamBody(
+  response: Response,
+  options: {
+    status: number;
+    maxBytes: number;
+    idleMs: number;
+    totalTimer: NodeJS.Timeout;
+    callerSignal: AbortSignal;
+    expire: () => void;
+  },
+): AsyncGenerator<Uint8Array, void, undefined> {
+  if (!response.body) {
+    clearTimeout(options.totalTimer);
+    return;
+  }
+  const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+  let idle: NodeJS.Timeout | undefined;
+  let received = 0;
+  let finished = false;
+  try {
+    for (;;) {
+      if (options.callerSignal.aborted)
+        throw new ProviderCallError('aborted', { retryable: false });
+      idle = setTimeout(options.expire, options.idleMs);
+      let chunk: Awaited<ReturnType<typeof reader.read>>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        if (options.callerSignal.aborted) {
+          throw new ProviderCallError('aborted', { retryable: false });
+        }
+        // A timeout (idle or total) or a broken connection.
+        throw new ProviderCallError('provider_unavailable', { status: options.status });
+      } finally {
+        clearTimeout(idle);
+      }
+      if (chunk.done) {
+        finished = true;
+        return;
+      }
+      received += chunk.value.byteLength;
+      if (received > options.maxBytes) {
+        throw new ProviderCallError('response_too_large', {
+          status: options.status,
+          retryable: false,
+        });
+      }
+      yield chunk.value;
+    }
+  } finally {
+    clearTimeout(options.totalTimer);
+    if (!finished) {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    reader.releaseLock();
+  }
 }

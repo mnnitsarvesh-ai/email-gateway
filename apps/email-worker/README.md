@@ -562,7 +562,18 @@ with a requested scan writes `parsed.v1` on success and applies E30 `intake_pars
 `parse_failed.v1`) on failure. The scan completion of an intake round (engines or the deadline
 sweeper) applies E6/E7 and then **E31** / **E32** (`→ journaled`) in the same transaction in
 place of `scanned.v1`; the risk score is recorded as for any round. Signature rescans never
-select intake messages. Gateway messages are unchanged. Metric
+select intake messages. Gateway messages are unchanged.
+
+**Detect-mode copies (step API-1 D8, ADR-0098).** Every non-gateway copy
+(`ingest_source` `journal_intake` or `mailbox_api`; `scanning/copy-scanned.ts` `isCopySource`)
+follows the rules above; a `mailbox_api` copy has no `journal_intake_messages` row and its scan
+is always requested (the smtp-adapter also sets `scan_requested` for journal copies of API-mode
+organizations). In the same transaction as E30 `intake_parse_failed` of a copy whose scan was
+requested, and as E31/E32 of every copy round, the worker writes
+`mail.message.copy_scanned.v1` (`writeCopyScannedOutbox`: `aggregate_id` = the message public
+id; outcome `parse_failed` / `scanned` / `scan_failed`, the round's risk verdict and score from
+`email_scans`, `completedAt`, `scanId`, `lifecycleRound`) for the mailbox-worker's per-mailbox
+copy record. Never `scanned.v1`, no policy, no `threat_detected` alert. Metric
 `mime_intake_messages_total{result}`; runbooks [mime-ingestion.md](../../docs/runbooks/mime-ingestion.md#journal-intake-messages-step-86)
 and [scan-pipeline.md](../../docs/runbooks/scan-pipeline.md#journal-intake-rounds-step-86).
 

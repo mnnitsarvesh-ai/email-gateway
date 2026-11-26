@@ -553,6 +553,29 @@ export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> 
       'Gmail, customer certificate credentials, automatic outbound suspension on health.',
   },
   {
+    name: 'api-mode',
+    description:
+      'Step API-1 (docs/plan/steps/35-api-mode-protection.md, ADR-0098–0100): API-mode protection ' +
+      'without an MX change. Protection modes of the organization and its domains (`inline`, ' +
+      '`api`, `hybrid`; audited, MX-conflict guarded, never changing inline mail flow), the ' +
+      'coverage and health overview, provider connections with their change-feed settings ' +
+      '(off by default; Microsoft Graph delta with optional change notifications, Gmail ' +
+      'history), wizard and setup guide, mailbox inventory and resync requests, mailboxes and ' +
+      'detections (per-mailbox copies scanned in detect mode: never delivered, forwarded or ' +
+      'bounced; subjects withheld, senders masked). Reads need `remediation:read`, writes ' +
+      '`remediation:write` (mode changes: `organization:manage` / `domain:manage`). The api ' +
+      'never calls a provider (the mailbox-worker does) and never returns feed cursors, ' +
+      'subscription ids or client state.',
+  },
+  {
+    name: 'provider-notifications',
+    description:
+      'Step API-1 D12.4: public callbacks of Microsoft Graph change and lifecycle notifications ' +
+      '(API-mode change feeds). No credential; an item only requests a delta sync of the ' +
+      'mailbox its stored subscription id and client state select; always `202` (validation ' +
+      'handshake: the token echoed as text/plain). Called by Microsoft Graph, never by clients.',
+  },
+  {
     name: 'assistant',
     description:
       'Step AI-1: the AI assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091–0094). ' +
@@ -595,15 +618,24 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
 /**
  * Step 8.6 D11: `x-tagGroups` (Redoc) with the two areas of the archive settings row —
  * `Journaling` = [`journaling`] (capture) and `Archive` = [`archive`, `ediscovery`] (storage and
- * use) — and every other tag in `Gateway and platform`, so no tag is hidden by a renderer that
- * only lists grouped tags.
+ * use) — step API-1: `API-mode protection` = [`api-mode`] and `Callbacks` =
+ * [`provider-notifications`] — and every other tag in `Gateway and platform`, so no tag is hidden
+ * by a renderer that only lists grouped tags.
  */
 export function openApiTagGroups(tags: readonly string[]): Array<{ name: string; tags: string[] }> {
-  const grouped = new Set(['journaling', 'archive', 'ediscovery']);
+  const grouped = new Set([
+    'journaling',
+    'archive',
+    'ediscovery',
+    'api-mode',
+    'provider-notifications',
+  ]);
   return [
     { name: 'Gateway and platform', tags: tags.filter((t) => !grouped.has(t)) },
     { name: 'Journaling', tags: ['journaling'] },
     { name: 'Archive', tags: ['archive', 'ediscovery'] },
+    { name: 'API-mode protection', tags: ['api-mode'] },
+    { name: 'Callbacks', tags: ['provider-notifications'] },
   ];
 }
 

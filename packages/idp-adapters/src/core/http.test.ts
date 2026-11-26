@@ -489,3 +489,236 @@ describe('redaction (invariant 2)', () => {
     }
   });
 });
+
+describe('requestStream (step API-1 D9)', () => {
+  const stream = (
+    http: ProviderHttpClient,
+    overrides: Partial<Parameters<ProviderHttpClient['requestStream']>[0]> = {},
+  ) =>
+    http.requestStream({
+      family: 'graph',
+      method: 'GET',
+      url: '/v1.0/users/u1/messages/m1/$value',
+      pathTemplate: '/v1.0/users/{id}/messages/{mid}/$value',
+      token: tokenSource(TOKEN),
+      signal: signal(),
+      maxBytes: 4096,
+      ...overrides,
+    });
+
+  async function collect(body: AsyncIterable<Uint8Array>): Promise<Buffer> {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of body) chunks.push(chunk);
+    return Buffer.concat(chunks);
+  }
+
+  async function streamFailure(body: AsyncIterable<Uint8Array>): Promise<ProviderCallError> {
+    return failure(collect(body));
+  }
+
+  it('streams the body chunk by chunk with the fixed headers', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'message/rfc822' });
+      res.write('Subject: one\r\n');
+      setTimeout(() => res.end('\r\nbody\r\n'), 10);
+    };
+    const response = await stream(client(), { accept: 'message/rfc822' });
+    expect(response.status).toBe(200);
+    expect(response.headers.contentType).toBe('message/rfc822');
+    expect((await collect(response.body)).toString('utf8')).toBe('Subject: one\r\n\r\nbody\r\n');
+    const request = seen[0];
+    expect(request?.url).toBe('/graph/v1.0/users/u1/messages/m1/$value');
+    expect(request?.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(request?.headers.accept).toBe('message/rfc822');
+    expect(request?.headers['client-request-id']).toBe(response.requestId);
+    expect(metrics.httpRequest).toHaveBeenCalledWith(
+      { provider: 'microsoft_entra', family: 'graph', statusClass: '2xx' },
+      expect.any(Number),
+    );
+    expect(logger.lines[0]?.obj).toEqual({
+      family: 'graph',
+      method: 'GET',
+      path: '/v1.0/users/{id}/messages/{mid}/$value',
+      status: 200,
+      durationMs: 0,
+      stream: true,
+    });
+  });
+
+  it('refuses a declared Content-Length over the cap before streaming', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'message/rfc822', 'Content-Length': '5000' });
+      res.end('x'.repeat(5000));
+    };
+    const error = await failure(stream(client()));
+    expect(error.code).toBe('response_too_large');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('fails response_too_large once the cap is exceeded while streaming (chunked)', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'message/rfc822' });
+      res.write('a'.repeat(3000));
+      setTimeout(() => res.end('b'.repeat(3000)), 10);
+    };
+    const response = await stream(client());
+    const error = await streamFailure(response.body);
+    expect(error.code).toBe('response_too_large');
+    expect(error.status).toBe(200);
+  });
+
+  it('accepts a body of exactly maxBytes', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.end('z'.repeat(4096));
+    };
+    const response = await stream(client());
+    expect((await collect(response.body)).length).toBe(4096);
+  });
+
+  it('cancels the transfer when the consumer stops early', async () => {
+    let closed = false;
+    handler = (req, res) => {
+      res.writeHead(200);
+      res.write('first');
+      req.socket.on('close', () => {
+        closed = true;
+      });
+      // never ends on its own
+    };
+    const response = await stream(client({ timeoutMs: 2_000 }));
+    for await (const chunk of response.body) {
+      expect(Buffer.from(chunk).toString()).toBe('first');
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(true);
+  });
+
+  it('applies the idle limit between chunks and the total body limit', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.write('start');
+      // then stalls
+    };
+    let response = await stream(client({ timeoutMs: 100 }));
+    let error = await streamFailure(response.body);
+    expect(error.code).toBe('provider_unavailable');
+    expect(error.retryable).toBe(true);
+
+    let timer: NodeJS.Timeout | undefined;
+    handler = (_req, res) => {
+      res.writeHead(200);
+      timer = setInterval(() => res.write('.'), 20);
+    };
+    response = await stream(client({ timeoutMs: 200 }), { bodyTimeoutMs: 150 });
+    error = await streamFailure(response.body);
+    clearInterval(timer);
+    expect(error.code).toBe('provider_unavailable');
+  });
+
+  it('times out before the headers and answers aborted when the caller aborts', async () => {
+    handler = () => undefined;
+    expect((await failure(stream(client({ timeoutMs: 100 })))).code).toBe('provider_unavailable');
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.write('start');
+    };
+    const controller = new AbortController();
+    const response = await stream(client({ timeoutMs: 5_000 }), { signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    const error = await streamFailure(response.body);
+    expect(error.code).toBe('aborted');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('keeps the origin allow-list and never follows redirects', async () => {
+    expect(
+      (await failure(stream(client(), { url: 'https://attacker.example.invalid/graph/x' }))).code,
+    ).toBe('blocked_host');
+    expect(seen).toHaveLength(0);
+    // A provider link under the base path is followed.
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.end('ok');
+    };
+    const response = await stream(client(), { url: `${base}/graph/v1.0/next?$skiptoken=a` });
+    expect((await collect(response.body)).toString()).toBe('ok');
+    expect(() => client().relativize('graph', `${base}/gmail/x`)).toThrow('blocked_host');
+    handler = (_req, res) => {
+      res.writeHead(302, { Location: 'https://attacker.example.invalid/' });
+      res.end();
+    };
+    const error = await failure(stream(client()));
+    expect(error.code).toBe('redirect_refused');
+  });
+
+  it('drops the token once on 401 and retries once', async () => {
+    handler = (req, res) => {
+      if (req.headers.authorization === `Bearer ${TOKEN}`) {
+        json(res, 401, { error: { code: 'InvalidAuthenticationToken' } });
+      } else {
+        res.writeHead(200);
+        res.end('second');
+      }
+    };
+    const token = tokenSource(TOKEN, SECOND_TOKEN);
+    const response = await stream(client(), { token });
+    expect((await collect(response.body)).toString()).toBe('second');
+    expect(token.invalidate).toHaveBeenCalledTimes(1);
+    handler = (_req, res) => json(res, 401, { error: { code: 'InvalidAuthenticationToken' } });
+    const again = tokenSource(TOKEN, SECOND_TOKEN);
+    expect((await failure(stream(client(), { token: again }))).code).toBe('unauthorized');
+    expect(again.invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies 429/503 with Retry-After (capped) and reports throttling', async () => {
+    handler = (_req, res) =>
+      json(res, 429, { error: { code: 'TooManyRequests' } }, { 'Retry-After': '9' });
+    let error = await failure(stream(client()));
+    expect(error.code).toBe('throttled');
+    expect(error.retryAfterMs).toBe(9_000);
+    expect(metrics.throttled).toHaveBeenCalledWith({
+      provider: 'microsoft_entra',
+      family: 'graph',
+    });
+    handler = (_req, res) => json(res, 503, {}, { 'Retry-After': '86400' });
+    error = await failure(stream(client({ maxBackoffMs: 600_000 })));
+    expect(error.code).toBe('provider_unavailable');
+    expect(error.retryAfterMs).toBe(600_000);
+    handler = (_req, res) => json(res, 404, { error: { code: 'ErrorItemNotFound' } });
+    expect((await failure(stream(client()))).code).toBe('not_found');
+  });
+
+  it('never leaks a token, query string or body into errors or log lines', async () => {
+    const bodyMarker = 'EXAMPLE-stream-body-4417';
+    const queryMarker = 'stream-query-8812';
+    const errors: unknown[] = [];
+    for (const status of [400, 401, 403, 429, 500]) {
+      handler = (_req, res) =>
+        json(res, status, { error: { code: 'Denied', message: bodyMarker, token: TOKEN } });
+      try {
+        await stream(client(), { url: `/v1.0/x?$filter=${queryMarker}` });
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    handler = (_req, res) => {
+      res.writeHead(200);
+      res.end(`${bodyMarker}${'q'.repeat(5000)}`);
+    };
+    const response = await stream(client(), { url: `/v1.0/x?$filter=${queryMarker}` });
+    errors.push(await streamFailure(response.body));
+    expect(errors).toHaveLength(6);
+    const dump = [
+      logger.text(),
+      ...errors.map((error) => JSON.stringify(error)),
+      ...errors.map((error) =>
+        error instanceof Error ? `${error.message} ${error.stack ?? ''}` : '',
+      ),
+    ].join('\n');
+    for (const secret of [TOKEN, SECOND_TOKEN, 'Bearer', queryMarker, bodyMarker]) {
+      expect(dump).not.toContain(secret);
+    }
+  });
+});

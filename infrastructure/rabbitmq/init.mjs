@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v16 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v17 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
 // v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
 // step 8.4 §4.1, ADR-0070; v14: step 8.2 D12, ADR-0079; v15: step AI-R D8, ADR-0095; v16: step
-// AI-6 D5, ADR-0096).
+// AI-6 D5, ADR-0096; v17: step API-1 D7, D8, ADR-0100).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -33,7 +33,7 @@
 //   6. --cleanup-legacy: delete the ADR-0005 objects on vhost "/" only when empty (queues with
 //      no messages and no consumers; RabbitMQ 4.x refuses `if-empty` deletes of quorum queues,
 //      so emptiness is checked first); --legacy-vhost points it at another vhost (tests only);
-//   7. verify: exactly the 6 exchanges and 24 quorum queues, exactly the bindings of the
+//   7. verify: exactly the 6 exchanges and 26 quorum queues, exactly the bindings of the
 //      definitions (no missing and no extra binding), every policy applied, and (--users) each
 //      role user's permissions and topic permissions exactly.
 // Exits non-zero on any failure. Logs object names and counts only: never a password, never a
@@ -159,6 +159,18 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * granted). `assistant.reports` is no dot-prefix of another queue name and no other queue name
  * starts with `assistant.`, so the prefix cannot reach another queue's hops. Not in
  * RECONCILE_QUEUES (the api's sweep fails jobs past their expiry).
+ *
+ * Topology v17 (step API-1 D7, D8, §5, ADR-0100) adds the mailbox-worker user (`eg-mailbox`,
+ * RABBITMQ_MAILBOX_USER / RABBITMQ_MAILBOX_PASSWORD): it reads only email.mailbox (the `copies`
+ * role's work queue, home exchange email.security) and publishes only that queue's retry hops on
+ * email.security and its dead-letter hops on email.events; every event it produces (registry
+ * copies' mail.message.received.v1, alert requests) goes through the outbox and the relay
+ * (EVENT_KEYS covers mail.message.copy_scanned.v1 on email.security). It configures nothing. ops
+ * may replay email.mailbox: its email.security topic grant gains `retry.email.mailbox.` (write on
+ * email.security is already granted). `email.mailbox` is no dot-prefix of another queue name and
+ * no other queue name starts with `email.mailbox`, so the prefix cannot reach another queue's
+ * hops. Reconciled (RECONCILE_QUEUES gains email.mailbox; the worker records its retry and
+ * dead-letter hops).
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -334,6 +346,21 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step API-1 D7, §5 (v17): the mailbox-worker's copies role. Reads its one queue; publishes
+    // only the retry hops of email.mailbox (home exchange email.security) and its dead-letter
+    // hops; everything it produces goes through the outbox.
+    role: 'mailbox-worker',
+    userKey: 'RABBITMQ_MAILBOX_USER',
+    passwordKey: 'RABBITMQ_MAILBOX_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(security|events)$',
+    read: '^email\\.mailbox$',
+    topics: [
+      topic('email.security', '^retry\\.email\\.mailbox\\.'),
+      topic('email.events', '^dead-letter\\.email\\.mailbox(\\.|$)'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -346,7 +373,8 @@ const ROLE_USERS = [
     // email.events; its topic grant there is the retry prefix only), v12 email.archive (home
     // exchange email.archive; retry prefix only), v13 ato.events, ato.mail and ato.responses
     // (home exchange email.security; retry prefixes only), v16 assistant.reports (home exchange
-    // email.policy; retry prefix only).
+    // email.policy; retry prefix only), v17 email.mailbox (home exchange email.security; retry
+    // prefix only).
     write: '^email\\.(ingestion|delivery|security|policy|archive|events)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -354,7 +382,7 @@ const ROLE_USERS = [
       topic('email.delivery', '^retry\\.email\\.delivery\\.pending\\.'),
       topic(
         'email.security',
-        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses))\\.',
+        '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses)|email\\.mailbox)\\.',
       ),
       topic(
         'email.policy',

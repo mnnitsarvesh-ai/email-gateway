@@ -168,6 +168,56 @@ export interface MsServicePrincipal {
   verifiedPublisher: { displayName: string | null; verifiedPublisherId: string | null };
 }
 
+/**
+ * One message of a simulated mailbox (step API-1 D13): the Graph Inbox or the Gmail mailbox of a
+ * user. Synthetic EMLs only, stored base64 (standard alphabet) so a dataset stays JSON.
+ */
+export interface SimMailMessage {
+  /** Graph message id / Gmail message id. */
+  id: string;
+  /** Gmail thread id (Graph: unused). */
+  threadId?: string;
+  /** The `Message-ID` header value (with angle brackets), or null. */
+  internetMessageId: string | null;
+  emlBase64: string;
+  /** Graph `receivedDateTime` / Gmail `internalDate` (ISO 8601). */
+  receivedAt: string;
+  isDraft?: boolean;
+  /** Gmail labels (default `INBOX`, `UNREAD`). */
+  labelIds?: string[];
+  /** Graph delta sequence / Gmail history id of the change that added the message. */
+  seq: number;
+  /** Graph: sequence of the change that removed the message from the Inbox (`@removed`). */
+  removedSeq?: number;
+}
+
+/** Change state of one simulated mailbox. */
+export interface SimMailbox {
+  /** Last change sequence (Graph delta state) / current Gmail history id. */
+  seq: number;
+  /**
+   * Cursors (Graph delta/skip tokens, Gmail start history ids) below this sequence are expired:
+   * Graph answers `410 syncStateNotFound`, Gmail `404`.
+   */
+  cursorFloor: number;
+  messages: SimMailMessage[];
+}
+
+/** A Graph change-notification subscription (step API-1 D13). */
+export interface MsSubscription {
+  id: string;
+  /** `users/{id}/mailFolders('inbox')/messages` as given. */
+  resource: string;
+  /** The user object id the resource names. */
+  userId: string;
+  changeType: string;
+  notificationUrl: string;
+  lifecycleNotificationUrl: string | null;
+  clientState: string | null;
+  expirationDateTime: string;
+  latestSupportedTlsVersion: string | null;
+}
+
 export interface MsDirectory {
   tenantId: string;
   domains: string[];
@@ -184,6 +234,10 @@ export interface MsDirectory {
   groups: MsGroup[];
   oauth2PermissionGrants: MsOAuthGrant[];
   servicePrincipals: MsServicePrincipal[];
+  /** Step API-1: Inbox state per user object id (created on first use). */
+  mailboxes?: Record<string, SimMailbox>;
+  /** Step API-1: change-notification subscriptions. */
+  subscriptions?: MsSubscription[];
 }
 
 export interface MicrosoftSimData {

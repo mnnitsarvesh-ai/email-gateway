@@ -52,14 +52,14 @@ const monthly = (
 });
 
 /**
- * The 41 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
+ * The 42 partitioned tables: the 16 of D3, the two delivery tables of step 2.3 (§3), the parse
  * stage table of step 3.1 (§3), the authentication results table of step 4.1 (§3), the
  * per-attachment results and sandbox submissions of step 4.2 (§3), the five URL tables of
  * step 4.3 (§3), the BEC results table of step 4.4 (§3), the two DLP tables of step 4.5 (§3),
  * the risk scores table of step 5.1 (§3), the webhook events and delivery attempts of
  * step 6.2 (§3), the archive capture intents and disposal log of step 8.1 (§3), the four
- * account takeover tables of step 8.4 (§3.3, D22) and the journal intake messages and archive
- * record sources of step 8.6 (§3.2).
+ * account takeover tables of step 8.4 (§3.3, D22), the journal intake messages and archive
+ * record sources of step 8.6 (§3.2) and the API-mode message copies of step API-1 (§3.2).
  */
 export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   monthly('email_messages', 'received_at', 6, 'core'),
@@ -134,6 +134,11 @@ export const PARTITION_REGISTRY: readonly PartitionSpec[] = Object.freeze([
   // partitioned by the record's received_at and never dropped (deleted row by row with the
   // record's disposal, like email_archives).
   monthly('archive_record_sources', 'archive_received_at', null, 'compliance'),
+  // Step API-1 (docs/plan/steps/35-api-mode-protection.md §3.2, D7, ADR-0100): the per-mailbox
+  // copy records (verdict, lag, hybrid link) live as long as the copy registry messages they
+  // reference (6 months, core). Nothing references them, so the registry purge keeps nothing
+  // extra for them.
+  monthly('api_message_copies', 'received_at', 6, 'core'),
   monthly('bounce_events', 'occurred_at', 6, 'core'),
   // Compliance: export and drop are a later manual or ops decision.
   monthly('audit_logs', 'created_at', null, 'compliance'),

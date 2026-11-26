@@ -25,6 +25,11 @@ export interface IntakeWizardInput {
     enabled: boolean;
     /** A live default retention policy is set. */
     defaultRetention: boolean;
+    /**
+     * Step API-1 D6: API mode is active (`api_mode_protection` and a domain effective
+     * `api`/`hybrid`): it entitles the source without archiving. Default false.
+     */
+    apiModeActive?: boolean;
   };
   /** TXT-verified (`verified`/`active`) domains of the organization. */
   verifiedDomains: number;
@@ -47,6 +52,8 @@ export interface IntakeWizardStepState {
   step: IntakeWizardStep;
   status: IntakeWizardStepStatus;
   blockers: string[];
+  /** Why a step is `skipped` when the kind alone does not explain it (step API-1: `api_mode`). */
+  reason?: string;
 }
 
 export interface IntakeWizardState {
@@ -123,6 +130,12 @@ export function computeIntakeWizard(input: IntakeWizardInput): IntakeWizardState
       ...(a.entitled ? [] : ['archiving_not_entitled']),
       ...(a.intakeEntitled ? [] : ['journal_intake_not_entitled']),
     ];
+    // Step API-1 D6: with journal intake entitled, active API mode entitles the source when
+    // archiving does not (archiving not entitled, disabled or without a default policy).
+    const archivingReady = a.entitled && a.enabled && a.defaultRetention;
+    if (a.intakeEntitled && !archivingReady && a.apiModeActive === true) {
+      return { step: 'archiving', status: 'skipped', blockers: [], reason: 'api_mode' };
+    }
     if (notEntitled.length > 0)
       return { step: 'archiving', status: 'blocked', blockers: notEntitled };
     const blockers = [

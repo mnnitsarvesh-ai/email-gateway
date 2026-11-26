@@ -7,7 +7,14 @@ import {
   STATE_RANK,
   type MessageState,
 } from './states';
-import { findEdge, INTAKE_ONLY_STATES, LIFECYCLE_REASON_CODES, TRANSITIONS } from './transitions';
+import {
+  COPY_INGEST_SOURCES,
+  findEdge,
+  INTAKE_ONLY_STATES,
+  LIFECYCLE_REASON_CODES,
+  MESSAGE_INGEST_SOURCES,
+  TRANSITIONS,
+} from './transitions';
 
 /** §9 item 2: invariants of the transition table. */
 
@@ -314,5 +321,13 @@ describe('TRANSITIONS', () => {
     ]);
     expect(INTAKE_ONLY_STATES).toEqual(['journaled']);
     expect(MESSAGE_STATES.at(-1)).toBe('journaled');
+    // Step API-1 (D8, ADR-0098): every non-gateway copy ends in journaled; no new edge or reason.
+    expect(MESSAGE_INGEST_SOURCES).toEqual(['gateway', 'journal_intake', 'mailbox_api']);
+    expect(COPY_INGEST_SOURCES).toEqual(['journal_intake', 'mailbox_api']);
+    expect(TRANSITIONS.filter((edge) => edge.to === 'journaled').map((edge) => edge.id)).toEqual([
+      'E30',
+      'E31',
+      'E32',
+    ]);
   });
 });
