@@ -66,13 +66,21 @@ const ORDER = [
   // Step AI-1: assistant conversations and their children, usage and settings (the purge order of
   // AssistantTenantDataRepository; every table references organizations RESTRICT). Step AI-R:
   // report deliveries, then reports (their objects under `org/<id>/` go with deleteObjects).
+  // Step AI-6: report jobs, feedback, pseudonyms, per-user usage and provider keys (the order of
+  // ASSISTANT_PURGE_ORDER).
   'ai_chat_report_deliveries',
+  'ai_chat_report_jobs',
   'ai_chat_reports',
+  'ai_chat_feedback',
+  'ai_chat_pseudonyms',
+  'ai_chat_action_confirmations',
   'ai_chat_tool_executions',
   'ai_chat_messages',
   'ai_chat_turns',
   'ai_chat_conversations',
   'ai_chat_usage_daily',
+  'ai_chat_usage_user_daily',
+  'ai_chat_provider_keys',
   'ai_chat_settings',
   // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
   ...ATO_TABLES,

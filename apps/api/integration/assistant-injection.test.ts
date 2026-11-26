@@ -65,6 +65,12 @@
  * message body, intake address, impact token or confirmation token appears in a transcript,
  * envelope or stored row.
  *
+ * Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md D3, I25, R2, §9 item 5): the same
+ * injected write in a tenant at `pseudonymized` data sharing: the adversarial fake still only
+ * produces a pending high confirmation (the server-side controls do not depend on the level), the
+ * model saw no raw address or URL host of the message (placeholders), and the confirmation card
+ * shown to the user carries the real values.
+ *
  * Messages, the delivery attempt's snippet and the session's user agent are written on the writer
  * with integration fixtures (no production code path writes them this way). Synthetic `it-*`
  * organizations only.
@@ -118,9 +124,11 @@ import {
   storedTraces,
   trackReports,
   turn,
+  updateSettings,
   waitFor,
   waitForRead,
 } from './support/assistant';
+import { needlesIn } from './support/assistant-hardening';
 import {
   complianceTenant,
   type ComplianceTenant,
@@ -1382,5 +1390,59 @@ describe('step AI-5: instructions in archived mail metadata (I22, I23, R1, R5)',
         expect(credentialKeys(envelope.parsed.data ?? null)).toEqual([]);
       }
     }
+  });
+});
+
+describe('step AI-6: injection in a pseudonymized tenant (I25, R2)', () => {
+  beforeAll(async () => {
+    await updateSettings(ctx, admin, { dataSharing: 'pseudonymized' });
+  });
+
+  afterAll(async () => {
+    await updateSettings(ctx, admin, { dataSharing: 'metadata' });
+  });
+
+  it('the injected write is still only a pending high confirmation; the model saw placeholders, the card real values', async () => {
+    const before = await ctx.prisma.user.findUniqueOrThrow({
+      where: { id: victim.user.id },
+      select: { status: true, updatedAt: true },
+    });
+    const { res, read, injected } = await injectedTurn(
+      directive('quarantine_entries_detail', { entryId }),
+    );
+    expect(read).toMatchObject({ decision: 'allowed', status: 'succeeded' });
+    expect(injected).toMatchObject({
+      tool: 'users_change_status',
+      decision: 'allowed',
+      status: 'pending_confirmation',
+    });
+    const [pending] = confirmationsOfTurn(res.body);
+    expect(pending!.confirmation).toMatchObject({ risk: 'high', requiresReauth: true });
+    const turnRow = await ctx.prisma.aiChatTurn.findUniqueOrThrow({
+      where: { publicId: res.body.turn.id as string },
+      select: { providerTranscript: true, dataSharing: true },
+    });
+    expect(turnRow.dataSharing).toBe('pseudonymized');
+    // The message's addresses and the link's host reached the model as placeholders only.
+    const raw = [
+      'alice@acme.example',
+      `sender@${orgA.slug}.example`,
+      'exfil.attacker.example',
+      admin.user.email,
+    ];
+    expect(needlesIn(turnRow.providerTranscript ?? '', raw)).toEqual([]);
+    expect(turnRow.providerTranscript).toMatch(/\[EMAIL_\d+\]/);
+    expect(turnRow.providerTranscript).toMatch(/\[DOMAIN_\d+\]/);
+    // The card (server-built, real values) names the victim; nothing changed.
+    expect(JSON.stringify(pending!.confirmation.summary)).toMatch(
+      new RegExp(`${victim.user.email.replace(/[.]/g, '\\.')}|${victim.user.displayName}`),
+    );
+    expect(
+      await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: victim.user.id },
+        select: { status: true, updatedAt: true },
+      }),
+    ).toEqual(before);
+    expect((await cancelConfirmation(ctx, admin, pending!.confirmation.id)).status).toBe(200);
   });
 });

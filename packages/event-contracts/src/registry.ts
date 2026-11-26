@@ -1,5 +1,8 @@
 import type { z } from 'zod';
-import { assistantReportEmailRequestedV1 } from './assistant-events';
+import {
+  assistantReportEmailRequestedV1,
+  assistantReportGenerateRequestedV1,
+} from './assistant-events';
 import {
   atoAccountRiskUpdatedV1,
   atoNotificationRequestedV1,
@@ -73,6 +76,9 @@ import type { ExchangeName } from './topology';
  *
  * `assistant_report_delivery` (step AI-R D8, §4.3): a confirmed assistant report email
  * (`aggregate_id` = the `ai_chat_report_deliveries.public_id`).
+ *
+ * `assistant_report_job` (step AI-6 D5, §4.2): an asynchronous assistant report job
+ * (`aggregate_id` = the `ai_chat_report_jobs.public_id`).
  */
 export type AggregateType =
   | 'message'
@@ -90,7 +96,8 @@ export type AggregateType =
   | 'ato_restriction'
   | 'ato_notification'
   | 'provider_connection'
-  | 'assistant_report_delivery';
+  | 'assistant_report_delivery'
+  | 'assistant_report_job';
 
 export interface EventDefinition<S extends z.ZodType = z.ZodType> {
   type: string;
@@ -407,6 +414,14 @@ export const EVENT_REGISTRY = {
     'email.policy',
     assistantReportEmailRequestedV1,
     'assistant_report_delivery',
+  ),
+  // Step AI-6 D5: producer api (turn engine, the report_generate transaction) through the
+  // outbox; bound to assistant.reports (consumer: the api-assistant ReportJobConsumer, v16).
+  [EventTypes.AssistantReportGenerateRequested]: define(
+    EventTypes.AssistantReportGenerateRequested,
+    'email.policy',
+    assistantReportGenerateRequestedV1,
+    'assistant_report_job',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

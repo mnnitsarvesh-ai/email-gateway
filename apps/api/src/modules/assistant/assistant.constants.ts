@@ -66,6 +66,27 @@ export type AssistantConfig = Pick<
   | 'ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY'
   | 'ASSISTANT_REPORT_MAX_HTML_BYTES'
   | 'REPORTS_MAX_RANGE_DAYS'
+  // Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md §4.3).
+  | 'LOG_LEVEL'
+  | 'SERVICE_VERSION'
+  | 'ASSISTANT_FALLBACK_PROVIDER'
+  | 'ASSISTANT_FALLBACK_MODEL'
+  | 'ASSISTANT_TENANT_KEYS_ENABLED'
+  | 'ASSISTANT_TENANT_KEY_PROVIDERS'
+  | 'ASSISTANT_TENANT_KEY_MODELS'
+  | 'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY'
+  | 'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS'
+  | 'ASSISTANT_TENANT_KEY_VALIDATION_TIMEOUT_MS'
+  | 'ASSISTANT_PSEUDONYMS_MAX_PER_CONVERSATION'
+  | 'ASSISTANT_SEARCH_SCAN_MAX_MESSAGES'
+  | 'ASSISTANT_SEARCH_TIMEOUT_MS'
+  | 'ASSISTANT_REPORT_JOBS_ENABLED'
+  | 'ASSISTANT_REPORT_SYNC_MAX_HOURS'
+  | 'ASSISTANT_REPORT_JOB_TTL_SECONDS'
+  | 'ASSISTANT_REPORT_JOBS_CONSUMER'
+  | 'ASSISTANT_REPORT_JOB_CONCURRENCY'
+  | 'RABBITMQ_ASSISTANT_URL'
+  | 'ARCHIVE_EXPORT_TTL_HOURS'
 >;
 
 /** Redis keys (prefix `as:`, contracts §35). */
@@ -79,8 +100,13 @@ export const assistantKeys = {
   /** Tenant tokens of a UTC day (TTL 48 h, seeded from ai_chat_usage_daily on a miss). */
   tenantTokens: (organizationId: bigint, day: string): string =>
     `as:tok:o:${organizationId}:${day}`,
-  /** Platform tokens of a UTC day. */
+  /** Platform tokens of a UTC day (step AI-6 D6: `key_source = platform` turns only). */
   platformTokens: (day: string): string => `as:tok:p:${day}`,
+  /**
+   * Step AI-6 D1: tokens of one user on a UTC day (TTL 48 h, seeded from
+   * ai_chat_usage_user_daily on a miss).
+   */
+  userTokens: (userPublicId: string, day: string): string => `as:tok:u:${userPublicId}:${day}`,
   /** Retention purge and stale-turn sweeper (one api replica at a time). */
   jobsLock: 'as:jobs:lock',
   /**
@@ -146,6 +172,15 @@ export const ASSISTANT_AUDIT = {
   // Step AI-R D11.
   reportGenerated: 'assistant.report_generated',
   reportEmailRequested: 'assistant.report_email_requested',
+  // Step AI-6 §4.1 (contracts §35.6).
+  feedbackRecorded: 'assistant.feedback_recorded',
+  feedbackRemoved: 'assistant.feedback_removed',
+  auditViewed: 'assistant.audit_viewed',
+  reportJobQueued: 'assistant.report_job_queued',
+  providerKeySet: 'assistant.provider_key_set',
+  providerKeyRemoved: 'assistant.provider_key_removed',
+  providerKeyValidated: 'assistant.provider_key_validated',
+  providerKeyInvalidated: 'assistant.provider_key_invalidated',
 } as const;
 export const AUDIT_RESOURCE = {
   execution: 'assistant_tool_execution',
@@ -155,6 +190,9 @@ export const AUDIT_RESOURCE = {
   // Step AI-R D11.
   report: 'assistant_report',
   delivery: 'assistant_report_delivery',
+  // Step AI-6.
+  providerKey: 'assistant_provider_key',
+  reportJob: 'assistant_report_job',
 } as const;
 
 /** Reports (step AI-R, docs/plan/steps/31-ai-chat-reports.md D2, D6, D7). */
@@ -181,6 +219,39 @@ export const REPORT_ROW_CODES = {
   purged: 'assistant_report_purged',
   emailTimeout: 'assistant_report_email_timeout',
 } as const;
+
+/** Background report jobs (step AI-6 D5, ADR-0096). */
+/** Outbox aggregate type of a report job (§4.2). */
+export const REPORT_JOB_AGGREGATE_TYPE = 'assistant_report_job';
+/** The work queue and the consumer ledger (topology v16). */
+export const REPORT_JOB_QUEUE = 'assistant.reports';
+export const REPORT_JOB_LEDGER = 'api-assistant.reports';
+/**
+ * A `running` job's lease (consumer step 2), renewed every REPORT_JOB_LEASE_RENEW_MS while the
+ * job runs. Short, so that a job whose pod died (crash, OOM) is claimable again within a minute:
+ * the redelivery or retry hop that finds a live lease is a transient retry, never an ack.
+ */
+export const REPORT_JOB_LEASE_MS = 60_000;
+/** Lease renewal interval of a running job (a third of the lease). */
+export const REPORT_JOB_LEASE_RENEW_MS = 20_000;
+/** The composition budget of one attempt (inside the job token's 300 s). */
+export const REPORT_JOB_COMPOSE_BUDGET_MS = 290_000;
+/** Attempts before a retryable failure becomes terminal (the queue's `maxAttempts`). */
+export const REPORT_JOB_MAX_ATTEMPTS = 5;
+/** Lifetime of the job token (`exp = now + 300 s`, I26). */
+export const REPORT_JOB_TOKEN_TTL_SECONDS = 300;
+/** Unreported terminal jobs reported to the model per turn (oldest first). */
+export const REPORT_JOB_REPORT_BATCH = 20;
+/** Jobs failed per expiry sweep run. */
+export const REPORT_JOB_SWEEP_BATCH = 100;
+
+/** Tenant provider keys (step AI-6 D7, ADR-0097). */
+/** Built provider clients per organization and key version (max entries, lifetime). */
+export const TENANT_KEY_CLIENT_CACHE_MAX = 100;
+export const TENANT_KEY_CLIENT_CACHE_TTL_MS = 10 * 60_000;
+/** The row-bound AAD of a stored tenant key. */
+export const tenantKeyAad = (organizationId: bigint, keyVersion: number): string =>
+  `assistant-provider-key:v1:${organizationId}:${keyVersion}`;
 
 /** Confirmations (step AI-2 D1, D2, D6, D7). */
 /** Wrong tokens that cancel a confirmation (the fifth). */

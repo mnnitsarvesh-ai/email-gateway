@@ -1,4 +1,5 @@
 import type { OperationTool } from '../registry/types';
+import type { ReportPeriod, ReportSection } from '../reports/types';
 import { toErrorEnvelope } from './minimize';
 import { isCredentialKey, sanitizeText, scrubValue } from './sanitize';
 import { PUBLIC_ID, detectRowId, detectShape, isPlainObject } from './shape';
@@ -10,6 +11,7 @@ import {
   type CardValue,
   type RefMap,
   type ReportCardData,
+  type ReportCardStatus,
   type ToolResultOk,
 } from './types';
 
@@ -389,15 +391,19 @@ export function reportPortalHref(reportId: string): string | null {
   return REPORT_UUID.test(reportId) ? `/assistant/reports/${reportId.toLowerCase()}` : null;
 }
 
+/** A stored report's card data; `status` defaults to `available` (the synchronous AI-R path). */
+export type ReportCardInput = ReportCardData;
+
 export interface ReportResultInput {
   executionId: string;
   /** Execution sequence: the report is row ref `r<refSeq>.1`. */
   refSeq: number;
-  report: ReportCardData;
+  report: ReportCardInput;
 }
 
-const reportData = (report: ReportCardData): ReportCardData => ({
+const reportData = (report: ReportCardInput): ReportCardData & { status: ReportCardStatus } => ({
   reportId: report.reportId,
+  status: report.status ?? 'available',
   title: sanitizeText(report.title, 200),
   period: {
     from: sanitizeText(report.period.from, 64),
@@ -462,6 +468,82 @@ export function reportEnvelope(input: Omit<ReportResultInput, 'executionId'>): T
       sections: report.sections,
       omitted: report.omitted,
       figures: report.figures,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Background (queued) report cards and envelopes (step AI-6 D5)
+// ---------------------------------------------------------------------------------------------
+
+/** The fixed note of the envelope of a queued (background) report. */
+export const REPORT_QUEUED_NOTE =
+  'The report is being generated in the background and appears in the chat when it is ready. Do not state any figures for it.';
+
+export interface ReportQueuedInput {
+  executionId: string;
+  /** Execution sequence: the report is row ref `r<refSeq>.1`. */
+  refSeq: number;
+  report: {
+    reportId: string;
+    title: string;
+    period: ReportPeriod;
+    /** The sections requested (the generated report may omit some). */
+    sections: readonly ReportSection[];
+  };
+}
+
+/** The card data of a queued report: no figures, no size, no generation time yet. */
+const queuedData = (report: ReportQueuedInput['report']): ReportCardData =>
+  reportData({
+    reportId: report.reportId,
+    status: 'queued',
+    title: report.title,
+    period: report.period,
+    generatedAt: '',
+    sizeBytes: 0,
+    sections: [...report.sections],
+    omitted: [],
+    figures: [],
+  });
+
+/** The `report` card of a queued background report (`report.status: 'queued'`, no figures). */
+export function reportQueuedCard(input: ReportQueuedInput): AssistantCard {
+  const report = queuedData(input.report);
+  const href = reportPortalHref(report.reportId);
+  return {
+    version: CARD_VERSION,
+    executionId: input.executionId,
+    tool: REPORT_CARD_TOOL,
+    title: report.title,
+    status: 'ok',
+    kind: 'report',
+    report,
+    portalLinks: href ? [{ label: 'Open full size', href }] : [],
+    refs: [`r${input.refSeq}.1`],
+  };
+}
+
+/** The envelope of a queued `report_generate` result (HTTP 202, no figures). */
+export function reportQueuedEnvelope(input: Omit<ReportQueuedInput, 'executionId'>): ToolResultOk {
+  const report = queuedData(input.report);
+  return {
+    kind: 'tool_result/1',
+    tool: REPORT_CARD_TOOL,
+    status: 'ok',
+    httpStatus: 202,
+    ref: `r${input.refSeq}`,
+    returned: 1,
+    hasMore: false,
+    truncated: false,
+    note: REPORT_QUEUED_NOTE,
+    data: {
+      ref: `r${input.refSeq}.1`,
+      reportId: report.reportId,
+      status: 'queued',
+      title: report.title,
+      period: report.period,
+      sections: report.sections,
     },
   };
 }

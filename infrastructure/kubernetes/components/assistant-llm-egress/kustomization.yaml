@@ -1,0 +1,31 @@
+# Component (step AI-6 D10, docs/deployment/assistant.md "Egress"): HTTPS egress of the
+# api-assistant pods to the LLM provider endpoints and the S3 endpoint ONLY, as ipBlocks. The base
+# api-assistant NetworkPolicy has no port-443 rule, so without this component the pods cannot reach
+# a provider or S3 (readiness fails on S3).
+#
+# The values in llm-egress.yaml are the documentation range 192.0.2.0/24 (RFC 5737, never routed):
+# the component fails closed until an environment overlay patches in its real ranges. Obtain them
+# from the providers' published lists, never from a one-off DNS lookup (the addresses rotate):
+#   - Anthropic API: the published egress/ingress IP addresses of the Anthropic API (API
+#     documentation, "IP addresses"); add every listed range.
+#   - OpenAI / Azure OpenAI (only when configured as primary, fallback or tenant-key provider):
+#     the provider's published ranges; for Azure, the regional AzureCloud service-tag ranges of the
+#     resource's region or, better, a private endpoint inside the VPC (then a 10.x ipBlock).
+#   - S3: the S3 prefix list of the region (AWS ip-ranges.json, service "S3", region of
+#     S3_REGION), or the VPC gateway endpoint's prefix-list ranges.
+# Re-check the lists on a schedule (runbook docs/runbooks/assistant.md "Provider outage"): a
+# provider that adds addresses produces connection errors (assistant_llm_requests_total
+# {outcome="connection"}).
+#
+# FQDN alternative: on a CNI with DNS-aware policies (Cilium CiliumNetworkPolicy toFQDNs, Calico
+# Enterprise/Cloud domain-based policies) replace this component with a policy that allows 443 to
+# api.anthropic.com (and the other configured hosts) and the regional S3 endpoint by name, as the
+# BEC precedent in docs/deployment/bec-detection.md describes.
+#
+# Enable in an overlay:   components: [../../components/assistant-llm-egress]
+# then patch the NetworkPolicy api-assistant's added rule with the environment's CIDRs.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: llm-egress.yaml
+    target: { kind: NetworkPolicy, name: api-assistant }

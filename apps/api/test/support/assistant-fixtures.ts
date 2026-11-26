@@ -75,6 +75,10 @@ import { OrganizationFeaturesService } from '../../src/tenancy/organization-feat
 import { RecipientDirectoryRepository } from '../../src/modules/assistant/repositories/recipient-directory.repository';
 import { ReportDeliveriesRepository } from '../../src/modules/assistant/repositories/report-deliveries.repository';
 import { ReportsRepository } from '../../src/modules/assistant/repositories/reports.repository';
+import { ReportJobsRepository } from '../../src/modules/assistant/repositories/report-jobs.repository';
+import { PseudonymsRepository } from '../../src/modules/assistant/repositories/pseudonyms.repository';
+import { ProviderKeysRepository } from '../../src/modules/assistant/repositories/provider-keys.repository';
+import { MessageFeedbackRepository } from '../../src/modules/assistant/repositories/message-feedback.repository';
 import { ReportObjectStore } from '../../src/modules/assistant/services/reports/report-object-store';
 import { ReportWorld } from './assistant-report-fixtures';
 
@@ -1071,6 +1075,7 @@ export class AssistantWorld {
         row.costMicros += BigInt(delta.costMicros);
         return Promise.resolve();
       },
+      userDayTokens: () => Promise.resolve(0),
       tenantDayTokens: (organizationId: bigint, day: Date) =>
         Promise.resolve(
           world.usage
@@ -1273,5 +1278,38 @@ export function overrideAssistant(
     .overrideProvider(RecipientDirectoryRepository)
     .useValue(world.reportWorld.directoryDouble())
     .overrideProvider(ReportObjectStore)
-    .useValue(world.reportWorld.storeDouble());
+    .useValue(world.reportWorld.storeDouble())
+    .overrideProvider(ReportJobsRepository)
+    .useValue(hardeningDoubles.reportJobs)
+    .overrideProvider(PseudonymsRepository)
+    .useValue(hardeningDoubles.pseudonyms)
+    .overrideProvider(ProviderKeysRepository)
+    .useValue(hardeningDoubles.providerKeys)
+    .overrideProvider(MessageFeedbackRepository)
+    .useValue(hardeningDoubles.feedback);
 }
+
+/**
+ * Step AI-6 repositories in the stubbed e2e world: no async report job, no pseudonym,
+ * no tenant key and no feedback exist (the world's tenants are at `metadata`, platform
+ * keys, synchronous reports). Their behaviour is proven by the integration suites.
+ */
+const hardeningDoubles = {
+  reportJobs: {
+    unreported: () => Promise.resolve([]),
+    markReported: () => Promise.resolve(),
+    forReport: () => Promise.resolve(null),
+    dueToExpire: () => Promise.resolve([]),
+  } as unknown as ReportJobsRepository,
+  pseudonyms: {
+    load: () => Promise.resolve([]),
+    insert: () => Promise.resolve(),
+  } as unknown as PseudonymsRepository,
+  providerKeys: {
+    find: () => Promise.resolve(null),
+    findSecret: () => Promise.resolve(null),
+  } as unknown as ProviderKeysRepository,
+  feedback: {
+    forMessages: () => Promise.resolve(new Map()),
+  } as unknown as MessageFeedbackRepository,
+};

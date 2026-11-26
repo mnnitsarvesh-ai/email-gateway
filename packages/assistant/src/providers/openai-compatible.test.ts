@@ -255,9 +255,12 @@ describe('OpenAiProvider', () => {
       retryAfterMs: 2000,
     });
     expect(await status(503)).toMatchObject({ reason: 'server_error', httpStatus: 503 });
-    const client = await status(401);
-    expect(client).toMatchObject({ reason: 'client_error', httpStatus: 401 });
-    expect(client.message).not.toContain('provider text');
+    const auth = await status(401);
+    expect(auth).toMatchObject({ reason: 'auth', httpStatus: 401 });
+    expect(auth.message).not.toContain('provider text');
+    expect(auth.retryable).toBe(false);
+    expect(await status(403)).toMatchObject({ reason: 'auth', httpStatus: 403 });
+    expect(await status(400)).toMatchObject({ reason: 'client_error', httpStatus: 400 });
   });
 
   it('connection, timeout and abort', async () => {

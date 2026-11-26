@@ -14,6 +14,8 @@ import {
   redactToolArguments,
   reportCard,
   reportEnvelope,
+  reportQueuedCard,
+  reportQueuedEnvelope,
   reportRefs,
   sanitizeText,
   toCard,
@@ -40,6 +42,7 @@ import {
 } from '../assistant.constants';
 import { nativeRequestOf, sameRequest } from '../domain/confirmation-binding';
 import { executionCorrelationId } from '../domain/correlation';
+import { UNKNOWN_PLACEHOLDER_ERROR, unknownPlaceholderMessage } from '../assistant.errors';
 import { DENIAL_MESSAGES, refusalMessageOf } from '../domain/denials';
 import {
   lookupTool,
@@ -60,7 +63,7 @@ import {
   unsafePathParams,
 } from './loopback-client';
 import { NativeToolsService } from './native-tools.service';
-import type { GeneratedReport } from './reports/report-generator.service';
+import type { GeneratedReport, QueuedReport } from './reports/report-generator.service';
 
 /**
  * The tool executor of the assistant (step AI-1 D5, ADR-0091). For each `call_tool`, in order,
@@ -115,6 +118,14 @@ export interface ExecutionContext {
    * header). Absent outside turns.
    */
   organizationName?: string | null;
+  /**
+   * Step AI-6 D3 (`pseudonymized` turns): replaces the conversation's placeholders in the
+   * model's arguments by the real values before bindings, refs and Ajv; an unknown placeholder is
+   * refused (`denied_schema`, `assistant_unknown_placeholder`). Absent = arguments as sent.
+   */
+  demapArguments?: (
+    args: Record<string, unknown>,
+  ) => { ok: true; value: Record<string, unknown> } | { ok: false; token: string };
 }
 
 export interface ToolCallRequest {
@@ -395,8 +406,26 @@ export class ToolExecutorService {
       );
     }
 
+    // Step AI-6 D3: placeholders of a pseudonymized turn → the real values (before step 4).
+    let modelArgs: Record<string, unknown> = call.arguments;
+    if (ctx.demapArguments) {
+      const demapped = ctx.demapArguments(call.arguments);
+      if (!demapped.ok) {
+        return this.deny(
+          base,
+          found,
+          'denied_schema',
+          unknownPlaceholderMessage(demapped.token),
+          call.arguments,
+          null,
+          { code: UNKNOWN_PLACEHOLDER_ERROR },
+        );
+      }
+      modelArgs = demapped.value;
+    }
+
     // D5 step 4: bindings (the api enforces the scope again).
-    const args: Record<string, unknown> = { ...call.arguments };
+    const args: Record<string, unknown> = { ...modelArgs };
     const bindValue =
       ctx.principal.organizationKind === 'customer' || ctx.principal.override
         ? scopeOrganizationPublicId(ctx.principal)
@@ -694,7 +723,59 @@ export class ToolExecutorService {
         );
       case 'report':
         return this.recordReport(base, tool, args, result, latencyMs);
+      case 'queue':
+        return this.recordQueued(base, tool, args, result, latencyMs);
     }
+  }
+
+  /**
+   * Step AI-6 D5: a background report. The execution (`allowed`, `succeeded`, HTTP 202) with the
+   * queued card and envelope, `assistant.tool_executed`, and — in the same transaction — the
+   * `queued` report, the job, its outbox event and `assistant.report_job_queued`.
+   */
+  private async recordQueued(
+    base: Base,
+    tool: OperationTool,
+    args: Record<string, unknown>,
+    queued: QueuedReport,
+    latencyMs: number,
+  ): Promise<ExecutionOutcome> {
+    const { ctx, seq, executionId } = base;
+    const report = {
+      reportId: queued.reportId,
+      title: queued.title,
+      period: queued.period,
+      sections: queued.sections,
+    };
+    const card = reportQueuedCard({ executionId, refSeq: seq, report });
+    const envelope = reportQueuedEnvelope({ refSeq: seq, report });
+    const refs = reportRefs(seq, queued.reportId);
+    const correlationId = executionCorrelationId(ctx.correlationBase, seq);
+    const outcome = this.outcomeOf(base, tool, {
+      status: 'succeeded',
+      httpStatus: 202,
+      errorCode: null,
+      envelope,
+      card,
+      hasMore: false,
+      latencyMs,
+    });
+    await this.persist(
+      ctx,
+      outcome,
+      tool,
+      {
+        correlationId,
+        params: redactParams(args, PARAMS_REDACTED_MAX_BYTES, tool).value,
+        args,
+        refs: refs as unknown as Prisma.InputJsonValue,
+        nextCursor: null,
+        latencyMs,
+      },
+      (tx, rowId) => this.native.queueRead(ctx, queued, { rowId, executionId, correlationId }, tx),
+    );
+    this.countAllowed(tool, 'succeeded');
+    return outcome;
   }
 
   /** The `report` card, envelope and refs of a generated report (D2 steps 10–11). */

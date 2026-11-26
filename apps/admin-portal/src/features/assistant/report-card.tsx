@@ -4,6 +4,7 @@ import {
   AlertTriangleIcon,
   DownloadIcon,
   FileXIcon,
+  Loader2Icon,
   Maximize2Icon,
   RefreshCwIcon,
 } from 'lucide-react';
@@ -109,13 +110,65 @@ export function downloadReportHtml(html: string, fileName: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+/** Step AI-6 (D5): how often a background report is polled. */
+export const REPORT_POLL_MS = 5_000;
+export const GENERATING_TEXT = 'Generating in the background…';
+
+/** A report generated in the background that has not finished (report `queued`, job active). */
+export function isReportInProgress(doc: ReportDocument | undefined): boolean {
+  if (!doc) return false;
+  const { report } = doc;
+  if (report.status !== 'queued') return false;
+  return !report.job || report.job.status === 'queued' || report.job.status === 'running';
+}
+
+/** The job's `expiresAt` passed while the report is still queued (the api fails it soon). */
+export function isReportJobExpired(doc: ReportDocument | undefined, now: number): boolean {
+  const expiresAt = doc?.report.job?.expiresAt;
+  return Boolean(expiresAt) && Date.parse(expiresAt ?? '') <= now;
+}
+
+/**
+ * The poll interval of a report document (D5): every 5 s while it is generated in the
+ * background, `false` (stop) at a terminal status (available, failed, purged) or once the job's
+ * `expiresAt` passed.
+ */
+export function reportPollInterval(doc: ReportDocument | undefined, now: number): number | false {
+  if (!isReportInProgress(doc) || isReportJobExpired(doc, now)) return false;
+  return REPORT_POLL_MS;
+}
+
 /** The report document through the BFF (`AssistantReportsController_get_v1`). */
-export function useReportDocument(reportId: string, enabled: boolean) {
+export function useReportDocument(
+  reportId: string,
+  enabled: boolean,
+  options: { now?: () => number } = {},
+) {
+  const now = options.now ?? Date.now;
   return useApiQuery(
     'AssistantReportsController_get_v1',
     { path: { reportId } },
-    { enabled, staleTime: 30_000, refetchOnWindowFocus: false },
+    {
+      enabled,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+      refetchInterval: (query) => reportPollInterval(query.state.data, now()),
+    },
   );
+}
+
+const JOB_ERRORS: Readonly<Record<string, string>> = {
+  assistant_report_job_expired: 'it did not finish in time',
+  assistant_report_session_ended: 'your session ended before it was ready',
+  assistant_report_not_allowed: 'you no longer have the permissions it needs',
+  assistant_report_sources_unavailable: 'no report data was available',
+  assistant_report_storage_failed: 'it could not be stored',
+  assistant_report_purged: 'it was deleted with the conversation content',
+};
+
+/** Plain text of a background report's failure code (D5). */
+export function reportFailureText(code: string | null | undefined): string {
+  return (code ? JOB_ERRORS[code] : undefined) ?? 'it could not be generated';
 }
 
 /**
@@ -239,14 +292,57 @@ export function ReportState({
   if (!data) return null;
   const { report, html } = data;
   if (report.status === 'purged') return <ReportNotice>{PURGED_TEXT}</ReportNotice>;
+  if (report.status === 'queued') {
+    if (isReportJobExpired(data, Date.now()) || !isReportInProgress(data))
+      return (
+        <ReportNotice tone="danger">
+          <p>
+            The background report did not finish in time. Ask the assistant to generate it again.
+          </p>
+        </ReportNotice>
+      );
+    return (
+      <div
+        role="status"
+        className="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm"
+      >
+        <Loader2Icon
+          className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground"
+          aria-hidden
+        />
+        <div className="grid gap-1">
+          <p className="font-medium">{GENERATING_TEXT}</p>
+          <p className="text-muted-foreground">
+            The report covers more than a week, so it is prepared in the background. It appears here
+            when it is ready; you can keep using the assistant meanwhile.
+          </p>
+        </div>
+      </div>
+    );
+  }
   if (report.status === 'pending')
     return <ReportNotice>The report is still being prepared. Refresh in a moment.</ReportNotice>;
-  if (report.status === 'failed')
+  if (report.status === 'failed') {
+    const code = report.job?.errorCode ?? null;
     return (
       <ReportNotice tone="danger">
-        <p>The report could not be stored. Ask the assistant to generate it again.</p>
+        {report.job ? (
+          <p>
+            The background report failed: {reportFailureText(code)}
+            {code ? (
+              <>
+                {' '}
+                (<code className="font-mono">{code}</code>)
+              </>
+            ) : null}
+            . Ask the assistant to generate it again.
+          </p>
+        ) : (
+          <p>The report could not be stored. Ask the assistant to generate it again.</p>
+        )}
       </ReportNotice>
     );
+  }
   if (html === null)
     return (
       <ReportNotice tone="danger">
@@ -386,6 +482,15 @@ export function ReportCard({ card, onNavigate }: { card: AssistantCard; onNaviga
   if (!report) return null;
   const data = query.data;
   const html = data?.report.status === 'available' ? data.html : null;
+  // Step AI-6 (D5): a queued card has no figures; the polled document carries them once ready.
+  const cardQueued = report.status === 'queued' || report.status === 'running';
+  const generating = data ? isReportInProgress(data) : cardQueued;
+  const figures = report.figures.length > 0 ? report.figures : (data?.report.figures ?? []);
+  const omitted =
+    report.omitted.length > 0 || !data
+      ? report.omitted
+      : data.report.omitted.map((entry) => ({ ...entry, code: entry.code ?? null }));
+  const generatedAt = report.generatedAt || data?.report.createdAt || null;
   const fullSize = safePortalHref(`/assistant/reports/${report.reportId.toLowerCase()}`);
   return (
     <section
@@ -396,18 +501,31 @@ export function ReportCard({ card, onNavigate }: { card: AssistantCard; onNaviga
       <div className="grid gap-0.5">
         <h3 className="text-sm font-semibold">{report.title}</h3>
         <p className="text-xs text-muted-foreground">
-          {periodText(report.period.label)} · Generated{' '}
-          <DateTime value={report.generatedAt} mode="absolute" />
+          {periodText(report.period.label)} ·{' '}
+          {generating ? (
+            GENERATING_TEXT
+          ) : (
+            <>
+              Generated <DateTime value={generatedAt} mode="absolute" />
+            </>
+          )}
         </p>
       </div>
-      <ReportFigures figures={report.figures} />
-      <ReportOmissions omitted={report.omitted} />
-      <ReportState
-        data={data}
-        error={query.error}
-        loading={!visible || query.isLoading}
-        onRetry={() => void query.refetch()}
-      />
+      {generating ? null : <ReportFigures figures={figures} />}
+      {generating ? null : <ReportOmissions omitted={omitted} />}
+      {generating && !data ? (
+        <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2Icon className="size-4 animate-spin" aria-hidden />
+          {GENERATING_TEXT}
+        </div>
+      ) : (
+        <ReportState
+          data={data}
+          error={query.error}
+          loading={!visible || query.isLoading}
+          onRetry={() => void query.refetch()}
+        />
+      )}
       {html !== null ? <ReportFrame html={html} /> : null}
       <div role="group" aria-label="Report actions" className="flex flex-wrap items-center gap-2">
         {fullSize ? (
@@ -424,10 +542,7 @@ export function ReportCard({ card, onNavigate }: { card: AssistantCard; onNaviga
           disabled={html === null}
           onClick={() => {
             if (html !== null)
-              downloadReportHtml(
-                html,
-                reportFileName(data?.report.createdAt ?? report.generatedAt),
-              );
+              downloadReportHtml(html, reportFileName(data?.report.createdAt ?? generatedAt));
           }}
         >
           <DownloadIcon aria-hidden />

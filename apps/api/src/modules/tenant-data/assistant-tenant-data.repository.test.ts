@@ -78,12 +78,12 @@ const KEY = (n: number) =>
   `org/42/assistant/report/2026/11/23/0193d000-0000-7000-8000-00000000000${n}.html`;
 
 describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D7, AI-R D7)', () => {
-  it('deletes deliveries, reports (objects first), confirmations, executions, messages, turns, conversations, usage, then settings', async () => {
-    // deliveries 2+0; reports: batch of 2 (objects, then 2 rows), short batch of 1 (no object);
-    // confirmations 2+1, executions 2+2+1, messages 0, turns 2+0, conversations 1, usage 2+2+0,
-    // settings 1.
+  it('deletes deliveries, jobs, reports (objects first), feedback, pseudonyms, confirmations, executions, messages, turns, conversations, usage, the provider key, then settings', async () => {
+    // deliveries 2+0; jobs 1; reports: batch of 2 (objects, then 2 rows), short batch of 1 (no
+    // object); feedback 1; pseudonyms 2+0; confirmations 2+1, executions 2+2+1, messages 0, turns
+    // 2+0, conversations 1, usage 2+2+0, user usage 1, provider key 1, settings 1.
     const { writer, statements } = writerDouble(
-      [2, 0, 2, 1, 2, 1, 2, 2, 1, 0, 2, 0, 1, 2, 2, 0, 1],
+      [2, 0, 1, 2, 1, 1, 2, 0, 2, 1, 2, 2, 1, 0, 2, 0, 1, 2, 2, 0, 1, 1, 1],
       [
         [
           { id: 1n, organization_id: 42n, object_key: KEY(1) },
@@ -96,13 +96,18 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D
     const counts = await new AssistantTenantDataRepository(writer, s3).purgeOrganization(SCOPE, 2);
     expect(counts).toEqual({
       ai_chat_report_deliveries: 2,
+      ai_chat_report_jobs: 1,
       ai_chat_reports: 3,
+      ai_chat_feedback: 1,
+      ai_chat_pseudonyms: 2,
       ai_chat_action_confirmations: 3,
       ai_chat_tool_executions: 5,
       ai_chat_messages: 0,
       ai_chat_turns: 2,
       ai_chat_conversations: 1,
       ai_chat_usage_daily: 4,
+      ai_chat_usage_user_daily: 1,
+      ai_chat_provider_keys: 1,
       ai_chat_settings: 1,
       reportObjects: 2,
     });
@@ -113,10 +118,14 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D
     expect(statements.map((s) => tableOf(s.sql))).toEqual([
       'ai_chat_report_deliveries',
       'ai_chat_report_deliveries',
+      'ai_chat_report_jobs',
       'ai_chat_reports',
       'ai_chat_reports',
       'ai_chat_reports',
       'ai_chat_reports',
+      'ai_chat_feedback',
+      'ai_chat_pseudonyms',
+      'ai_chat_pseudonyms',
       'ai_chat_action_confirmations',
       'ai_chat_action_confirmations',
       'ai_chat_tool_executions',
@@ -129,6 +138,8 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D
       'ai_chat_usage_daily',
       'ai_chat_usage_daily',
       'ai_chat_usage_daily',
+      'ai_chat_usage_user_daily',
+      'ai_chat_provider_keys',
       'ai_chat_settings',
     ]);
     for (const s of statements) {
@@ -161,9 +172,15 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D
     expect(counts.reportObjects).toBe(0);
   });
 
-  it('deletes children before their parents (FK-safe order) and covers all nine tables', () => {
+  it('deletes children before their parents (FK-safe order) and covers all fourteen tables', () => {
     const at = (t: (typeof ASSISTANT_PURGE_ORDER)[number]) => ASSISTANT_PURGE_ORDER.indexOf(t);
-    expect(new Set(ASSISTANT_PURGE_ORDER).size).toBe(9);
+    expect(new Set(ASSISTANT_PURGE_ORDER).size).toBe(14);
+    // Step AI-6: jobs reference their report; feedback its message; pseudonyms, jobs and
+    // feedback their conversation.
+    expect(at('ai_chat_report_jobs')).toBeLessThan(at('ai_chat_reports'));
+    expect(at('ai_chat_feedback')).toBeLessThan(at('ai_chat_messages'));
+    expect(at('ai_chat_pseudonyms')).toBeLessThan(at('ai_chat_conversations'));
+    expect(at('ai_chat_feedback')).toBeLessThan(at('ai_chat_conversations'));
     expect(ASSISTANT_PURGE_ORDER[0]).toBe('ai_chat_report_deliveries');
     expect(at('ai_chat_report_deliveries')).toBeLessThan(at('ai_chat_reports'));
     expect(at('ai_chat_reports')).toBeLessThan(at('ai_chat_conversations'));
@@ -183,8 +200,8 @@ describe('AssistantTenantDataRepository.purgeOrganization (step AI-1 D12, AI-2 D
     const { writer, statements } = writerDouble([]);
     const { s3, deleted } = s3Double();
     const counts = await new AssistantTenantDataRepository(writer, s3).purgeOrganization(SCOPE);
-    expect(Object.values(counts)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(statements).toHaveLength(9);
+    expect(Object.values(counts)).toEqual(new Array(15).fill(0));
+    expect(statements).toHaveLength(14);
     for (const s of statements) expect(s.values).toEqual([42n, ASSISTANT_PURGE_BATCH]);
     expect(deleted).toEqual([]);
   });

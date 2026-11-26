@@ -18,6 +18,7 @@ import type { ApiConfig } from './config';
 import { MetaModule } from './meta/meta.module';
 import { ApiKeysModule } from './modules/api-keys/api-keys.module';
 import { AssistantModule } from './modules/assistant/assistant.module';
+import { AssistantInsightsModule } from './modules/assistant-insights/assistant-insights.module';
 import { ArchiveModule } from './modules/archive/archive.module';
 import { AtoModule } from './modules/ato/ato.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
@@ -148,6 +149,9 @@ export class AppModule {
         // Step AI-1: the AI assistant (conversations, turns, loopback tools over the routes
         // above; registered after every feature module).
         AssistantModule,
+        // Step AI-6: assistant insights (content search, ratings, tenant AI administration
+        // reads and the metadata-only conversation audit view; no model or tool calls).
+        AssistantInsightsModule,
       ],
       providers: [{ provide: API_CONFIG, useValue: config }],
       exports: [API_CONFIG],

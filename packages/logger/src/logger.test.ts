@@ -226,6 +226,26 @@ describe('redaction of provider credentials and consent state (step 8.2 D17)', (
   });
 });
 
+describe('redaction of tenant LLM provider keys (step AI-6 D7)', () => {
+  it('censors apiKey of a provider-key request body and a provider spec', () => {
+    const out = capture();
+    const logger = createLogger({ service: 'test-svc', destination: out.stream });
+    const value = 'tenant-llm-key-value-0004';
+    logger.info(
+      {
+        apiKey: value,
+        body: { provider: 'openai', model: 'm-1', apiKey: value },
+        spec: { role: 'tenant', apiKey: value },
+      },
+      'provider key',
+    );
+    const line = out.lines()[0]!;
+    expect(JSON.stringify(line)).not.toContain(value);
+    expect((line.body as Record<string, unknown>).provider).toBe('openai');
+    expect((line.spec as Record<string, unknown>).apiKey).toBe('[REDACTED]');
+  });
+});
+
 describe('redaction of mail content (step 3.1 M15)', () => {
   const fields = [
     'subject',

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v13 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v16 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
 // v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
-// step 8.4 §4.1, ADR-0070).
+// step 8.4 §4.1, ADR-0070; v14: step 8.2 D12, ADR-0079; v15: step AI-R D8, ADR-0095; v16: step
+// AI-6 D5, ADR-0096).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -146,6 +147,18 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * queue's hops. ato.mail is lossy without dead-lettered heads (no dead-letter target in its
  * policy; the worker's consumer dead letters still use the granted dead-letter keys).
  * ato.responses is reconciled (RECONCILE_QUEUES gains it); ato.events and ato.mail are not.
+ *
+ * Topology v16 (step AI-6 D5, §4.2, ADR-0096) adds the api report job consumer's user
+ * (`eg-assistant`, RABBITMQ_ASSISTANT_USER / RABBITMQ_ASSISTANT_PASSWORD; held only by the
+ * api-assistant Deployment and host-run development): it reads only assistant.reports (home
+ * exchange email.policy) and publishes only that queue's retry hops on email.policy and its
+ * dead-letter hops on email.events; never an event key (the job's outcome is written to MySQL).
+ * It configures nothing. The relay needs nothing new (EVENT_KEYS covers
+ * assistant.report.generate_requested.v1 on email.policy). ops may replay assistant.reports: its
+ * email.policy topic grant gains `retry.assistant.reports.` (write on email.policy is already
+ * granted). `assistant.reports` is no dot-prefix of another queue name and no other queue name
+ * starts with `assistant.`, so the prefix cannot reach another queue's hops. Not in
+ * RECONCILE_QUEUES (the api's sweep fails jobs past their expiry).
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';
@@ -306,6 +319,21 @@ const ROLE_USERS = [
     ],
   },
   {
+    // Step AI-6 D5, §4.2 (v16): the api's report job consumer (api-assistant). Reads its one
+    // queue; publishes only the retry hops of assistant.reports (home exchange email.policy) and
+    // its dead-letter hops; the job's outcome goes to MySQL, never to the broker.
+    role: 'api-assistant',
+    userKey: 'RABBITMQ_ASSISTANT_USER',
+    passwordKey: 'RABBITMQ_ASSISTANT_PASSWORD',
+    configure: '^$',
+    write: '^email\\.(policy|events)$',
+    read: '^assistant\\.reports$',
+    topics: [
+      topic('email.policy', '^retry\\.assistant\\.reports\\.'),
+      topic('email.events', '^dead-letter\\.assistant\\.reports(\\.|$)'),
+    ],
+  },
+  {
     role: 'ops',
     userKey: 'RABBITMQ_OPS_USER',
     passwordKey: 'RABBITMQ_OPS_PASSWORD',
@@ -317,7 +345,8 @@ const ROLE_USERS = [
     // email.quarantine (home exchange email.policy), v11 email.webhooks (home exchange
     // email.events; its topic grant there is the retry prefix only), v12 email.archive (home
     // exchange email.archive; retry prefix only), v13 ato.events, ato.mail and ato.responses
-    // (home exchange email.security; retry prefixes only).
+    // (home exchange email.security; retry prefixes only), v16 assistant.reports (home exchange
+    // email.policy; retry prefix only).
     write: '^email\\.(ingestion|delivery|security|policy|archive|events)$',
     read: '^email\\.dead-letter$',
     topics: [
@@ -327,7 +356,10 @@ const ROLE_USERS = [
         'email.security',
         '^retry\\.(scan\\.(spam|attachment|url|url\\.inspect|url\\.results|bec|dlp|sandbox|sandbox\\.submissions|sandbox\\.results)|ato\\.(events|mail|responses))\\.',
       ),
-      topic('email.policy', '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.'),
+      topic(
+        'email.policy',
+        '^retry\\.(email\\.(policy\\.evaluate|notifications|quarantine)|assistant\\.reports)\\.',
+      ),
       topic('email.archive', '^retry\\.email\\.archive\\.'),
       topic('email.events', '^retry\\.email\\.webhooks\\.'),
     ],

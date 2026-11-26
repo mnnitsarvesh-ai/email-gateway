@@ -12,7 +12,7 @@
  * active policies") answered over the `assistant-stream/1` event stream, with streamed text, tool
  * chips and table cards rendered from the real API response; "Load more" (a new execution, no
  * model call); a deep link from a card row to the policy page; the full `/assistant` page with a
- * new conversation, search by title, rename and clear with confirmation; a user without
+ * new conversation, search (by content since step AI-6), rename and clear with confirmation; a user without
  * `assistant:use` (no entry, `/assistant` forbidden); an organization admin of a tenant with the
  * setting off (the reason and the settings link); the panel as a full-screen sheet on a phone;
  * axe checks (WCAG 2.2 A/AA, serious and critical).
@@ -195,7 +195,7 @@ test('analyst: header entry, Ctrl/Cmd+J, directive and demo intent, load more, d
   });
 });
 
-test('assistant page: new conversation, search by title, rename and clear', async ({ page }) => {
+test('assistant page: new conversation, search, rename and clear', async ({ page }) => {
   // A marker of this attempt: the admin keeps the conversations of earlier attempts and tests
   // (retries, the phone test), so the checks below look at this attempt's conversations only.
   const tag = `e2e${Date.now().toString(36)}`;
@@ -210,7 +210,10 @@ test('assistant page: new conversation, search by title, rename and clear', asyn
   const conversation = page.getByRole('region', { name: 'Conversation' });
   const history = page.getByRole('complementary', { name: 'Conversation history' });
   const list = history.getByRole('list', { name: 'Conversations' });
-  const search = history.getByRole('searchbox', { name: 'Search conversations by title' });
+  // Step AI-6 (D4): the search covers the user's own questions, answers and titles.
+  const search = history.getByRole('searchbox', { name: 'Search conversations' });
+  const results = history.getByRole('list', { name: 'Search results' });
+  const hits = (title: string) => results.getByRole('button').filter({ hasText: title });
   const item = (title: string) => list.getByRole('listitem').filter({ hasText: title });
 
   // Start from a new conversation, then a demo intent over today's seeded quarantine entries.
@@ -242,12 +245,17 @@ test('assistant page: new conversation, search by title, rename and clear', asyn
   await expectTurnDone(conversation);
   await expect(item(greeting)).toHaveCount(1);
 
-  // Search by title (the api's `q`, title contains).
+  // Content search (step AI-6 D4, `GET /assistant/search`): hits of both conversations with
+  // snippets (the question of the first; question and streamed answer of the second).
   await search.fill(tag);
-  await expect(list.getByRole('listitem')).toHaveCount(2);
+  await expect(hits(quarantineQuestion).first()).toBeVisible({ timeout: 20_000 });
+  await expect(hits(greeting).first()).toBeVisible();
+  await expect(
+    hits(greeting).filter({ hasText: `Assistant: Hello from the e2e suite ${tag}` }),
+  ).toHaveCount(1);
   await search.fill(`quarantined today (${tag}`);
-  await expect(list.getByRole('listitem')).toHaveCount(1);
-  await expect(list).toContainText(quarantineQuestion);
+  await expect(hits(greeting)).toHaveCount(0);
+  await expect(hits(quarantineQuestion).first()).toBeVisible();
   await search.fill('');
   await expect(item(greeting)).toHaveCount(1);
 
@@ -277,8 +285,11 @@ test('assistant page: new conversation, search by title, rename and clear', asyn
   expect((await removed).status()).toBe(204);
   await expect(item(renamed)).toHaveCount(0);
   await expect(item(quarantineQuestion)).toHaveCount(1);
+  // The cleared conversation's content is purged: the search no longer finds it.
   await search.fill(tag);
-  await expect(list.getByRole('listitem')).toHaveCount(1);
+  await expect(hits(quarantineQuestion).first()).toBeVisible({ timeout: 20_000 });
+  await expect(hits(renamed)).toHaveCount(0);
+  await expect(results).not.toContainText('Hello from the e2e suite');
 });
 
 test('user without assistant:use: no entry point, /assistant is forbidden', async ({ page }) => {

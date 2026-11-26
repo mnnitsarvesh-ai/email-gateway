@@ -8,25 +8,22 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { TENANT_PERMISSIONS } from '@email-gateway/database';
+import { type Counter, MetricsService } from '@email-gateway/common';
 import { setContextTenant } from '@email-gateway/logger';
 import type { Response } from 'express';
+import { isAssistantJobRoute } from '../../../auth-contracts/assistant-job-routes';
 import { IS_PUBLIC_KEY } from '../../../auth-contracts/decorators';
-import type { Principal, UserPrincipal } from '../../../auth-contracts/principal';
+import type { Principal } from '../../../auth-contracts/principal';
 import type { AuthenticatedRequest } from '../../../auth-contracts/request';
 import { scopeFromPrincipal } from '../../../auth-contracts/tenant-scope';
+import { AccessTokenPrincipalResolver } from '../services/access-token-principal-resolver.service';
 import { ApiKeyAuthenticatorService } from '../services/api-key-authenticator.service';
-import { OverrideRequestAuditor } from '../services/override-request-auditor.service';
 import {
-  OVERRIDE_PERMISSION,
-  PlatformOverrideService,
-} from '../services/platform-override.service';
-import { PrincipalLoaderService } from '../services/principal-loader.service';
-import { SessionService } from '../services/session.service';
-import { TokenService } from '../services/token.service';
+  OverrideRequestAuditor,
+  routeTemplate,
+} from '../services/override-request-auditor.service';
 
 const BEARER = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;
-const TENANT = new Set<string>(TENANT_PERMISSIONS);
 
 /** The single credential of a request, or why there is none. */
 type Credential = { kind: 'bearer'; token: string } | { kind: 'api_key'; key: string } | null;
@@ -47,23 +44,33 @@ function credentialOf(req: AuthenticatedRequest): Credential {
 
 /**
  * Global authentication (D9). `@Public()` routes pass. Otherwise exactly one credential: a
- * bearer access token or an `X-API-Key`. Sets `req.principal`, `req.tenantScope` and the log
- * context tenant. Every rejection is `401 Unauthorized`; an unavailable key-value store or
- * database is `503` (fail closed).
+ * bearer access token (`AccessTokenPrincipalResolver`) or an `X-API-Key`. Sets `req.principal`,
+ * `req.tenantScope` and the log context tenant. Every rejection is `401 Unauthorized`; an
+ * unavailable key-value store or database is `503` (fail closed).
+ *
+ * Step AI-6 D5 (ADR-0096, I26): an access token with the claim `ajb` (an assistant report job's
+ * token) is accepted only for `GET` on a matched route in `ASSISTANT_JOB_ROUTES`; anything else is
+ * `401` (metric `api_assistant_job_token_refusals_total`, a warn log with the route template and
+ * the job id only). Rate limits, permissions, tenant scope and override checks run unchanged.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
   private readonly logger = new Logger(AuthGuard.name);
+  private readonly jobTokenRefusals: Counter;
 
   constructor(
     private readonly reflector: Reflector,
-    private readonly tokens: TokenService,
-    private readonly sessions: SessionService,
-    private readonly principals: PrincipalLoaderService,
-    private readonly overrides: PlatformOverrideService,
+    private readonly resolver: AccessTokenPrincipalResolver,
     private readonly apiKeys: ApiKeyAuthenticatorService,
     private readonly overrideAuditor: OverrideRequestAuditor,
-  ) {}
+    metrics: MetricsService,
+  ) {
+    this.jobTokenRefusals = metrics.counter(
+      'api_assistant_job_token_refusals_total',
+      'Requests refused because an assistant report job token was used outside GET on the report ' +
+        'source routes',
+    );
+  }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return false;
@@ -81,7 +88,7 @@ export class AuthGuard implements CanActivate {
     try {
       principal =
         credential.kind === 'bearer'
-          ? await this.fromAccessToken(credential.token)
+          ? await this.resolver.resolve(credential.token)
           : await this.apiKeys.authenticate(credential.key);
     } catch (err) {
       if (err instanceof HttpException) throw err;
@@ -89,6 +96,18 @@ export class AuthGuard implements CanActivate {
       throw new ServiceUnavailableException('Service temporarily unavailable');
     }
     if (!principal) throw new UnauthorizedException();
+    if (principal.kind === 'user' && principal.assistantJobId !== undefined) {
+      const route = routeTemplate(req);
+      if (!isAssistantJobRoute(req.method, route)) {
+        this.jobTokenRefusals.inc();
+        this.logger.warn({
+          message: 'Assistant job token refused outside its routes',
+          route,
+          jobId: principal.assistantJobId,
+        });
+        throw new UnauthorizedException();
+      }
+    }
 
     const scope = scopeFromPrincipal(principal);
     req.principal = principal;
@@ -98,55 +117,5 @@ export class AuthGuard implements CanActivate {
       this.overrideAuditor.attach(req, context.switchToHttp().getResponse<Response>());
     }
     return true;
-  }
-
-  /** Bearer path: verify, deny-list, principal snapshot, optional override. Null = 401. */
-  private async fromAccessToken(token: string): Promise<UserPrincipal | null> {
-    const claims = await this.tokens.verify(token);
-    if (!claims) return null;
-    if (await this.sessions.isRevoked(claims.sid)) return null;
-    const snapshot = await this.principals.load(claims.sub);
-    if (!snapshot) return null;
-    const { user, org } = snapshot;
-    if (org.publicId !== claims.org) return null;
-    if (user.status !== 'active' || user.deleted || org.status !== 'active' || org.deleted) {
-      return null;
-    }
-
-    const principal: UserPrincipal = {
-      kind: 'user',
-      userId: BigInt(user.id),
-      userPublicId: user.publicId,
-      organizationId: BigInt(org.id),
-      organizationPublicId: org.publicId,
-      organizationKind: org.kind,
-      sessionId: claims.sid,
-      mfaAuthenticated: claims.amr.includes('otp'),
-      // Current state, not the token claim: a newly required MFA restricts existing tokens.
-      mfaEnrollmentRequired: org.mfaRequired && !user.mfaEnabled,
-      permissions: new Set(snapshot.permissions),
-    };
-    if (claims.ovr === undefined) return principal;
-
-    // Override token: still a platform user holding the override permission, same MFA session.
-    if (
-      org.kind !== 'platform' ||
-      !principal.mfaAuthenticated ||
-      !principal.permissions.has(OVERRIDE_PERMISSION)
-    ) {
-      return null;
-    }
-    const override = await this.overrides.resolve(claims.ovr, {
-      userId: principal.userId,
-      sessionId: principal.sessionId,
-    });
-    // Override tokens can outlive the deny-list entry, so the session itself must be live.
-    if (!override || !(await this.sessions.isLive(principal.sessionId))) return null;
-    return {
-      ...principal,
-      mfaEnrollmentRequired: false,
-      permissions: new Set([...principal.permissions].filter((p) => TENANT.has(p))),
-      override,
-    };
   }
 }

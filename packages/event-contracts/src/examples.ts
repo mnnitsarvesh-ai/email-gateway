@@ -596,6 +596,13 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     reportId: '01890a5d-ac96-774b-bcce-b302099a80b0',
     requestedAt: '2026-11-23T08:00:00.000Z',
   },
+  // Step AI-6 D5: the job and report public ids and the request time only (no window, session or
+  // credential).
+  'assistant.report.generate_requested.v1': {
+    jobId: '01890a5d-ac96-774b-bcce-b302099a80c1',
+    reportId: '01890a5d-ac96-774b-bcce-b302099a80c0',
+    requestedAt: '2026-11-26T08:00:00.000Z',
+  },
 };
 
 /**

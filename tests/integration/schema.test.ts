@@ -336,17 +336,24 @@ const TENANT_OWNED = [
   // Step AI-R §3: the assistant's reports and report emails (organization_id NOT NULL on both).
   'ai_chat_reports',
   'ai_chat_report_deliveries',
+  // Step AI-6 §3: per-user usage, feedback, pseudonym mappings, tenant provider keys and report
+  // jobs (organization_id NOT NULL on all five).
+  'ai_chat_usage_user_daily',
+  'ai_chat_feedback',
+  'ai_chat_pseudonyms',
+  'ai_chat_provider_keys',
+  'ai_chat_report_jobs',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 178 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 183 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(178);
-    expect(new Set(ALL_TABLES).size).toBe(178);
+    expect(ALL_TABLES).toHaveLength(183);
+    expect(new Set(ALL_TABLES).size).toBe(183);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -6268,7 +6275,8 @@ describe('step AI-R assistant reports schema (31-ai-chat-reports.md §3)', () =>
       platform_override_id: ['char(36)', 'YES'],
       conversation_id: ['bigint unsigned', 'NO'],
       execution_id: ['bigint unsigned', 'YES'],
-      status: ["enum('pending','available','failed','purged')", 'NO'],
+      // Step AI-6 D5 appends `queued` (asynchronous report).
+      status: ["enum('pending','available','failed','purged','queued')", 'NO'],
       title: ['varchar(200)', 'NO'],
       period_from: ['datetime(3)', 'NO'],
       period_to: ['datetime(3)', 'NO'],
@@ -6438,6 +6446,451 @@ describe('step AI-R assistant reports schema (31-ai-chat-reports.md §3)', () =>
       expect(await prisma.aiChatReportDelivery.count({ where: { id: delivery.id } })).toBe(0);
     } finally {
       await prisma.aiChatReportDelivery.deleteMany({ where: { organizationId } });
+      await prisma.aiChatReport.deleteMany({ where: { organizationId } });
+      await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
+      await prisma.user.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step AI-6 assistant hardening schema (34-ai-chat-hardening-operations.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<{ columnName: string; referenced: string; onDelete: string }[]>`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  const expectIndexes = async (
+    table: string,
+    expected: Record<string, { columns: string[]; unique: boolean }>,
+  ) => {
+    const idx = await indexes(table);
+    for (const [name, definition] of Object.entries(expected)) {
+      expect(idx.get(name), name).toEqual(definition);
+    }
+  };
+
+  it('appends pseudonymized to data_sharing and adds the user budget and tenant-key switches to ai_chat_settings', async () => {
+    const cols = await columns(['ai_chat_settings']);
+    expect(cols.get('ai_chat_settings.data_sharing')).toMatchObject({
+      columnType: "enum('metadata','pseudonymized')",
+      nullable: 'NO',
+      columnDefault: 'metadata',
+    });
+    expect(cols.get('ai_chat_settings.user_daily_token_budget')).toMatchObject({
+      columnType: 'int unsigned',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    for (const column of ['use_tenant_key', 'tenant_key_fallback_to_platform']) {
+      expect(cols.get(`ai_chat_settings.${column}`), column).toMatchObject({
+        columnType: 'tinyint(1)',
+        nullable: 'NO',
+        columnDefault: '0',
+      });
+    }
+  });
+
+  it('records data sharing, key source and fallback on ai_chat_turns and adds the per-user index', async () => {
+    const cols = await columns(['ai_chat_turns']);
+    expect(cols.get('ai_chat_turns.data_sharing')).toMatchObject({
+      columnType: "enum('metadata','pseudonymized')",
+      nullable: 'NO',
+      columnDefault: 'metadata',
+    });
+    expect(cols.get('ai_chat_turns.key_source')).toMatchObject({
+      columnType: "enum('platform','tenant')",
+      nullable: 'NO',
+      columnDefault: 'platform',
+    });
+    expect(cols.get('ai_chat_turns.fallback_from')).toMatchObject({
+      columnType: 'varchar(32)',
+      nullable: 'YES',
+      columnDefault: null,
+    });
+    await expectIndexes('ai_chat_turns', {
+      ai_chat_turns_organization_id_user_id_started_at_idx: {
+        columns: ['organization_id', 'user_id', 'started_at'],
+        unique: false,
+      },
+    });
+    await expectIndexes('ai_chat_conversations', {
+      ai_chat_conversations_organization_id_last_turn_at_id_idx: {
+        columns: ['organization_id', 'last_turn_at', 'id'],
+        unique: false,
+      },
+    });
+    await expectIndexes('ai_chat_tool_executions', {
+      ai_chat_tool_executions_organization_id_user_id_created_at_idx: {
+        columns: ['organization_id', 'user_id', 'created_at'],
+        unique: false,
+      },
+      ai_chat_tool_executions_organization_id_tool_name_created_at_idx: {
+        columns: ['organization_id', 'tool_name', 'created_at'],
+        unique: false,
+      },
+    });
+  });
+
+  it('creates ai_chat_usage_user_daily with the §3 columns, primary key and index', async () => {
+    const table = 'ai_chat_usage_user_daily';
+    const cols = await expectColumns(table, {
+      organization_id: ['bigint unsigned', 'NO'],
+      day: ['date', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      provider: ['varchar(32)', 'NO'],
+      model: ['varchar(64)', 'NO'],
+      key_source: ["enum('platform','tenant')", 'NO'],
+      turns: ['int unsigned', 'NO'],
+      input_tokens: ['bigint unsigned', 'NO'],
+      output_tokens: ['bigint unsigned', 'NO'],
+      cache_read_tokens: ['bigint unsigned', 'NO'],
+      cache_write_tokens: ['bigint unsigned', 'NO'],
+      cost_micros: ['bigint unsigned', 'YES'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get(`${table}.cost_micros`)?.columnDefault).toBeNull();
+    expect(PARTITIONED).not.toHaveProperty(table);
+    await expectIndexes(table, {
+      PRIMARY: {
+        columns: ['organization_id', 'day', 'user_id', 'provider', 'model', 'key_source'],
+        unique: true,
+      },
+      ai_chat_usage_user_daily_organization_id_user_id_day_idx: {
+        columns: ['organization_id', 'user_id', 'day'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('creates ai_chat_feedback with the §3 columns, keys and foreign keys', async () => {
+    const table = 'ai_chat_feedback';
+    await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      turn_id: ['bigint unsigned', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      rating: ["enum('up','down')", 'NO'],
+      reason: [
+        "enum('incorrect','incomplete','not_helpful','wrong_action','unsafe','too_slow','other')",
+        'YES',
+      ],
+      comment: ['varchar(500)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(PARTITIONED).not.toHaveProperty(table);
+    await expectIndexes(table, {
+      ai_chat_feedback_public_id_key: { columns: ['public_id'], unique: true },
+      ai_chat_feedback_message_id_key: { columns: ['message_id'], unique: true },
+      ai_chat_feedback_organization_id_created_at_idx: {
+        columns: ['organization_id', 'created_at'],
+        unique: false,
+      },
+      ai_chat_feedback_organization_id_rating_created_at_idx: {
+        columns: ['organization_id', 'rating', 'created_at'],
+        unique: false,
+      },
+      ai_chat_feedback_conversation_id_idx: { columns: ['conversation_id'], unique: false },
+    });
+    // No FK on user_id or turn_id (the conversation and the message cascade).
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'conversation_id', referenced: 'ai_chat_conversations', onDelete: 'CASCADE' },
+      { columnName: 'message_id', referenced: 'ai_chat_messages', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('creates ai_chat_pseudonyms with the §3 columns, unique keys and foreign keys', async () => {
+    const table = 'ai_chat_pseudonyms';
+    await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      kind: ["enum('email','ip','domain','name')", 'NO'],
+      token: ['varchar(24)', 'NO'],
+      value: ['varchar(320)', 'NO'],
+      value_sha256: ['char(64)', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+    });
+    expect(PARTITIONED).not.toHaveProperty(table);
+    await expectIndexes(table, {
+      ai_chat_pseudonyms_conversation_id_token_key: {
+        columns: ['conversation_id', 'token'],
+        unique: true,
+      },
+      ai_chat_pseudonyms_conversation_id_kind_value_sha256_key: {
+        columns: ['conversation_id', 'kind', 'value_sha256'],
+        unique: true,
+      },
+      ai_chat_pseudonyms_organization_id_created_at_idx: {
+        columns: ['organization_id', 'created_at'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'conversation_id', referenced: 'ai_chat_conversations', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('creates ai_chat_provider_keys (one row per organization, ciphertext only)', async () => {
+    const table = 'ai_chat_provider_keys';
+    const cols = await expectColumns(table, {
+      organization_id: ['bigint unsigned', 'NO'],
+      provider: ["enum('anthropic','openai')", 'NO'],
+      model: ['varchar(64)', 'NO'],
+      key_ciphertext: ['varchar(1024)', 'NO'],
+      key_kid: ['varchar(8)', 'NO'],
+      key_fingerprint: ['char(16)', 'NO'],
+      key_version: ['int unsigned', 'NO'],
+      status: ["enum('valid','invalid','unverified')", 'NO'],
+      last_validated_at: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      set_by_user_id: ['bigint unsigned', 'NO'],
+      set_at: ['datetime(3)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    // I27: no plaintext column.
+    expect([...cols.keys()].some((k) => /\.(api_key|key|plaintext|secret)$/.test(k))).toBe(false);
+    await expectIndexes(table, { PRIMARY: { columns: ['organization_id'], unique: true } });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+    ]);
+  });
+
+  it('creates ai_chat_report_jobs with the §3 columns, keys and foreign keys', async () => {
+    const table = 'ai_chat_report_jobs';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      user_id: ['bigint unsigned', 'NO'],
+      conversation_id: ['bigint unsigned', 'NO'],
+      report_id: ['bigint unsigned', 'NO'],
+      execution_id: ['bigint unsigned', 'NO'],
+      session_id: ['char(36)', 'NO'],
+      auth_methods: ['varchar(16)', 'NO'],
+      home_organization_public_id: ['char(36)', 'NO'],
+      platform_override_id: ['char(36)', 'YES'],
+      arguments: ['json', 'NO'],
+      organization_label: ['varchar(120)', 'YES'],
+      status: ["enum('queued','running','succeeded','failed','cancelled')", 'NO'],
+      attempts: ['tinyint unsigned', 'NO'],
+      lease_until: ['datetime(3)', 'YES'],
+      error_code: ['varchar(64)', 'YES'],
+      correlation_id: ['varchar(128)', 'NO'],
+      expires_at: ['datetime(3)', 'NO'],
+      reported_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      started_at: ['datetime(3)', 'YES'],
+      finished_at: ['datetime(3)', 'YES'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    // I26: no credential column (the job token is minted per attempt and never stored).
+    expect(
+      [...cols.keys()].some((k) => /\.(token|access_token|refresh_token|bearer)$/.test(k)),
+    ).toBe(false);
+    expect(cols.get(`${table}.status`)?.columnDefault).toBe('queued');
+    expect(PARTITIONED).not.toHaveProperty(table);
+    await expectIndexes(table, {
+      ai_chat_report_jobs_public_id_key: { columns: ['public_id'], unique: true },
+      ai_chat_report_jobs_report_id_key: { columns: ['report_id'], unique: true },
+      ai_chat_report_jobs_status_expires_at_idx: {
+        columns: ['status', 'expires_at'],
+        unique: false,
+      },
+      ai_chat_report_jobs_conversation_id_status_reported_at_idx: {
+        columns: ['conversation_id', 'status', 'reported_at'],
+        unique: false,
+      },
+      ai_chat_report_jobs_organization_id_created_at_idx: {
+        columns: ['organization_id', 'created_at'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'conversation_id', referenced: 'ai_chat_conversations', onDelete: 'CASCADE' },
+      { columnName: 'organization_id', referenced: 'organizations', onDelete: 'RESTRICT' },
+      { columnName: 'report_id', referenced: 'ai_chat_reports', onDelete: 'CASCADE' },
+    ]);
+  });
+
+  it('keeps one feedback per message, one job per report and unique pseudonyms; restricts the organization and cascades with the conversation', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const user = await prisma.user.create({
+      data: { organizationId, email: `ai6-${suffix}@example.test`, displayName: 'IT' },
+    });
+    try {
+      const conversation = await prisma.aiChatConversation.create({
+        data: { organizationId, userId: user.id },
+      });
+      const turn = await prisma.aiChatTurn.create({
+        data: {
+          conversationId: conversation.id,
+          organizationId,
+          userId: user.id,
+          seq: 1,
+          clientTurnId: randomUUID(),
+          status: 'completed',
+          provider: 'fake',
+          model: 'fake-model',
+          promptVersion: 'assistant-system/7',
+          registryVersion: 'test',
+          correlationId: `it-${suffix}`,
+        },
+      });
+      // The new turn columns default to the AI-5 behaviour.
+      expect(turn).toMatchObject({
+        dataSharing: 'metadata',
+        keySource: 'platform',
+        fallbackFrom: null,
+      });
+      const message = await prisma.aiChatMessage.create({
+        data: {
+          conversationId: conversation.id,
+          turnId: turn.id,
+          organizationId,
+          seq: 2,
+          role: 'assistant',
+          content: 'Synthetic answer',
+        },
+      });
+      const feedback = {
+        organizationId,
+        userId: user.id,
+        conversationId: conversation.id,
+        turnId: turn.id,
+        messageId: message.id,
+        rating: 'down' as const,
+        reason: 'incomplete' as const,
+        comment: 'Synthetic comment',
+      };
+      await prisma.aiChatFeedback.create({ data: feedback });
+      await expect(prisma.aiChatFeedback.create({ data: feedback })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+
+      const pseudonym = {
+        organizationId,
+        conversationId: conversation.id,
+        kind: 'email' as const,
+        token: '[EMAIL_1]',
+        value: `ai6-${suffix}@example.test`,
+        valueSha256: 'a'.repeat(64),
+      };
+      await prisma.aiChatPseudonym.create({ data: pseudonym });
+      // Same token twice, or the same value under a second token: both refused.
+      await expect(
+        prisma.aiChatPseudonym.create({ data: { ...pseudonym, valueSha256: 'b'.repeat(64) } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      await expect(
+        prisma.aiChatPseudonym.create({ data: { ...pseudonym, token: '[EMAIL_2]' } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      const report = await prisma.aiChatReport.create({
+        data: {
+          organizationId,
+          userId: user.id,
+          conversationId: conversation.id,
+          status: 'queued',
+          title: 'Security report',
+          periodFrom: new Date(Date.now() - 30 * 86_400_000),
+          periodTo: new Date(),
+          granularity: 'day',
+          sections: { included: [], omitted: [] },
+          figures: [],
+          templateVersion: 'assistant-report/1',
+        },
+      });
+      const job = {
+        organizationId,
+        userId: user.id,
+        conversationId: conversation.id,
+        reportId: report.id,
+        executionId: 9_100_000_000n + BigInt(report.id),
+        sessionId: randomUUID(),
+        authMethods: 'pwd,otp',
+        homeOrganizationPublicId: randomUUID(),
+        arguments: { range: 'last_30_days' },
+        correlationId: `it-${suffix}.job`,
+        expiresAt: new Date(Date.now() + 1_800_000),
+      };
+      const created = await prisma.aiChatReportJob.create({ data: job });
+      expect(created).toMatchObject({ status: 'queued', attempts: 0, leaseUntil: null });
+      expect(created.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      await expect(prisma.aiChatReportJob.create({ data: job })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+
+      await prisma.aiChatProviderKey.create({
+        data: {
+          organizationId,
+          provider: 'anthropic',
+          model: 'claude-sonnet-5-5',
+          keyCiphertext: 'v1.k0000000.synthetic-not-a-ciphertext',
+          keyKid: 'k0000000',
+          keyFingerprint: '0'.repeat(16),
+          keyVersion: 1,
+          status: 'unverified',
+          setByUserId: user.id,
+          setAt: new Date(),
+        },
+      });
+      await prisma.aiChatUsageUserDaily.create({
+        data: {
+          organizationId,
+          day: new Date('2026-11-21T00:00:00.000Z'),
+          userId: user.id,
+          provider: 'fake',
+          model: 'fake-model',
+          keySource: 'tenant',
+          turns: 1,
+        },
+      });
+
+      // The organization cannot go while these rows reference it (the purge deletes them).
+      await expect(
+        prisma.$executeRaw`DELETE FROM organizations WHERE id = ${organizationId}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // Deleting the report takes its job; deleting the conversation takes feedback and mappings.
+      await prisma.aiChatReport.delete({ where: { id: report.id } });
+      expect(await prisma.aiChatReportJob.count({ where: { organizationId } })).toBe(0);
+      await prisma.aiChatConversation.delete({ where: { id: conversation.id } });
+      expect(await prisma.aiChatFeedback.count({ where: { organizationId } })).toBe(0);
+      expect(await prisma.aiChatPseudonym.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await prisma.aiChatUsageUserDaily.deleteMany({ where: { organizationId } });
+      await prisma.aiChatProviderKey.deleteMany({ where: { organizationId } });
+      await prisma.aiChatReportJob.deleteMany({ where: { organizationId } });
+      await prisma.aiChatFeedback.deleteMany({ where: { organizationId } });
+      await prisma.aiChatPseudonym.deleteMany({ where: { organizationId } });
       await prisma.aiChatReport.deleteMany({ where: { organizationId } });
       await prisma.aiChatConversation.deleteMany({ where: { organizationId } });
       await prisma.user.deleteMany({ where: { organizationId } });

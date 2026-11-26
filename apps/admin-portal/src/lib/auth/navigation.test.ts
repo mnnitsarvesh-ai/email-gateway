@@ -55,7 +55,9 @@ describe('navigation model (design P11)', () => {
     const fromInventory = (n: number) => n > 22 || changedLater.has(n);
     // Step AI-1: the /assistant row is added to docs/frontend/page-inventory.md by the step's
     // documentation package; until it exists the design note's gate (D14) is the reference.
-    const pendingInventory: Record<string, string[]> = { '/assistant': ['assistant:use'] };
+    const pendingInventory: Record<string, string[]> = {
+      '/assistant': ['assistant:use'],
+    };
     for (const item of NAV_ITEMS) {
       const documented =
         inventoryRows.some((r) => (cells(r)[2] ?? '').includes(`\`${item.href}\``)) ||
@@ -131,6 +133,7 @@ describe('navigation model (design P11)', () => {
       'organizations',
       'integrations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -159,6 +162,7 @@ describe('navigation model (design P11)', () => {
       'organizations',
       'integrations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -187,6 +191,7 @@ describe('navigation model (design P11)', () => {
       'organizations',
       'integrations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -233,6 +238,7 @@ describe('navigation model (design P11)', () => {
       'organizations',
       'integrations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -277,6 +283,7 @@ describe('navigation model (design P11)', () => {
       'organizations',
       'integrations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -316,6 +323,7 @@ describe('navigation model (design P11)', () => {
       'users',
       'organizations',
       'audit-logs',
+      'assistant-admin',
       'billing',
       'settings',
     ],
@@ -406,6 +414,13 @@ describe('navigation model (design P11)', () => {
 
   it('finds the owning item of nested routes (longest match)', () => {
     expect(navItemForPath('/policies/builder')?.id).toBe('policy-builder');
+    // Step AI-6: the AI administration page is its own item below /assistant.
+    expect(navItemForPath('/assistant/admin')?.id).toBe('assistant-admin');
+    expect(gateForPath('/assistant/admin')).toEqual([
+      'AssistantAdminController_usageByUser_v1',
+      'AssistantAdminAuditController_conversations_v1',
+    ]);
+    expect(gateForPath('/assistant/reports/0193')).toEqual(['AssistantReportsController_get_v1']);
     expect(navItemForPath('/policies/123')?.id).toBe('policies');
     expect(navItemForPath('/domains/onboarding')?.id).toBe('domains');
     expect(navItemForPath('/webhooks/1')).toBeNull();

@@ -1182,6 +1182,8 @@ describe('loadApiConfig: REST API conventions (step 6.1 §3.7)', () => {
       API_MESSAGES_MAX_RANGE_DAYS: '1',
       API_AUDIT_MAX_RANGE_DAYS: '1',
       REPORTS_MAX_RANGE_DAYS: '1',
+      // Step AI-6: the synchronous report window must fit in the report range.
+      ASSISTANT_REPORT_SYNC_MAX_HOURS: '24',
       REPORTS_CACHE_TTL_SECONDS: '10',
       REPORTS_QUERY_TIMEOUT_MS: '1000',
       RECIPIENT_SUPPRESSIONS_MAX_MANUAL: '1',
@@ -2124,6 +2126,315 @@ describe('loadApiConfig: AI assistant (step AI-1 D6, D11)', () => {
     ['ASSISTANT_REPORTS_ENABLED', 'sometimes'],
     ['ASSISTANT_REPORT_EMAIL_ENABLED', 'on-demand'],
     ['ASSISTANT_REPORT_MAX_HTML_BYTES', '512k'],
+  ])('refuses %s=%s naming the key', (key, value) => {
+    expect(rejection({ ...valid, [key]: value })).toContain(key);
+  });
+});
+
+describe('loadApiConfig: AI assistant hardening (step AI-6 §4.3)', () => {
+  // Synthetic, deliberately not secret-shaped placeholder credentials.
+  const KEY = 'placeholder-assistant-credential-MARKER';
+  const AMQP = 'amqp://eg-assistant:placeholder-MARKER@rabbitmq:5672/email-gateway';
+
+  it('has the documented defaults (no fallback, tenant keys off, jobs on, consumer off)', () => {
+    const cfg = loadApiConfig(valid);
+    expect(cfg).toMatchObject({
+      ASSISTANT_FALLBACK_PROVIDER: 'none',
+      ASSISTANT_TENANT_KEYS_ENABLED: false,
+      ASSISTANT_TENANT_KEY_PROVIDERS: ['anthropic', 'openai'],
+      ASSISTANT_TENANT_KEY_MODELS: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+      ASSISTANT_TENANT_KEY_VALIDATION_TIMEOUT_MS: 10_000,
+      ASSISTANT_PSEUDONYMS_MAX_PER_CONVERSATION: 5000,
+      ASSISTANT_SEARCH_SCAN_MAX_MESSAGES: 20_000,
+      ASSISTANT_SEARCH_TIMEOUT_MS: 3000,
+      ASSISTANT_REPORT_JOBS_ENABLED: true,
+      ASSISTANT_REPORT_SYNC_MAX_HOURS: 168,
+      ASSISTANT_REPORT_JOB_TTL_SECONDS: 1800,
+      ASSISTANT_REPORT_JOBS_CONSUMER: false,
+      ASSISTANT_REPORT_JOB_CONCURRENCY: 2,
+      ARCHIVE_EXPORT_TTL_HOURS: 168,
+    });
+    for (const key of [
+      'ASSISTANT_FALLBACK_MODEL',
+      'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY',
+      'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS',
+      'RABBITMQ_ASSISTANT_URL',
+    ] as const) {
+      expect(cfg[key], key).toBeUndefined();
+    }
+  });
+
+  it('treats the empty keys of .env.example as unset', () => {
+    const cfg = loadApiConfig({
+      ...valid,
+      ASSISTANT_FALLBACK_MODEL: '',
+      ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: '',
+      ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS: '',
+      RABBITMQ_ASSISTANT_URL: '',
+    });
+    expect(cfg.ASSISTANT_FALLBACK_MODEL).toBeUndefined();
+    expect(cfg.RABBITMQ_ASSISTANT_URL).toBeUndefined();
+  });
+
+  it('accepts a secondary provider of another family, or of the same family with another model', () => {
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_ANTHROPIC_API_KEY: KEY,
+        ASSISTANT_FALLBACK_PROVIDER: 'openai',
+        ASSISTANT_OPENAI_API_KEY: KEY,
+        ASSISTANT_FALLBACK_MODEL: 'example-model-1',
+      }),
+    ).toMatchObject({
+      ASSISTANT_FALLBACK_PROVIDER: 'openai',
+      ASSISTANT_FALLBACK_MODEL: 'example-model-1',
+    });
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_ANTHROPIC_API_KEY: KEY,
+        ASSISTANT_FALLBACK_PROVIDER: 'anthropic',
+        ASSISTANT_FALLBACK_MODEL: 'claude-sonnet-5-5',
+      }).ASSISTANT_FALLBACK_MODEL,
+    ).toBe('claude-sonnet-5-5');
+    // fake as the secondary is fine outside production (tests, local development).
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_ANTHROPIC_API_KEY: KEY,
+        ASSISTANT_FALLBACK_PROVIDER: 'fake',
+      }).ASSISTANT_FALLBACK_PROVIDER,
+    ).toBe('fake');
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_FALLBACK_PROVIDER: 'fake',
+        ASSISTANT_FALLBACK_MODEL: 'fake-secondary',
+      }).ASSISTANT_FALLBACK_MODEL,
+    ).toBe('fake-secondary');
+  });
+
+  it('refuses a secondary equal to the primary unless the model differs', () => {
+    for (const extra of [{}, { ASSISTANT_FALLBACK_MODEL: 'claude-opus-5-5' }]) {
+      const message = rejection({
+        ...valid,
+        ASSISTANT_PROVIDER: 'anthropic',
+        ASSISTANT_MODEL: 'claude-opus-5-5',
+        ASSISTANT_FALLBACK_PROVIDER: 'anthropic',
+        ...extra,
+      });
+      expect(message).toContain('ASSISTANT_FALLBACK_PROVIDER');
+    }
+    expect(
+      rejection({ ...valid, ASSISTANT_PROVIDER: 'fake', ASSISTANT_FALLBACK_PROVIDER: 'fake' }),
+    ).toContain('ASSISTANT_FALLBACK_PROVIDER');
+  });
+
+  it('requires ASSISTANT_FALLBACK_MODEL for an anthropic or openai secondary', () => {
+    for (const provider of ['anthropic', 'openai']) {
+      expect(rejection({ ...valid, ASSISTANT_FALLBACK_PROVIDER: provider })).toContain(
+        'ASSISTANT_FALLBACK_MODEL',
+      );
+    }
+    expect(
+      rejection({
+        ...valid,
+        ASSISTANT_FALLBACK_PROVIDER: 'openai',
+        ASSISTANT_FALLBACK_MODEL: 'model with spaces',
+      }),
+    ).toContain('ASSISTANT_FALLBACK_MODEL');
+  });
+
+  it('refuses a fake secondary in production while the assistant is enabled', () => {
+    const env = {
+      ...valid,
+      NODE_ENV: 'production',
+      ASSISTANT_PROVIDER: 'anthropic',
+      ASSISTANT_ANTHROPIC_API_KEY: KEY,
+      ASSISTANT_FALLBACK_PROVIDER: 'fake',
+    };
+    const message = rejection({ ...env, ASSISTANT_ENABLED: 'true' });
+    expect(message).toContain('ASSISTANT_FALLBACK_PROVIDER');
+    expect(message).toContain('NODE_ENV=production');
+    expect(loadApiConfig(env).ASSISTANT_FALLBACK_PROVIDER).toBe('fake');
+  });
+
+  it.each([
+    ['anthropic', ['ASSISTANT_ANTHROPIC_API_KEY']],
+    ['openai', ['ASSISTANT_OPENAI_API_KEY']],
+    [
+      'azure_openai',
+      [
+        'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+        'ASSISTANT_AZURE_OPENAI_API_KEY',
+        'ASSISTANT_AZURE_OPENAI_DEPLOYMENT',
+      ],
+    ],
+  ] as const)(
+    'requires the credentials of secondary provider %s when enabled',
+    (provider, keys) => {
+      const env = {
+        ...valid,
+        ASSISTANT_ENABLED: 'true',
+        ASSISTANT_PROVIDER: 'fake',
+        ASSISTANT_FALLBACK_PROVIDER: provider,
+        ASSISTANT_FALLBACK_MODEL: 'example-model-1',
+      };
+      const message = rejection(env);
+      for (const key of keys) expect(message).toContain(key);
+      expect(message).not.toContain('MARKER');
+      expect(
+        loadApiConfig({ ...env, ASSISTANT_ENABLED: 'false' }).ASSISTANT_FALLBACK_PROVIDER,
+      ).toBe(provider);
+    },
+  );
+
+  it('requires the tenant-key encryption key when tenant keys are enabled, never echoing it', () => {
+    expect(rejection({ ...valid, ASSISTANT_TENANT_KEYS_ENABLED: 'true' })).toContain(
+      'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY',
+    );
+    const key = hex64();
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_TENANT_KEYS_ENABLED: 'true',
+        ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: key,
+        ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS: hex64(),
+      }),
+    ).toMatchObject({
+      ASSISTANT_TENANT_KEYS_ENABLED: true,
+      ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: key,
+    });
+    const short = 'ab'.repeat(16);
+    const message = rejection({ ...valid, ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: short });
+    expect(message).toContain('ASSISTANT_TENANT_KEY_ENCRYPTION_KEY');
+    expect(message).not.toContain(short);
+    const same = rejection({
+      ...valid,
+      ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: key,
+      ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS: key.toUpperCase(),
+    });
+    expect(same).toContain('ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS');
+    expect(same).not.toContain(key);
+  });
+
+  it('reads the tenant-key encryption keys and the RabbitMQ URL from <KEY>_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'api-assistant-ai6-'));
+    const keyFile = join(dir, 'key');
+    const previousFile = join(dir, 'previous');
+    const urlFile = join(dir, 'url');
+    const key = hex64();
+    const previous = hex64();
+    writeFileSync(keyFile, `${key}\n`);
+    writeFileSync(previousFile, `${previous}\n`);
+    writeFileSync(urlFile, `${AMQP}\n`);
+    try {
+      expect(
+        loadApiConfig({
+          ...valid,
+          ASSISTANT_TENANT_KEYS_ENABLED: 'true',
+          ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_FILE: keyFile,
+          ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS_FILE: previousFile,
+          ASSISTANT_REPORT_JOBS_CONSUMER: 'true',
+          RABBITMQ_ASSISTANT_URL_FILE: urlFile,
+        }),
+      ).toMatchObject({
+        ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: key,
+        ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS: previous,
+        RABBITMQ_ASSISTANT_URL: [AMQP],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('parses the tenant-key provider and model lists', () => {
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_TENANT_KEY_PROVIDERS: ' openai , openai ',
+        ASSISTANT_TENANT_KEY_MODELS: 'claude-sonnet-5-5, example-model-1',
+      }),
+    ).toMatchObject({
+      ASSISTANT_TENANT_KEY_PROVIDERS: ['openai'],
+      ASSISTANT_TENANT_KEY_MODELS: ['claude-sonnet-5-5', 'example-model-1'],
+    });
+    for (const bad of ['azure_openai', 'anthropic,MARKER', ' , ']) {
+      const message = rejection({ ...valid, ASSISTANT_TENANT_KEY_PROVIDERS: bad });
+      expect(message, bad).toContain('ASSISTANT_TENANT_KEY_PROVIDERS');
+      expect(message, bad).not.toContain('MARKER');
+    }
+    for (const bad of ['bad model MARKER', ',', 'x'.repeat(65)]) {
+      const message = rejection({ ...valid, ASSISTANT_TENANT_KEY_MODELS: bad });
+      expect(message, bad).toContain('ASSISTANT_TENANT_KEY_MODELS');
+      expect(message, bad).not.toContain('MARKER');
+    }
+  });
+
+  it('keeps the synchronous report window within REPORTS_MAX_RANGE_DAYS', () => {
+    expect(
+      rejection({ ...valid, REPORTS_MAX_RANGE_DAYS: '7', ASSISTANT_REPORT_SYNC_MAX_HOURS: '169' }),
+    ).toContain('ASSISTANT_REPORT_SYNC_MAX_HOURS');
+    expect(
+      loadApiConfig({
+        ...valid,
+        REPORTS_MAX_RANGE_DAYS: '7',
+        ASSISTANT_REPORT_SYNC_MAX_HOURS: '168',
+      }).ASSISTANT_REPORT_SYNC_MAX_HOURS,
+    ).toBe(168);
+  });
+
+  it('requires RABBITMQ_ASSISTANT_URL for the report job consumer, never echoing it', () => {
+    expect(rejection({ ...valid, ASSISTANT_REPORT_JOBS_CONSUMER: 'true' })).toContain(
+      'RABBITMQ_ASSISTANT_URL',
+    );
+    expect(
+      loadApiConfig({
+        ...valid,
+        ASSISTANT_REPORT_JOBS_CONSUMER: 'true',
+        RABBITMQ_ASSISTANT_URL: AMQP,
+      }).RABBITMQ_ASSISTANT_URL,
+    ).toEqual([AMQP]);
+    const bad = 'http://eg-assistant:placeholder-MARKER@rabbitmq';
+    const message = rejection({ ...valid, RABBITMQ_ASSISTANT_URL: bad });
+    expect(message).toContain('RABBITMQ_ASSISTANT_URL');
+    expect(message).not.toContain('MARKER');
+  });
+
+  it('accepts every bounded key at its bounds', () => {
+    const bounds: Record<string, [number, number]> = {
+      ASSISTANT_TENANT_KEY_VALIDATION_TIMEOUT_MS: [1000, 30_000],
+      ASSISTANT_PSEUDONYMS_MAX_PER_CONVERSATION: [100, 50_000],
+      ASSISTANT_SEARCH_SCAN_MAX_MESSAGES: [1000, 200_000],
+      ASSISTANT_SEARCH_TIMEOUT_MS: [500, 10_000],
+      ASSISTANT_REPORT_SYNC_MAX_HOURS: [24, 744],
+      ASSISTANT_REPORT_JOB_TTL_SECONDS: [300, 7200],
+      ASSISTANT_REPORT_JOB_CONCURRENCY: [1, 8],
+      ARCHIVE_EXPORT_TTL_HOURS: [1, 8760],
+    };
+    for (const [key, [min, max]] of Object.entries(bounds)) {
+      for (const value of [min, max]) {
+        const cfg = loadApiConfig({ ...valid, [key]: String(value) });
+        expect(cfg[key as keyof typeof cfg], `${key}=${value}`).toBe(value);
+      }
+      expect(rejection({ ...valid, [key]: String(min - 1) })).toContain(key);
+      expect(rejection({ ...valid, [key]: String(max + 1) })).toContain(key);
+    }
+  });
+
+  it.each([
+    ['ASSISTANT_FALLBACK_PROVIDER', 'gemini'],
+    ['ASSISTANT_TENANT_KEYS_ENABLED', 'yes'],
+    ['ASSISTANT_REPORT_JOBS_ENABLED', 'sometimes'],
+    ['ASSISTANT_REPORT_JOBS_CONSUMER', 'maybe'],
+    ['ARCHIVE_EXPORT_TTL_HOURS', 'a-week'],
   ])('refuses %s=%s naming the key', (key, value) => {
     expect(rejection({ ...valid, [key]: value })).toContain(key);
   });

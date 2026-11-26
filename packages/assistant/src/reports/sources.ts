@@ -436,6 +436,28 @@ export function sourceRequirement(def: ReportSourceDef): PermissionRequirement {
   return tool.requirement;
 }
 
+/**
+ * The full loopback path templates (`/api/v1/...`, OpenAPI form) of every source tool of
+ * `REPORT_SOURCES`, deduplicated and sorted (step AI-6 D5, I26): the routes a background report
+ * job's GET-only access token may call (the api's `ASSISTANT_JOB_ROUTES`). Derived from the
+ * registry records, so it follows the source plan; every source tool must be a `GET`.
+ */
+export function reportJobRoutePaths(): readonly string[] {
+  const paths = new Set<string>();
+  const keys = new Set<ReportSourceKey>([
+    ...Object.values(REPORT_SOURCES).flat(),
+    ...SUMMARY_SOURCES,
+  ]);
+  for (const key of keys) {
+    const def = REPORT_SOURCE_DEFS[key];
+    const tool = findTool(def.tool);
+    if (!tool || tool.native || tool.method !== 'GET')
+      throw new Error(`report source ${key}: ${def.tool} is not a GET operation tool`);
+    paths.add(tool.pathTemplate);
+  }
+  return Object.freeze([...paths].sort());
+}
+
 /** The permission named in an omission (`permission` reason): the first of the requirement. */
 export function sourcePermission(def: ReportSourceDef): string | null {
   const requirement = sourceRequirement(def);

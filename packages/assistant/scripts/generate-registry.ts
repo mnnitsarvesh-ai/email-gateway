@@ -1,9 +1,11 @@
 /**
  * Registry generator (design D3).
  *
- *   tsx scripts/generate-registry.ts           writes src/registry/operations.generated.ts and
- *                                              docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md
- *   tsx scripts/generate-registry.ts --check   regenerates in memory; exit 1 when either file is
+ *   tsx scripts/generate-registry.ts           writes src/registry/operations.generated.ts,
+ *                                              docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md and
+ *                                              docs/assistant/CHAT_CAPABILITY_REPORT.md (step AI-6
+ *                                              D12)
+ *   tsx scripts/generate-registry.ts --check   regenerates in memory; exit 1 when any file is
  *                                              stale (the package `test` runs it)
  *
  * Inputs: ../../docs/api/openapi.json, src/registry/manifest.ts, the native tools
@@ -18,6 +20,7 @@ import { buildRegistry, type OpenApiDocument, type RegistryBuild } from '../src/
 import { registryConsistencyIssues } from '../src/registry/consistency';
 import { NATIVE_TOOLS } from '../src/registry/native';
 import { renderMatrix, renderOperationsModule } from '../src/registry/render';
+import { renderCapabilityReport } from '../src/registry/report';
 
 export const PACKAGE_DIR = join(__dirname, '..');
 export const REPO_DIR = join(PACKAGE_DIR, '../..');
@@ -25,6 +28,7 @@ export const OPENAPI_PATH = join(REPO_DIR, 'docs/api/openapi.json');
 export const FEATURES_DIR = join(REPO_DIR, 'apps/admin-portal/src/features');
 export const OPERATIONS_OUT = join(PACKAGE_DIR, 'src/registry/operations.generated.ts');
 export const MATRIX_OUT = join(REPO_DIR, 'docs/assistant/UI_TO_CHAT_CAPABILITY_MATRIX.md');
+export const CAPABILITY_REPORT_OUT = join(REPO_DIR, 'docs/assistant/CHAT_CAPABILITY_REPORT.md');
 
 const OPERATION_ID = /[A-Z][A-Za-z0-9]*Controller_[A-Za-z0-9]+_v1/g;
 const SOURCE_FILE = /\.(ts|tsx|js|jsx|mjs)$/;
@@ -70,7 +74,7 @@ export interface GeneratedOutputs {
   files: Record<string, string>;
 }
 
-/** Builds and formats both outputs in memory. */
+/** Builds and formats every output in memory. */
 export async function generateOutputs(): Promise<GeneratedOutputs> {
   const document = readOpenApi();
   const build = buildRegistry(document, readPortalUsage());
@@ -96,6 +100,7 @@ export async function generateOutputs(): Promise<GeneratedOutputs> {
         renderMatrix(build, (id) => idempotency.get(id) ?? ''),
         MATRIX_OUT,
       ),
+      [CAPABILITY_REPORT_OUT]: await format(renderCapabilityReport(build), CAPABILITY_REPORT_OUT),
     },
   };
 }

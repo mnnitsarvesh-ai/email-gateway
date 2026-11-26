@@ -31,13 +31,21 @@ const ALLOWED_INGRESS_PATHS: Record<string, Record<string, string>> = {
   'click-service': { '/c/': 'Prefix', '/static/click.css': 'Exact' },
   // Step 6.1 D13, ADR-0053: the business API only.
   api: { '/api/v1/': 'Prefix' },
-  // Step 7.1, ADR-0060: the admin portal on its own host (pages, BFF, its own /api/health).
-  'admin-portal': { '/': 'Prefix' },
+  // Step AI-6 D10: the assistant routes (SSE turns) on the api host go to api-assistant (the
+  // same api image; the longer prefix wins in ingress-nginx).
+  'api-assistant': { '/api/v1/assistant/': 'Prefix' },
+  // Step 7.1, ADR-0060: the admin portal on its own host (pages, BFF, its own /api/health); step
+  // AI-6 D10: a second Ingress for the portal's assistant BFF paths (SSE settings), same Service.
+  'admin-portal': { '/': 'Prefix', '/bff/api/v1/assistant/': 'Prefix' },
 };
+
+/** Step AI-6 D10: the Ingress objects that carry the assistant's SSE turn streams. */
+const SSE_INGRESSES = ['admin-portal-assistant', 'api-assistant'];
 
 /** ADR-0060: the only workloads that mount each step 7.1 Secret. */
 const SECRET_MOUNTERS: Record<string, string[]> = {
-  'email-gateway-api-trusted-forwarder': ['admin-portal', 'api'],
+  // Step AI-6 D10: api-assistant (the same api image) receives the portal BFF's assistant calls.
+  'email-gateway-api-trusted-forwarder': ['admin-portal', 'api', 'api-assistant'],
   'email-gateway-admin-portal-session': ['admin-portal'],
 };
 
@@ -184,13 +192,55 @@ describe('public / internal boundary (step 6.1 D13, step 7.1 ADR-0060, e2e, depe
       objects.filter((o) => o.kind === 'Service').map((o) => [o.metadata?.name, o]),
     );
     const workerServices = [...services.keys()].filter(
-      (name) => name !== 'api' && name !== 'click-service' && name !== 'admin-portal',
+      (name) =>
+        name !== 'api' &&
+        name !== 'api-assistant' &&
+        name !== 'click-service' &&
+        name !== 'admin-portal',
     );
 
     it('parses every YAML document of the base and finds the admin-portal, api and click-service Ingresses', () => {
       expect(objects.length).toBeGreaterThan(50);
       const ingresses = objects.filter((o) => o.kind === 'Ingress').map((o) => o.metadata?.name);
-      expect(ingresses.sort()).toEqual(['admin-portal', 'api', 'click-service']);
+      expect(ingresses.sort()).toEqual([
+        'admin-portal',
+        'admin-portal-assistant',
+        'api',
+        'api-assistant',
+        'click-service',
+      ]);
+    });
+
+    it('the assistant Ingresses (step AI-6 D10) stream: buffering off, HTTP/1.1, timeouts above the turn deadline, no snippets', () => {
+      for (const name of SSE_INGRESSES) {
+        const ingress = objects.find((o) => o.kind === 'Ingress' && o.metadata?.name === name) as
+          { metadata: { annotations?: Record<string, string> } } | undefined;
+        const annotations = ingress?.metadata.annotations ?? {};
+        expect(annotations, name).toMatchObject({
+          'nginx.ingress.kubernetes.io/proxy-buffering': 'off',
+          'nginx.ingress.kubernetes.io/proxy-request-buffering': 'off',
+          'nginx.ingress.kubernetes.io/proxy-http-version': '1.1',
+          'nginx.ingress.kubernetes.io/proxy-read-timeout': '330',
+          'nginx.ingress.kubernetes.io/proxy-send-timeout': '330',
+        });
+        expect(
+          Object.keys(annotations).filter((k) => /snippet/i.test(k)),
+          name,
+        ).toEqual([]);
+      }
+      expect(paths.filter((p) => p.service === 'api-assistant')).toEqual([
+        expect.objectContaining({
+          ingress: 'api-assistant',
+          path: '/api/v1/assistant/',
+          pathType: 'Prefix',
+          port: { name: 'http' },
+        }),
+      ]);
+      // The same host as the api's business API (the longer prefix wins).
+      const apiHosts = new Set(paths.filter((p) => p.service === 'api').map((p) => p.host));
+      for (const p of paths.filter((x) => x.service === 'api-assistant')) {
+        expect(apiHosts.has(p.host), p.host).toBe(true);
+      }
     });
 
     it('routes only the documented paths: click-service /c/ and /static/click.css, api Prefix /api/v1/, admin-portal Prefix /', () => {
@@ -213,6 +263,12 @@ describe('public / internal boundary (step 6.1 D13, step 7.1 ADR-0060, e2e, depe
       ]);
       expect(paths.filter((p) => p.service === 'admin-portal')).toEqual([
         expect.objectContaining({ path: '/', pathType: 'Prefix', port: { name: 'http' } }),
+        expect.objectContaining({
+          ingress: 'admin-portal-assistant',
+          path: '/bff/api/v1/assistant/',
+          pathType: 'Prefix',
+          port: { name: 'http' },
+        }),
       ]);
     });
 

@@ -147,6 +147,7 @@ describe('ProviderBreaker', () => {
     expect(countsTowardBreaker(new LlmError('client_error', { httpStatus: 400 }))).toBe(false);
     expect(countsTowardBreaker(new LlmError('refusal'))).toBe(false);
     expect(countsTowardBreaker(new LlmError('aborted'))).toBe(false);
+    expect(countsTowardBreaker(new LlmError('auth', { httpStatus: 401 }))).toBe(false);
     expect(countsTowardBreaker(new Error('x'))).toBe(false);
   });
 

@@ -7,6 +7,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { MetricsService } from '@email-gateway/common';
 import { getContext, runWithContext } from '@email-gateway/logger';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -24,6 +25,7 @@ import type {
   Principal,
 } from '../../../auth-contracts/principal';
 import type { AuthenticatedRequest } from '../../../auth-contracts/request';
+import { AccessTokenPrincipalResolver } from '../services/access-token-principal-resolver.service';
 import type { ApiKeyAuthenticatorService } from '../services/api-key-authenticator.service';
 import type { OverrideRequestAuditor } from '../services/override-request-auditor.service';
 import type { PlatformOverrideService } from '../services/platform-override.service';
@@ -104,6 +106,7 @@ describe('AuthGuard', () => {
   let failing: boolean;
   let attach: ReturnType<typeof vi.fn>;
   let guard: AuthGuard;
+  let metrics: MetricsService;
 
   beforeEach(() => {
     tokens = new TokenService({
@@ -122,21 +125,25 @@ describe('AuthGuard', () => {
     const fail = () => {
       if (failing) throw new Error('redis down');
     };
+    metrics = new MetricsService({ service: 'api-test' });
     guard = new AuthGuard(
       new Reflector(),
-      tokens,
-      {
-        isRevoked: (sid: string) => Promise.resolve().then(() => (fail(), revoked.has(sid))),
-        isLive: () => Promise.resolve(live),
-      } as unknown as SessionService,
-      {
-        load: () => Promise.resolve().then(() => (fail(), snap)),
-      } as unknown as PrincipalLoaderService,
-      { resolve: () => Promise.resolve(override) } as unknown as PlatformOverrideService,
+      new AccessTokenPrincipalResolver(
+        tokens,
+        {
+          isRevoked: (sid: string) => Promise.resolve().then(() => (fail(), revoked.has(sid))),
+          isLive: () => Promise.resolve(live),
+        } as unknown as SessionService,
+        {
+          load: () => Promise.resolve().then(() => (fail(), snap)),
+        } as unknown as PrincipalLoaderService,
+        { resolve: () => Promise.resolve(override) } as unknown as PlatformOverrideService,
+      ),
       {
         authenticate: () => Promise.resolve(apiKeyPrincipal),
       } as unknown as ApiKeyAuthenticatorService,
       { attach } as unknown as OverrideRequestAuditor,
+      metrics,
     );
     vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
   });
@@ -290,6 +297,101 @@ describe('AuthGuard', () => {
     expect(req.tenantScope).toMatchObject({ organizationId: 7n, via: 'api_key' });
     apiKeyPrincipal = null;
     await expect(run({ 'x-api-key': 'egk_anything' })).rejects.toThrow(UnauthorizedException);
+  });
+
+  describe('assistant report job tokens (step AI-6 D5, I26)', () => {
+    const jobId = '0193d000-0000-7000-8000-00000000a0b1';
+    const job = async (extra: { amr?: Array<'pwd' | 'otp'> } = {}, now?: Date) =>
+      (
+        await tokens.issueAssistantJobAccess(
+          {
+            userPublicId: ids.user,
+            organizationPublicId: ids.org,
+            sessionId: 'b5f2c4a8-1111-4222-8333-444455556666',
+            amr: extra.amr ?? ['pwd'],
+            jobId,
+          },
+          now,
+        )
+      ).token;
+    const request = async (
+      token: string,
+      method: string,
+      path: string,
+    ): Promise<AuthenticatedRequest> => {
+      const req = {
+        headers: { authorization: `Bearer ${token}` },
+        method,
+        baseUrl: '',
+        route: { path },
+      } as unknown as AuthenticatedRequest;
+      await guard.canActivate(contextFor(Routes.prototype.all, req));
+      return req;
+    };
+    const refusals = async () =>
+      (await metrics.metrics())
+        .split('\n')
+        .find((line) => line.startsWith('api_assistant_job_token_refusals_total'));
+
+    it('accepts GET on every report source route and marks the principal', async () => {
+      const token = await job();
+      for (const path of [
+        '/api/v1/reports/traffic',
+        '/api/v1/reports/threats',
+        '/api/v1/reports/url-clicks',
+        '/api/v1/reports/delivery',
+        '/api/v1/reports/processing',
+        '/api/v1/reports/top-domains',
+        '/api/v1/quarantine/summary',
+        '/api/v1/ato/overview',
+        '/api/v1/ato/accounts',
+      ]) {
+        const req = await request(token, 'GET', path);
+        expect(req.principal).toMatchObject({ kind: 'user', assistantJobId: jobId });
+      }
+    });
+
+    it('refuses other methods and other GET routes with 401, counted and logged without the token', async () => {
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const token = await job();
+      await expect(request(token, 'POST', '/api/v1/reports/traffic')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      await expect(request(token, 'GET', '/api/v1/users')).rejects.toThrow(UnauthorizedException);
+      await expect(request(token, 'GET', '/api/v1/assistant/reports/:reportId')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(await refusals()).toMatch(/ 3$/);
+      expect(warn).toHaveBeenCalledWith({
+        message: 'Assistant job token refused outside its routes',
+        route: '/api/v1/users',
+        jobId,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(token);
+    });
+
+    it('refuses a job token of a revoked or ended session and an expired one', async () => {
+      const token = await job();
+      revoked.add('b5f2c4a8-1111-4222-8333-444455556666');
+      await expect(request(token, 'GET', '/api/v1/reports/traffic')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      revoked.clear();
+      live = false;
+      await expect(request(token, 'GET', '/api/v1/reports/traffic')).rejects.toThrow(
+        UnauthorizedException,
+      );
+      live = true;
+      const old = await job({}, new Date(Date.now() - 10 * 60_000));
+      await expect(request(old, 'GET', '/api/v1/reports/traffic')).rejects.toThrow(
+        UnauthorizedException,
+      );
+    });
+
+    it('leaves ordinary access tokens unrestricted', async () => {
+      const req = await request(await access(), 'POST', '/api/v1/users');
+      expect(req.principal).not.toHaveProperty('assistantJobId');
+    });
   });
 
   it('fails closed with 503 when the key-value store is unavailable', async () => {

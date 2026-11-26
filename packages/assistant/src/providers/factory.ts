@@ -1,7 +1,7 @@
 import { AnthropicProvider, type RefusalFallback } from './anthropic';
 import { FakeProvider } from './fake';
 import { AzureOpenAiProvider, OpenAiProvider } from './openai-compatible';
-import type { FetchLike, LlmEffort, LlmProvider, LlmProviderId } from './types';
+import type { FetchLike, LlmEffort, LlmErrorReason, LlmProvider, LlmProviderId } from './types';
 
 /**
  * Builds the configured provider from a plain options object (the api maps its zod config onto
@@ -29,6 +29,10 @@ export interface ProviderFactoryOptions {
   fetch?: FetchLike;
   /** Fake only (tests): follow instruction-shaped text in tool results. */
   fakeObedient?: boolean;
+  /** Fake only (tests, load test; step AI-6 D11): delay before the first delta of each round. */
+  fakeLatencyMs?: number;
+  /** Fake only (tests; step AI-6 D6): every call and probe fails with this reason. */
+  fakeFailure?: LlmErrorReason | null;
   now?: () => Date;
 }
 
@@ -67,6 +71,8 @@ export function createLlmProvider(options: ProviderFactoryOptions): LlmProvider 
         model: options.model || 'fake',
         obedient: options.fakeObedient ?? false,
         ...(options.now ? { now: options.now } : {}),
+        ...(options.fakeLatencyMs ? { latencyMs: options.fakeLatencyMs } : {}),
+        ...(options.fakeFailure ? { failure: options.fakeFailure } : {}),
       });
     default: {
       const never: never = options.provider;

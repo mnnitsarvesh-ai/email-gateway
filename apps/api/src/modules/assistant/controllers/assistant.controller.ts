@@ -72,15 +72,20 @@ export class AssistantStatusController {
       '`tenant_disabled` (your organization has not enabled it with the external-processing ' +
       'acknowledgement), `provider_unavailable` (the provider breaker is open) or ' +
       '`budget_exhausted` (the daily token budget of your organization or of the platform is ' +
-      'used up). Also the configured provider and model, the message limit, the turns per ' +
-      'minute and today’s token use (UTC day).' +
+      'used up; step AI-6: also your own daily budget). Also the configured provider and ' +
+      'model, the message limit, the turns per minute and today’s token use (UTC day); step ' +
+      'AI-6: whose provider key the next turn uses (`keySource`), whether the platform’s ' +
+      'secondary provider is in use (`fallbackActive`) and the `dataSharing` level.' +
       USER_ONLY_RULE,
   })
   @ApiAssistantResponse(200, AssistantStatusSchema, X.status, 'The assistant status')
   @ApiAssistantForbidden()
   @ApiAssistantUnavailable()
-  get(@CurrentScope() scope: TenantScope): Promise<AssistantStatusView> {
-    return this.availability.status(scope);
+  get(
+    @CurrentPrincipal() principal: Principal,
+    @CurrentScope() scope: TenantScope,
+  ): Promise<AssistantStatusView> {
+    return this.availability.status(scope, new Date(), userOf(principal));
   }
 }
 
@@ -99,9 +104,12 @@ export class AssistantSettingsController {
     description:
       'Your organization’s `assistant-settings/1`: `enabled`, the external-processing ' +
       'acknowledgement (who and when), `dailyTokenBudget` (null = the platform default) and ' +
-      'the effective budget, the content `retentionDays` (1-365), `dataSharing` (`metadata`), ' +
-      'whether the feature `ai_assistant` is on, and the `rowVersion` to send with PUT (0 ' +
-      'before the first save). Needs `assistant:configure`.' +
+      'the effective budget, the content `retentionDays` (1-365), `dataSharing` (`metadata` ' +
+      'or `pseudonymized`), whether the feature `ai_assistant` is on, and the `rowVersion` to ' +
+      'send with PUT (0 before the first save). Step AI-6: `userDailyTokenBudget`, ' +
+      '`useTenantKey`, `tenantKeyFallbackToPlatform`, the stored provider key (`tenantKey`: ' +
+      'fingerprint and status only), what the platform offers (`tenantKeysOffered`) and the ' +
+      'read-only `effectiveLimits`. Needs `assistant:configure`.' +
       USER_ONLY_RULE,
   })
   @ApiAssistantResponse(200, AssistantSettingsSchema, X.settings, 'The assistant settings')
@@ -124,9 +132,15 @@ export class AssistantSettingsController {
       'and the masked metadata of tool results are processed by the platform’s AI provider; the ' +
       'acknowledging user and time are recorded. Enabling also needs the organization feature ' +
       '`ai_assistant`, which a platform operator turns on (`403 assistant_not_enabled`). ' +
-      '`dailyTokenBudget` is at most ASSISTANT_TENANT_DAILY_TOKENS_MAX (`400`). Audited ' +
-      '`assistant.settings_updated` (changed field names, never values). Needs ' +
-      '`assistant:configure`; rate class `sensitive`.' +
+      '`dailyTokenBudget` is at most ASSISTANT_TENANT_DAILY_TOKENS_MAX (`400`). Step AI-6: ' +
+      '`dataSharing` (`pseudonymized` replaces e-mail addresses, IPs, domains and person names ' +
+      'by placeholders in everything the AI provider reads; from the next turn), ' +
+      '`userDailyTokenBudget` (1 … the effective daily budget, `400` above), `useTenantKey` ' +
+      '(needs the platform offer: `403 assistant_tenant_keys_disabled`; a stored key: `404 ' +
+      'assistant_tenant_key_not_found`; with status `valid`: `422 ' +
+      'assistant_tenant_key_rejected`) and `tenantKeyFallbackToPlatform`; an absent field ' +
+      'stays unchanged. Audited `assistant.settings_updated` (changed field names, never ' +
+      'values). Needs `assistant:configure`; rate class `sensitive`.' +
       USER_ONLY_RULE,
   })
   @ApiBody({
@@ -135,9 +149,12 @@ export class AssistantSettingsController {
   })
   @ApiAssistantResponse(200, AssistantSettingsSchema, X.settings, 'The updated settings')
   @ApiAssistantForbidden(
-    [C.notEnabled],
-    '`assistant_not_enabled` when enabling without the feature `ai_assistant`',
+    [C.notEnabled, C.tenantKeysDisabled],
+    '`assistant_not_enabled` when enabling without the feature `ai_assistant`, ' +
+      '`assistant_tenant_keys_disabled` for `useTenantKey` without the platform offer',
   )
+  @ApiCodedError(404, '`useTenantKey` without a stored provider key', [C.tenantKeyNotFound])
+  @ApiCodedError(422, '`useTenantKey` with a key that is not `valid`', [C.tenantKeyRejected])
   @ApiCodedError(
     409,
     '`expectedRowVersion` is not the stored version (`currentRowVersion` given)',

@@ -944,8 +944,13 @@ describe('retention and organization purge (D7, D12, ADR-0094)', () => {
     expect(counts).toEqual({
       // Step AI-R: report deliveries and reports (with their objects) go first (none here).
       ai_chat_report_deliveries: 0,
+      // Step AI-6: report jobs before reports, feedback and pseudonyms before messages (none
+      // here), the per-user usage row of the two turns, no tenant key.
+      ai_chat_report_jobs: 0,
       ai_chat_reports: 0,
       reportObjects: 0,
+      ai_chat_feedback: 0,
+      ai_chat_pseudonyms: 0,
       // Step AI-2: confirmations go first (none here: both tools are reads).
       ai_chat_action_confirmations: 0,
       ai_chat_tool_executions: 2,
@@ -953,6 +958,8 @@ describe('retention and organization purge (D7, D12, ADR-0094)', () => {
       ai_chat_turns: 2,
       ai_chat_conversations: 1,
       ai_chat_usage_daily: 1,
+      ai_chat_usage_user_daily: 1,
+      ai_chat_provider_keys: 0,
       ai_chat_settings: 1,
     });
     const where = { where: { organizationId: org.id } };
@@ -961,6 +968,7 @@ describe('retention and organization purge (D7, D12, ADR-0094)', () => {
     expect(await ctx.prisma.aiChatTurn.count(where)).toBe(0);
     expect(await ctx.prisma.aiChatConversation.count(where)).toBe(0);
     expect(await ctx.prisma.aiChatUsageDaily.count(where)).toBe(0);
+    expect(await ctx.prisma.aiChatUsageUserDaily.count(where)).toBe(0);
     expect(await ctx.prisma.aiChatSettings.count(where)).toBe(0);
     // Another organization's rows stay; the tool audit rows stay (append-only).
     expect(await ctx.prisma.aiChatToolExecution.count({ where: { organizationId: orgA.id } })).toBe(

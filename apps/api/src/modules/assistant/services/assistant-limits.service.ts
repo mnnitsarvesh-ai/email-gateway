@@ -19,10 +19,19 @@ export function secondsUntilUtcMidnight(now: Date): number {
   return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }
 
+/** The per-user daily budget of a turn start (step AI-6 D1). */
+export interface UserBudget {
+  userId: bigint;
+  userPublicId: string;
+  budget: number;
+}
+
 /**
  * Budgets, limits and locks of the assistant (design D7, D11; Redis keys of contracts §35):
  * turns per user per minute (`as:rl:u`), the tenant and platform daily token counters
- * (`as:tok:o`, `as:tok:p`; seeded from `ai_chat_usage_daily` on a miss, TTL 48 h), the
+ * (`as:tok:o`, `as:tok:p`; seeded from the usage tables on a miss, TTL 48 h; step AI-6 D6: the
+ * platform counter counts platform-key turns only), the per-user daily token counter of step
+ * AI-6 D1 (`as:tok:u`, seeded from `ai_chat_usage_user_daily`), the
  * per-process concurrency semaphore and the per-conversation turn lock (`as:turn`). Store
  * errors propagate: callers fail closed.
  */
@@ -55,16 +64,45 @@ export class AssistantLimitsService {
     return this.counter(key, () => this.usage.platformDayTokens(utcDayStart(now)));
   }
 
-  /** Which budget is exhausted at turn start, if any (a running turn may finish). */
+  /** Tokens one user used today (UTC; step AI-6 D1). */
+  async userUsedToday(
+    organizationId: bigint,
+    user: { userId: bigint; userPublicId: string },
+    now: Date,
+  ): Promise<number> {
+    const key = assistantKeys.userTokens(user.userPublicId, utcDayKey(now));
+    return this.counter(key, () =>
+      this.usage.userDayTokens(organizationId, user.userId, utcDayStart(now)),
+    );
+  }
+
+  /**
+   * Which budget is exhausted at turn start, if any (a running turn may finish): the tenant's,
+   * the caller's per-user budget (step AI-6 D1), then the platform cap, which counts only turns on
+   * the platform's keys (step AI-6 D6, A6-7: a tenant-key turn is not refused by it).
+   */
   async exhaustedScope(
     organizationId: bigint,
     dailyTokenBudget: number | null,
     now: Date,
-  ): Promise<'tenant' | 'platform' | null> {
+    options: { keySource?: 'platform' | 'tenant'; user?: UserBudget | null } = {},
+  ): Promise<'tenant' | 'platform' | 'user' | null> {
     const used = await this.tenantUsedToday(organizationId, now);
     if (used >= this.tenantBudget(dailyTokenBudget)) return 'tenant';
+    if (
+      options.user &&
+      (await this.userUsedToday(organizationId, options.user, now)) >= options.user.budget
+    ) {
+      return 'user';
+    }
     const cap = this.config.ASSISTANT_PLATFORM_DAILY_TOKENS;
-    if (cap > 0 && (await this.platformUsedToday(now)) >= cap) return 'platform';
+    if (
+      cap > 0 &&
+      (options.keySource ?? 'platform') === 'platform' &&
+      (await this.platformUsedToday(now)) >= cap
+    ) {
+      return 'platform';
+    }
     return null;
   }
 
@@ -79,14 +117,23 @@ export class AssistantLimitsService {
     }
   }
 
-  /** Adds a finished turn's tokens to today's counters (after its usage row committed). */
-  async recordTokens(organizationId: bigint, tokens: number, now: Date): Promise<void> {
+  /**
+   * Adds a finished turn's tokens to today's counters (after its usage rows committed): the
+   * tenant's, the user's (step AI-6 D1) and, for a platform-key turn, the platform's (D6).
+   */
+  async recordTokens(
+    organizationId: bigint,
+    tokens: number,
+    now: Date,
+    options: { userPublicId?: string; keySource?: 'platform' | 'tenant' } = {},
+  ): Promise<void> {
     if (!Number.isSafeInteger(tokens) || tokens < 1) return;
     const day = utcDayKey(now);
-    for (const key of [
-      assistantKeys.tenantTokens(organizationId, day),
-      assistantKeys.platformTokens(day),
-    ]) {
+    const keys = [assistantKeys.tenantTokens(organizationId, day)];
+    if ((options.keySource ?? 'platform') === 'platform')
+      keys.push(assistantKeys.platformTokens(day));
+    if (options.userPublicId) keys.push(assistantKeys.userTokens(options.userPublicId, day));
+    for (const key of keys) {
       // A missing counter is seeded from the table on its next read (which includes this turn).
       if ((await this.kv.get(key)) !== null) {
         await this.kv.incrByWithTtl(key, tokens, TOKEN_COUNTER_TTL_SECONDS);

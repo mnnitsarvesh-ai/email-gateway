@@ -124,6 +124,28 @@ describe('server config (design §3.5)', () => {
     ).toBe(true);
   });
 
+  it('accepts an optional assistant origin (step AI-6 D10); empty = unset', () => {
+    expect(loadServerConfig(base).API_ASSISTANT_INTERNAL_URL).toBeUndefined();
+    expect(
+      loadServerConfig({ ...base, API_ASSISTANT_INTERNAL_URL: '' }).API_ASSISTANT_INTERNAL_URL,
+    ).toBeUndefined();
+    expect(
+      loadServerConfig({ ...base, API_ASSISTANT_INTERNAL_URL: 'http://api-assistant:3000/' })
+        .API_ASSISTANT_INTERNAL_URL,
+    ).toBe('http://api-assistant:3000');
+    expect(
+      issues({ ...base, API_ASSISTANT_INTERNAL_URL: 'http://api-assistant:3000/api/v1' }),
+    ).toEqual([
+      'API_ASSISTANT_INTERNAL_URL: API_ASSISTANT_INTERNAL_URL must be an origin without a path',
+    ]);
+    expect(issues({ ...base, API_ASSISTANT_INTERNAL_URL: 'ftp://api-assistant' })).toEqual([
+      'API_ASSISTANT_INTERNAL_URL: API_ASSISTANT_INTERNAL_URL must use http or https',
+    ]);
+    expect(issues({ ...base, API_ASSISTANT_INTERNAL_URL: 'not a url' }).join('\n')).toMatch(
+      /^API_ASSISTANT_INTERNAL_URL: /,
+    );
+  });
+
   it('refuses a previous key equal to the current one', () => {
     expect(issues({ ...base, PORTAL_SESSION_KEY_PREVIOUS: TEST_KEY.toUpperCase() })).toEqual([
       'PORTAL_SESSION_KEY_PREVIOUS: must differ from PORTAL_SESSION_KEY',

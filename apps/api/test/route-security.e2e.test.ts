@@ -941,10 +941,11 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step AI-1, AI-2 and AI-R assistant routes: exact permissions, users only, no MFA requirement, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
-    type Flags = { cls?: string; cursor?: boolean };
+  it('the step AI-1, AI-2, AI-R and AI-6 assistant routes: exact permissions, users only, MFA only for the tenant key, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
+    type Flags = { cls?: string; cursor?: boolean; mfa?: boolean };
     const USE = 'assistant:use';
     const CONFIGURE = 'assistant:configure';
+    const AUDIT = 'audit:read';
     const expected: Record<string, [string, Flags?]> = {
       'get /api/v1/assistant/status': [USE],
       'get /api/v1/assistant/settings': [CONFIGURE],
@@ -966,6 +967,24 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'post /api/v1/assistant/confirmations/:confirmationId/cancel': [USE, { cls: 'sensitive' }],
       // Step AI-R §4.1.
       'get /api/v1/assistant/reports/:reportId': [USE],
+      // Step AI-6 §4.1 (contracts §35.6): the tenant key needs an MFA session (D7).
+      'put /api/v1/assistant/settings/provider-key': [CONFIGURE, { cls: 'sensitive', mfa: true }],
+      'delete /api/v1/assistant/settings/provider-key': [
+        CONFIGURE,
+        { cls: 'sensitive', mfa: true },
+      ],
+      'post /api/v1/assistant/settings/provider-key/validate': [
+        CONFIGURE,
+        { cls: 'sensitive', mfa: true },
+      ],
+      'get /api/v1/assistant/search': [USE, { cls: 'expensive', cursor: true }],
+      'put /api/v1/assistant/messages/:messageId/feedback': [USE],
+      'delete /api/v1/assistant/messages/:messageId/feedback': [USE],
+      'get /api/v1/assistant/admin/usage/users': [CONFIGURE, { cursor: true }],
+      'get /api/v1/assistant/admin/feedback': [CONFIGURE, { cursor: true }],
+      'get /api/v1/assistant/admin/conversations': [AUDIT, { cursor: true }],
+      'get /api/v1/assistant/admin/conversations/:conversationId': [AUDIT],
+      'get /api/v1/assistant/admin/executions': [AUDIT, { cursor: true }],
     };
     const assistant = routes.filter((r) => /^\/api\/v1\/assistant(\/|$)/.test(r.path));
     expect(assistant.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
@@ -975,9 +994,10 @@ describe('route security (e2e, dependencies stubbed)', () => {
       const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
       expect(route.isPublic, key).toBe(false);
       expect(route.requirement, key).toEqual({ mode: 'all', permissions: [permission] });
-      // API keys never chat (D1, §4.1); MFA is the organization's login policy, not per route.
+      // API keys never chat (D1, §4.1); MFA is the organization's login policy, not per route,
+      // except for the write-only tenant key of step AI-6 (D7).
       expect(route.userOnly, key).toBe(true);
-      expect(route.requireMfa, key).toBe(false);
+      expect(route.requireMfa, key).toBe(flags?.mfa ?? false);
       expect(route.rateClass, key).toBe(flags?.cls ?? null);
       expect(route.idempotency, key).toBeNull();
       expect(route.returnsSecret, key).toBe(false);

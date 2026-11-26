@@ -31,6 +31,11 @@ export interface AccessTokenClaims {
   mfa_enroll?: true;
   /** Platform override id. */
   ovr?: string;
+  /**
+   * Step AI-6 D5 (ADR-0096, I26): the public id of the assistant report job this token was minted
+   * for; the guard accepts such a token only for GET on `ASSISTANT_JOB_ROUTES`.
+   */
+  ajb?: string;
 }
 
 export interface AccessTokenInput {
@@ -43,6 +48,20 @@ export interface AccessTokenInput {
   /** Override tokens expire with the override; others after AUTH_ACCESS_TOKEN_TTL_SECONDS. */
   expiresAt?: Date;
 }
+
+/** A report job's token (step AI-6 D5): the user's own session family, GET-only, 300 s. */
+export interface AssistantJobAccessInput {
+  userPublicId: string;
+  /** The user's home organization public id. */
+  organizationPublicId: string;
+  sessionId: string;
+  amr: readonly AuthMethod[];
+  overrideId?: string;
+  jobId: string;
+}
+
+/** Lifetime of an assistant job token (I26). */
+export const ASSISTANT_JOB_TOKEN_TTL_SECONDS = 300;
 
 export interface IssuedAccessToken {
   token: string;
@@ -72,7 +91,8 @@ function isClaims(payload: JWTPayload): payload is JWTPayload & AccessTokenClaim
     p.amr.length > 0 &&
     p.amr.every((m) => m === 'pwd' || m === 'otp') &&
     (p.mfa_enroll === undefined || p.mfa_enroll === true) &&
-    (p.ovr === undefined || (typeof p.ovr === 'string' && UUID.test(p.ovr)))
+    (p.ovr === undefined || (typeof p.ovr === 'string' && UUID.test(p.ovr))) &&
+    (p.ajb === undefined || (typeof p.ajb === 'string' && UUID.test(p.ajb)))
   );
 }
 
@@ -99,6 +119,38 @@ export class TokenService {
   }
 
   async issue(input: AccessTokenInput, now: Date = new Date()): Promise<IssuedAccessToken> {
+    return this.sign(input, null, now);
+  }
+
+  /**
+   * Step AI-6 D5 (ADR-0096): an ordinary access token of the user's live session plus the claim
+   * `ajb` (the job's public id), `exp = now + 300 s`. Never stored or logged: the report job
+   * consumer sends it only as the `authorization` header of its loopback reads.
+   */
+  async issueAssistantJobAccess(
+    input: AssistantJobAccessInput,
+    now: Date = new Date(),
+  ): Promise<IssuedAccessToken> {
+    if (!UUID.test(input.jobId)) throw new Error('an assistant job token needs the job public id');
+    return this.sign(
+      {
+        userPublicId: input.userPublicId,
+        organizationPublicId: input.organizationPublicId,
+        sessionId: input.sessionId,
+        amr: input.amr,
+        ...(input.overrideId !== undefined && { overrideId: input.overrideId }),
+        expiresAt: new Date(now.getTime() + ASSISTANT_JOB_TOKEN_TTL_SECONDS * 1000),
+      },
+      input.jobId,
+      now,
+    );
+  }
+
+  private async sign(
+    input: AccessTokenInput,
+    jobId: string | null,
+    now: Date,
+  ): Promise<IssuedAccessToken> {
     const iat = Math.floor(now.getTime() / 1000);
     const exp = input.expiresAt
       ? Math.floor(input.expiresAt.getTime() / 1000)
@@ -110,6 +162,7 @@ export class TokenService {
       amr: [...input.amr],
       ...(input.mfaEnrollmentRequired && { mfa_enroll: true }),
       ...(input.overrideId && { ovr: input.overrideId }),
+      ...(jobId !== null && { ajb: jobId }),
     };
     const token = await new SignJWT(payload)
       .setProtectedHeader({ alg: JWT_ALGORITHM, kid: 'current', typ: 'JWT' })

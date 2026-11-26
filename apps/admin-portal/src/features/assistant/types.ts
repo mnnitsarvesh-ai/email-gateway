@@ -26,6 +26,10 @@ export interface CardLink {
   readonly ref?: string;
 }
 
+/** Card statuses of a report (packages/assistant `REPORT_CARD_STATUSES`, step AI-6). */
+export const REPORT_CARD_STATUSES = ['queued', 'running', 'available', 'failed'] as const;
+export type ReportCardStatus = (typeof REPORT_CARD_STATUSES)[number];
+
 /** Why a requested report section is not in the report (step AI-R D3). */
 export type ReportOmissionReason =
   'permission' | 'not_enabled' | 'unavailable' | 'unexpected_response';
@@ -36,6 +40,12 @@ export type ReportOmissionReason =
  */
 export interface ReportCardData {
   readonly reportId: string;
+  /**
+   * Step AI-6 (D5): `queued` when the report is generated in the background (no figures yet;
+   * the card polls `GET /assistant/reports/{id}`). Absent on cards stored before AI-6 =
+   * `available`.
+   */
+  readonly status?: ReportCardStatus;
   readonly title: string;
   readonly period: {
     readonly from: string;
@@ -245,3 +255,15 @@ export type CancelResult = SuccessBody<'AssistantConfirmationsController_cancel_
 export type ReportDocument = SuccessBody<'AssistantReportsController_get_v1'>;
 export type ReportView = ReportDocument['report'];
 export type ReportDelivery = ReportView['deliveries'][number];
+export type ReportJob = NonNullable<ReportView['job']>;
+
+/** Step AI-6 (D2): the rating of an assistant message (owner view of `GET …/messages`). */
+export type MessageFeedback = NonNullable<StoredMessage['feedback']>;
+export type FeedbackRating = MessageFeedback['rating'];
+export type FeedbackReason = NonNullable<MessageFeedback['reason']>;
+export type FeedbackView = SuccessBody<'AssistantFeedbackController_set_v1'>;
+/** Step AI-6 (D4): one hit of the owner's content search. */
+export type SearchHit = SuccessBody<'AssistantSearchController_search_v1'>['data'][number];
+export type TenantKeyView = SuccessBody<'AssistantProviderKeyController_set_v1'>;
+export type EffectiveLimits = AssistantSettings['effectiveLimits'];
+export type DataSharing = AssistantSettings['dataSharing'];

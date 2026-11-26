@@ -92,6 +92,13 @@ export interface LlmProvider {
   userEntry(text: string): unknown[];
   /** The native transcript entries that return tool results (in call order). */
   toolResultEntries(results: readonly LlmToolResult[]): unknown[];
+  /**
+   * Checks the credentials and the model without generating tokens (step AI-6 D7: tenant-key
+   * validation): Anthropic retrieves the model, OpenAI `GET {base}/models/{model}`; the fake
+   * resolves. Absent where no probe exists (Azure OpenAI). Throws a classified `LlmError`
+   * (`auth` for 401/403, `rate_limited`, `server_error`, `connection`, `timeout`, …).
+   */
+  probe?(signal: AbortSignal): Promise<void>;
 }
 
 export const LLM_ERROR_REASONS = [
@@ -104,6 +111,8 @@ export const LLM_ERROR_REASONS = [
   'refusal',
   'schema',
   'unexpected',
+  // step AI-6 D6/D7: 401/403 of the provider (a rejected key); never counts toward the breaker
+  'auth',
 ] as const;
 export type LlmErrorReason = (typeof LLM_ERROR_REASONS)[number];
 
@@ -150,8 +159,9 @@ export class LlmError extends Error {
   }
 }
 
-/** Reason code of an HTTP error status (shared by the plain-HTTP providers). */
+/** Reason code of an HTTP error status (shared by the providers; 401/403 → `auth`, step AI-6). */
 export function reasonOfStatus(status: number): LlmErrorReason {
+  if (status === 401 || status === 403) return 'auth';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'server_error';
   return 'client_error';

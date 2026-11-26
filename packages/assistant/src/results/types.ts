@@ -150,9 +150,22 @@ export interface AssistantCard {
   report?: ReportCardData;
 }
 
-/** The report of a `report` card (step AI-R D2 step 10). */
+/**
+ * The state of the report of a card (step AI-6 D5): synchronous reports are `available`; a
+ * background report starts `queued` (the portal polls the report view for `running`,
+ * `available` or `failed`).
+ */
+export const REPORT_CARD_STATUSES = ['queued', 'running', 'available', 'failed'] as const;
+export type ReportCardStatus = (typeof REPORT_CARD_STATUSES)[number];
+
+/** The report of a `report` card (step AI-R D2 step 10; `status` since step AI-6 D5). */
 export interface ReportCardData {
   reportId: string;
+  /**
+   * Always set by the card builders (`available` for synchronous reports); absent only on cards
+   * stored before step AI-6, which are `available`.
+   */
+  status?: ReportCardStatus;
   title: string;
   period: ReportPeriod;
   generatedAt: string;

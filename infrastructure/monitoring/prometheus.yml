@@ -5,7 +5,7 @@ global:
 # Alert rules (step 3.2 Q15: messaging.rules.yml; step 3.3 L14: lifecycle.rules.yml; step 4.1 S17:
 # scanning.rules.yml; step 4.3 U18: click-service.rules.yml, url-scanning.rules.yml; step 4.6 X20:
 # sandbox-controller.rules.yml; step 5.2 P24: policy-engine.rules.yml; step 6.1 D16:
-# api.rules.yml). Alertmanager routing is
+# api.rules.yml; step AI-6 D8: assistant.rules.yml). Alertmanager routing is
 # step 10.3; until then the alerts are visible on the Prometheus /alerts page.
 rule_files:
   - rules/*.rules.yml
@@ -31,7 +31,10 @@ scrape_configs:
   # api (step 6.1 D16; quarantine series of step 5.3 Q29): api_http_*, api_rate_limit*,
   # api_idempotency_total, api_cursor_rejected_total, api_list_scan_budget_exhausted_total,
   # api_report_*, quarantine_* and the shared process series. /metrics is on the api port but
-  # outside /api (internal only; never routed by an Ingress, ADR-0053).
+  # outside /api (internal only; never routed by an Ingress, ADR-0053). The AI assistant series
+  # (assistant_*, api_assistant_job_token_refusals_total; step AI-6 D8, rules/assistant.rules.yml)
+  # are on the same registry: in Kubernetes the api-assistant Deployment (same image, turns, model
+  # calls and the report-job consumer) is scraped under this job name too.
   - job_name: api
     metrics_path: /metrics
     static_configs:

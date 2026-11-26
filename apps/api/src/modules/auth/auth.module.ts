@@ -16,6 +16,7 @@ import { RecoveryCodesRepository } from './repositories/recovery-codes.repositor
 import { SessionsRepository } from './repositories/sessions.repository';
 import { UserTokensRepository } from './repositories/user-tokens.repository';
 import { UsersAuthRepository } from './repositories/users-auth.repository';
+import { AccessTokenPrincipalResolver } from './services/access-token-principal-resolver.service';
 import { ApiKeyAuthenticatorService } from './services/api-key-authenticator.service';
 import { AuthenticationService } from './services/authentication.service';
 import { BootstrapAdminService } from './services/bootstrap-admin.service';
@@ -65,6 +66,8 @@ import { UserTokenService } from './services/user-token.service';
     InvitationService,
     PrincipalCacheService,
     PrincipalLoaderService,
+    // Step AI-6 D5: the bearer path shared by the guard and the assistant's report job consumer.
+    AccessTokenPrincipalResolver,
     ApiKeyAuthenticatorService,
     PlatformOverrideService,
     OverrideRequestAuditor,
@@ -86,6 +89,9 @@ import { UserTokenService } from './services/user-token.service';
     PrincipalCacheService,
     LoginThrottleService,
     ReauthenticationService,
+    // Step AI-6 D5 (ADR-0096): the assistant's report job consumer mints and resolves job tokens.
+    TokenService,
+    AccessTokenPrincipalResolver,
   ],
 })
 export class AuthModule {}

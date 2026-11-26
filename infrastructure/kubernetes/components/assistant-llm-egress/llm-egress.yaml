@@ -1,0 +1,14 @@
+# JSON patch: HTTPS (443) from the api-assistant pods to the LLM provider and S3 address ranges.
+# 192.0.2.0/24 is a placeholder (RFC 5737 documentation range): replace it per environment with the
+# published ranges listed in kustomization.yaml (one ipBlock per range).
+- op: add
+  path: /spec/egress/-
+  value:
+    to:
+      # LLM provider endpoints (ASSISTANT_PROVIDER, ASSISTANT_FALLBACK_PROVIDER, tenant-key
+      # providers; replace with the provider's published ranges).
+      - ipBlock: { cidr: 192.0.2.0/24 }
+      # S3 endpoint of S3_REGION (report objects in S3_BUCKET_MAIL; replace with the region's S3
+      # prefix-list ranges or the gateway endpoint's).
+      - ipBlock: { cidr: 192.0.2.0/24 }
+    ports: [{ protocol: TCP, port: 443 }]

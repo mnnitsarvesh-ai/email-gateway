@@ -728,3 +728,16 @@ describe('outcome wording (D11): queued 202 writes', () => {
     );
   });
 });
+
+describe('export lifetime in the card (step AI-6 D13)', () => {
+  it('states ARCHIVE_EXPORT_TTL_HOURS of the api config (default 168)', async () => {
+    const t = setup();
+    const out = await t.call('ediscovery_exports_create', {
+      caseId: CASE,
+      body: { searchId: SEARCH },
+    });
+    const impact = out.confirmation!.view.summary!.impact.join(' ');
+    expect(impact).toContain('Download it on the case page in the portal for 168 hours');
+    expect(impact).not.toContain('until it expires');
+  });
+});

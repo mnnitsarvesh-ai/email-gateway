@@ -118,8 +118,8 @@ describe('registry completeness and consistency (D3)', () => {
     ]);
   });
 
-  it('AI-5: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
-    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-5');
+  it('AI-6: enabled tools are within the program phase; writes are enabled only with testedBy, a spec and a template', () => {
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-6');
     expect(PROGRAM_PHASES).toEqual(['AI-1', 'AI-2', 'AI-3', 'AI-R', 'AI-4', 'AI-5', 'AI-6']);
     expect(registryConsistencyIssues(ALL_TOOLS, { openApiOperationIds: OPENAPI_IDS })).toEqual([]);
     // AI-R adds no OpenAPI tool; every generated tool of AI-5 and later stays disabled.
@@ -1081,13 +1081,20 @@ describe('native tools (step AI-R D1)', () => {
 });
 
 describe('step AI-5 (design 33 D1, D2, D7, D8, D10)', () => {
-  it('AI-5 totals (D1, §11): 428 operations, 354 operation tools (354 enabled), 356 enabled tools (188 reads, 168 writes), MISSING 0', () => {
+  it('AI-5/AI-6 totals (D1, §11; design 34 §0): 439 operations, 354 operation tools (354 enabled), 356 enabled tools (188 reads, 168 writes), MISSING 0', () => {
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
-    expect(operations).toHaveLength(428);
+    // 428 operations after AI-5 plus the 11 assistant routes of step AI-6 (contracts §35.6),
+    // which are `not_applicable` (the assistant's own routes are never tools): no new tool.
+    expect(operations).toHaveLength(439);
     expect(OPERATION_TOOLS).toHaveLength(354);
     expect(NATIVE_TOOLS).toHaveLength(2);
-    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(74);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(85);
+    expect(
+      NOT_APPLICABLE_OPERATIONS.filter((o) =>
+        /^Assistant(ProviderKey|Search|Feedback|Admin|AdminAudit)Controller_/.test(o.operationId),
+      ),
+    ).toHaveLength(11);
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
     expect(count((t) => t.enabled)).toBe(354);
     expect(enabled).toHaveLength(356);

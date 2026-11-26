@@ -1737,6 +1737,11 @@ model Organization {
   aiChatConfirmations      AiChatActionConfirmation[]
   aiChatReports            AiChatReport[]
   aiChatReportDeliveries   AiChatReportDelivery[]
+  aiChatUsageUserDaily     AiChatUsageUserDaily[]
+  aiChatFeedback           AiChatFeedback[]
+  aiChatPseudonyms         AiChatPseudonym[]
+  aiChatProviderKey        AiChatProviderKey?
+  aiChatReportJobs         AiChatReportJob[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -7863,10 +7868,21 @@ enum AiChatHttpMethod {
   DELETE
 }
 
-/// What the assistant may send to the LLM provider (step AI-1 D13, ADR-0092): `metadata` is the
-/// only value in AI-1 (`pseudonymized` is an AI-6 option, appended then).
+/// What the assistant may send to the LLM provider (step AI-1 D13, ADR-0092): `metadata` (AI-1)
+/// sends tool results as minimized metadata envelopes; `pseudonymized` (step AI-6 D3, ADR-0097,
+/// I25; appended) additionally replaces e-mail addresses, IP addresses, domains and person names
+/// by stable per-conversation tokens (`ai_chat_pseudonyms`) before anything reaches the provider.
 enum AiChatDataSharing {
   metadata
+  pseudonymized
+}
+
+/// Which credential paid for an assistant turn (step AI-6 D6, D7; ADR-0097): the platform's
+/// configured provider key, or the organization's own key (`ai_chat_provider_keys`). The platform
+/// daily token cap counts only `platform` turns (A6-7).
+enum AiChatKeySource {
+  platform
+  tenant
 }
 
 /// The organization's assistant setting `assistant-settings/1` (step AI-1 D13, §3; ADR-0094):
@@ -7876,7 +7892,10 @@ enum AiChatDataSharing {
 /// NULL = ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT (never above ASSISTANT_TENANT_DAILY_TOKENS_MAX);
 /// `retention_days` 1–365 is the content retention after the last turn. CAS on `row_version`.
 /// `external_processing_ack_by_user_id` / `updated_by_user_id` have no FK (the trail survives the
-/// user).
+/// user). Step AI-6 (D1, D3, D7): `data_sharing` may be `pseudonymized`; `user_daily_token_budget`
+/// (NULL = none; 1 … the tenant's effective daily budget) is enforced per user and UTC day;
+/// `use_tenant_key` routes turns through the organization's `ai_chat_provider_keys` row and
+/// `tenant_key_fallback_to_platform` lets them fall back to the platform providers (A6-6).
 model AiChatSettings {
   organizationId                BigInt            @id @map("organization_id") @db.UnsignedBigInt
   enabled                       Boolean           @default(false)
@@ -7885,6 +7904,12 @@ model AiChatSettings {
   dailyTokenBudget              Int?              @map("daily_token_budget") @db.UnsignedInt
   retentionDays                 Int               @default(30) @map("retention_days") @db.UnsignedSmallInt
   dataSharing                   AiChatDataSharing @default(metadata) @map("data_sharing")
+  /// Step AI-6 D1: per-user daily token budget (NULL = none).
+  userDailyTokenBudget          Int?              @map("user_daily_token_budget") @db.UnsignedInt
+  /// Step AI-6 D7: use the organization's own provider key (`ai_chat_provider_keys`).
+  useTenantKey                  Boolean           @default(false) @map("use_tenant_key")
+  /// Step AI-6 D6: with a tenant key, fall back to the platform providers when it fails.
+  tenantKeyFallbackToPlatform   Boolean           @default(false) @map("tenant_key_fallback_to_platform")
   updatedByUserId               BigInt?           @map("updated_by_user_id") @db.UnsignedBigInt
   rowVersion                    Int               @default(1) @map("row_version") @db.UnsignedInt
   createdAt                     DateTime          @default(now()) @map("created_at") @db.DateTime(3)
@@ -7929,8 +7954,17 @@ model AiChatConversation {
   confirmations  AiChatActionConfirmation[]
   /// Reports generated in the conversation (step AI-R); purged with its content.
   reports        AiChatReport[]
+  /// Step AI-6 D2: ratings of the conversation's assistant messages.
+  feedback       AiChatFeedback[]
+  /// Step AI-6 D3: pseudonym mappings (content; deleted at the content purge).
+  pseudonyms     AiChatPseudonym[]
+  /// Step AI-6 D5: asynchronous report jobs.
+  reportJobs     AiChatReportJob[]
 
   @@index([organizationId, userId, status, lastTurnAt, id])
+  /// Step AI-6 D4: metadata-only admin list `WHERE organization_id = ? ORDER BY last_turn_at DESC,
+  /// id DESC`.
+  @@index([organizationId, lastTurnAt, id])
   @@index([purgeAfter])
   @@index([userId])
   @@map("ai_chat_conversations")
@@ -7943,35 +7977,45 @@ model AiChatConversation {
 /// token counts, advisory `cost_micros` (micro-USD; NULL = unpriced model), latency, coded error.
 /// `provider_transcript` = JSON of the provider-native blocks of the turn (≤ 512 KiB, replayed
 /// verbatim within a segment for preserved thinking; content, purged). `user_id` has no FK (the
-/// conversation's owner; the conversation cascades).
+/// conversation's owner; the conversation cascades). Step AI-6 (D3, D6, D7): `provider`/`model`
+/// are the candidate actually used, `data_sharing` the level the turn applied, `key_source`
+/// whose key paid, `fallback_from` the provider id of the skipped or failed primary (NULL when
+/// the first candidate answered); the `(organization_id, user_id, started_at)` index serves the
+/// per-user usage and audit views.
 model AiChatTurn {
-  id                 BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId           String           @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  conversationId     BigInt           @map("conversation_id") @db.UnsignedBigInt
-  organizationId     BigInt           @map("organization_id") @db.UnsignedBigInt
-  userId             BigInt           @map("user_id") @db.UnsignedBigInt
-  seq                Int              @db.UnsignedInt
-  segment            Int              @default(1) @db.UnsignedSmallInt
-  clientTurnId       String           @map("client_turn_id") @db.Char(36)
-  status             AiChatTurnStatus @default(running)
-  provider           String           @db.VarChar(32)
-  model              String           @db.VarChar(64)
-  responseModel      String?          @map("response_model") @db.VarChar(128)
-  promptVersion      String           @map("prompt_version") @db.VarChar(32)
-  registryVersion    String           @map("registry_version") @db.VarChar(32)
-  rounds             Int              @default(0) @db.UnsignedTinyInt
-  toolCalls          Int              @default(0) @map("tool_calls") @db.UnsignedSmallInt
-  inputTokens        Int              @default(0) @map("input_tokens") @db.UnsignedInt
-  outputTokens       Int              @default(0) @map("output_tokens") @db.UnsignedInt
-  cacheReadTokens    Int              @default(0) @map("cache_read_tokens") @db.UnsignedInt
-  cacheWriteTokens   Int              @default(0) @map("cache_write_tokens") @db.UnsignedInt
-  costMicros         BigInt?          @map("cost_micros") @db.UnsignedBigInt
-  latencyMs          Int?             @map("latency_ms") @db.UnsignedInt
-  errorCode          String?          @map("error_code") @db.VarChar(64)
-  correlationId      String           @map("correlation_id") @db.VarChar(128)
-  providerTranscript String?          @map("provider_transcript") @db.MediumText
-  startedAt          DateTime         @default(now()) @map("started_at") @db.DateTime(3)
-  finishedAt         DateTime?        @map("finished_at") @db.DateTime(3)
+  id                 BigInt            @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId           String            @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  conversationId     BigInt            @map("conversation_id") @db.UnsignedBigInt
+  organizationId     BigInt            @map("organization_id") @db.UnsignedBigInt
+  userId             BigInt            @map("user_id") @db.UnsignedBigInt
+  seq                Int               @db.UnsignedInt
+  segment            Int               @default(1) @db.UnsignedSmallInt
+  clientTurnId       String            @map("client_turn_id") @db.Char(36)
+  status             AiChatTurnStatus  @default(running)
+  provider           String            @db.VarChar(32)
+  model              String            @db.VarChar(64)
+  responseModel      String?           @map("response_model") @db.VarChar(128)
+  promptVersion      String            @map("prompt_version") @db.VarChar(32)
+  registryVersion    String            @map("registry_version") @db.VarChar(32)
+  rounds             Int               @default(0) @db.UnsignedTinyInt
+  toolCalls          Int               @default(0) @map("tool_calls") @db.UnsignedSmallInt
+  inputTokens        Int               @default(0) @map("input_tokens") @db.UnsignedInt
+  outputTokens       Int               @default(0) @map("output_tokens") @db.UnsignedInt
+  cacheReadTokens    Int               @default(0) @map("cache_read_tokens") @db.UnsignedInt
+  cacheWriteTokens   Int               @default(0) @map("cache_write_tokens") @db.UnsignedInt
+  costMicros         BigInt?           @map("cost_micros") @db.UnsignedBigInt
+  latencyMs          Int?              @map("latency_ms") @db.UnsignedInt
+  errorCode          String?           @map("error_code") @db.VarChar(64)
+  correlationId      String            @map("correlation_id") @db.VarChar(128)
+  providerTranscript String?           @map("provider_transcript") @db.MediumText
+  /// Step AI-6 D3: the data-sharing level applied to this turn.
+  dataSharing        AiChatDataSharing @default(metadata) @map("data_sharing")
+  /// Step AI-6 D6, D7: whose provider key paid for the turn.
+  keySource          AiChatKeySource   @default(platform) @map("key_source")
+  /// Step AI-6 D6: provider id of the skipped or failed primary candidate.
+  fallbackFrom       String?           @map("fallback_from") @db.VarChar(32)
+  startedAt          DateTime          @default(now()) @map("started_at") @db.DateTime(3)
+  finishedAt         DateTime?         @map("finished_at") @db.DateTime(3)
 
   organization   Organization               @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   conversation   AiChatConversation         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -7982,6 +8026,7 @@ model AiChatTurn {
   @@unique([conversationId, seq])
   @@unique([conversationId, clientTurnId])
   @@index([organizationId, startedAt])
+  @@index([organizationId, userId, startedAt])
   @@index([status, startedAt])
   @@map("ai_chat_turns")
 }
@@ -8004,6 +8049,8 @@ model AiChatMessage {
   organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   conversation AiChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   turn         AiChatTurn         @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  /// Step AI-6 D2: the author's rating of an assistant message (at most one).
+  feedback     AiChatFeedback?
 
   @@unique([conversationId, seq])
   @@index([organizationId, createdAt])
@@ -8054,6 +8101,9 @@ model AiChatToolExecution {
 
   @@unique([conversationId, seq])
   @@index([organizationId, createdAt])
+  /// Step AI-6 D4: audit search by user and by tool within a time window.
+  @@index([organizationId, userId, createdAt])
+  @@index([organizationId, toolName, createdAt])
   @@index([correlationId])
   @@index([turnId])
   @@map("ai_chat_tool_executions")
@@ -8204,12 +8254,16 @@ model AiChatActionConfirmation {
 /// Lifecycle of an assistant report (step AI-R D2, D7): `pending` (row written before the
 /// PutObject) → `available` (object stored, in the execution's persist transaction) or `failed`
 /// (put failed, or a `pending` row older than 1 hour swept with `assistant_report_abandoned`);
-/// `available|pending|failed` → `purged` with the conversation's content.
+/// `available|pending|failed` → `purged` with the conversation's content. Step AI-6 D5
+/// (ADR-0096; appended): `queued` = an asynchronous report whose `ai_chat_report_jobs` row waits
+/// for the `api-assistant` consumer → `available` or `failed` (or `purged`); the AI-R `pending`
+/// sweep ignores it, the job's `expires_at` sweep fails it.
 enum AiChatReportStatus {
   pending
   available
   failed
   purged
+  queued
 }
 
 /// Bucket size of the report's time series (step AI-R D2 step 3): `hour` for windows ≤ 48 h,
@@ -8280,6 +8334,8 @@ model AiChatReport {
   organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   conversation AiChatConversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   deliveries   AiChatReportDelivery[]
+  /// Step AI-6 D5: the background job of a `queued` report (at most one).
+  job          AiChatReportJob?
 
   @@index([organizationId, userId, createdAt])
   @@index([conversationId, status, createdAt])
@@ -8328,4 +8384,239 @@ model AiChatReportDelivery {
   @@index([reportId, requestedAt])
   @@index([status, requestedAt])
   @@map("ai_chat_report_deliveries")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step AI-6: AI assistant hardening and operations
+// (docs/plan/steps/34-ai-chat-hardening-operations.md §3, D1-D7; ADR-0096, ADR-0097, ADR-0094
+// amendment AI-6). Five tables, not partitioned (low volume). Metadata and user/assistant text
+// only (I5). Content columns (`ai_chat_feedback.comment`, `ai_chat_pseudonyms.value`) follow the
+// conversation's content retention; tenant provider keys are stored encrypted only (I27).
+// ---------------------------------------------------------------------------------------------
+
+/// Assistant usage per organization, UTC day, user, provider, model and key source (step AI-6
+/// D1): upserted in the turn's closing transaction next to `ai_chat_usage_daily` (same
+/// semantics: every turn closed by the turn engine counts, the day is the UTC day of
+/// `finished_at`); seeds the per-user Redis budget `as:tok:u:<userPublicId>:<yyyymmdd>` on a miss
+/// and backs `GET /assistant/admin/usage/users`. `cost_micros` is an estimate (micro-USD) and
+/// NULL while no priced turn was counted. `user_id` has no FK (the usage trail survives the
+/// user). Backfilled from `ai_chat_turns` by the migration (`key_source = platform`). Rows are
+/// kept like `ai_chat_usage_daily` (execution retention).
+model AiChatUsageUserDaily {
+  organizationId   BigInt          @map("organization_id") @db.UnsignedBigInt
+  day              DateTime        @db.Date
+  userId           BigInt          @map("user_id") @db.UnsignedBigInt
+  provider         String          @db.VarChar(32)
+  model            String          @db.VarChar(64)
+  keySource        AiChatKeySource @map("key_source")
+  turns            Int             @default(0) @db.UnsignedInt
+  inputTokens      BigInt          @default(0) @map("input_tokens") @db.UnsignedBigInt
+  outputTokens     BigInt          @default(0) @map("output_tokens") @db.UnsignedBigInt
+  cacheReadTokens  BigInt          @default(0) @map("cache_read_tokens") @db.UnsignedBigInt
+  cacheWriteTokens BigInt          @default(0) @map("cache_write_tokens") @db.UnsignedBigInt
+  costMicros       BigInt?         @map("cost_micros") @db.UnsignedBigInt
+  updatedAt        DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@id([organizationId, day, userId, provider, model, keySource])
+  @@index([organizationId, userId, day])
+  @@map("ai_chat_usage_user_daily")
+}
+
+/// Rating of an assistant answer (step AI-6 D2, A6-10).
+enum AiChatFeedbackRating {
+  up
+  down
+}
+
+/// Optional fixed reason of an assistant answer rating (step AI-6 D2).
+enum AiChatFeedbackReason {
+  incorrect
+  incomplete
+  not_helpful
+  wrong_action
+  unsafe
+  too_slow
+  other
+}
+
+/// The author's rating of one assistant message (step AI-6 D2; ADR-0094 amendment AI-6): one row
+/// per message (UQ `message_id`), upserted and removable by the conversation's owner only.
+/// `comment` (≤ 500 characters, sanitized like user text) is content: set to NULL at the
+/// conversation's content purge; it is the only user-written text an `assistant:configure`
+/// holder sees (I24, with a notice to the user). `user_id` and `turn_id` have no FK (the
+/// conversation and the message cascade).
+model AiChatFeedback {
+  id             BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId       String                @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId BigInt                @map("organization_id") @db.UnsignedBigInt
+  userId         BigInt                @map("user_id") @db.UnsignedBigInt
+  conversationId BigInt                @map("conversation_id") @db.UnsignedBigInt
+  /// The turn of the rated message (no FK).
+  turnId         BigInt                @map("turn_id") @db.UnsignedBigInt
+  messageId      BigInt                @unique @map("message_id") @db.UnsignedBigInt
+  rating         AiChatFeedbackRating
+  reason         AiChatFeedbackReason?
+  /// Optional comment (content, purged).
+  comment        String?               @db.VarChar(500)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  conversation AiChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  message      AiChatMessage      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, rating, createdAt])
+  @@index([conversationId])
+  @@map("ai_chat_feedback")
+}
+
+/// Kind of a pseudonymized value (step AI-6 D3): token `[EMAIL_n]`, `[IP_n]`, `[DOMAIN_n]`,
+/// `[PERSON_n]`.
+enum AiChatPseudonymKind {
+  email
+  ip
+  domain
+  name
+}
+
+/// One pseudonym mapping of a conversation (step AI-6 D3, I25; ADR-0097): `token` (e.g.
+/// `[EMAIL_3]`, numbered per kind and conversation) stands for `value` in everything the model
+/// reads. `value` is content (the normalized real value, ≤ 320 characters); `value_sha256` =
+/// SHA-256 hex of it (lookup of an existing token). New mappings of a turn are inserted in the
+/// turn's closing transaction (the turn lock makes numbering race-free); rows are deleted at the
+/// conversation's content purge, on conversation delete and with the organization purge.
+model AiChatPseudonym {
+  id             BigInt              @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId BigInt              @map("organization_id") @db.UnsignedBigInt
+  conversationId BigInt              @map("conversation_id") @db.UnsignedBigInt
+  kind           AiChatPseudonymKind
+  token          String              @db.VarChar(24)
+  /// The real value (content; the row is deleted at the content purge).
+  value          String              @db.VarChar(320)
+  valueSha256    String              @map("value_sha256") @db.Char(64)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  conversation AiChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, token])
+  @@unique([conversationId, kind, valueSha256])
+  @@index([organizationId, createdAt])
+  @@map("ai_chat_pseudonyms")
+}
+
+/// Provider of a tenant-supplied assistant key (step AI-6 D7, A6-7): Azure OpenAI is not offered
+/// (a per-tenant endpoint cannot be allowed by the egress policy).
+enum AiChatTenantKeyProvider {
+  anthropic
+  openai
+}
+
+/// Validation status of a tenant-supplied assistant key (step AI-6 D7): `valid` (last probe
+/// accepted), `invalid` (the provider answered 401/403, by probe or during a turn),
+/// `unverified` (the last re-validation could not reach the provider).
+enum AiChatTenantKeyStatus {
+  valid
+  invalid
+  unverified
+}
+
+/// The organization's own LLM provider key (step AI-6 D7, I27; ADR-0097): at most one row per
+/// organization, write-only. `key_ciphertext` = AES-256-GCM `v1.<kid>.<iv>.<tag>.<ct>` under
+/// ASSISTANT_TENANT_KEY_ENCRYPTION_KEY (`_PREVIOUS` decrypts only) with the row-bound AAD
+/// `assistant-provider-key:v1:<organizationId>:<keyVersion>`; `key_kid` = `k` + 7 hex of the
+/// SHA-256 of the encryption key (ADR-0077); `key_fingerprint` = the first 16 hex of the SHA-256
+/// of the API key, the only visible trace. The plaintext is never stored, returned, logged,
+/// audited or put in an event. `model` is one of ASSISTANT_TENANT_KEY_MODELS. CAS on
+/// `row_version`; `set_by_user_id` has no FK. Deleted by `DELETE /assistant/settings/provider-key`
+/// and with the organization purge.
+model AiChatProviderKey {
+  organizationId  BigInt                  @id @map("organization_id") @db.UnsignedBigInt
+  provider        AiChatTenantKeyProvider
+  model           String                  @db.VarChar(64)
+  /// Encrypted API key (never the plaintext).
+  keyCiphertext   String                  @map("key_ciphertext") @db.VarChar(1024)
+  keyKid          String                  @map("key_kid") @db.VarChar(8)
+  keyFingerprint  String                  @map("key_fingerprint") @db.Char(16)
+  /// Incremented on every new key (part of the AAD).
+  keyVersion      Int                     @map("key_version") @db.UnsignedInt
+  status          AiChatTenantKeyStatus
+  lastValidatedAt DateTime?               @map("last_validated_at") @db.DateTime(3)
+  lastErrorCode   String?                 @map("last_error_code") @db.VarChar(64)
+  setByUserId     BigInt                  @map("set_by_user_id") @db.UnsignedBigInt
+  setAt           DateTime                @map("set_at") @db.DateTime(3)
+  /// Compare-and-set counter.
+  rowVersion      Int                     @default(1) @map("row_version") @db.UnsignedInt
+  createdAt       DateTime                @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@map("ai_chat_provider_keys")
+}
+
+/// Lifecycle of an asynchronous assistant report job (step AI-6 D5; ADR-0096): `queued` (turn
+/// transaction, with the outbox event) → `running` (consumer CAS with a lease) → `succeeded`
+/// (report `available`) or `failed` (expired, session ended, not allowed, retries exhausted);
+/// `queued|running` → `cancelled` at the conversation's content purge.
+enum AiChatReportJobStatus {
+  queued
+  running
+  succeeded
+  failed
+  cancelled
+}
+
+/// One background generation of a `queued` assistant report (step AI-6 D5, I26; ADR-0096):
+/// written in the turn's transaction with the report row, the execution and the outbox event
+/// `assistant.report.generate_requested.v1` (eventId = `public_id`); consumed from the
+/// `assistant.reports` queue by the `api-assistant` consumer, which mints a 5-minute GET-only job
+/// token of the requesting user's live session (`session_id`, `auth_methods`,
+/// `home_organization_public_id`, `platform_override_id`). No credential is stored. `arguments`
+/// = the validated `report_generate` arguments (≤ 1 KiB); `lease_until` guards a `running` row
+/// against a second pod; `reported_at` = when the outcome was given to the model (action
+/// updates). Expired rows (`expires_at`) are failed by the retention sweep. `user_id` and
+/// `execution_id` have no FK (the conversation and the report cascade).
+model AiChatReportJob {
+  id                       BigInt                @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                 String                @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId           BigInt                @map("organization_id") @db.UnsignedBigInt
+  userId                   BigInt                @map("user_id") @db.UnsignedBigInt
+  conversationId           BigInt                @map("conversation_id") @db.UnsignedBigInt
+  reportId                 BigInt                @unique @map("report_id") @db.UnsignedBigInt
+  /// The queuing `report_generate` execution (no FK).
+  executionId              BigInt                @map("execution_id") @db.UnsignedBigInt
+  /// Refresh-token family of the requesting session (`UserPrincipal.sessionId`).
+  sessionId                String                @map("session_id") @db.Char(36)
+  /// Authentication methods of the session (`pwd` / `pwd,otp`).
+  authMethods              String                @map("auth_methods") @db.VarChar(16)
+  homeOrganizationPublicId String                @map("home_organization_public_id") @db.Char(36)
+  /// Public id of the platform override the job was queued under (no FK).
+  platformOverrideId       String?               @map("platform_override_id") @db.Char(36)
+  /// Validated `report_generate` arguments (≤ 1 KiB).
+  arguments                Json
+  organizationLabel        String?               @map("organization_label") @db.VarChar(120)
+  status                   AiChatReportJobStatus @default(queued)
+  attempts                 Int                   @default(0) @db.UnsignedTinyInt
+  leaseUntil               DateTime?             @map("lease_until") @db.DateTime(3)
+  errorCode                String?               @map("error_code") @db.VarChar(64)
+  correlationId            String                @map("correlation_id") @db.VarChar(128)
+  expiresAt                DateTime              @map("expires_at") @db.DateTime(3)
+  reportedAt               DateTime?             @map("reported_at") @db.DateTime(3)
+  createdAt                DateTime              @default(now()) @map("created_at") @db.DateTime(3)
+  startedAt                DateTime?             @map("started_at") @db.DateTime(3)
+  finishedAt               DateTime?             @map("finished_at") @db.DateTime(3)
+  updatedAt                DateTime              @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  conversation AiChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  report       AiChatReport       @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([status, expiresAt])
+  @@index([conversationId, status, reportedAt])
+  @@index([organizationId, createdAt])
+  @@map("ai_chat_report_jobs")
 }

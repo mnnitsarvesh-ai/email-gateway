@@ -1,5 +1,7 @@
 'use client';
 
+import { ArrowRightIcon } from 'lucide-react';
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
@@ -25,7 +27,7 @@ import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
 import type { RequestBody } from '@/lib/api/types';
 import { useCan } from '@/lib/auth/me';
 import { formatNumber } from '@/lib/format';
-import type { AssistantSettings, AssistantUsage } from './types';
+import type { AssistantSettings, AssistantUsage, DataSharing } from './types';
 
 /**
  * Settings → AI assistant (step AI-1 D13): `assistant:configure` turns the assistant on for the
@@ -40,6 +42,13 @@ export const RETENTION_MIN_DAYS = 1;
 export const RETENTION_MAX_DAYS = 365;
 const BUDGET_MAX = Number.MAX_SAFE_INTEGER;
 export const USAGE_DAYS = 30;
+/** Step AI-6 (D1): the tenant AI administration page. */
+export const ADMIN_HREF = '/assistant/admin';
+
+export const DATA_SHARING_LABEL: Readonly<Record<DataSharing, string>> = {
+  metadata: 'Metadata only',
+  pseudonymized: 'Pseudonymized',
+};
 
 const optionalBudget = z.preprocess(
   (value) => (value === '' || value === null || value === undefined ? null : value),
@@ -100,7 +109,8 @@ export function settingsBody(
     externalProcessingAcknowledged: values.externalProcessingAcknowledged,
     dailyTokenBudget: values.dailyTokenBudget ?? null,
     retentionDays: values.retentionDays,
-    dataSharing: 'metadata',
+    // Step AI-6: `dataSharing`, the per-user budget and the tenant-key switches are absent =
+    // unchanged; the AI administration page (/assistant/admin) edits them.
   };
 }
 
@@ -389,9 +399,12 @@ export function AssistantSettingsForm({
         />
         <div className="grid gap-1 text-sm">
           <span className="font-medium">Data shared with the AI provider</span>
-          <span>Metadata only</span>
+          <span>{DATA_SHARING_LABEL[settings.dataSharing]}</span>
           <span className="text-muted-foreground">
-            Your questions and masked record metadata (no message bodies or attachments).
+            {settings.dataSharing === 'pseudonymized'
+              ? 'Questions and masked record metadata, with e-mail addresses, IP addresses, domains and person names replaced by placeholders (no message bodies or attachments).'
+              : 'Your questions and masked record metadata (no message bodies or attachments).'}{' '}
+            Change it, the per-user budget and the provider key on the AI administration page.
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -417,12 +430,30 @@ export function AssistantSettingsForm({
 export function AssistantSettingsPanel() {
   const settings = useApiQuery('AssistantSettingsController_get_v1');
   const canUsage = useCan('AssistantUsageController_get_v1');
+  const canAdminUsage = useCan('AssistantAdminController_usageByUser_v1');
+  const canAdminAudit = useCan('AssistantAdminAuditController_conversations_v1');
+  const canAdmin = canAdminUsage || canAdminAudit;
   if (settings.isLoading) return <LoadingState label="Loading AI assistant settings" rows={5} />;
   if (settings.error)
     return <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />;
   if (!settings.data) return null;
   return (
     <div className="grid gap-4 xl:grid-cols-2">
+      {canAdmin ? (
+        <p className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm xl:col-span-2">
+          <span>
+            Usage per person, limits, data sharing, the provider key, feedback and the conversation
+            audit are on the AI administration page.
+          </span>
+          <Link
+            href={ADMIN_HREF}
+            className="inline-flex items-center gap-1 font-medium text-primary underline underline-offset-4"
+          >
+            Open AI administration
+            <ArrowRightIcon className="size-3.5" aria-hidden />
+          </Link>
+        </p>
+      ) : null}
       <ReportSection title="AI assistant">
         <AssistantSettingsForm settings={settings.data} onReload={() => settings.refetch()} />
       </ReportSection>

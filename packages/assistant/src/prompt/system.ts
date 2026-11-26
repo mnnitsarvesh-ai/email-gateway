@@ -4,23 +4,24 @@ import { join } from 'node:path';
 import { sanitizeText } from '../results/sanitize';
 
 /**
- * The versioned system prompt `assistant-system/6` (design 28 D7, D10; step AI-2 D9: writes are
+ * The versioned system prompt `assistant-system/7` (design 28 D7, D10; step AI-2 D9: writes are
  * proposals confirmed in a card; step AI-3 D11: rule 12, no self-service of authority, no
  * credentials, re-authentication for identity changes, the assistant's own settings; step AI-R
  * D10: rule 13, reports through `report_generate` and `report_send_email`; step AI-4 D12: rule
  * 14, ATO four eyes, re-authentication for weakening detection, platform-only operations, no
  * message content in DLP pattern tests; step AI-5 D11: rule 15, compliance and integrations:
  * portal-only content, disposal, hold release and key rotation, re-authentication for weakening
- * compliance changes, the provider wizard with server-filled impact tokens, no secrets in chat).
- * `prompts/assistant-system-1.md` to `assistant-system-5.md` stay in the package because stored
+ * compliance changes, the provider wizard with server-filled impact tokens, no secrets in chat;
+ * step AI-6 D9: rule 13 gains background reports, rule 16 pseudonymization placeholders).
+ * `prompts/assistant-system-1.md` to `assistant-system-6.md` stay in the package because stored
  * turns reference their `prompt_version`. Layout, stable first for
  * prompt caching: the prompt text, then the catalogue index (stable per permission set and
  * registry version), then the volatile context block (organization, user, roles, current time,
  * time zone, registry version).
  */
 
-export const PROMPT_VERSION = 'assistant-system/6';
-export const PROMPT_FILE = 'assistant-system-6.md';
+export const PROMPT_VERSION = 'assistant-system/7';
+export const PROMPT_FILE = 'assistant-system-7.md';
 const PACKAGE_DIR = join(__dirname, '..', '..');
 
 export interface PromptTemplate {

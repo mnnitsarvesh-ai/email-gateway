@@ -1,5 +1,7 @@
 import { type MiddlewareConsumer, Module, type NestModule } from '@nestjs/common';
+import { API_CONFIG } from '../../api-config.token';
 import { AuthModule } from '../auth/auth.module';
+import type { AssistantConfig } from './assistant.constants';
 import {
   AssistantSettingsController,
   AssistantStatusController,
@@ -7,6 +9,7 @@ import {
   AssistantUsageController,
 } from './controllers/assistant.controller';
 import { AssistantConfirmationsController } from './controllers/confirmations.controller';
+import { AssistantProviderKeyController } from './controllers/provider-key.controller';
 import { AssistantReportsController } from './controllers/reports.controller';
 import {
   AssistantConversationsController,
@@ -20,18 +23,19 @@ import { AssistantSettingsRepository } from './repositories/assistant-settings.r
 import { ConfirmationsRepository } from './repositories/confirmations.repository';
 import { ConversationsRepository } from './repositories/conversations.repository';
 import { ExecutionsRepository } from './repositories/executions.repository';
+import { MessageFeedbackRepository } from './repositories/message-feedback.repository';
+import { ProviderKeysRepository } from './repositories/provider-keys.repository';
+import { PseudonymsRepository } from './repositories/pseudonyms.repository';
 import { RecipientDirectoryRepository } from './repositories/recipient-directory.repository';
 import { ReportDeliveriesRepository } from './repositories/report-deliveries.repository';
+import { ReportJobsRepository } from './repositories/report-jobs.repository';
 import { ReportsRepository } from './repositories/reports.repository';
 import { UsageRepository } from './repositories/usage.repository';
 import { AssistantAvailabilityService } from './services/assistant-availability.service';
 import { AssistantLimitsService } from './services/assistant-limits.service';
 import { AssistantMetrics } from './services/assistant-metrics';
-import {
-  AssistantProviderService,
-  defaultLlmProviderFactory,
-  LLM_PROVIDER_FACTORY,
-} from './services/assistant-provider.service';
+import { AssistantProviderService } from './services/assistant-provider.service';
+import { defaultLlmProviderFactory, LLM_PROVIDER_FACTORY } from './services/llm-provider-factory';
 import { AssistantRetentionService } from './services/assistant-retention.service';
 import { AssistantSettingsService } from './services/assistant-settings.service';
 import { AssistantUsageService } from './services/assistant-usage.service';
@@ -45,8 +49,11 @@ import { NativeToolsService } from './services/native-tools.service';
 import { AssistantReadPrimaryMiddleware } from './services/read-primary';
 import { ReportDeliveryService } from './services/reports/report-delivery.service';
 import { ReportGeneratorService } from './services/reports/report-generator.service';
+import { ReportJobConsumer } from './services/reports/report-job.consumer';
+import { ReportJobProcessor } from './services/reports/report-job.processor';
 import { ReportObjectStore } from './services/reports/report-object-store';
 import { ReportsService } from './services/reports/reports.service';
+import { TenantKeyService } from './services/tenant-key.service';
 import { ToolExecutorService } from './services/tool-executor.service';
 import { TurnEngineService } from './services/turn-engine.service';
 
@@ -70,6 +77,15 @@ import { TurnEngineService } from './services/turn-engine.service';
  * `GET /assistant/reports/{reportId}`, and two read-only lookups outside `ai_chat_*`
  * (`RecipientDirectoryRepository`: the users and domains of the scope's organization, for the
  * recipient rule only).
+ *
+ * Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md; ADR-0096, ADR-0097) adds the
+ * provider router (`AssistantProviderService`: candidates, breakers, fallback, tenant keys), the
+ * organization's own provider key (`TenantKeyService`, `PUT|DELETE
+ * /assistant/settings/provider-key`, `POST …/validate`), the `pseudonymized` data-sharing level
+ * (`ai_chat_pseudonyms`), per-user usage and budgets, and asynchronous reports: the turn queues a
+ * job through the outbox; `ReportJobConsumer` (only with ASSISTANT_REPORT_JOBS_CONSUMER=true)
+ * composes it with a GET-only job token of the user's session (`TokenService`,
+ * `AccessTokenPrincipalResolver` of `AuthModule`).
  */
 @Module({
   imports: [AuthModule],
@@ -84,6 +100,7 @@ import { TurnEngineService } from './services/turn-engine.service';
     AssistantExecutionsController,
     AssistantConfirmationsController,
     AssistantReportsController,
+    AssistantProviderKeyController,
   ],
   providers: [
     AssistantSettingsRepository,
@@ -93,6 +110,10 @@ import { TurnEngineService } from './services/turn-engine.service';
     UsageRepository,
     ReportsRepository,
     ReportDeliveriesRepository,
+    ReportJobsRepository,
+    PseudonymsRepository,
+    ProviderKeysRepository,
+    MessageFeedbackRepository,
     RecipientDirectoryRepository,
     ReportObjectStore,
     ReportsService,
@@ -100,7 +121,12 @@ import { TurnEngineService } from './services/turn-engine.service';
     ReportDeliveryService,
     NativeToolsService,
     AssistantMetrics,
-    { provide: LLM_PROVIDER_FACTORY, useValue: defaultLlmProviderFactory },
+    {
+      provide: LLM_PROVIDER_FACTORY,
+      useFactory: (config: AssistantConfig) => defaultLlmProviderFactory(config),
+      inject: [API_CONFIG],
+    },
+    TenantKeyService,
     AssistantProviderService,
     AssistantLimitsService,
     AssistantAvailabilityService,
@@ -116,6 +142,8 @@ import { TurnEngineService } from './services/turn-engine.service';
     TurnEngineService,
     ExecutionsService,
     AssistantRetentionService,
+    ReportJobProcessor,
+    ReportJobConsumer,
     AssistantReadPrimaryMiddleware,
   ],
 })

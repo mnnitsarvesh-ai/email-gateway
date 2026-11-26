@@ -30,6 +30,9 @@ export const STATUS_AVAILABLE: AssistantStatus = {
   model: 'fake-model',
   limits: { messageMaxChars: 4000, turnsPerMinute: 6 },
   budget: { dailyTokens: 1_000_000, usedToday: 1200 },
+  keySource: 'platform',
+  fallbackActive: false,
+  dataSharing: 'metadata',
 };
 
 export function statusUnavailable(reason: NonNullable<AssistantStatus['reason']>): AssistantStatus {
@@ -185,6 +188,7 @@ export function storedExchange(
     status?: StoredMessage['turn']['status'];
     errorCode?: string | null;
     executions?: Execution[];
+    feedback?: StoredMessage['feedback'];
   } = {},
 ): StoredMessage[] {
   const turn = {
@@ -202,6 +206,7 @@ export function storedExchange(
       createdAt: '2026-11-20T09:00:00.000Z',
       turn,
       executions: [],
+      feedback: null,
     },
   ];
   if (options.answer !== null) {
@@ -214,6 +219,7 @@ export function storedExchange(
       createdAt: '2026-11-20T09:00:03.000Z',
       turn,
       executions: options.executions ?? [],
+      feedback: options.feedback ?? null,
     });
   }
   return messages;
@@ -229,6 +235,25 @@ export const SETTINGS: AssistantSettings = {
   effectiveDailyTokenBudget: 1_000_000,
   retentionDays: 30,
   dataSharing: 'metadata',
+  userDailyTokenBudget: null,
+  useTenantKey: false,
+  tenantKeyFallbackToPlatform: false,
+  tenantKey: null,
+  tenantKeysOffered: { enabled: false, providers: [], models: [] },
+  effectiveLimits: {
+    turnsPerUserPerMinute: 6,
+    messageMaxChars: 4000,
+    toolRoundsPerTurn: 8,
+    toolCallsPerTurn: 16,
+    turnDeadlineSeconds: 300,
+    platformDailyCapSet: false,
+    tenantDailyTokensMax: 5_000_000,
+    reportsPerUserPerDay: 20,
+    reportEmailsPerUserPerDay: 10,
+    reportEmailsPerTenantPerDay: 50,
+    confirmationTtlSeconds: 900,
+    retentionDays: { min: 1, max: 365 },
+  },
   featureEnabled: true,
   rowVersion: 3,
   updatedAt: '2026-11-19T10:00:00.000Z',
@@ -671,6 +696,7 @@ export function reportDocument(
       templateVersion: 'assistant-report/1',
       createdAt: '2026-11-23T09:30:00.000Z',
       deliveries: [],
+      job: null,
       ...overrides,
     },
   };

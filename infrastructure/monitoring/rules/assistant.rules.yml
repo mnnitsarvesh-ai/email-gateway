@@ -1,0 +1,218 @@
+# AI assistant alerts (step AI-6 D8, docs/plan/steps/34-ai-chat-hardening-operations.md; ADR-0091,
+# ADR-0096, ADR-0097). Series (the api registry, GET /metrics on the internal port, job "api";
+# in Kubernetes the api and api-assistant Deployments are scraped under that job name):
+#   assistant_llm_requests_total{provider,role,outcome}   one model call; role = primary|fallback|
+#                                                           tenant, outcome = ok or the failure
+#                                                           reason (connection, timeout,
+#                                                           rate_limited, server_error, auth, ...)
+#   assistant_provider_breaker_open{provider,role}         gauge, 1 = breaker open (platform
+#                                                           candidates only), refreshed at turn
+#                                                           start and by GET /assistant/status
+#   assistant_provider_fallback_active                     gauge, 1 = the last turn start of the
+#                                                           process selected the secondary
+#   assistant_turn_seconds_bucket{le}                      histogram of whole turns
+#   assistant_budget_refusals_total{scope}                 turns refused at start: tenant, platform,
+#                                                           user (per-minute window), user_tokens
+#                                                           (per-user daily budget), concurrency
+#   assistant_confirmations_total{risk,outcome}            proposed, executed, failed, cancelled,
+#                                                           expired, refused_*, reauth_*,
+#                                                           outcome_unknown
+#   assistant_report_jobs_total{outcome}                   queued, succeeded, failed, expired,
+#                                                           cancelled, retried
+#   api_assistant_job_token_refusals_total                 job tokens used outside GET on the
+#                                                           report source routes (AuthGuard, I26)
+#   rabbitmq_detailed_queue_messages_ready / _consumers    job "rabbitmq-detailed", queue
+#                                                           assistant.reports (as messaging.rules.yml)
+# Other assistant series (assistant_turns_total, assistant_llm_tokens_total, _llm_errors_total,
+# _llm_seconds, _provider_switches_total, _tool_calls_total, _tool_seconds, _active_turns,
+# _confirmation_seconds, _reports_total, _report_bytes, _report_sources_total,
+# _report_emails_total, _report_job_seconds, _tenant_key_validations_total, _pseudonyms_total,
+# _feedback_total, _search_seconds) are for dashboards; they carry no organization or user label.
+# Every alert links its section of docs/runbooks/assistant.md.
+# Validate with `promtool check rules` and `promtool test rules tests/assistant.rules.test.yml`.
+groups:
+  - name: assistant-providers
+    rules:
+      - alert: AssistantProviderErrorRatioHigh
+        # More than 20 % of one provider candidate's model calls failed over 10 minutes, with at
+        # least 0.05 calls per second (3 per minute) so that a single failure on an idle
+        # deployment does not alert.
+        expr: >-
+          (
+            sum by (provider, role) (rate(assistant_llm_requests_total{outcome!="ok"}[10m]))
+            /
+            sum by (provider, role) (rate(assistant_llm_requests_total[10m]))
+          ) > 0.2
+          and
+          sum by (provider, role) (rate(assistant_llm_requests_total[10m])) >= 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 20 % of the assistant's model calls fail
+          description: >-
+            Over 10 minutes more than 20 % of the model calls of provider {{ $labels.provider }}
+            (role {{ $labels.role }}) failed. Break assistant_llm_requests_total down by outcome:
+            auth means a rejected key, rate_limited the provider's quota, connection or timeout the
+            egress path or the provider. The breaker opens after ASSISTANT_BREAKER_THRESHOLD
+            failures and the router then uses the next healthy candidate.
+          runbook_url: docs/runbooks/assistant.md#assistantprovidererrorratiohigh
+      - alert: AssistantAllProvidersUnavailable
+        # Every platform candidate (primary and, when configured, fallback) has an open breaker:
+        # turns start with 503 assistant_provider_unavailable. The gauge is refreshed at turn
+        # start and by GET /assistant/status (the portal polls it), so it also clears once the
+        # breaker window has expired and someone uses the assistant.
+        expr: min(max by (provider, role) (assistant_provider_breaker_open)) == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: No assistant provider is available
+          description: >-
+            For 5 minutes the breaker of every configured platform provider candidate has been
+            open. New assistant turns are refused with 503 assistant_provider_unavailable (tenant
+            keys are not covered by this gauge). The rest of the gateway is unaffected.
+          runbook_url: docs/runbooks/assistant.md#assistantallprovidersunavailable
+      - alert: AssistantProviderFallbackActive
+        expr: max(assistant_provider_fallback_active) == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: The assistant runs on its secondary provider
+          description: >-
+            For 15 minutes turns have started on the platform secondary provider
+            (ASSISTANT_FALLBACK_PROVIDER) because the primary's breaker was open. Answers come
+            from a different model and every provider change starts a new transcript segment.
+          runbook_url: docs/runbooks/assistant.md#assistantproviderfallbackactive
+
+  - name: assistant-turns
+    rules:
+      - alert: AssistantTurnLatencyHigh
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(assistant_turn_seconds_bucket[15m]))) > 45
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Assistant turns are slow (p95 above 45 s)
+          description: >-
+            The 95th percentile of assistant turn durations has been above 45 s for 15 minutes.
+            Compare assistant_llm_seconds (model calls) with assistant_tool_seconds (loopback tool
+            calls on the api pods): slow model calls point at the provider, slow tool calls at the
+            api, MySQL or the report queries.
+          runbook_url: docs/runbooks/assistant.md#assistantturnlatencyhigh
+      - alert: AssistantBudgetExhaustion
+        # A tenant's daily token budget is used up: its users get 429 assistant_budget_exhausted
+        # until the UTC day ends (information for the platform operator, not an incident).
+        expr: sum(increase(assistant_budget_refusals_total{scope="tenant"}[30m])) > 0
+        for: 30m
+        labels:
+          severity: info
+          scope: tenant
+        annotations:
+          summary: Assistant turns are refused by a tenant daily token budget
+          description: >-
+            For 30 minutes turns have been refused because an organization used up its daily
+            token budget (ai_chat_settings.daily_token_budget or
+            ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT). Users of that organization see 429
+            assistant_budget_exhausted until 00:00 UTC.
+          runbook_url: docs/runbooks/assistant.md#assistantbudgetexhaustion
+      - alert: AssistantBudgetExhaustion
+        # The platform-wide daily cap (ASSISTANT_PLATFORM_DAILY_TOKENS) is used up: every tenant
+        # on platform keys is refused until the UTC day ends.
+        expr: sum(increase(assistant_budget_refusals_total{scope="platform"}[30m])) > 0
+        for: 30m
+        labels:
+          severity: warning
+          scope: platform
+        annotations:
+          summary: Assistant turns are refused by the platform daily token cap
+          description: >-
+            For 30 minutes turns have been refused because the platform daily token cap
+            (ASSISTANT_PLATFORM_DAILY_TOKENS) is used up. Every organization on platform keys sees
+            429 assistant_budget_exhausted until 00:00 UTC; tenant-key turns are not counted.
+          runbook_url: docs/runbooks/assistant.md#assistantbudgetexhaustion
+      - alert: AssistantConfirmationFailures
+        # Of the confirmed write actions that ran (executed, failed, outcome_unknown), more than
+        # 10 % failed or ended with an unknown outcome over 30 minutes, with at least 5 decided.
+        expr: >-
+          (
+            sum(increase(assistant_confirmations_total{outcome=~"failed|outcome_unknown"}[30m]))
+            /
+            sum(increase(assistant_confirmations_total{outcome=~"executed|failed|outcome_unknown"}[30m]))
+          ) > 0.1
+          and
+          sum(increase(assistant_confirmations_total{outcome=~"executed|failed|outcome_unknown"}[30m])) >= 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Confirmed assistant actions fail
+          description: >-
+            Over 30 minutes more than 10 % of the write actions users confirmed in the assistant
+            failed or ended with an unknown outcome. Break assistant_confirmations_total down by
+            risk and join the failures with ai_chat_tool_executions (http_status, error_code):
+            the same requests fail in the portal when the cause is the api.
+          runbook_url: docs/runbooks/assistant.md#assistantconfirmationfailures
+
+  - name: assistant-report-jobs
+    rules:
+      - alert: AssistantReportJobsFailing
+        expr: sum(increase(assistant_report_jobs_total{outcome=~"failed|expired"}[30m])) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: Background assistant reports fail
+          description: >-
+            More than 3 background report jobs failed or expired in 30 minutes. Read the
+            error_code of ai_chat_report_jobs: assistant_report_job_expired (no consumer or a
+            backlog), assistant_report_session_ended (users signed out), assistant_report_not_allowed
+            (permissions changed), assistant_report_sources_unavailable or
+            assistant_report_storage_failed (report sources or S3).
+          runbook_url: docs/runbooks/assistant.md#assistantreportjobsfailing
+      - alert: AssistantReportJobsBacklog
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="assistant.reports"}) > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Background assistant reports are queuing up
+          description: >-
+            More than 50 report jobs have waited in the queue assistant.reports for 15 minutes.
+            Jobs expire after ASSISTANT_REPORT_JOB_TTL_SECONDS; check the api-assistant consumers,
+            their prefetch (ASSISTANT_REPORT_JOB_CONCURRENCY) and the report source latency.
+          runbook_url: docs/runbooks/assistant.md#assistantreportjobsbacklog
+      - alert: AssistantReportJobsNoConsumer
+        # Not in the D8 list (WP6 addition, see §11 WP6): messages wait but no api-assistant pod
+        # consumes the queue (ASSISTANT_REPORT_JOBS_CONSUMER off, RabbitMQ credentials, or no pod).
+        expr: >-
+          max(rabbitmq_detailed_queue_messages_ready{vhost="email-gateway",queue="assistant.reports"}) > 0
+          and
+          max(rabbitmq_detailed_queue_consumers{vhost="email-gateway",queue="assistant.reports"}) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: No consumer on the assistant report queue
+          description: >-
+            Report jobs wait in assistant.reports and no consumer has been attached for 10
+            minutes. Every queued job will expire (assistant_report_job_expired). Check that the
+            api-assistant pods run with ASSISTANT_REPORT_JOBS_CONSUMER=true and can log in as
+            eg-assistant.
+          runbook_url: docs/runbooks/assistant.md#assistantreportjobsnoconsumer
+      - alert: AssistantJobTokenMisuse
+        # A report job token (claim ajb) was presented outside GET on the report source routes.
+        # The api refused it (401); any occurrence is a defect or misuse and is investigated.
+        expr: sum(increase(api_assistant_job_token_refusals_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An assistant job token was used outside its allowed routes
+          description: >-
+            The api refused a request carrying an assistant report job token (claim ajb) because
+            it was not a GET on a report source route. Job tokens never leave the api process, so
+            this is a defect or a token leak. Read the api's warn log (route template and job id)
+            and follow the job-token misuse procedure.
+          runbook_url: docs/runbooks/assistant.md#assistantjobtokenmisuse

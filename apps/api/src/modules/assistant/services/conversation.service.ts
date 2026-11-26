@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { type ConfirmationView, REGISTRY_VERSION } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
 import { API_CONFIG } from '../../../api-config.token';
@@ -34,6 +34,7 @@ import type {
   ExecutionView,
   MessageListItem,
   MessageListQuery,
+  MessageFeedbackView,
   MessagePage,
   ToolsView,
   UpdateConversationBody,
@@ -49,6 +50,7 @@ import {
   type ExecutionWithRefs,
   ExecutionsRepository,
 } from '../repositories/executions.repository';
+import { MessageFeedbackRepository } from '../repositories/message-feedback.repository';
 import { AssistantAvailabilityService } from './assistant-availability.service';
 import { AssistantMetrics } from './assistant-metrics';
 import { ConfirmationViewsService } from './confirmation-views.service';
@@ -87,6 +89,7 @@ export class ConversationService {
     private readonly confirmationViews: ConfirmationViewsService,
     private readonly metrics: AssistantMetrics,
     private readonly reports: ReportsService,
+    @Optional() private readonly feedback?: MessageFeedbackRepository,
   ) {}
 
   now(): Date {
@@ -306,6 +309,14 @@ export class ConversationService {
       'replica',
     );
     const byTurn = groupByTurn(executions, confirmations);
+    // Step AI-6 D2: the caller's ratings of the assistant messages of this page.
+    const feedback = this.feedback
+      ? await this.feedback.forMessages(
+          owner,
+          conversation.id,
+          page.filter((m) => m.role === 'assistant').map((m) => m.id),
+        )
+      : new Map<bigint, MessageFeedbackView>();
     const hasAssistant = new Set(page.filter((m) => m.role === 'assistant').map((m) => m.turnId));
     const data: MessageListItem[] = page.map((m) => {
       const carries = m.role === 'assistant' || !hasAssistant.has(m.turnId);
@@ -320,6 +331,7 @@ export class ConversationService {
         ...messageView(m, m.turn.publicId),
         turn: { id: m.turn.publicId, status: m.turn.status, errorCode: m.turn.errorCode },
         executions: shown,
+        feedback: m.role === 'assistant' ? (feedback.get(m.id) ?? null) : null,
       };
     });
     return {

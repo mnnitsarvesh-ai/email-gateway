@@ -438,6 +438,14 @@ export class ReportDeliveryService {
         'This report was deleted with the conversation content.',
       );
     }
+    // Step AI-6 D5: a background report that is still being generated.
+    if (report.status === 'queued' || report.status === 'pending') {
+      return this.ownFailure(
+        409,
+        REPORT_ERROR_CODES.notReady,
+        'This report is still being generated; email it when it is ready.',
+      );
+    }
     if (report.status !== 'available' || report.sha256 === null || report.sizeBytes === null) {
       return this.ownFailure(
         404,

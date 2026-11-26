@@ -995,6 +995,14 @@ describe('eDiscovery searches, review and exports through chat (D6 #14–#16, D1
     });
     expect(exported.proposal.confirmation.summary!.warnings).toContain(W.exportMalicious);
     expect(exported.proposal.confirmation.summary!.reversible).toBe(false);
+    // Step AI-6 D13: the api reads the shared ARCHIVE_EXPORT_TTL_HOURS (168 by default).
+    expect(ctx.config.ARCHIVE_EXPORT_TTL_HOURS).toBe(168);
+    expect(exported.proposal.confirmation.summary!.impact).toContain(
+      'Download it on the case page in the portal for 168 hours; chat never shows its content.',
+    );
+    expect(JSON.stringify(exported.proposal.confirmation.summary)).not.toContain(
+      'until it expires',
+    );
     expectExecuted(exported, 202);
     const row = await ctx.prisma.ediscoveryExport.findFirstOrThrow({
       where: { organizationId: org.id, search: { publicId: searchId } },

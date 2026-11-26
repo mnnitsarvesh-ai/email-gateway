@@ -13,12 +13,12 @@ import type { LlmRequest, LlmResponse } from '../providers/types';
 import { enabledTools, renderCatalogueIndex } from '../registry/registry';
 import {
   REPORT_ENVELOPE_NOTE,
+  type ReportCardInput,
   reportCard,
   reportEnvelope,
   reportPortalHref,
   reportRefs,
 } from '../results/card';
-import type { ReportCardData } from '../results/types';
 import {
   FIXTURE_GENERATED_AT,
   FIXTURE_ORGANIZATION,
@@ -35,7 +35,7 @@ import { REPORT_SECTIONS } from './types';
 
 const REPORT_ID = '0193aaaa-0000-7000-8000-000000000001';
 
-function cardData(): ReportCardData {
+function cardData(): ReportCardInput {
   const model = buildReportModel(okResults(), {
     window: WINDOW_7D,
     generatedAt: FIXTURE_GENERATED_AT,

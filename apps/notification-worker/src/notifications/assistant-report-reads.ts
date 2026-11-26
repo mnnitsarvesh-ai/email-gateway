@@ -33,7 +33,7 @@ export interface ReportDeliveryRow {
   report: {
     id: bigint;
     publicId: string;
-    status: 'pending' | 'available' | 'failed' | 'purged';
+    status: 'queued' | 'pending' | 'available' | 'failed' | 'purged';
     title: string;
     periodFrom: Date;
     periodTo: Date;

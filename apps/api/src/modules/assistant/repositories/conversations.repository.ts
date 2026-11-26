@@ -2,11 +2,14 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService } from '@email-gateway/common';
 import {
   type AiChatConversationStatus,
+  type AiChatDataSharing,
+  type AiChatKeySource,
   type AiChatTurnStatus,
   Prisma,
 } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import { assertEcho } from '../../../http/listing/echo-check';
+import { cancelReportJobsOfConversations } from './report-jobs.repository';
 import { purgeReportsOfConversations } from './reports.repository';
 
 type Tx = Prisma.TransactionClient;
@@ -56,10 +59,17 @@ export const turnSelect = {
   latencyMs: true,
   errorCode: true,
   correlationId: true,
+  dataSharing: true,
+  keySource: true,
+  fallbackFrom: true,
   startedAt: true,
   finishedAt: true,
 } satisfies Prisma.AiChatTurnSelect;
-export type TurnRow = Prisma.AiChatTurnGetPayload<{ select: typeof turnSelect }>;
+type FullTurnRow = Prisma.AiChatTurnGetPayload<{ select: typeof turnSelect }>;
+/** Step AI-6 columns (always selected; optional in the type for rows built before AI-6). */
+type TurnHardeningColumns = 'dataSharing' | 'keySource' | 'fallbackFrom';
+export type TurnRow = Omit<FullTurnRow, TurnHardeningColumns> &
+  Partial<Pick<FullTurnRow, TurnHardeningColumns>>;
 
 export const messageSelect = {
   id: true,
@@ -100,6 +110,10 @@ export interface TurnStart {
   startedAt: Date;
   userMessagePublicId: string;
   userMessage: string;
+  /** Step AI-6 D3, D6: the level applied, whose key pays and the skipped first candidate. */
+  dataSharing?: AiChatDataSharing;
+  keySource?: AiChatKeySource;
+  fallbackFrom?: string | null;
   /**
    * The conversation's content purge date from this turn on (`startedAt` + the tenant's
    * retention): new content always gets a fresh retention window, and a conversation whose
@@ -128,6 +142,16 @@ export interface TurnFinish {
   finishedAt: Date;
   /** The assistant message (completed and cancelled turns). */
   assistantMessage: { publicId: string; content: string } | null;
+  /**
+   * Step AI-6 D6: the candidate actually used after a same-turn switch (provider, model, key
+   * source, the failed candidate's provider id); absent = as started.
+   */
+  route?: {
+    provider: string;
+    model: string;
+    keySource: AiChatKeySource;
+    fallbackFrom: string | null;
+  };
 }
 
 /** Message sequence numbers of a turn: the user message `2·seq − 1`, the answer `2·seq`. */
@@ -262,15 +286,17 @@ export class ConversationsRepository {
    * execution cards, refs and cursors, confirmation requests, preconditions and summaries) and
    * stamps `content_purged_at`. Metadata stays. Step AI-R D7: the conversation's reports become
    * `purged` and their deliveries lose the address (`queued` ones fail); the report objects are
-   * deleted after the commit (`AssistantRetentionService`, the delete route inline).
+   * deleted after the commit (`AssistantRetentionService`, the delete route inline). Step AI-6:
+   * the pseudonym mappings are deleted (D3), feedback comments cleared (D2) and unfinished report
+   * jobs cancelled (D5), in the same transaction.
    */
   async purgeContent(
     organizationId: bigint,
     conversationIds: readonly bigint[],
     now: Date,
     tx: Tx,
-  ): Promise<void> {
-    if (conversationIds.length === 0) return;
+  ): Promise<number> {
+    if (conversationIds.length === 0) return 0;
     const ids = [...conversationIds];
     await tx.aiChatMessage.updateMany({
       where: { organizationId, conversationId: { in: ids } },
@@ -289,11 +315,19 @@ export class ConversationsRepository {
       where: { organizationId, conversationId: { in: ids } },
       data: { request: Prisma.DbNull, preconditions: Prisma.DbNull, summary: Prisma.DbNull },
     });
+    // Step AI-6: jobs first (their `queued` reports then become `purged` with the others).
+    const cancelledJobs = await cancelReportJobsOfConversations(tx, organizationId, ids, now);
     await purgeReportsOfConversations(tx, organizationId, ids, now);
+    await tx.aiChatPseudonym.deleteMany({ where: { organizationId, conversationId: { in: ids } } });
+    await tx.aiChatFeedback.updateMany({
+      where: { organizationId, conversationId: { in: ids }, comment: { not: null } },
+      data: { comment: null },
+    });
     await tx.aiChatConversation.updateMany({
       where: { organizationId, id: { in: ids } },
       data: { title: null, contentPurgedAt: now },
     });
+    return cancelledJobs;
   }
 
   // ---- turns ---------------------------------------------------------------------------------
@@ -369,6 +403,11 @@ export class ConversationsRepository {
           promptVersion: data.promptVersion,
           registryVersion: data.registryVersion,
           correlationId: data.correlationId,
+          ...(data.dataSharing !== undefined && { dataSharing: data.dataSharing }),
+          ...(data.keySource !== undefined && { keySource: data.keySource }),
+          ...(data.fallbackFrom !== undefined && {
+            fallbackFrom: data.fallbackFrom?.slice(0, 32) ?? null,
+          }),
           startedAt: data.startedAt,
         },
         select: turnSelect,
@@ -424,6 +463,12 @@ export class ConversationsRepository {
         errorCode: data.errorCode,
         providerTranscript: data.providerTranscript,
         finishedAt: data.finishedAt,
+        ...(data.route && {
+          provider: data.route.provider.slice(0, 32),
+          model: data.route.model.slice(0, 64),
+          keySource: data.route.keySource,
+          fallbackFrom: data.route.fallbackFrom?.slice(0, 32) ?? null,
+        }),
       },
     });
     if (updated.count !== 1) return false;
@@ -469,16 +514,22 @@ export class ConversationsRepository {
     });
   }
 
-  /** Native transcripts of the completed turns of a segment, oldest first (verbatim replay). */
+  /**
+   * Native transcripts of the completed turns of a segment, oldest first (verbatim replay), with
+   * the provider and model each used (step AI-6 D6: a different provider or model starts a new
+   * segment).
+   */
   async segmentTranscripts(
     owner: Owner,
     conversationId: bigint,
     segment: number,
-  ): Promise<Array<{ seq: number; providerTranscript: string | null }>> {
+  ): Promise<
+    Array<{ seq: number; providerTranscript: string | null; provider?: string; model?: string }>
+  > {
     return this.writer.aiChatTurn.findMany({
       where: { ...this.ownerWhere(owner), conversationId, segment, status: 'completed' },
       orderBy: { seq: 'asc' },
-      select: { seq: true, providerTranscript: true },
+      select: { seq: true, providerTranscript: true, provider: true, model: true },
     });
   }
 

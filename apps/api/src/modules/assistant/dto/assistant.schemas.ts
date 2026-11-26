@@ -1,4 +1,9 @@
-import { REPORT_OMIT_REASONS, REPORT_RANGES, REPORT_SECTIONS } from '@email-gateway/assistant';
+import {
+  REPORT_CARD_STATUSES,
+  REPORT_OMIT_REASONS,
+  REPORT_RANGES,
+  REPORT_SECTIONS,
+} from '@email-gateway/assistant';
 import { z } from 'zod';
 import { defineListQuery } from '../../../http/listing/list-query';
 
@@ -41,10 +46,56 @@ export const AssistantStatusSchema = z.object({
     dailyTokens: z.number().int().describe('The organization’s daily token budget (UTC day)'),
     usedToday: z.number().int(),
   }),
+  keySource: z
+    .enum(['platform', 'tenant'])
+    .describe('Whose provider key the next turn uses (step AI-6: the organization’s own key)'),
+  fallbackActive: z
+    .boolean()
+    .describe('The next turn uses the platform’s secondary provider (the primary is unhealthy)'),
+  dataSharing: z
+    .enum(['metadata', 'pseudonymized'])
+    .describe('The data-sharing level the next turn applies'),
 });
 export type AssistantStatusView = z.output<typeof AssistantStatusSchema>;
 
 // ---- settings -------------------------------------------------------------------------------
+
+export const DATA_SHARING_LEVELS = ['metadata', 'pseudonymized'] as const;
+export const TENANT_KEY_STATUSES = ['valid', 'invalid', 'unverified'] as const;
+
+/** `TenantKeyView` (step AI-6 D7, contracts §35.6): never the key or its ciphertext. */
+export const TenantKeyViewSchema = z
+  .object({
+    provider: z.enum(['anthropic', 'openai']),
+    model: z.string(),
+    fingerprint: z.string().describe('First 16 hex characters of SHA-256 of the key'),
+    status: z.enum(TENANT_KEY_STATUSES),
+    setAt: isoInstant,
+    setBy: z
+      .object({ id: z.uuid(), displayName: z.string() })
+      .nullable()
+      .describe('The user who stored the key'),
+    lastValidatedAt: nullableInstant,
+    lastErrorCode: z.string().nullable().describe('Why the last validation failed (codes only)'),
+  })
+  .describe('The organization’s own provider key (write-only: never returned)');
+export type TenantKeyView = z.output<typeof TenantKeyViewSchema>;
+
+/** Read-only limits of the platform (step AI-6 D1). */
+export const EffectiveLimitsSchema = z.object({
+  turnsPerUserPerMinute: z.number().int(),
+  messageMaxChars: z.number().int(),
+  toolRoundsPerTurn: z.number().int(),
+  toolCallsPerTurn: z.number().int(),
+  turnDeadlineSeconds: z.number().int(),
+  platformDailyCapSet: z.boolean().describe('A platform-wide daily token cap is configured'),
+  tenantDailyTokensMax: z.number().int().describe('Highest daily token budget of an organization'),
+  reportsPerUserPerDay: z.number().int(),
+  reportEmailsPerUserPerDay: z.number().int(),
+  reportEmailsPerTenantPerDay: z.number().int(),
+  confirmationTtlSeconds: z.number().int(),
+  retentionDays: z.object({ min: z.number().int(), max: z.number().int() }),
+});
 
 export const AssistantSettingsSchema = z.object({
   version: z.literal('assistant-settings/1'),
@@ -62,7 +113,28 @@ export const AssistantSettingsSchema = z.object({
     .describe('null = the platform default (ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT)'),
   effectiveDailyTokenBudget: z.number().int(),
   retentionDays: z.number().int(),
-  dataSharing: z.literal('metadata'),
+  dataSharing: z
+    .enum(DATA_SHARING_LEVELS)
+    .describe(
+      '`pseudonymized`: e-mail addresses, IPs, domains and person names reach the AI provider ' +
+        'only as placeholders (applies from the next turn)',
+    ),
+  userDailyTokenBudget: z
+    .number()
+    .int()
+    .nullable()
+    .describe('Tokens per user and UTC day (null = no per-user budget)'),
+  useTenantKey: z.boolean().describe('Turns use the organization’s own provider key'),
+  tenantKeyFallbackToPlatform: z
+    .boolean()
+    .describe('With an own key, turns fall back to the platform’s providers when it fails'),
+  tenantKey: TenantKeyViewSchema.nullable(),
+  tenantKeysOffered: z.object({
+    enabled: z.boolean().describe('The platform offers organization provider keys'),
+    providers: z.array(z.string()),
+    models: z.array(z.string()),
+  }),
+  effectiveLimits: EffectiveLimitsSchema,
   featureEnabled: z.boolean().describe('Whether the organization feature `ai_assistant` is on'),
   rowVersion: z.number().int().describe('0 when the settings were never saved'),
   updatedAt: nullableInstant,
@@ -86,9 +158,61 @@ export const UpdateAssistantSettingsBodySchema = z.strictObject({
     .nullable()
     .describe('Tokens per UTC day (≤ ASSISTANT_TENANT_DAILY_TOKENS_MAX); null = platform default'),
   retentionDays: z.number().int().min(1).max(365).describe('Content retention after the last turn'),
-  dataSharing: z.literal('metadata').default('metadata'),
+  dataSharing: z
+    .enum(DATA_SHARING_LEVELS)
+    .optional()
+    .describe('`metadata` or `pseudonymized` (absent = unchanged)'),
+  userDailyTokenBudget: z
+    .number()
+    .int()
+    .min(1)
+    .nullable()
+    .optional()
+    .describe(
+      'Tokens per user and UTC day, at most the effective daily budget (absent = unchanged)',
+    ),
+  useTenantKey: z
+    .boolean()
+    .optional()
+    .describe('Use the stored provider key (needs one with status `valid`; absent = unchanged)'),
+  tenantKeyFallbackToPlatform: z.boolean().optional().describe('absent = unchanged'),
 });
 export type UpdateAssistantSettingsBody = z.output<typeof UpdateAssistantSettingsBodySchema>;
+
+/** `PUT /assistant/settings/provider-key` (step AI-6 D7). */
+export const SetProviderKeyBodySchema = z.strictObject({
+  expectedRowVersion: z
+    .number()
+    .int()
+    .min(0)
+    .describe('`rowVersion` of the settings you read (0 before the first save)'),
+  provider: z.enum(['anthropic', 'openai']).describe('One of the providers the platform offers'),
+  model: z
+    .string()
+    .regex(/^[A-Za-z0-9._:-]{1,64}$/)
+    .describe('One of the models the platform offers for organization keys'),
+  apiKey: z
+    .string()
+    .min(20)
+    .max(512)
+    .regex(/^[\x21-\x7e]+$/)
+    .meta({ writeOnly: true, format: 'password' })
+    .describe(
+      'Your provider API key (20-512 printable ASCII characters). Write-only: it is verified ' +
+        'with the provider, stored encrypted and never returned, logged or shown again',
+    ),
+});
+export type SetProviderKeyBody = z.output<typeof SetProviderKeyBodySchema>;
+
+/** `DELETE /assistant/settings/provider-key?expectedRowVersion=` (step AI-6 D7). */
+export const RemoveProviderKeyQuerySchema = z.strictObject({
+  expectedRowVersion: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .describe('`rowVersion` of the settings you read'),
+});
+export type RemoveProviderKeyQuery = z.output<typeof RemoveProviderKeyQuerySchema>;
 
 // ---- usage ----------------------------------------------------------------------------------
 
@@ -241,6 +365,10 @@ export const CardReportSchema = z
       )
       .describe('Requested sections that are not in the report, and why'),
     figures: z.array(reportFigure).max(8).describe('Summary figures (formatted)'),
+    status: z
+      .enum(REPORT_CARD_STATUSES)
+      .optional()
+      .describe('`queued`: generated in the background (no figures yet); absent = available'),
   })
   .describe('Kind `report` (step AI-R): GET /assistant/reports/{reportId} returns the HTML');
 
@@ -418,7 +546,10 @@ export const ExecutionSchema = z.object({
         '`assistant_report_purged` (410), `assistant_report_too_large` (413), ' +
         '`assistant_report_generation_limit` and `assistant_report_email_limit` (429, refused ' +
         '`denied_budget`), `assistant_report_storage_failed` (502) and ' +
-        '`assistant_report_sources_unavailable` (503)',
+        '`assistant_report_sources_unavailable` (503); step AI-6: `assistant_report_not_ready` ' +
+        '(409, `report_send_email` on a report still being generated in the background) and ' +
+        '`assistant_unknown_placeholder` (`denied_schema`: tool arguments name a placeholder ' +
+        'unknown in this conversation, `pseudonymized` data sharing)',
     ),
   message: z
     .string()
@@ -472,6 +603,25 @@ export const MessageSchema = z.object({
 });
 export type MessageView = z.output<typeof MessageSchema>;
 
+export const FEEDBACK_RATINGS = ['up', 'down'] as const;
+export const FEEDBACK_REASONS = [
+  'incorrect',
+  'incomplete',
+  'not_helpful',
+  'wrong_action',
+  'unsafe',
+  'too_slow',
+  'other',
+] as const;
+
+/** The caller's rating of an assistant message (step AI-6 D2; owner view). */
+export const MessageFeedbackSchema = z.object({
+  rating: z.enum(FEEDBACK_RATINGS),
+  reason: z.enum(FEEDBACK_REASONS).nullable(),
+  comment: z.string().nullable().describe('null when none was given or after the content purge'),
+});
+export type MessageFeedbackView = z.output<typeof MessageFeedbackSchema>;
+
 export const MessageListItemSchema = MessageSchema.extend({
   turn: z.object({
     id: z.uuid(),
@@ -484,6 +634,9 @@ export const MessageListItemSchema = MessageSchema.extend({
       'The turn’s tool executions (and their "more" pages) on its assistant message, or on the ' +
         'user message when the turn has no assistant message (failed or running)',
     ),
+  feedback: MessageFeedbackSchema.nullable().describe(
+    'Your rating of an assistant message (step AI-6); null for user messages and unrated answers',
+  ),
 });
 export type MessageListItem = z.output<typeof MessageListItemSchema>;
 
@@ -599,7 +752,22 @@ export type CancelConfirmationResultView = z.output<typeof CancelConfirmationRes
 
 // ---- reports (step AI-R §4.1) ---------------------------------------------------------------
 
-export const REPORT_STATUSES = ['pending', 'available', 'failed', 'purged'] as const;
+export const REPORT_STATUSES = ['pending', 'available', 'failed', 'purged', 'queued'] as const;
+export const REPORT_JOB_STATUSES = [
+  'queued',
+  'running',
+  'succeeded',
+  'failed',
+  'cancelled',
+] as const;
+
+/** The background job of a `queued` report (step AI-6 D5). */
+export const ReportJobViewSchema = z.object({
+  status: z.enum(REPORT_JOB_STATUSES),
+  attempts: z.number().int(),
+  errorCode: z.string().nullable().describe('Why the job failed (codes only)'),
+  expiresAt: isoInstant.describe('The job fails when it has not finished by then'),
+});
 export const REPORT_DELIVERY_STATUSES = ['queued', 'sent', 'failed'] as const;
 
 export const ReportDeliverySchema = z.object({
@@ -644,6 +812,10 @@ export const ReportViewSchema = z
       .array(ReportDeliverySchema)
       .max(20)
       .describe('Emails of this report, newest first (at most 20)'),
+    job: ReportJobViewSchema.nullable().describe(
+      'The background job of a report generated asynchronously (step AI-6); null otherwise. ' +
+        'Poll every 5 s while `queued`/`running`',
+    ),
   })
   .describe('assistant-report-view/1: metadata of a report; the HTML is never stored in MySQL');
 export type ReportView = z.output<typeof ReportViewSchema>;
@@ -922,6 +1094,9 @@ export const ASSISTANT_EXAMPLES = {
     model: 'claude-opus-5-5',
     limits: { messageMaxChars: 4000, turnsPerMinute: 6 },
     budget: { dailyTokens: 1_000_000, usedToday: 18_250 },
+    keySource: 'platform',
+    fallbackActive: false,
+    dataSharing: 'metadata',
   } satisfies AssistantStatusView,
   settings: {
     version: 'assistant-settings/1',
@@ -933,10 +1108,43 @@ export const ASSISTANT_EXAMPLES = {
     effectiveDailyTokenBudget: 1_000_000,
     retentionDays: 30,
     dataSharing: 'metadata',
+    userDailyTokenBudget: 200_000,
+    useTenantKey: false,
+    tenantKeyFallbackToPlatform: false,
+    tenantKey: null,
+    tenantKeysOffered: {
+      enabled: false,
+      providers: ['anthropic', 'openai'],
+      models: ['claude-opus-5-5', 'claude-sonnet-5-5'],
+    },
+    effectiveLimits: {
+      turnsPerUserPerMinute: 6,
+      messageMaxChars: 4000,
+      toolRoundsPerTurn: 8,
+      toolCallsPerTurn: 16,
+      turnDeadlineSeconds: 120,
+      platformDailyCapSet: false,
+      tenantDailyTokensMax: 10_000_000,
+      reportsPerUserPerDay: 10,
+      reportEmailsPerUserPerDay: 10,
+      reportEmailsPerTenantPerDay: 50,
+      confirmationTtlSeconds: 600,
+      retentionDays: { min: 1, max: 365 },
+    },
     featureEnabled: true,
     rowVersion: 2,
     updatedAt: '2026-11-20T09:30:00.000Z',
   } satisfies AssistantSettingsView,
+  tenantKey: {
+    provider: 'anthropic',
+    model: 'claude-sonnet-5-5',
+    fingerprint: '3f9a0c1d2e4b5a69',
+    status: 'valid',
+    setAt: '2026-11-26T09:00:00.000Z',
+    setBy: { id: ID.acknowledger, displayName: 'Dana Admin' },
+    lastValidatedAt: '2026-11-26T09:00:00.000Z',
+    lastErrorCode: null,
+  } satisfies TenantKeyView,
   settingsUpdate: {
     expectedRowVersion: 0,
     enabled: true,
@@ -997,11 +1205,13 @@ export const ASSISTANT_EXAMPLES = {
         createdAt: '2026-11-20T10:00:00.000Z',
         turn: { id: ID.turn, status: 'completed', errorCode: null },
         executions: [],
+        feedback: null,
       },
       {
         ...assistantMessage,
         turn: { id: ID.turn, status: 'completed', errorCode: null },
         executions: [execution],
+        feedback: { rating: 'up', reason: null, comment: null },
       },
     ],
     nextCursor: null,
@@ -1079,6 +1289,7 @@ export const ASSISTANT_EXAMPLES = {
           sentAt: '2026-11-20T10:02:03.000Z',
         },
       ],
+      job: null,
     },
     html: EXAMPLE_REPORT_HTML,
   } satisfies ReportResultView,
@@ -1098,6 +1309,7 @@ export const ASSISTANT_EXAMPLES = {
       templateVersion: 'assistant-report/1',
       createdAt: '2026-11-20T10:00:02.000Z',
       deliveries: [],
+      job: null,
     },
     html: null,
   } satisfies ReportResultView,

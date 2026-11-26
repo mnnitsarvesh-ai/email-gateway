@@ -174,6 +174,16 @@ export const NAV_GATES: ReadonlyArray<NavGate> = [
     ],
   },
   { label: 'Audit logs', href: '/audit-logs', gate: ['AuditLogsController_search_v1'] },
+  // Step AI-6 (D1): the AI administration page (usage or audit operation; never the landing page).
+  {
+    label: 'AI administration',
+    href: '/assistant/admin',
+    gate: [
+      'AssistantAdminController_usageByUser_v1',
+      'AssistantAdminAuditController_conversations_v1',
+    ],
+    landing: false,
+  },
   {
     label: 'Usage and billing',
     href: '/billing',

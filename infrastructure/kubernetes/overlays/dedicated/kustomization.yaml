@@ -5,6 +5,13 @@ resources: [../../base]
 # Account takeover GeoIP (step 8.4, docs/deployment/account-takeover.md): once the operator has a
 # MaxMind account and the Secret email-gateway-geoip, enable the geoipupdate sidecar with
 # components: [../../components/ato-geoip]
+# AI assistant HTTPS egress (step AI-6 D10, docs/deployment/assistant.md "Egress"): the api-assistant
+# pods reach the LLM providers and S3 only through this component's ipBlocks. Included in both
+# overlays because the base has no port-443 rule for api-assistant; its placeholder range
+# 192.0.2.0/24 fails closed until the environment patches in the providers' published ranges and
+# the S3 ranges of its region (or replaces the component by an FQDN policy).
+components:
+  - ../../components/assistant-llm-egress
 configMapGenerator:
   - name: email-gateway-config
     behavior: merge

@@ -330,6 +330,10 @@ export class Fixtures {
     await p.aiChatTurn.deleteMany({ where: byOrgOrUser });
     await p.aiChatConversation.deleteMany({ where: byOrgOrUser });
     await p.aiChatUsageDaily.deleteMany(byOrgOnly);
+    // Step AI-6: per-user usage and the tenant provider key reference the organization
+    // (RESTRICT); report jobs, feedback and pseudonyms went with their conversations (CASCADE).
+    await p.aiChatUsageUserDaily.deleteMany(byOrgOnly);
+    await p.aiChatProviderKey.deleteMany(byOrgOnly);
     await p.aiChatSettings.deleteMany(byOrgOnly);
     await p.loginAuditLog.deleteMany({
       where: { OR: [...byOrgOrUser.OR, { emailAttempted: { in: emails } }] },

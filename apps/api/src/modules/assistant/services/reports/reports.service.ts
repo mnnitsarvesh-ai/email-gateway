@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   atoRangeFor,
   REPORT_OMIT_REASONS,
@@ -17,6 +17,7 @@ import {
   type DeliveryRow,
   ReportDeliveriesRepository,
 } from '../../repositories/report-deliveries.repository';
+import { type ReportJobRow, ReportJobsRepository } from '../../repositories/report-jobs.repository';
 import {
   type ReportObjectRow,
   ReportsRepository,
@@ -73,8 +74,15 @@ export function figuresOf(value: unknown): Array<{ label: string; value: string 
     .slice(0, 8);
 }
 
-/** Row → `ReportView` (§4.1; public ids only, ISO instants, deliveries newest first). */
-export function reportView(row: ReportWithRefs, deliveries: readonly DeliveryRow[]): ReportView {
+/**
+ * Row → `ReportView` (§4.1; public ids only, ISO instants, deliveries newest first; step AI-6 D5:
+ * the background job of an asynchronous report).
+ */
+export function reportView(
+  row: ReportWithRefs,
+  deliveries: readonly DeliveryRow[],
+  job: Pick<ReportJobRow, 'status' | 'attempts' | 'errorCode' | 'expiresAt'> | null = null,
+): ReportView {
   const sections = sectionsOf(row.sections);
   return {
     id: row.publicId,
@@ -104,6 +112,15 @@ export function reportView(row: ReportWithRefs, deliveries: readonly DeliveryRow
       requestedAt: d.requestedAt.toISOString(),
       sentAt: d.sentAt === null ? null : d.sentAt.toISOString(),
     })),
+    job:
+      job === null
+        ? null
+        : {
+            status: job.status,
+            attempts: job.attempts,
+            errorCode: job.errorCode,
+            expiresAt: job.expiresAt.toISOString(),
+          },
   };
 }
 
@@ -123,6 +140,7 @@ export class ReportsService {
     private readonly reports: ReportsRepository,
     private readonly deliveries: ReportDeliveriesRepository,
     private readonly store: ReportObjectStore,
+    @Optional() private readonly jobs?: ReportJobsRepository,
   ) {}
 
   now(): Date {
@@ -142,7 +160,8 @@ export class ReportsService {
       row.id,
       REPORT_VIEW_DELIVERIES,
     );
-    return { report: reportView(row, deliveries), html: await this.htmlOf(row) };
+    const job = this.jobs ? await this.jobs.forReport(scope.organizationId, row.id) : null;
+    return { report: reportView(row, deliveries, job), html: await this.htmlOf(row) };
   }
 
   /** The stored HTML of an available report; null otherwise or when the object is unreadable. */

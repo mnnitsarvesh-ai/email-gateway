@@ -25,9 +25,10 @@ import type {
  * a `testedBy` suite and a confirmation spec, step AI-2; identity and tenant administration
  * writes, step AI-3; the native report tools, step AI-R, which adds no OpenAPI tool; security
  * operations, step AI-4; compliance and integrations, step AI-5, after which every planned
- * OpenAPI tool of the program is enabled).
+ * OpenAPI tool of the program is enabled; hardening and operations, step AI-6, which adds no
+ * tool: its assistant routes are `not_applicable` through the `assistant` tag).
  */
-export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-5';
+export const ASSISTANT_PROGRAM_PHASE: ProgramPhase = 'AI-6';
 
 /** Phase from which write tools can execute (the confirmation manager, ADR-0093). */
 export const CONFIRMATION_SUPPORT_PHASE: ProgramPhase = 'AI-2';

@@ -25,19 +25,100 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
-import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
+import { shouldRetry, useApiMutation, useApiQuery } from '@/lib/api/hooks';
+import { useCan } from '@/lib/auth/me';
 import { cn } from '@/lib/utils';
 import { useAssistant } from './assistant-context';
 import { conversationTitle } from './model';
-import type { Conversation } from './types';
+import type { Conversation, SearchHit } from './types';
 
 /**
- * Conversation history (step AI-1 D14): search by title (`q`), active or archived, new
- * conversation, rename, archive/restore and delete ("Clear conversation": soft delete with
- * immediate content purge by the api). Only the user's own conversations exist here.
+ * Conversation history (step AI-1 D14): active or archived, new conversation, rename,
+ * archive/restore and delete ("Clear conversation": soft delete with immediate content purge by
+ * the api). Only the user's own conversations exist here. Search (step AI-6 D4): from two
+ * characters the text of the user's own questions, answers and titles (`GET /assistant/search`,
+ * snippets; a hit opens its conversation at the message); without that operation, the title
+ * filter of the list (`q`).
  */
 
 export const CONVERSATION_LIST_LIMIT = 50;
+export const SEARCH_MIN_CHARS = 2;
+export const SEARCH_MAX_CHARS = 200;
+export const SEARCH_RESULT_LIMIT = 20;
+
+function SearchResults({
+  q,
+  onOpen,
+  disabled,
+}: {
+  q: string;
+  onOpen: (hit: SearchHit) => void;
+  disabled: boolean;
+}) {
+  const search = useApiQuery(
+    'AssistantSearchController_search_v1',
+    { query: { q, limit: String(SEARCH_RESULT_LIMIT) } },
+    {
+      staleTime: 15_000,
+      refetchOnWindowFocus: false,
+      // A timed-out scan would only time out again: no automatic retry of that 503.
+      retry: (count, error) =>
+        error.code !== 'assistant_search_timeout' && shouldRetry(count, error),
+    },
+  );
+  if (search.isLoading) return <LoadingState label="Searching your conversations" rows={3} />;
+  if (search.error) {
+    if (search.error.code === 'assistant_search_timeout')
+      return (
+        <p role="alert" className="px-1 py-2 text-sm text-destructive">
+          The search took too long. Use a longer, more specific phrase.
+        </p>
+      );
+    return <ErrorState error={search.error} onRetry={() => void search.refetch()} compact />;
+  }
+  const hits = search.data?.data ?? [];
+  return (
+    <div className="grid min-h-0 gap-1">
+      <p className="px-1 text-xs text-muted-foreground" role="status">
+        {hits.length === 0
+          ? 'No question, answer or title matches this search.'
+          : `${hits.length}${search.data?.nextCursor ? '+' : ''} ${hits.length === 1 ? 'match' : 'matches'} in your conversations`}
+      </p>
+      {hits.length > 0 ? (
+        <ul className="grid min-h-0 gap-1 overflow-y-auto" aria-label="Search results">
+          {hits.map((hit) => (
+            <li key={`${hit.messageId}`}>
+              <button
+                type="button"
+                onClick={() => onOpen(hit)}
+                disabled={disabled}
+                className="grid w-full min-w-0 gap-0.5 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-60"
+              >
+                <span className="truncate font-medium">
+                  {conversationTitle(hit.conversationTitle)}
+                </span>
+                <span className="line-clamp-2 text-xs break-words">
+                  <span className="text-muted-foreground">
+                    {hit.role === 'user' ? 'You: ' : 'Assistant: '}
+                  </span>
+                  {hit.snippet}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  <DateTime value={hit.createdAt} />
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {search.data?.nextCursor ? (
+        <p className="px-1 text-xs text-muted-foreground">
+          The {SEARCH_RESULT_LIMIT} newest matches are shown; add words to narrow the search.
+        </p>
+      ) : null}
+    </div>
+  );
+}
 const TITLE_MAX = 200;
 
 function RenameDialog({
@@ -52,7 +133,10 @@ function RenameDialog({
   const inputId = useId();
   const mutation = useApiMutation('AssistantConversationsController_update_v1', {
     successMessage: 'Conversation renamed.',
-    invalidates: ['AssistantConversationsController_list_v1'],
+    invalidates: [
+      'AssistantConversationsController_list_v1',
+      'AssistantSearchController_search_v1',
+    ],
   });
   useEffect(() => {
     setTitle(conversation?.title ?? '');
@@ -124,27 +208,39 @@ export function ConversationList({
   const [search, setSearch] = useState('');
   const [archived, setArchived] = useState(false);
   const q = useDebouncedValue(search.trim(), 300);
+  const canSearch = useCan('AssistantSearchController_search_v1');
+  const contentSearch = canSearch && q.length >= SEARCH_MIN_CHARS;
   const [renaming, setRenaming] = useState<Conversation | null>(null);
   const [deleting, setDeleting] = useState<Conversation | null>(null);
   const searchId = useId();
   const archivedId = useId();
-  const list = useApiQuery('AssistantConversationsController_list_v1', {
-    query: {
-      limit: String(CONVERSATION_LIST_LIMIT),
-      status: archived ? 'archived' : 'active',
-      ...(q ? { q } : {}),
+  const list = useApiQuery(
+    'AssistantConversationsController_list_v1',
+    {
+      query: {
+        limit: String(CONVERSATION_LIST_LIMIT),
+        status: archived ? 'archived' : 'active',
+        ...(q && !canSearch ? { q } : {}),
+      },
     },
-  });
+    { enabled: !contentSearch },
+  );
   const update = useApiMutation('AssistantConversationsController_update_v1', {
-    invalidates: ['AssistantConversationsController_list_v1'],
+    invalidates: [
+      'AssistantConversationsController_list_v1',
+      'AssistantSearchController_search_v1',
+    ],
   });
   const remove = useApiMutation('AssistantConversationsController_remove_v1', {
     successMessage: 'Conversation cleared.',
-    invalidates: ['AssistantConversationsController_list_v1'],
+    invalidates: [
+      'AssistantConversationsController_list_v1',
+      'AssistantSearchController_search_v1',
+    ],
   });
 
-  const choose = (id: string | null) => {
-    selectConversation(id);
+  const choose = (id: string | null, messageId?: string) => {
+    selectConversation(id, messageId ? { messageId } : undefined);
     onSelected?.();
   };
 
@@ -170,30 +266,39 @@ export function ConversationList({
           aria-hidden
         />
         <label htmlFor={searchId} className="sr-only">
-          Search conversations by title
+          {canSearch ? 'Search conversations' : 'Search conversations by title'}
         </label>
         <Input
           id={searchId}
           type="search"
           value={search}
+          maxLength={SEARCH_MAX_CHARS}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search by title"
+          placeholder={canSearch ? 'Search questions and answers' : 'Search by title'}
           className="h-8 pl-8"
         />
       </div>
-      <div className="flex items-center gap-2 text-xs">
-        <Switch id={archivedId} checked={archived} onCheckedChange={setArchived} />
-        <Label htmlFor={archivedId} className="text-xs font-normal">
-          Show archived
-        </Label>
-      </div>
-      {list.isLoading ? (
+      {contentSearch ? null : (
+        <div className="flex items-center gap-2 text-xs">
+          <Switch id={archivedId} checked={archived} onCheckedChange={setArchived} />
+          <Label htmlFor={archivedId} className="text-xs font-normal">
+            Show archived
+          </Label>
+        </div>
+      )}
+      {contentSearch ? (
+        <SearchResults
+          q={q}
+          disabled={running}
+          onOpen={(hit) => choose(hit.conversationId, hit.messageId)}
+        />
+      ) : list.isLoading ? (
         <LoadingState label="Loading conversations" rows={4} />
       ) : list.error ? (
         <ErrorState error={list.error} onRetry={() => void list.refetch()} compact />
       ) : rows.length === 0 ? (
         <p className="px-1 py-4 text-sm text-muted-foreground">
-          {q
+          {q && !canSearch
             ? 'No conversation title matches this search.'
             : archived
               ? 'No archived conversations.'
@@ -276,10 +381,10 @@ export function ConversationList({
           })}
         </ul>
       )}
-      {list.data?.nextCursor ? (
+      {!contentSearch && list.data?.nextCursor ? (
         <p className="px-1 text-xs text-muted-foreground">
-          The {CONVERSATION_LIST_LIMIT} most recent conversations are shown; search by title to find
-          older ones.
+          The {CONVERSATION_LIST_LIMIT} most recent conversations are shown; search to find older
+          ones.
         </p>
       ) : null}
       <RenameDialog

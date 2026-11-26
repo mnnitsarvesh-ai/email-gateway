@@ -105,6 +105,12 @@ export interface WindowInput {
    * user entry before the `Current user message:` marker (after the recap of a new segment).
    */
   actionUpdates?: string | null;
+  /**
+   * Start a new segment with the recap even when the segment still fits (step AI-6 D6: the
+   * selected provider or model differs from the segment's; provider-native transcripts cannot
+   * cross providers). Like an overflow, it applies only to a non-empty segment.
+   */
+  forceNewSegment?: boolean;
 }
 
 export interface WindowPlan {
@@ -117,14 +123,18 @@ export interface WindowPlan {
   estimatedTokens: number;
 }
 
-/** Plans the transcript of a turn: append to the segment, or open a new one with a recap. */
+/**
+ * Plans the transcript of a turn: append to the segment, or open a new one with a recap (on
+ * overflow or when `forceNewSegment` is set).
+ */
 export function planWindow(input: WindowInput): WindowPlan {
   const userEntries = input.userEntry(
     composeUserEntryText({ message: input.userMessage, actionUpdates: input.actionUpdates }),
   );
   const continued = [...input.segmentTranscript, ...userEntries];
   const estimate = estimateTokens(input.system) + estimateTranscriptTokens(continued);
-  if (estimate <= input.maxTokens || input.segmentTranscript.length === 0) {
+  const overflow = estimate > input.maxTokens || input.forceNewSegment === true;
+  if (!overflow || input.segmentTranscript.length === 0) {
     return {
       newSegment: false,
       transcript: continued,

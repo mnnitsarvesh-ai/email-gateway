@@ -372,6 +372,18 @@ describe('AnthropicProvider errors (typed SDK classes, never message text)', () 
     expect(bad.retryable).toBe(false);
   });
 
+  it('401/403 → auth (step AI-6: a rejected key; not retryable)', async () => {
+    for (const status of [401, 403]) {
+      const { error, calls } = await failure(() =>
+        errorResponse(status, status === 401 ? 'authentication_error' : 'permission_error'),
+      );
+      expect(calls).toHaveLength(1);
+      expect(error).toMatchObject({ reason: 'auth', httpStatus: status });
+      expect(error.retryable).toBe(false);
+      expect(error.message).not.toContain('fixture');
+    }
+  });
+
   it('connection failure → connection; timeout → timeout; caller abort → aborted', async () => {
     expect(
       (

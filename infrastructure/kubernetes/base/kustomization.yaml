@@ -8,6 +8,11 @@ resources:
   - namespace.yaml
   - config.yaml
   - api.yaml
+  # AI assistant (step AI-6 D10, docs/deployment/assistant.md): the api image with the assistant
+  # enabled; the only holder of the LLM keys and the tenant-key encryption key; serves
+  # /api/v1/assistant/* (own Ingress, SSE settings) and consumes assistant.reports. Its HTTPS egress
+  # (LLM providers, S3) comes from components/assistant-llm-egress.
+  - api-assistant.yaml
   - smtp-adapter.yaml
   - email-worker.yaml
   # Attachment scanning (step 4.2 A20): the attachment consumer and clamd.

@@ -2253,4 +2253,7 @@ export const EventTypes = {
   // Step AI-R (docs/plan/steps/31-ai-chat-reports.md D8, §4.3): a confirmed assistant report
   // email (schema in assistant-events.ts).
   AssistantReportEmailRequested: 'assistant.report.email_requested.v1',
+  // Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md D5, §4.2): an asynchronous
+  // assistant report job (schema in assistant-events.ts).
+  AssistantReportGenerateRequested: 'assistant.report.generate_requested.v1',
 } as const;

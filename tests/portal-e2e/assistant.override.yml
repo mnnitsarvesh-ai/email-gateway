@@ -9,6 +9,14 @@
 #     -f tests/portal-e2e/assistant.override.yml --profile apps \
 #     up -d --no-deps --force-recreate --wait api
 # and recreate the api without it after the run.
+#
+# Step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md §9 item 9): the api also runs the
+# background report consumer (`ASSISTANT_REPORT_JOBS_CONSUMER`, queue `assistant.reports`; Compose
+# already passes `RABBITMQ_ASSISTANT_URL`, the `eg-assistant` role user's container URL), so a
+# report over more than seven days goes queued → available in the chat. Tenant-supplied provider
+# keys stay off (`ASSISTANT_TENANT_KEYS_ENABLED=false`): the AI administration page shows its
+# "not offered by the platform" state and no key or key-encryption secret is needed. The live
+# event-relay must know topology v16 (rebuild it before the run when its image is older).
 services:
   api:
     environment:
@@ -19,3 +27,6 @@ services:
       ASSISTANT_OPENAI_API_KEY: ''
       ASSISTANT_AZURE_OPENAI_API_KEY: ''
       ASSISTANT_LOOPBACK_URL: ''
+      ASSISTANT_REPORT_JOBS_CONSUMER: 'true'
+      ASSISTANT_TENANT_KEYS_ENABLED: 'false'
+      ASSISTANT_FALLBACK_PROVIDER: none

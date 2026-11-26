@@ -243,6 +243,21 @@ spec:
             - { name: ARCHIVE_CASE_MAX_CUSTODIANS, value: '1000' }
             - { name: ARCHIVE_CASE_MAX_ACTIVE_SEARCHES, value: '3' }
             - { name: ARCHIVE_REVIEW_MAX_ITEMS, value: '500' }
+            # Step AI-6 D13: the eDiscovery export lifetime (shared ConfigMap key, so it always
+            # equals the archive-jobs value; read so the assistant's export card can state it).
+            - name: ARCHIVE_EXPORT_TTL_HOURS
+              valueFrom:
+                configMapKeyRef: { name: email-gateway-config, key: ARCHIVE_EXPORT_TTL_HOURS }
+            # AI assistant (step AI-6 D10, docs/deployment/assistant.md): the assistant runs in the
+            # api-assistant Deployment (same image), which holds the LLM and tenant-key secrets and
+            # serves /api/v1/assistant/*. Here ASSISTANT_ENABLED and the provider keys stay unset
+            # (assistant off: 503 assistant_disabled if a turn reaches these pods); they serve the
+            # assistant's loopback tool calls and the report-job reads (job tokens are validated
+            # by the AuthGuard like any bearer, GET on the report source routes only). The
+            # assistant's background jobs (retention purge with report-object deletes, stale-turn
+            # sweeper, report-job expiry; one replica at a time through a Redis lock) run only in
+            # api-assistant, whose ServiceAccount holds the report-object S3 permissions.
+            - { name: ASSISTANT_BACKGROUND_JOBS_ENABLED, value: 'false' }
           volumeMounts:
             - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
             - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }

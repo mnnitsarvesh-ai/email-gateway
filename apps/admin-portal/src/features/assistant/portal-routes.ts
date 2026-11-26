@@ -9,6 +9,10 @@ import { NAV_ITEMS } from '@/lib/navigation';
  */
 export const DETAIL_ROUTE_PATTERNS: readonly string[] = [
   '/assistant',
+  // Step AI-6 (D1): the tenant AI administration page (also a navigation item; listed here so the
+  // allow-list states it). Its tabs and the audit drawer are query parameters
+  // (`?tab=audit&audit=<uuid>`), so it has no detail route.
+  '/assistant/admin',
   // Step AI-R (D9): the full-size page of a chat report (a UUID only, see PARAM_RULES).
   '/assistant/reports/:reportId',
   '/archive/:messageId',

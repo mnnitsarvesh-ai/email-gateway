@@ -23,7 +23,7 @@ import { stack } from './support/env';
  * The provisioned vhost `email-gateway` matches the topology exactly (step 3.2 Q1, Q4, §3; v2:
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
  * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26;
- * v13: step 8.4 §4.1; v14: step 8.2 D12; v15: step AI-R D8): checks through the management API. The prune case adds one stray binding to the dormant
+ * v13: step 8.4 §4.1; v14: step 8.2 D12; v15: step AI-R D8; v16: step AI-6 D5): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -44,9 +44,11 @@ import { stack } from './support/env';
  * one: 72 (67 queue + 5 exchange bindings). v14 (step 8.2 D12): email.webhooks adds one
  * (integration.connection.health_changed.v1): 73 (68 queue + 5 exchange bindings). v15 (step AI-R
  * D8): email.notifications adds one (assistant.report.email_requested.v1): 74 (69 queue + 5
- * exchange bindings).
+ * exchange bindings). v16 (step AI-6 D5): assistant.reports adds two
+ * (assistant.report.generate_requested.v1 + its retry binding): 76 (71 queue + 5 exchange
+ * bindings).
  */
-const TOPOLOGY_BINDINGS = 74;
+const TOPOLOGY_BINDINGS = 76;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -78,8 +80,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     }
   });
 
-  it('has exactly the twenty-four durable quorum queues, each under its policy eg.<queue>', () => {
-    expect(QUEUE_NAMES).toHaveLength(24);
+  it('has exactly the twenty-five durable quorum queues, each under its policy eg.<queue>', () => {
+    expect(QUEUE_NAMES).toHaveLength(25);
     expect(queues.map((q) => q.name).sort()).toEqual([...QUEUE_NAMES].sort());
     for (const queue of queues) {
       expect(queue.type, queue.name).toBe('quorum');
@@ -150,10 +152,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v15: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(15);
+  it('is topology v16: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R, AI-6)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(16);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v15');
+    expect(info.description).toBe('email-gateway topology v16');
     const rescan = bindings
       .filter(
         (b) =>
@@ -867,6 +869,43 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const queue of ['ato.events', 'ato.mail', 'ato.responses']) {
       for (const user of await consumerUsers(queue)) expect(user, queue).toBe(worker);
     }
+  });
+
+  it('has the assistant.reports queue of v16 (step AI-6 D5) for the api report job consumer (eg-assistant) only', async () => {
+    expect(queueDefinition('assistant.reports')).toMatchObject({
+      role: 'work',
+      homeExchange: 'email.policy',
+      consumer: { kind: 'ledger', ledgerName: 'api-assistant.reports', service: 'api-assistant' },
+    });
+    expect(bindingsOf('assistant.reports')).toEqual([
+      'email.policy [org.*.assistant.report.generate_requested.v1]',
+      'email.policy [retry.assistant.reports.#]',
+    ]);
+    // A queued report job is never dropped (work, reject-publish).
+    expect(queues.find((q) => q.name === 'assistant.reports')?.effective_policy_definition).toEqual(
+      policyFor('work', 'assistant.reports'),
+    );
+    const reached = (exchange: string, key: string) =>
+      bindings
+        .filter((b) => b.source === exchange && topicMatches(b.routing_key, key))
+        .map((b) => `${b.destination_type}:${b.destination}`)
+        .sort();
+    const type = 'assistant.report.generate_requested.v1';
+    // The event reaches the consumer queue (and the firehose through email.events) only.
+    expect(reached('email.policy', `org.42.${type}`)).toEqual([
+      'exchange:email.events',
+      'queue:assistant.reports',
+    ]);
+    // Hops: its retry reaches exactly its queue, its dead letters email.dead-letter.
+    expect(reached('email.policy', `retry.assistant.reports.org.42.${type}`)).toEqual([
+      'queue:assistant.reports',
+    ]);
+    expect(reached('email.events', `dead-letter.assistant.reports.org.42.${type}`)).toEqual([
+      'queue:email.dead-letter',
+    ]);
+    // Consumers (from WP3 on, api-assistant pods or a host-run api): the eg-assistant user only.
+    const worker = process.env.RABBITMQ_ASSISTANT_USER || 'eg-assistant';
+    for (const user of await consumerUsers('assistant.reports')) expect(user).toBe(worker);
   });
 
   it('init.mjs prunes a binding on a topology queue that the definitions do not have', async () => {

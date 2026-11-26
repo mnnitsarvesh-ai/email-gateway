@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   atoAccountsWanted,
   buildReportModel,
@@ -12,11 +12,15 @@ import {
   reportDigestOf,
   reportHasNoData,
   type ReportModel,
+  type ReportPeriod,
+  reportPeriodOf,
+  type ReportSection,
   type ReportSourceDef,
   type ReportSourceResult,
   type ReportSourceResults,
   ReportTooLargeError,
   type ReportWindow,
+  REPORT_TITLE,
   renderReportHtml,
   resolveReportWindow,
 } from '@email-gateway/assistant';
@@ -24,6 +28,7 @@ import { uuidv7 } from '@email-gateway/common';
 import type { Prisma } from '@email-gateway/database';
 import { API_CONFIG } from '../../../../api-config.token';
 import { AuditService } from '../../../../audit/audit.service';
+import type { UserPrincipal } from '../../../../auth-contracts/principal';
 import {
   ASSISTANT_AUDIT,
   AUDIT_RESOURCE,
@@ -39,6 +44,8 @@ import {
 } from '../../assistant.errors';
 import { sourceCorrelationId } from '../../domain/correlation';
 import { toolAvailability } from '../../domain/tool-catalog';
+import type { Owner } from '../../repositories/conversations.repository';
+import { ReportJobsRepository } from '../../repositories/report-jobs.repository';
 import { ReportsRepository } from '../../repositories/reports.repository';
 import { AssistantMetrics } from '../assistant-metrics';
 import { buildLoopbackRequest, LoopbackDispatcher } from '../loopback-client';
@@ -85,7 +92,57 @@ export interface GeneratedReport {
   audit: Record<string, unknown>;
 }
 
-export type ReportGenerateResult = NativeDenial | NativeFailure | GeneratedReport;
+/**
+ * Step AI-6 D5: a window longer than ASSISTANT_REPORT_SYNC_MAX_HOURS becomes a background job. The
+ * executor records the execution (`202`) and, in the same transaction, `queue` writes the
+ * `queued` report, the job and its outbox event.
+ */
+export interface QueuedReport {
+  kind: 'queue';
+  reportId: string;
+  jobId: string;
+  title: string;
+  period: ReportPeriod;
+  sections: ReportSection[];
+  /** The validated arguments stored with the job (`range`/`from`/`to`/`sections`). */
+  arguments: Record<string, unknown>;
+  window: ReportWindow;
+}
+
+export type ReportGenerateResult = NativeDenial | NativeFailure | GeneratedReport | QueuedReport;
+
+/**
+ * Who reads the sources of a composition and how (step AI-6 D5: the turn's own credential, or a
+ * report job's GET-only token of the user's live session).
+ */
+export interface ReportComposeContext {
+  principal: UserPrincipal;
+  owner: Owner;
+  conversationId: bigint;
+  conversationPublicId: string;
+  /** The `authorization` header of the loopback reads. */
+  authorization: string;
+  clientIp: string | null;
+  signal: AbortSignal;
+  /** The organization name of the report header (null = "Your organization"). */
+  organizationName: string | null;
+  /** The `report_generate` execution (`x-eg-assistant-execution`, audit). */
+  executionId: string;
+  /** The correlation id of the n-th source read. */
+  correlationOf: (n: number) => string;
+}
+
+/** The report row a composition fills: a new `pending` row (sync) or a job's `queued` row. */
+export type ComposeTarget =
+  { kind: 'new' } | { kind: 'job'; reportRowId: bigint; reportId: string };
+
+/** A stored composition (the object is in the bucket; the row is not `available` yet). */
+export interface ComposedReport extends GeneratedReport {
+  objectKey: string;
+  sha256: string;
+  sections: Prisma.InputJsonValue;
+  figures: Prisma.InputJsonValue;
+}
 
 export interface ReportGenerateInput {
   ctx: ExecutionContext;
@@ -96,6 +153,15 @@ export interface ReportGenerateInput {
 }
 
 export { sourceCorrelationId };
+
+/** The validated arguments a job stores (≤ 1 KiB: range, from, to, sections). */
+function storedArguments(args: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ['range', 'from', 'to', 'sections'] as const) {
+    if (args[key] !== undefined) out[key] = args[key];
+  }
+  return out;
+}
 
 /** Runs `fn` over `items` with at most `limit` in flight; results in item order. */
 async function mapLimit<T, R>(
@@ -116,6 +182,8 @@ async function mapLimit<T, R>(
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
   return out;
 }
+
+const HOUR_MS = 3_600_000;
 
 type SourceRead =
   | { kind: 'result'; result: ReportSourceResult }
@@ -149,7 +217,13 @@ export class ReportGeneratorService {
     private readonly loopback: LoopbackDispatcher,
     private readonly audit: AuditService,
     private readonly metrics: AssistantMetrics,
+    @Optional() private readonly jobRepository?: ReportJobsRepository,
   ) {}
+
+  private get jobs(): ReportJobsRepository {
+    if (!this.jobRepository) throw new Error('report jobs are not available');
+    return this.jobRepository;
+  }
 
   now(): Date {
     return new Date();
@@ -164,7 +238,7 @@ export class ReportGeneratorService {
       return this.guard(REPORT_GUARDS.needsOrganization);
     }
     const now = this.now();
-    // 2. The per-user daily generation limit (UTC day, every status counts).
+    // 2. The per-user daily generation limit (UTC day, every status counts, queued too).
     const used = await this.reports.countSince(ctx.owner, utcDayStart(now));
     if (used >= this.config.ASSISTANT_REPORTS_PER_USER_PER_DAY) {
       this.metrics.reports.inc({ outcome: 'denied' });
@@ -176,10 +250,7 @@ export class ReportGeneratorService {
       };
     }
     // 3. The window (validated again server-side; the schema already checked the shapes).
-    const resolved = resolveReportWindow(
-      { range: args.range, from: args.from, to: args.to },
-      { now, maxRangeDays: this.config.REPORTS_MAX_RANGE_DAYS },
-    );
+    const resolved = this.resolveWindow(args, now);
     if (!resolved.ok) {
       this.metrics.reports.inc({ outcome: 'denied' });
       return {
@@ -192,8 +263,71 @@ export class ReportGeneratorService {
     const window = resolved.window;
     const sections = normalizeSections(args.sections);
 
-    // 4–6. The source plan, the permission pre-check and the reads.
-    const read = await this.readSources(input, window, sections);
+    // Step AI-6 D5: a window longer than the synchronous maximum becomes a background job.
+    const hours = (Date.parse(window.to) - Date.parse(window.from)) / HOUR_MS;
+    if (
+      this.config.ASSISTANT_REPORT_JOBS_ENABLED &&
+      hours > this.config.ASSISTANT_REPORT_SYNC_MAX_HOURS
+    ) {
+      const period = reportPeriodOf(window);
+      return {
+        kind: 'queue',
+        reportId: uuidv7(now.getTime()),
+        jobId: uuidv7(now.getTime()),
+        title: `${REPORT_TITLE}: ${period.label}`.slice(0, 200),
+        period,
+        sections: [...sections],
+        arguments: storedArguments(args),
+        window,
+      };
+    }
+
+    // 4–9. Compose and store with the turn's own credential.
+    return this.composeAndStore(
+      {
+        principal,
+        owner: ctx.owner,
+        conversationId: ctx.conversationId,
+        conversationPublicId: ctx.conversationPublicId,
+        authorization: ctx.authorization,
+        clientIp: ctx.clientIp,
+        signal: ctx.signal,
+        organizationName: ctx.organizationName ?? null,
+        executionId: input.executionId,
+        correlationOf: (n) => sourceCorrelationId(ctx.correlationBase, input.seq, n),
+      },
+      window,
+      sections,
+      now,
+      { kind: 'new' },
+    );
+  }
+
+  /** The report window of validated `report_generate` arguments (D2 step 3). */
+  resolveWindow(
+    args: Readonly<Record<string, unknown>>,
+    now: Date,
+  ): ReturnType<typeof resolveReportWindow> {
+    return resolveReportWindow(
+      { range: args.range, from: args.from, to: args.to },
+      { now, maxRangeDays: this.config.REPORTS_MAX_RANGE_DAYS },
+    );
+  }
+
+  /**
+   * D2 steps 4–9, shared by the synchronous tool call and the report job (step AI-6 D5): the
+   * fixed source plan with the permission pre-check, the loopback reads with `c.authorization`,
+   * the pure model and renderer, the size cap, then the object (a sync call first inserts the
+   * `pending` row; a job fills its `queued` row in its own finalize transaction).
+   */
+  async composeAndStore(
+    c: ReportComposeContext,
+    window: ReportWindow,
+    sections: ReturnType<typeof normalizeSections>,
+    now: Date,
+    target: ComposeTarget,
+  ): Promise<NativeFailure | ComposedReport> {
+    const read = await this.readSources(c, window, sections);
     if (read.kind === 'session_expired') {
       this.metrics.reports.inc({ outcome: 'failed' });
       return {
@@ -222,7 +356,7 @@ export class ReportGeneratorService {
     const model = buildReportModel(read.results, {
       window,
       generatedAt,
-      organizationName: ctx.organizationName ?? 'Your organization',
+      organizationName: c.organizationName ?? 'Your organization',
       sections,
     });
     this.observeSources(model);
@@ -248,44 +382,51 @@ export class ReportGeneratorService {
       );
     }
 
-    // 9. Store: the pending row, then the object (the executor's transaction makes it available).
+    // 9. Store: (sync) the pending row, then the object.
     const bytes = Buffer.from(html, 'utf8');
     const sha256 = sha256Hex(bytes);
     const sizeBytes = byteLength(html);
-    const reportId = uuidv7(now.getTime());
-    const organizationId = ctx.owner.scope.organizationId;
+    const reportId = target.kind === 'job' ? target.reportId : uuidv7(now.getTime());
+    const organizationId = c.owner.scope.organizationId;
     const key = reportObjectKey(organizationId, reportId, now);
     const digest = reportDigestOf(model);
-    const reportRowId = await this.reports.insertPending(ctx.owner, {
-      publicId: reportId,
-      platformOverrideId: principal.override?.id ?? null,
-      conversationId: ctx.conversationId,
-      title: digest.title.slice(0, 200),
-      periodFrom: new Date(window.from),
-      periodTo: new Date(window.to),
-      granularity: window.granularity,
-      sections: {
-        included: digest.sections,
-        omitted: digest.omitted,
-        atoRange: window.atoRange,
-        range: window.range,
-        label: digest.period.label,
-      } as unknown as Prisma.InputJsonValue,
-      figures: digest.figures as unknown as Prisma.InputJsonValue,
-      templateVersion: REPORT_TEMPLATE_VERSION,
-      objectKey: key,
-      sizeBytes,
-      sha256,
-      createdAt: now,
-    });
+    const storedSections = {
+      included: digest.sections,
+      omitted: digest.omitted,
+      atoRange: window.atoRange,
+      range: window.range,
+      label: digest.period.label,
+    } as unknown as Prisma.InputJsonValue;
+    const figures = digest.figures as unknown as Prisma.InputJsonValue;
+    const reportRowId =
+      target.kind === 'job'
+        ? target.reportRowId
+        : await this.reports.insertPending(c.owner, {
+            publicId: reportId,
+            platformOverrideId: c.principal.override?.id ?? null,
+            conversationId: c.conversationId,
+            title: digest.title.slice(0, 200),
+            periodFrom: new Date(window.from),
+            periodTo: new Date(window.to),
+            granularity: window.granularity,
+            sections: storedSections,
+            figures,
+            templateVersion: REPORT_TEMPLATE_VERSION,
+            objectKey: key,
+            sizeBytes,
+            sha256,
+            createdAt: now,
+          });
     try {
       await this.store.put(organizationId, key, bytes, sha256);
     } catch (error) {
-      await this.reports.markFailed(ctx.owner, reportRowId, REPORT_ERROR_CODES.storageFailed);
+      if (target.kind === 'new') {
+        await this.reports.markFailed(c.owner, reportRowId, REPORT_ERROR_CODES.storageFailed);
+      }
       this.metrics.reports.inc({ outcome: 'failed' });
       this.logger.warn({
         message: 'Assistant report object could not be stored',
-        executionId: input.executionId,
+        executionId: c.executionId,
         reportId,
         code: (error as { name?: unknown }).name ?? 'error',
       });
@@ -299,7 +440,7 @@ export class ReportGeneratorService {
     this.metrics.reportBytes.observe(sizeBytes);
     this.logger.log({
       message: 'Assistant report generated',
-      executionId: input.executionId,
+      executionId: c.executionId,
       reportId,
       sizeBytes,
       omitted: model.omitted.length,
@@ -307,11 +448,15 @@ export class ReportGeneratorService {
     return {
       kind: 'report',
       reportRowId,
+      objectKey: key,
+      sha256,
+      sections: storedSections,
+      figures,
       report: { reportId, generatedAt, sizeBytes, ...digest },
       audit: {
         reportId,
-        conversationId: ctx.conversationPublicId,
-        executionId: input.executionId,
+        conversationId: c.conversationPublicId,
+        executionId: c.executionId,
         period: {
           from: window.from,
           to: window.to,
@@ -338,6 +483,100 @@ export class ReportGeneratorService {
           })),
       },
     };
+  }
+
+  /**
+   * Step AI-6 D5 producer, inside the execution's persist transaction (after the execution row):
+   * the `queued` report (title, period and the requested sections; no object), the job (the
+   * principal's session id and authentication methods, home organization, override id, the
+   * validated arguments, the organization label, `expires_at`), its outbox event
+   * `assistant.report.generate_requested.v1` (ids only) and `assistant.report_job_queued`.
+   */
+  async queue(
+    ctx: ExecutionContext,
+    queued: QueuedReport,
+    execution: { rowId: bigint; executionId: string; correlationId: string },
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    const now = this.now();
+    const principal = ctx.principal;
+    const window = queued.window;
+    const reportRowId = await this.reports.insertQueued(
+      ctx.owner,
+      {
+        publicId: queued.reportId,
+        platformOverrideId: principal.override?.id ?? null,
+        conversationId: ctx.conversationId,
+        title: queued.title,
+        periodFrom: new Date(window.from),
+        periodTo: new Date(window.to),
+        granularity: window.granularity,
+        sections: {
+          included: queued.sections,
+          omitted: [],
+          atoRange: window.atoRange,
+          range: window.range,
+          label: queued.period.label,
+          requested: queued.sections,
+        },
+        templateVersion: REPORT_TEMPLATE_VERSION,
+        createdAt: now,
+      },
+      tx,
+    );
+    const expiresAt = new Date(now.getTime() + this.config.ASSISTANT_REPORT_JOB_TTL_SECONDS * 1000);
+    await this.jobs.insert(
+      ctx.owner,
+      {
+        publicId: queued.jobId,
+        conversationId: ctx.conversationId,
+        reportId: reportRowId,
+        executionId: execution.rowId,
+        sessionId: principal.sessionId,
+        authMethods: principal.mfaAuthenticated ? 'pwd,otp' : 'pwd',
+        homeOrganizationPublicId: principal.organizationPublicId,
+        platformOverrideId: principal.override?.id ?? null,
+        arguments: queued.arguments as Prisma.InputJsonValue,
+        organizationLabel: ctx.organizationName?.slice(0, 120) ?? null,
+        correlationId: execution.correlationId.slice(0, 128),
+        expiresAt,
+        createdAt: now,
+      },
+      tx,
+    );
+    await this.jobs.insertGenerateRequested(tx, {
+      organizationId: ctx.owner.scope.organizationId,
+      correlationId: execution.correlationId,
+      payload: { jobId: queued.jobId, reportId: queued.reportId, requestedAt: now.toISOString() },
+    });
+    await this.audit.record(
+      {
+        organizationId: ctx.owner.scope.organizationId,
+        actor: this.audit.actorFrom(principal),
+        action: ASSISTANT_AUDIT.reportJobQueued,
+        resourceType: AUDIT_RESOURCE.reportJob,
+        resourceId: queued.jobId,
+        sourceIp: ctx.clientIp,
+        metadata: {
+          jobId: queued.jobId,
+          reportId: queued.reportId,
+          conversationId: ctx.conversationPublicId,
+          executionId: execution.executionId,
+          period: { from: window.from, to: window.to, granularity: window.granularity },
+          sections: queued.sections,
+          expiresAt: expiresAt.toISOString(),
+          correlationId: execution.correlationId,
+        },
+      },
+      tx,
+    );
+    this.metrics.reportJobs.inc({ outcome: 'queued' });
+    this.logger.log({
+      message: 'Assistant report job queued',
+      executionId: execution.executionId,
+      reportId: queued.reportId,
+      jobId: queued.jobId,
+    });
   }
 
   /**
@@ -374,7 +613,7 @@ export class ReportGeneratorService {
    * monitoring on. A `401` ends the turn; an aborted turn aborts the report.
    */
   private async readSources(
-    input: ReportGenerateInput,
+    input: ReportComposeContext,
     window: ReportWindow,
     sections: ReturnType<typeof normalizeSections>,
   ): Promise<
@@ -413,12 +652,11 @@ export class ReportGeneratorService {
   }
 
   private async readSource(
-    input: ReportGenerateInput,
+    ctx: ReportComposeContext,
     def: ReportSourceDef,
     window: ReportWindow,
     n: number,
   ): Promise<SourceRead> {
-    const { ctx } = input;
     const tool = findTool(def.tool);
     if (!tool || tool.access !== 'read' || tool.method !== 'GET') {
       return {
@@ -441,9 +679,9 @@ export class ReportGeneratorService {
       method: 'GET',
       path: request.path,
       authorization: ctx.authorization,
-      correlationId: sourceCorrelationId(ctx.correlationBase, input.seq, n),
+      correlationId: ctx.correlationOf(n),
       clientIp: ctx.clientIp,
-      executionId: input.executionId,
+      executionId: ctx.executionId,
       signal: ctx.signal,
     });
     switch (result.kind) {

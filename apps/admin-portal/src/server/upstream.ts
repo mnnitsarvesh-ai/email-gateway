@@ -34,6 +34,21 @@ export interface UpstreamRequest {
 
 const CORRELATION_ID = /^[A-Za-z0-9._:-]{8,128}$/;
 
+/** Upstream paths of the AI assistant (step AI-6 D10: the `api-assistant` route split). */
+export const ASSISTANT_UPSTREAM_PREFIX = '/api/v1/assistant/';
+
+/**
+ * The api origin of an upstream path: `API_ASSISTANT_INTERNAL_URL` for paths under
+ * `/api/v1/assistant/` when it is configured, `API_INTERNAL_URL` for everything else (step AI-6
+ * D10; the ingress splits the same prefix). Same-origin, CSRF, session and the trusted forwarder
+ * headers do not depend on the origin chosen here.
+ */
+export function upstreamOrigin(config: ServerConfig, path: string): string {
+  if (config.API_ASSISTANT_INTERNAL_URL && path.startsWith(ASSISTANT_UPSTREAM_PREFIX))
+    return config.API_ASSISTANT_INTERNAL_URL;
+  return config.API_INTERNAL_URL;
+}
+
 export function correlationIdFrom(headers: Headers): string {
   const given = headers.get('x-correlation-id');
   return given && CORRELATION_ID.test(given) ? given : crypto.randomUUID();
@@ -57,7 +72,7 @@ export async function callUpstream(deps: BffDeps, request: UpstreamRequest): Pro
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deps.config.PORTAL_API_TIMEOUT_MS);
   try {
-    return await deps.fetch(`${deps.config.API_INTERNAL_URL}${request.path}`, {
+    return await deps.fetch(`${upstreamOrigin(deps.config, request.path)}${request.path}`, {
       method: request.method,
       headers,
       body: request.body ?? null,

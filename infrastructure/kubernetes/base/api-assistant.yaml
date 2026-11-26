@@ -1,0 +1,628 @@
+# AI assistant workload (step AI-6 D10, docs/deployment/assistant.md, ADR-0091, ADR-0096, ADR-0097):
+# api-assistant runs the SAME api image as the api Deployment with the assistant enabled. It serves
+# /api/v1/assistant/* (turns over SSE, conversations, settings, reports, admin and audit views),
+# holds the only LLM credentials and the tenant-key encryption key, calls the model providers, and
+# consumes background report jobs (queue assistant.reports, role user eg-assistant). Tool calls of
+# a turn are ordinary HTTP requests to the api Service (ASSISTANT_LOOPBACK_URL), so the api pods do
+# the data work under their own guards, rate limits and HPA. It boots with the same env and secret
+# mounts the api needs (one image, one config schema; design risk R11: a boot profile that loads
+# only the assistant module is a follow-up). Manifests are rendered with `kubectl kustomize` only;
+# they have not been applied to a cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-assistant
+  labels: { app.kubernetes.io/name: api-assistant, app.kubernetes.io/part-of: email-gateway }
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: { app.kubernetes.io/name: api-assistant }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: api-assistant, app.kubernetes.io/part-of: email-gateway }
+    spec:
+      serviceAccountName: api-assistant
+      automountServiceAccountToken: false
+      # Turn deadline (ASSISTANT_TURN_DEADLINE_MS, at most 300 s) plus headroom: on SIGTERM the pod
+      # stops accepting turns and lets running SSE turns finish (step AI-6 D10).
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: api-assistant }
+      containers:
+        - name: api
+          # The same api image as the api Deployment (one build, two roles; step AI-6 D10).
+          image: email-gateway/api:latest
+          ports:
+            - { name: http, containerPort: 3000 }
+          envFrom:
+            - configMapRef: { name: email-gateway-config }
+          env:
+            - { name: HTTP_PORT, value: '3000' }
+            # Secrets are mounted as files by External Secrets and read via the <KEY>_FILE convention.
+            - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
+            # Control-plane reads: RDS/Aurora reader endpoint (see docs/database/replication.md).
+            - { name: DATABASE_READ_URL_FILE, value: /var/run/secrets/gateway/database-read-url }
+            # Role user eg-ops (step 3.2 Q9, Q10): dead-letter replay and queue stats.
+            - { name: RABBITMQ_OPS_URL_FILE, value: /var/run/secrets/gateway/rabbitmq-ops-url }
+            - { name: DEAD_LETTER_REPLAY_SCAN_MAX, value: '10000' }
+            # Risk scoring (step 5.1 R15, R16): platform profile of the profile and dry-run
+            # routes, profile versions per organization.
+            - { name: RISK_PLATFORM_PROFILE, value: rsk-default/1 }
+            - { name: RISK_PROFILE_MAX_VERSIONS, value: '200' }
+            # Policy management bounds (step 5.2 §5, P17, P22); POLICY_PLATFORM_DEFAULT: ConfigMap.
+            - { name: POLICY_MAX_POLICIES, value: '100' }
+            - { name: POLICY_MAX_VERSIONS_PER_POLICY, value: '200' }
+            - { name: POLICY_MAX_ACTIVE_RULES, value: '1000' }
+            - { name: POLICY_HISTORY_MAX_RANGE_DAYS, value: '31' }
+            - { name: DEPARTMENT_MAX_PER_ORG, value: '500' }
+            - { name: DEPARTMENT_MAX_MEMBERS, value: '5000' }
+            # Quarantine (step 5.3 §5); shared bounds come from the ConfigMap.
+            - { name: QUARANTINE_TX_TIMEOUT_MS, value: '120000' }
+            - { name: QUARANTINE_MANUAL_FROM_REJECT_MAX_DAYS, value: '30' }
+            - { name: QUARANTINE_SEARCH_MAX_RANGE_DAYS, value: '62' }
+            - { name: QUARANTINE_SEARCH_MAX_PAGE_SIZE, value: '100' }
+            - { name: QUARANTINE_PREVIEW_MAX_BODY_BYTES, value: '262144' }
+            - { name: QUARANTINE_PREVIEW_MAX_TEXT_CHARS, value: '100000' }
+            - { name: QUARANTINE_PREVIEW_RATE_PER_MINUTE, value: '60' }
+            - { name: QUARANTINE_DOWNLOAD_TOKEN_TTL_SECONDS, value: '60' }
+            - { name: QUARANTINE_DOWNLOAD_MAX_BYTES, value: '26214400' }
+            - { name: QUARANTINE_DOWNLOAD_GRANTS_PER_HOUR, value: '20' }
+            - { name: QUARANTINE_BULK_MAX_ITEMS, value: '100' }
+            - { name: QUARANTINE_BULK_MAX_ITEMS_PER_MINUTE, value: '1000' }
+            - { name: QUARANTINE_BULK_REQUESTS_PER_MINUTE, value: '20' }
+            - { name: QUARANTINE_BULK_DEADLINE_MS, value: '25000' }
+            # Quarantine download tokens (step 5.3 Q12, Q28): the api is the only holder of the
+            # HMAC key; its own Secret, mounted here only (64 hex characters).
+            - {
+                name: QUARANTINE_DOWNLOAD_TOKEN_KEY_FILE,
+                value: /var/run/secrets/quarantine-download/key,
+              }
+            # REST API conventions (step 6.1 §3.7, ADR-0050..0053): global limiter (per principal,
+            # per tenant clamped, sensitive/expensive classes; Redis, fail closed), Idempotency-Key
+            # reservations, v1 list bounds, reports and the manual suppression cap.
+            - { name: API_CURSOR_TTL_SECONDS, value: '86400' }
+            - { name: API_RATE_PRINCIPAL_PER_MINUTE, value: '600' }
+            - { name: API_RATE_TENANT_DEFAULT_PER_MINUTE, value: '300' }
+            - { name: API_RATE_TENANT_MIN_PER_MINUTE, value: '10' }
+            - { name: API_RATE_TENANT_MAX_PER_MINUTE, value: '10000' }
+            - { name: API_RATE_SENSITIVE_PER_MINUTE, value: '30' }
+            - { name: API_RATE_EXPENSIVE_PER_MINUTE, value: '60' }
+            - { name: API_RATE_LIMIT_CACHE_SECONDS, value: '60' }
+            - { name: API_IDEMPOTENCY_LEGACY_MODE, value: enforce }
+            - { name: API_IDEMPOTENCY_PENDING_TTL_SECONDS, value: '300' }
+            - { name: API_LIST_SCAN_BUDGET_ROWS, value: '5000' }
+            - { name: API_MESSAGES_MAX_RANGE_DAYS, value: '31' }
+            - { name: API_AUDIT_MAX_RANGE_DAYS, value: '90' }
+            - { name: REPORTS_MAX_RANGE_DAYS, value: '31' }
+            - { name: REPORTS_CACHE_TTL_SECONDS, value: '60' }
+            - { name: REPORTS_QUERY_TIMEOUT_MS, value: '10000' }
+            - { name: RECIPIENT_SUPPRESSIONS_MAX_MANUAL, value: '100000' }
+            # Email explorer and details (step 7.2 §2 E16): the capped subject-prefix search
+            # (422 above the cap, 503 on MAX_EXECUTION_TIME), the saved views per user and the
+            # audited reveal operations per principal and minute (429 above).
+            - { name: API_MESSAGES_SEARCH_MAX_MATCHES, value: '5000' }
+            - { name: API_MESSAGES_SEARCH_TIMEOUT_MS, value: '5000' }
+            - { name: SAVED_VIEWS_MAX_PER_USER, value: '50' }
+            - { name: API_MESSAGES_REVEAL_PER_MINUTE, value: '30' }
+            # Policy builder (step 7.3 §3): the sample dry-run's most rounds (400 above), its
+            # deadline (truncated result) and the per-principal requests per minute (429 above).
+            - { name: POLICY_DRY_RUN_SAMPLE_MAX, value: '50' }
+            - { name: POLICY_DRY_RUN_DEADLINE_MS, value: '10000' }
+            - { name: POLICY_SAMPLE_DRY_RUNS_PER_MINUTE, value: '6' }
+            # HMAC key of the signed v1 list cursors (step 6.1 D3; 64 hex characters): the api is
+            # its only holder; its own Secret, mounted here only. The previous key (rotation,
+            # verification only) is optional; see docs/runbooks/api-rate-limits-and-reports.md.
+            - { name: API_CURSOR_KEY_FILE, value: /var/run/secrets/api-cursor/key }
+            - name: API_CURSOR_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-api-cursor-key, key: previous-key, optional: true }
+            - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
+            # Authentication (steps 1.2/1.3) and the transactional-email relay password.
+            - { name: AUTH_JWT_SECRET_FILE, value: /var/run/secrets/gateway/auth-jwt-secret }
+            - { name: AUTH_TOKEN_PEPPER_FILE, value: /var/run/secrets/gateway/auth-token-pepper }
+            - {
+                name: DATA_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/gateway/data-encryption-key,
+              }
+            - {
+                name: NOTIFY_SMTP_PASSWORD_FILE,
+                value: /var/run/secrets/gateway/notify-smtp-password,
+              }
+            # DLP evidence (step 4.5 D16, D24): the key-encryption key opens evidence in the
+            # audited GET .../dlp-evidence route only. Its own Secret, mounted here and in
+            # email-worker-dlp only. The previous key (rotation) is optional.
+            - { name: DLP_EVIDENCE_KEY_FILE, value: /var/run/secrets/dlp-evidence/key }
+            - name: DLP_EVIDENCE_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-dlp-evidence-key, key: previous-key, optional: true }
+            # Webhooks (step 6.2 W6, W7, W12, §4.4): registration, history, replay and test bounds;
+            # WEBHOOK_ALLOWED_PORTS / WEBHOOK_ALLOW_HTTP come from the ConfigMap.
+            - { name: WEBHOOK_MAX_SUBSCRIPTIONS_PER_ORG, value: '10' }
+            - { name: WEBHOOK_SECRET_OVERLAP_HOURS_DEFAULT, value: '24' }
+            - { name: WEBHOOK_HISTORY_MAX_RANGE_DAYS, value: '31' }
+            - { name: WEBHOOK_REPLAY_MAX_RANGE_HOURS, value: '72' }
+            - { name: WEBHOOK_REPLAY_MAX_PER_DELIVERY, value: '10' }
+            - { name: WEBHOOK_REPLAY_REQUESTS_PER_HOUR, value: '10' }
+            - { name: WEBHOOK_TEST_REQUESTS_PER_MINUTE, value: '6' }
+            # Webhook secret cipher (W7): the api ENCRYPTS signing secrets (webhook-delivery
+            # decrypts; nobody else holds the key). Its own Secret; the previous key (encryption
+            # key rotation, decryption only) is optional.
+            - {
+                name: WEBHOOK_SECRET_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/webhook-secret-key/key,
+              }
+            - name: WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-webhook-secret-key, key: previous-key, optional: true }
+            # Provider integrations (step 8.2 §4.4, ADR-0077, ADR-0080, ADR-0081): the api ENCRYPTS
+            # customer provider credentials (the integration-worker decrypts), signs mail-flow
+            # impact tokens and derives Microsoft 365 route tokens (the delivery-worker holds the
+            # same route-token key). Each key is its own Secret; the previous credential key
+            # (rotation, decryption only, not used by the api for encryption) is optional.
+            # Non-secret keys (endpoints, client ids, redirect URL, bounds) are in the ConfigMap.
+            - {
+                name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/provider-credential-key/key,
+              }
+            - name: PROVIDER_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-provider-credential-key, key: previous-key, optional: true }
+            - {
+                name: PROVIDER_IMPACT_TOKEN_KEY_FILE,
+                value: /var/run/secrets/provider-impact-token-key/key,
+              }
+            - {
+                name: PROVIDER_ROUTE_TOKEN_KEY_FILE,
+                value: /var/run/secrets/provider-route-token-key/key,
+              }
+            # Trusted client-IP forwarder (step 7.1 P5, ADR-0060): the secret shared with the
+            # admin portal BFF only (its own Secret, mounted in api and admin-portal only). With
+            # it, X-EG-Client-IP from the portal becomes the request's client IP. Rotation:
+            # update the Secret, restart api and admin-portal (docs/runbooks/api-rate-limits-and-reports.md).
+            - {
+                name: API_TRUSTED_FORWARDER_TOKEN_FILE,
+                value: /var/run/secrets/api-trusted-forwarder/token,
+              }
+            # Journal intake (step 8.6 D1, ADR-0087): the HMAC key that derives intake addresses and
+            # Google header tokens (64 hex). The api alone holds it (the smtp-adapter compares
+            # SHA-256 hashes); its own Secret. The non-secret JOURNAL_INTAKE_* keys are in the
+            # ConfigMap. Rotation of this key changes every address: rotate sources instead
+            # (docs/runbooks/journal-intake.md).
+            - {
+                name: JOURNAL_INTAKE_ADDRESS_SECRET_FILE,
+                value: /var/run/secrets/journal-intake-address/secret,
+              }
+            # Journaling and archiving (step 8.1 §4.8, A9, A17-A19, ADR-0065..0069). Shared keys
+            # (search URL, index prefix, Object Lock mode, retention cap, key ids, export bounds)
+            # come from the ConfigMap. The archive root key (decrypts archived content; held by the
+            # api and the archive-worker only), the download-token HMAC key (api only), the api's
+            # OpenSearch password (FGAC user eg-archive-api: read <prefix>-t* only) and the export
+            # signing PUBLIC key are mounted from their own Secrets. The previous root key and its
+            # id (root rotation, unwrap only) are optional.
+            - { name: ARCHIVE_ROOT_KEY_FILE, value: /var/run/secrets/archive-root-key/key }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key, optional: true }
+            - name: ARCHIVE_ROOT_KEY_PREVIOUS_ID
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-archive-root-key, key: previous-key-id, optional: true }
+            - {
+                name: ARCHIVE_DOWNLOAD_TOKEN_KEY_FILE,
+                value: /var/run/secrets/archive-download-token/key,
+              }
+            - { name: ARCHIVE_SEARCH_USERNAME, value: eg-archive-api }
+            - {
+                name: ARCHIVE_SEARCH_PASSWORD_FILE,
+                value: /var/run/secrets/archive-search/password,
+              }
+            - {
+                name: ARCHIVE_EXPORT_SIGNING_PUBLIC_KEY_FILE,
+                value: /var/run/secrets/archive-export-signing/public-key,
+              }
+            - name: ARCHIVE_EXPORT_SIGNING_PREVIOUS_PUBLIC_KEYS
+              valueFrom:
+                secretKeyRef:
+                  {
+                    name: email-gateway-archive-export-signing,
+                    key: previous-public-keys,
+                    optional: true,
+                  }
+            - { name: ARCHIVE_DOWNLOAD_TOKEN_TTL_SECONDS, value: '60' }
+            - { name: ARCHIVE_DOWNLOAD_GRANTS_PER_HOUR, value: '20' }
+            - { name: ARCHIVE_PREVIEW_PER_MINUTE, value: '30' }
+            - { name: ARCHIVE_REVEAL_PER_MINUTE, value: '30' }
+            - { name: ARCHIVE_SEARCH_MAX_RANGE_DAYS, value: '366' }
+            - { name: ARCHIVE_CASE_SEARCH_MAX_RANGE_DAYS, value: '3650' }
+            - { name: ARCHIVE_RETENTION_POLICIES_MAX_PER_ORG, value: '50' }
+            - { name: ARCHIVE_HOLDS_MAX_ACTIVE_PER_ORG, value: '100' }
+            - { name: ARCHIVE_CASES_MAX_OPEN_PER_ORG, value: '200' }
+            - { name: ARCHIVE_CASE_MAX_CUSTODIANS, value: '1000' }
+            - { name: ARCHIVE_CASE_MAX_ACTIVE_SEARCHES, value: '3' }
+            - { name: ARCHIVE_REVIEW_MAX_ITEMS, value: '500' }
+            # D13 (step AI-6): the eDiscovery export lifetime stated in the export confirmation card;
+            # the shared ConfigMap key, so it always equals the archive-jobs value.
+            - name: ARCHIVE_EXPORT_TTL_HOURS
+              valueFrom:
+                configMapKeyRef: { name: email-gateway-config, key: ARCHIVE_EXPORT_TTL_HOURS }
+            # ---- AI assistant (steps AI-1..AI-6; docs/deployment/assistant.md) ----
+            # Only this Deployment enables the assistant: turns, SSE streams, model calls, the
+            # assistant routes (the api-assistant Ingress and the portal BFF split route
+            # /api/v1/assistant/* here) and the report-job consumer. The api Deployment keeps every
+            # ASSISTANT_* key unset (assistant off).
+            - { name: ASSISTANT_ENABLED, value: 'true' }
+            - { name: ASSISTANT_PROVIDER, value: anthropic }
+            - { name: ASSISTANT_MODEL, value: claude-opus-5-5 }
+            - { name: ASSISTANT_EFFORT, value: low }
+            # LLM credentials (Secret email-gateway-assistant-llm, mounted in this Deployment only;
+            # never in the api Deployment). The OpenAI key is optional (an OpenAI primary or
+            # fallback); Azure OpenAI uses ASSISTANT_AZURE_OPENAI_* set by the overlay.
+            - {
+                name: ASSISTANT_ANTHROPIC_API_KEY_FILE,
+                value: /var/run/secrets/assistant-llm/anthropic-api-key,
+              }
+            - name: ASSISTANT_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-assistant-llm, key: openai-api-key, optional: true }
+            # D6 (ADR-0097): the platform secondary provider; none by default. To enable, an
+            # overlay sets ASSISTANT_FALLBACK_PROVIDER/ASSISTANT_FALLBACK_MODEL and the provider's
+            # key, and the component's egress patch lists that provider's ranges.
+            - { name: ASSISTANT_FALLBACK_PROVIDER, value: none }
+            - { name: ASSISTANT_TIMEOUT_MS, value: '30000' }
+            - { name: ASSISTANT_TURN_DEADLINE_MS, value: '90000' }
+            - { name: ASSISTANT_TOOL_TIMEOUT_MS, value: '15000' }
+            - { name: ASSISTANT_MAX_CONCURRENT_TURNS, value: '20' }
+            - { name: ASSISTANT_TURNS_PER_USER_PER_MINUTE, value: '6' }
+            - { name: ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT, value: '1000000' }
+            - { name: ASSISTANT_TENANT_DAILY_TOKENS_MAX, value: '5000000' }
+            - { name: ASSISTANT_PLATFORM_DAILY_TOKENS, value: '0' }
+            - { name: ASSISTANT_BREAKER_THRESHOLD, value: '5' }
+            - { name: ASSISTANT_BREAKER_RESET_MS, value: '60000' }
+            # Tool calls go through the api Service (loopback to the api pods, ordinary requests
+            # under the api's guards, rate limits and HPA), so these LLM-holding pods need no route
+            # to most backends (D10).
+            - { name: ASSISTANT_LOOPBACK_URL, value: http://api.email-gateway.svc.cluster.local }
+            # Retention purge, stale-turn sweeper and report-job expiry sweep run here.
+            - { name: ASSISTANT_BACKGROUND_JOBS_ENABLED, value: 'true' }
+            # D5 (ADR-0096): reports longer than 7 days run as background jobs consumed here as
+            # the role user eg-assistant (topology v16: reads assistant.reports, publishes its
+            # retry and dead-letter hops only).
+            - { name: ASSISTANT_REPORT_JOBS_ENABLED, value: 'true' }
+            - { name: ASSISTANT_REPORT_SYNC_MAX_HOURS, value: '168' }
+            - { name: ASSISTANT_REPORT_JOB_TTL_SECONDS, value: '1800' }
+            - { name: ASSISTANT_REPORT_JOBS_CONSUMER, value: 'true' }
+            - { name: ASSISTANT_REPORT_JOB_CONCURRENCY, value: '2' }
+            - {
+                name: RABBITMQ_ASSISTANT_URL_FILE,
+                value: /var/run/secrets/gateway/rabbitmq-assistant-url,
+              }
+            # D7 (ADR-0097, I27): tenant-supplied provider keys; the platform gate is off by
+            # default. The encryption key (64 hex, Secret email-gateway-assistant-tenant-key,
+            # mounted in this Deployment only) must exist even while the gate is off; the previous
+            # key (rotation, decryption only) is optional.
+            - { name: ASSISTANT_TENANT_KEYS_ENABLED, value: 'false' }
+            - {
+                name: ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_FILE,
+                value: /var/run/secrets/assistant-tenant-key/key,
+              }
+            - name: ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  { name: email-gateway-assistant-tenant-key, key: previous-key, optional: true }
+            - { name: ASSISTANT_TENANT_KEY_VALIDATION_TIMEOUT_MS, value: '10000' }
+            # D3/D4: pseudonym cap and content search bounds.
+            - { name: ASSISTANT_PSEUDONYMS_MAX_PER_CONVERSATION, value: '5000' }
+            - { name: ASSISTANT_SEARCH_SCAN_MAX_MESSAGES, value: '20000' }
+            - { name: ASSISTANT_SEARCH_TIMEOUT_MS, value: '3000' }
+          volumeMounts:
+            - { name: secrets, mountPath: /var/run/secrets/gateway, readOnly: true }
+            - { name: dlp-evidence-key, mountPath: /var/run/secrets/dlp-evidence, readOnly: true }
+            - {
+                name: quarantine-download-key,
+                mountPath: /var/run/secrets/quarantine-download,
+                readOnly: true,
+              }
+            - { name: api-cursor-key, mountPath: /var/run/secrets/api-cursor, readOnly: true }
+            - {
+                name: webhook-secret-key,
+                mountPath: /var/run/secrets/webhook-secret-key,
+                readOnly: true,
+              }
+            - {
+                name: api-trusted-forwarder,
+                mountPath: /var/run/secrets/api-trusted-forwarder,
+                readOnly: true,
+              }
+            - {
+                name: provider-credential-key,
+                mountPath: /var/run/secrets/provider-credential-key,
+                readOnly: true,
+              }
+            - {
+                name: journal-intake-address,
+                mountPath: /var/run/secrets/journal-intake-address,
+                readOnly: true,
+              }
+            - {
+                name: provider-impact-token-key,
+                mountPath: /var/run/secrets/provider-impact-token-key,
+                readOnly: true,
+              }
+            - {
+                name: provider-route-token-key,
+                mountPath: /var/run/secrets/provider-route-token-key,
+                readOnly: true,
+              }
+            - {
+                name: archive-root-key,
+                mountPath: /var/run/secrets/archive-root-key,
+                readOnly: true,
+              }
+            - {
+                name: archive-download-token,
+                mountPath: /var/run/secrets/archive-download-token,
+                readOnly: true,
+              }
+            - { name: archive-search, mountPath: /var/run/secrets/archive-search, readOnly: true }
+            - {
+                name: archive-export-signing,
+                mountPath: /var/run/secrets/archive-export-signing,
+                readOnly: true,
+              }
+            - { name: assistant-llm, mountPath: /var/run/secrets/assistant-llm, readOnly: true }
+            - {
+                name: assistant-tenant-key,
+                mountPath: /var/run/secrets/assistant-tenant-key,
+                readOnly: true,
+              }
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: secrets
+          secret: { secretName: email-gateway-secrets }
+        - name: dlp-evidence-key
+          secret:
+            secretName: email-gateway-dlp-evidence-key
+            items: [{ key: key, path: key }]
+        - name: quarantine-download-key
+          secret:
+            secretName: email-gateway-quarantine-download-key
+            items: [{ key: key, path: key }]
+        - name: api-cursor-key
+          secret:
+            secretName: email-gateway-api-cursor-key
+            items: [{ key: key, path: key }]
+        - name: webhook-secret-key
+          secret:
+            secretName: email-gateway-webhook-secret-key
+            items: [{ key: key, path: key }]
+        - name: api-trusted-forwarder
+          secret:
+            secretName: email-gateway-api-trusted-forwarder
+            items: [{ key: token, path: token }]
+        # Step 8.2: the credential key (the api encrypts only), the impact-token key (api only)
+        # and the route-token key (api and delivery-worker).
+        - name: provider-credential-key
+          secret:
+            secretName: email-gateway-provider-credential-key
+            items: [{ key: key, path: key }]
+        - name: provider-impact-token-key
+          secret:
+            secretName: email-gateway-provider-impact-token-key
+            items: [{ key: key, path: key }]
+        - name: provider-route-token-key
+          secret:
+            secretName: email-gateway-provider-route-token-key
+            items: [{ key: key, path: key }]
+        # Step 8.6: the journal intake address secret (api only).
+        - name: journal-intake-address
+          secret:
+            secretName: email-gateway-journal-intake-address-secret
+            items: [{ key: secret, path: secret }]
+        # Step 8.1: only the items the api needs (never the export signing PRIVATE key, which only
+        # the archive-jobs Deployment mounts).
+        - name: archive-root-key
+          secret:
+            secretName: email-gateway-archive-root-key
+            items: [{ key: key, path: key }]
+        - name: archive-download-token
+          secret:
+            secretName: email-gateway-archive-download-token-key
+            items: [{ key: key, path: key }]
+        - name: archive-search
+          secret:
+            secretName: email-gateway-archive-search-api
+            items: [{ key: password, path: password }]
+        - name: archive-export-signing
+          secret:
+            secretName: email-gateway-archive-export-signing
+            items: [{ key: public-key, path: public-key }]
+        # Step AI-6 D10: the LLM credentials and the tenant-key encryption key, mounted in this
+        # Deployment only.
+        - name: assistant-llm
+          secret:
+            secretName: email-gateway-assistant-llm
+            items: [{ key: anthropic-api-key, path: anthropic-api-key }]
+        - name: assistant-tenant-key
+          secret:
+            secretName: email-gateway-assistant-tenant-key
+            items: [{ key: key, path: key }]
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-assistant
+  # Production: IRSA role limited to the assistant report objects in the mail bucket
+  # (S3_BUCKET_MAIL): s3:PutObject, s3:GetObject and s3:DeleteObjectVersion on
+  # arn:aws:s3:::<mail-bucket>/org/*/assistant/report/*, and s3:ListBucketVersions on the bucket
+  # with the condition s3:prefix like org/*/assistant/report/* (docs/deployment/assistant.md).
+  # Readiness also checks the bucket (HeadBucket), like the api.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-assistant
+  labels: { app.kubernetes.io/name: api-assistant }
+spec:
+  selector: { app.kubernetes.io/name: api-assistant }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Route split (D10, program risk R6): /api/v1/assistant/ on the api host goes to api-assistant. Both
+# Ingress objects share the host; ingress-nginx merges them and the longer Prefix wins, so every
+# other /api/v1/ path still reaches the api. SSE needs response buffering off, HTTP/1.1 to the
+# upstream and timeouts above the turn deadline (ASSISTANT_TURN_DEADLINE_MS ≤ 300 s); no
+# configuration snippets (they are disabled on the controller). Same TLS secret as the api Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-assistant
+  labels: { app.kubernetes.io/name: api-assistant }
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: '5'
+    nginx.ingress.kubernetes.io/proxy-buffering: 'off'
+    nginx.ingress.kubernetes.io/proxy-request-buffering: 'off'
+    nginx.ingress.kubernetes.io/proxy-http-version: '1.1'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '330'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '330'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.replace-per-environment.invalid]
+      secretName: api-tls
+  rules:
+    - host: api.replace-per-environment.invalid
+      http:
+        paths:
+          - path: /api/v1/assistant/
+            pathType: Prefix
+            backend: { service: { name: api-assistant, port: { name: http } } }
+---
+# CPU-based like the api. Turns are mostly waiting on the model, so CPU under-reports load: watch
+# assistant_active_turns against ASSISTANT_MAX_CONCURRENT_TURNS per pod (503 assistant_busy
+# beyond); with a Prometheus adapter an environment can add it as a Pods metric (target ~60 % of
+# ASSISTANT_MAX_CONCURRENT_TURNS).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-assistant
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api-assistant }
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 60 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-assistant
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: api-assistant }
+---
+# Ingress from the ingress controller (the api-assistant Ingress), the admin portal BFF
+# (API_ASSISTANT_INTERNAL_URL) and Prometheus (/metrics), all on the http port 3000 (the kubelet's
+# probes are not subject to policies). Egress: the MySQL writer and reader, Redis, RabbitMQ
+# (eg-assistant), cluster DNS, OTLP and the api pods (loopback tool calls through the api Service,
+# port 80 -> 3000). HTTPS to the LLM providers and S3 is NOT in the base: the component
+# components/assistant-llm-egress adds it as ipBlocks of the configured endpoints only (no
+# 0.0.0.0/0), so the pod fails closed (readiness checks S3) until an environment sets its ranges.
+# The CIDRs are the managed services' subnets: replace per environment.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-assistant
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: api-assistant }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: ingress-nginx }
+      ports: [{ protocol: TCP, port: 3000 }]
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: admin-portal }
+      ports: [{ protocol: TCP, port: 3000 }]
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: prometheus }
+      ports: [{ protocol: TCP, port: 3000 }]
+  egress:
+    # MySQL writer and reader endpoints (RDS/Aurora subnet).
+    - to: [{ ipBlock: { cidr: 10.0.32.0/20 } }]
+      ports: [{ protocol: TCP, port: 3306 }]
+    # Redis (ElastiCache subnet): rate limits, budgets, breakers, turn locks.
+    - to: [{ ipBlock: { cidr: 10.0.48.0/20 } }]
+      ports: [{ protocol: TCP, port: 6379 }]
+    # RabbitMQ (Amazon MQ subnet): the report-job consumer.
+    - to: [{ ipBlock: { cidr: 10.0.64.0/20 } }]
+      ports: [{ protocol: TCP, port: 5671 }, { protocol: TCP, port: 5672 }]
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+    # OTLP traces / logs to the collector.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports: [{ protocol: TCP, port: 4318 }]
+    # Loopback tool calls and report-job reads: the api Service (port 80) selects the api pods,
+    # policies match the pod port after Service translation.
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: api }
+      ports: [{ protocol: TCP, port: 3000 }]

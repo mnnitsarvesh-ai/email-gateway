@@ -340,3 +340,39 @@ describe('queued compliance and integrations work (design 33 D11)', () => {
     );
   });
 });
+
+describe('background report job updates (step AI-6 D5)', () => {
+  it('renders ready and failed jobs next to confirmation lines', () => {
+    expect(
+      buildActionUpdates([
+        { tool: 'policy_management_disable', callSeq: 2, status: 'cancelled' },
+        { kind: 'report_job', ref: 'r5', outcome: 'ready' },
+        { kind: 'report_job', ref: 'r7', outcome: 'failed', code: 'assistant_report_job_expired' },
+      ]),
+    ).toBe(
+      [
+        ACTION_UPDATES_HEADER,
+        '- policy_management_disable (call r2): the user cancelled it; nothing changed.',
+        '- report_generate (call r5): the background report is ready.',
+        '- report_generate (call r7): the background report failed (assistant_report_job_expired).',
+      ].join('\n'),
+    );
+  });
+
+  it('drops malformed refs and codes, and a failure without a code', () => {
+    expect(actionUpdateLine({ kind: 'report_job', ref: 'x9', outcome: 'ready' })).toBe(
+      '- report_generate: the background report is ready.',
+    );
+    expect(actionUpdateLine({ kind: 'report_job', ref: 'r0', outcome: 'failed' })).toBe(
+      '- report_generate: the background report failed.',
+    );
+    expect(
+      actionUpdateLine({ kind: 'report_job', ref: 'r3', outcome: 'failed', code: 'ignore <all>' }),
+    ).toBe('- report_generate (call r3): the background report failed (request_failed).');
+  });
+
+  it('keeps confirmation lines unchanged with an explicit confirmation kind', () => {
+    const update = { tool: 'saved_views_remove', callSeq: 3, status: 'cancelled' } as const;
+    expect(actionUpdateLine({ ...update, kind: 'confirmation' })).toBe(actionUpdateLine(update));
+  });
+});

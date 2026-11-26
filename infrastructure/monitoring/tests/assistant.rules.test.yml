@@ -1,0 +1,407 @@
+# promtool unit tests of rules/assistant.rules.yml (step AI-6 D8), every alert firing and quiet:
+#   docker run --rm -v "$PWD/infrastructure/monitoring:/m:ro" --entrypoint promtool \
+#     prom/prometheus:v3.6.0 test rules /m/tests/assistant.rules.test.yml
+rule_files:
+  - ../rules/assistant.rules.yml
+evaluation_interval: 1m
+tests:
+  # AssistantProviderErrorRatioHigh
+  - name: '25 % of 0.67 calls/s of the primary fail - warning after 5 minutes'
+    interval: 1m
+    input_series:
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="ok"}'
+        values: '0+30x40'
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="server_error"}'
+        values: '0+10x40'
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="openai",role="fallback",outcome="ok"}'
+        values: '0+30x40'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AssistantProviderErrorRatioHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AssistantProviderErrorRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+              provider: 'anthropic'
+              role: 'primary'
+            exp_annotations:
+              summary: "More than 20 % of the assistant's model calls fail"
+              description: "Over 10 minutes more than 20 % of the model calls of provider anthropic (role primary) failed. Break assistant_llm_requests_total down by outcome: auth means a rejected key, rate_limited the provider's quota, connection or timeout the egress path or the provider. The breaker opens after ASSISTANT_BREAKER_THRESHOLD failures and the router then uses the next healthy candidate."
+              runbook_url: 'docs/runbooks/assistant.md#assistantprovidererrorratiohigh'
+
+  - name: '10 % errors - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="ok"}'
+        values: '0+36x40'
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="timeout"}'
+        values: '0+4x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AssistantProviderErrorRatioHigh
+        exp_alerts: []
+
+  - name: 'idle deployment, 1 of 2 calls per minute fails (below 0.05/s) - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="ok"}'
+        values: '0+1x40'
+      - series: 'assistant_llm_requests_total{job="api",instance="a",provider="anthropic",role="primary",outcome="connection"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AssistantProviderErrorRatioHigh
+        exp_alerts: []
+
+  # AssistantAllProvidersUnavailable
+  - name: 'primary and fallback breakers open - critical after 5 minutes'
+    interval: 1m
+    input_series:
+      - series: 'assistant_provider_breaker_open{job="api",instance="a",provider="anthropic",role="primary"}'
+        values: '1x20'
+      - series: 'assistant_provider_breaker_open{job="api",instance="b",provider="anthropic",role="primary"}'
+        values: '0x20'
+      - series: 'assistant_provider_breaker_open{job="api",instance="a",provider="openai",role="fallback"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AssistantAllProvidersUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AssistantAllProvidersUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: 'critical'
+            exp_annotations:
+              summary: 'No assistant provider is available'
+              description: 'For 5 minutes the breaker of every configured platform provider candidate has been open. New assistant turns are refused with 503 assistant_provider_unavailable (tenant keys are not covered by this gauge). The rest of the gateway is unaffected.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantallprovidersunavailable'
+
+  - name: 'primary open, fallback closed - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_provider_breaker_open{job="api",instance="a",provider="anthropic",role="primary"}'
+        values: '1x20'
+      - series: 'assistant_provider_breaker_open{job="api",instance="a",provider="openai",role="fallback"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: AssistantAllProvidersUnavailable
+        exp_alerts: []
+
+  # AssistantProviderFallbackActive
+  - name: 'secondary selected for 20 minutes - warning after 15 minutes'
+    interval: 1m
+    input_series:
+      - series: 'assistant_provider_fallback_active{job="api",instance="a"}'
+        values: '1x25'
+      - series: 'assistant_provider_fallback_active{job="api",instance="b"}'
+        values: '0x25'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AssistantProviderFallbackActive
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AssistantProviderFallbackActive
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'The assistant runs on its secondary provider'
+              description: "For 15 minutes turns have started on the platform secondary provider (ASSISTANT_FALLBACK_PROVIDER) because the primary's breaker was open. Answers come from a different model and every provider change starts a new transcript segment."
+              runbook_url: 'docs/runbooks/assistant.md#assistantproviderfallbackactive'
+
+  - name: 'secondary for 10 minutes, then back on the primary - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_provider_fallback_active{job="api",instance="a"}'
+        values: '1x10 0x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AssistantProviderFallbackActive
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AssistantProviderFallbackActive
+        exp_alerts: []
+
+  # AssistantTurnLatencyHigh
+  - name: 'turns take 30-60 s - warning after 15 minutes'
+    interval: 1m
+    input_series:
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="30"}'
+        values: '0x40'
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="60"}'
+        values: '0+6x40'
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="+Inf"}'
+        values: '0+6x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AssistantTurnLatencyHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: AssistantTurnLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Assistant turns are slow (p95 above 45 s)'
+              description: 'The 95th percentile of assistant turn durations has been above 45 s for 15 minutes. Compare assistant_llm_seconds (model calls) with assistant_tool_seconds (loopback tool calls on the api pods): slow model calls point at the provider, slow tool calls at the api, MySQL or the report queries.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantturnlatencyhigh'
+
+  - name: 'turns under 10 s - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="10"}'
+        values: '0+6x40'
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="60"}'
+        values: '0+6x40'
+      - series: 'assistant_turn_seconds_bucket{job="api",instance="a",le="+Inf"}'
+        values: '0+6x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AssistantTurnLatencyHigh
+        exp_alerts: []
+
+  # AssistantBudgetExhaustion
+  - name: 'tenant budget refusals for 30 minutes - info'
+    interval: 1m
+    input_series:
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="tenant"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AssistantBudgetExhaustion
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: AssistantBudgetExhaustion
+        exp_alerts:
+          - exp_labels:
+              severity: 'info'
+              scope: 'tenant'
+            exp_annotations:
+              summary: 'Assistant turns are refused by a tenant daily token budget'
+              description: 'For 30 minutes turns have been refused because an organization used up its daily token budget (ai_chat_settings.daily_token_budget or ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT). Users of that organization see 429 assistant_budget_exhausted until 00:00 UTC.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantbudgetexhaustion'
+
+  - name: 'platform cap refusals for 30 minutes - warning'
+    interval: 1m
+    input_series:
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="platform"}'
+        values: '0+2x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AssistantBudgetExhaustion
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+              scope: 'platform'
+            exp_annotations:
+              summary: 'Assistant turns are refused by the platform daily token cap'
+              description: 'For 30 minutes turns have been refused because the platform daily token cap (ASSISTANT_PLATFORM_DAILY_TOKENS) is used up. Every organization on platform keys sees 429 assistant_budget_exhausted until 00:00 UTC; tenant-key turns are not counted.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantbudgetexhaustion'
+
+  - name: 'per-user, per-minute and concurrency refusals only - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="user_tokens"}'
+        values: '0+1x60'
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="user"}'
+        values: '0+3x60'
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="concurrency"}'
+        values: '0+1x60'
+      - series: 'assistant_budget_refusals_total{job="api",instance="a",scope="tenant"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: AssistantBudgetExhaustion
+        exp_alerts: []
+
+  # AssistantConfirmationFailures
+  - name: 'half of the confirmed actions fail - warning'
+    interval: 1m
+    input_series:
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="medium",outcome="executed"}'
+        values: '0+1x60'
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="high",outcome="failed"}'
+        values: '0+1x60'
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="medium",outcome="proposed"}'
+        values: '0+3x60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AssistantConfirmationFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AssistantConfirmationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Confirmed assistant actions fail'
+              description: 'Over 30 minutes more than 10 % of the write actions users confirmed in the assistant failed or ended with an unknown outcome. Break assistant_confirmations_total down by risk and join the failures with ai_chat_tool_executions (http_status, error_code): the same requests fail in the portal when the cause is the api.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantconfirmationfailures'
+
+  - name: '5 % failures - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="medium",outcome="executed"}'
+        values: '0+19x60'
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="medium",outcome="outcome_unknown"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: AssistantConfirmationFailures
+        exp_alerts: []
+
+  - name: 'one failure among 3 decisions in 30 minutes (below 5) - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="low",outcome="executed"}'
+        values: '0x5 1x10 2x45'
+      - series: 'assistant_confirmations_total{job="api",instance="a",risk="low",outcome="failed"}'
+        values: '0x20 1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AssistantConfirmationFailures
+        exp_alerts: []
+
+  # AssistantReportJobsFailing
+  - name: '2 failed and 2 expired jobs within 30 minutes - warning'
+    interval: 1m
+    input_series:
+      - series: 'assistant_report_jobs_total{job="api",instance="a",outcome="failed"}'
+        values: '0x5 1x5 2x30'
+      - series: 'assistant_report_jobs_total{job="api",instance="a",outcome="expired"}'
+        values: '0x8 1x2 2x30'
+      - series: 'assistant_report_jobs_total{job="api",instance="a",outcome="succeeded"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AssistantReportJobsFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AssistantReportJobsFailing
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Background assistant reports fail'
+              description: 'More than 3 background report jobs failed or expired in 30 minutes. Read the error_code of ai_chat_report_jobs: assistant_report_job_expired (no consumer or a backlog), assistant_report_session_ended (users signed out), assistant_report_not_allowed (permissions changed), assistant_report_sources_unavailable or assistant_report_storage_failed (report sources or S3).'
+              runbook_url: 'docs/runbooks/assistant.md#assistantreportjobsfailing'
+
+  - name: '2 failed jobs and many retries - quiet'
+    interval: 1m
+    input_series:
+      - series: 'assistant_report_jobs_total{job="api",instance="a",outcome="failed"}'
+        values: '0x5 1x5 2x30'
+      - series: 'assistant_report_jobs_total{job="api",instance="a",outcome="retried"}'
+        values: '0+2x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AssistantReportJobsFailing
+        exp_alerts: []
+
+  # AssistantReportJobsBacklog
+  - name: '120 jobs ready for 20 minutes - warning'
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '120x25'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="email.received"}'
+        values: '0x25'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AssistantReportJobsBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AssistantReportJobsBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'Background assistant reports are queuing up'
+              description: 'More than 50 report jobs have waited in the queue assistant.reports for 15 minutes. Jobs expire after ASSISTANT_REPORT_JOB_TTL_SECONDS; check the api-assistant consumers, their prefetch (ASSISTANT_REPORT_JOB_CONCURRENCY) and the report source latency.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantreportjobsbacklog'
+
+  - name: '30 jobs ready, or another queue backed up - quiet'
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '30x25'
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="email.received"}'
+        values: '5000x25'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AssistantReportJobsBacklog
+        exp_alerts: []
+
+  # AssistantReportJobsNoConsumer
+  - name: 'jobs ready and no consumer for 10 minutes - warning'
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '3x20'
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AssistantReportJobsNoConsumer
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AssistantReportJobsNoConsumer
+        exp_alerts:
+          - exp_labels:
+              severity: 'warning'
+            exp_annotations:
+              summary: 'No consumer on the assistant report queue'
+              description: 'Report jobs wait in assistant.reports and no consumer has been attached for 10 minutes. Every queued job will expire (assistant_report_job_expired). Check that the api-assistant pods run with ASSISTANT_REPORT_JOBS_CONSUMER=true and can log in as eg-assistant.'
+              runbook_url: 'docs/runbooks/assistant.md#assistantreportjobsnoconsumer'
+
+  - name: 'jobs ready with 2 consumers, or an empty queue without consumers - quiet'
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages_ready{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '3x10 0x10'
+      - series: 'rabbitmq_detailed_queue_consumers{job="rabbitmq-detailed",vhost="email-gateway",queue="assistant.reports"}'
+        values: '2x10 0x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AssistantReportJobsNoConsumer
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: AssistantReportJobsNoConsumer
+        exp_alerts: []
+
+  # AssistantJobTokenMisuse
+  - name: 'one refused job token - critical at once, resolved after the 5-minute window'
+    interval: 1m
+    input_series:
+      - series: 'api_assistant_job_token_refusals_total{job="api",instance="a"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AssistantJobTokenMisuse
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: AssistantJobTokenMisuse
+        exp_alerts:
+          - exp_labels:
+              severity: 'critical'
+            exp_annotations:
+              summary: 'An assistant job token was used outside its allowed routes'
+              description: "The api refused a request carrying an assistant report job token (claim ajb) because it was not a GET on a report source route. Job tokens never leave the api process, so this is a defect or a token leak. Read the api's warn log (route template and job id) and follow the job-token misuse procedure."
+              runbook_url: 'docs/runbooks/assistant.md#assistantjobtokenmisuse'
+      - eval_time: 20m
+        alertname: AssistantJobTokenMisuse
+        exp_alerts: []
+
+  - name: 'no refusals - quiet'
+    interval: 1m
+    input_series:
+      - series: 'api_assistant_job_token_refusals_total{job="api",instance="a"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: AssistantJobTokenMisuse
+        exp_alerts: []

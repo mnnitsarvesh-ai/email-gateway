@@ -222,9 +222,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/30-ai-chat-identity-tenant-admin.md D8): 422; plus the report read of step
     // AI-R (docs/plan/steps/31-ai-chat-reports.md §4.1): 423; plus the four single-item reads of
     // step AI-4 (docs/plan/steps/32-ai-chat-security-operations.md D8): 427; plus the capture-issue
-    // read of step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8): 428, all under
-    // /api/v1.
-    expect(count).toBe(428);
+    // read of step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8): 428; plus the
+    // 11 hardening operations of step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md
+    // §4.1, contracts §35.6): 439, all under /api/v1.
+    expect(count).toBe(439);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -1464,7 +1465,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     ).toContain('Step 8.5');
   });
 
-  it('documents the 15 step AI-1, 3 step AI-2 and 1 step AI-R assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
+  it('documents the 15 step AI-1, 3 step AI-2, 1 step AI-R and 11 step AI-6 assistant operations with their ids, permissions, classes, cursors, user-only security and error codes (§4.1)', () => {
     const ops = operations(doc).filter((op) => op.key.includes(' /api/v1/assistant'));
     const expected: Record<string, [string, string, string | null, 'v1' | null]> = {
       'GET /api/v1/assistant/status': [
@@ -1583,6 +1584,73 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
         null,
         null,
       ],
+      // Step AI-6 §4.1 (contracts §35.6).
+      'PUT /api/v1/assistant/settings/provider-key': [
+        'AssistantProviderKeyController_set_v1',
+        'assistant:configure',
+        'sensitive',
+        null,
+      ],
+      'DELETE /api/v1/assistant/settings/provider-key': [
+        'AssistantProviderKeyController_remove_v1',
+        'assistant:configure',
+        'sensitive',
+        null,
+      ],
+      'POST /api/v1/assistant/settings/provider-key/validate': [
+        'AssistantProviderKeyController_validate_v1',
+        'assistant:configure',
+        'sensitive',
+        null,
+      ],
+      'GET /api/v1/assistant/search': [
+        'AssistantSearchController_search_v1',
+        'assistant:use',
+        'expensive',
+        'v1',
+      ],
+      'PUT /api/v1/assistant/messages/{messageId}/feedback': [
+        'AssistantFeedbackController_set_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'DELETE /api/v1/assistant/messages/{messageId}/feedback': [
+        'AssistantFeedbackController_remove_v1',
+        'assistant:use',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/admin/usage/users': [
+        'AssistantAdminController_usageByUser_v1',
+        'assistant:configure',
+        null,
+        'v1',
+      ],
+      'GET /api/v1/assistant/admin/feedback': [
+        'AssistantAdminController_feedback_v1',
+        'assistant:configure',
+        null,
+        'v1',
+      ],
+      'GET /api/v1/assistant/admin/conversations': [
+        'AssistantAdminAuditController_conversations_v1',
+        'audit:read',
+        null,
+        'v1',
+      ],
+      'GET /api/v1/assistant/admin/conversations/{conversationId}': [
+        'AssistantAdminAuditController_conversation_v1',
+        'audit:read',
+        null,
+        null,
+      ],
+      'GET /api/v1/assistant/admin/executions': [
+        'AssistantAdminAuditController_executions_v1',
+        'audit:read',
+        null,
+        'v1',
+      ],
     };
     expect(ops.map((op) => op.key).sort()).toEqual(Object.keys(expected).sort());
     for (const [key, [operationId, permission, rateClass, cursor]] of Object.entries(expected)) {
@@ -1648,6 +1716,25 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'report_recipient_not_allowed',
       'report_needs_organization',
       'assistant-report-view/1',
+      // Step AI-6 §4.1 (contracts §35.6).
+      'assistant_tenant_keys_disabled',
+      'assistant_tenant_key_rejected',
+      'assistant_tenant_key_unverified',
+      'assistant_tenant_key_not_found',
+      'assistant_tenant_key_invalid',
+      'assistant_message_not_found',
+      'assistant_feedback_not_allowed',
+      'assistant_search_timeout',
+      'assistant_admin_conversation_not_found',
+      'assistant_report_not_ready',
+      'assistant_unknown_placeholder',
+      'pseudonymized',
+      'keySource',
+      'fallbackActive',
+      'userDailyTokenBudget',
+      'tenantKeysOffered',
+      'effectiveLimits',
+      'tenantKeyFallbackToPlatform',
     ]) {
       expect(docs, code).toContain(code);
     }
@@ -1655,6 +1742,62 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(
       new Map((doc.tags ?? []).map((t) => [t.name, t.description ?? ''])).get('assistant'),
     ).toContain('Step AI-1');
+  });
+
+  it('documents the step AI-6 changed views and keeps the tenant key write-only (§35.6, I27)', () => {
+    const op = (path: string, method: string): Record<string, unknown> =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    const json = (value: unknown): string => JSON.stringify(value);
+    // The three provider-key routes need an MFA session (documented 403 `mfa_required`).
+    for (const [path, method] of [
+      ['/api/v1/assistant/settings/provider-key', 'put'],
+      ['/api/v1/assistant/settings/provider-key', 'delete'],
+      ['/api/v1/assistant/settings/provider-key/validate', 'post'],
+    ] as const) {
+      expect(json(op(path, method).responses), `${method} ${path}`).toContain('mfa_required');
+    }
+    // `apiKey`: write-only, a password-format string, never an example anywhere.
+    const body = op('/api/v1/assistant/settings/provider-key', 'put').requestBody as {
+      content: Record<string, { schema: { properties: Record<string, Record<string, unknown>> } }>;
+    };
+    const apiKey = body.content['application/json']!.schema.properties.apiKey!;
+    expect(apiKey).toMatchObject({
+      type: 'string',
+      writeOnly: true,
+      minLength: 20,
+      maxLength: 512,
+    });
+    expect(apiKey.example).toBeUndefined();
+    expect(apiKey.examples).toBeUndefined();
+    const whole = json(doc);
+    expect(whole).not.toMatch(/"apiKey":"[^"]*"/);
+    expect(whole).not.toContain('not-a-secret');
+    // Changed views (additive).
+    const settings = json(op('/api/v1/assistant/settings', 'get').responses);
+    for (const field of [
+      'pseudonymized',
+      'userDailyTokenBudget',
+      'useTenantKey',
+      'tenantKeyFallbackToPlatform',
+      'tenantKey',
+      'tenantKeysOffered',
+      'effectiveLimits',
+    ]) {
+      expect(settings, field).toContain(field);
+    }
+    const status = json(op('/api/v1/assistant/status', 'get').responses);
+    for (const field of ['keySource', 'fallbackActive', 'dataSharing']) {
+      expect(status, field).toContain(field);
+    }
+    expect(
+      json(op('/api/v1/assistant/conversations/{conversationId}/messages', 'get').responses),
+    ).toContain('"feedback"');
+    const report = json(op('/api/v1/assistant/reports/{reportId}', 'get').responses);
+    expect(report).toContain('"job"');
+    expect(report).toContain('queued');
+    expect(json(op('/api/v1/assistant/conversations/{conversationId}/turns', 'post'))).toContain(
+      'queued',
+    );
   });
 
   it('matches the committed policy catalogue snapshot docs/api/policy-catalog.json (step 7.3 B1)', async () => {

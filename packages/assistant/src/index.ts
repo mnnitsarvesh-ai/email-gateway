@@ -1,7 +1,8 @@
 // @email-gateway/assistant: providers, prompt, context, results and the tool registry of the AI
-// assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091/0092) and the reports of step
-// AI-R (docs/plan/steps/31-ai-chat-reports.md, ADR-0095). Only apps/api depends on
-// this package; the portal may import its types.
+// assistant (docs/plan/steps/28-ai-chat-management.md, ADR-0091/0092), the reports of step
+// AI-R (docs/plan/steps/31-ai-chat-reports.md, ADR-0095) and the hardening of step AI-6
+// (docs/plan/steps/34-ai-chat-hardening-operations.md: pseudonymization, provider routing, the
+// capability report). Only apps/api depends on this package; the portal may import its types.
 export * from './providers/types';
 export * from './providers/meta-tools';
 export * from './providers/anthropic';
@@ -11,6 +12,7 @@ export * from './providers/factory';
 export * from './providers/breaker';
 export * from './providers/prices';
 export * from './providers/retry';
+export * from './providers/routing';
 export * from './prompt/system';
 export * from './context/window';
 export * from './results/types';
@@ -41,4 +43,10 @@ export {
   REPORT_SEND_EMAIL_TESTED_BY,
 } from './registry/native';
 export * from './reports';
+export * from './pseudonym';
+export {
+  CAPABILITY_REPORT_PREAMBLE,
+  CAPABILITY_REPORT_TITLE,
+  renderCapabilityReport,
+} from './registry/report';
 export { API_PREFIX, phaseIndex, toolNameOf } from './registry/build';

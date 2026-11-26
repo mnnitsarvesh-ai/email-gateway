@@ -14,7 +14,11 @@ import { HttpException } from '@nestjs/common';
 import { createRequire } from 'node:module';
 import {
   ALL_TOOLS,
+  createProviderFromSpec,
   FakeProvider,
+  type FetchLike,
+  LlmError,
+  type LlmErrorReason,
   REPORT_CSP,
   REPORT_STYLE,
   type FakeProviderOptions,
@@ -25,6 +29,7 @@ import {
   type LlmToolResult,
   OPERATION_TOOLS,
   type OperationTool,
+  type ProviderSpec,
 } from '@email-gateway/assistant';
 import { S3Service, uuidv7 } from '@email-gateway/common';
 import {
@@ -84,8 +89,23 @@ export function assistantEnv(overrides: Record<string, string> = {}): Record<str
     ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT: '50000000',
     ASSISTANT_TENANT_DAILY_TOKENS_MAX: '50000000',
     ASSISTANT_PLATFORM_DAILY_TOKENS: '0',
+    // Step AI-6: no platform secondary, no tenant keys and no report-job consumer unless a suite
+    // asks for them (the local .env runs the consumer for the host-run api).
+    ASSISTANT_FALLBACK_PROVIDER: 'none',
+    ASSISTANT_FALLBACK_MODEL: '',
+    ASSISTANT_TENANT_KEYS_ENABLED: 'false',
+    ASSISTANT_REPORT_JOBS_CONSUMER: 'false',
     ...overrides,
   };
+}
+
+/**
+ * A scripted failure of a fake provider call (step AI-6 D6): the reason, and whether some text is
+ * streamed before it (`afterDelta`: a failure after output, which never switches providers).
+ */
+export interface FakeFailure {
+  reason: LlmErrorReason;
+  afterDelta?: boolean;
 }
 
 /**
@@ -97,14 +117,43 @@ export function assistantEnv(overrides: Record<string, string> = {}): Record<str
 export class HoldableFakeProvider implements LlmProvider {
   readonly id = 'fake' as const;
   readonly model: string;
-  private readonly inner: FakeProvider;
+  private readonly plain: FakeProvider;
+  private readonly adversarial: FakeProvider;
   private readonly gates: Array<() => void> = [];
+  /**
+   * Whether the adversarial (obedient) fake answers (tests only): starts as the app's `obedient`
+   * option; a suite may switch it for one describe block.
+   */
+  obedient: boolean;
+  /**
+   * Step AI-6 D3: rewrites the text of the last user entry the model receives before the fake
+   * reads it — stands for a model that invents or alters a placeholder (null = unchanged).
+   */
+  rewriteUser: ((text: string) => string) | null = null;
   /** Turns currently waiting at the gate. */
   holding = 0;
+  /**
+   * Step AI-6 D6: a scripted failure per call (null = answer normally). Lets a suite fail the
+   * platform primary always, only on a later round (after a tool ran) or after a delta.
+   */
+  failure: ((request: LlmRequest) => FakeFailure | null) | null = null;
+  /** Calls of `complete` (every round, incl. failed ones). */
+  calls = 0;
 
   constructor(options: FakeProviderOptions) {
-    this.inner = new FakeProvider(options);
-    this.model = this.inner.model;
+    this.plain = new FakeProvider({ ...options, obedient: false });
+    this.adversarial = new FakeProvider({ ...options, obedient: true });
+    this.obedient = options.obedient ?? false;
+    this.model = this.plain.model;
+  }
+
+  private get inner(): FakeProvider {
+    return this.obedient ? this.adversarial : this.plain;
+  }
+
+  /** The fake's probe (no network). */
+  probe(signal: AbortSignal): Promise<void> {
+    return this.inner.probe(signal);
   }
 
   userEntry(text: string): unknown[] {
@@ -124,7 +173,19 @@ export class HoldableFakeProvider implements LlmProvider {
     signal: AbortSignal,
     onDelta: (text: string) => void,
   ): Promise<LlmResponse> {
-    const transcript = request.transcript as readonly FakeTranscriptEntry[];
+    this.calls += 1;
+    const failure = this.failure?.(request) ?? null;
+    if (failure) {
+      if (failure.afterDelta) onDelta('Partial answer ');
+      throw new LlmError(failure.reason, { afterDelta: failure.afterDelta === true });
+    }
+    let transcript = request.transcript as readonly FakeTranscriptEntry[];
+    const rewrite = this.rewriteUser;
+    if (rewrite && transcript.at(-1)?.role === 'user') {
+      const entry = transcript.at(-1) as Extract<FakeTranscriptEntry, { role: 'user' }>;
+      transcript = [...transcript.slice(0, -1), { ...entry, text: rewrite(entry.text) }];
+      request = { ...request, transcript };
+    }
     const last = transcript.at(-1);
     if (last?.role === 'user' && /(^|\n)\/hold\s*$/.test(last.text)) {
       this.holding += 1;
@@ -155,31 +216,92 @@ export interface AssistantAppOptions extends IntegrationAppOptions {
   env?: Record<string, string>;
   /** Adversarial fake (tests only): follows instruction-shaped text in tool results. */
   obedient?: boolean;
+  /**
+   * Step AI-6 D6: a fake platform secondary (`ASSISTANT_FALLBACK_PROVIDER=fake`, model
+   * `FALLBACK_FAKE_MODEL`), available as `AssistantApp.fallback`.
+   */
+  fallback?: boolean;
+  /**
+   * Step AI-6 D7: the local fake `fetch` the real Anthropic/OpenAI provider classes of tenant keys
+   * use (never the network). Without it a tenant candidate is refused.
+   */
+  tenantFetch?: FetchLike;
 }
+
+/** The model label of the fake platform secondary (distinct from the primary's `fake`). */
+export const FALLBACK_FAKE_MODEL = 'fake-fallback';
+
+/** A spec the api asked the factory for (never the key). */
+export type BuiltSpec = Pick<ProviderSpec, 'role' | 'provider' | 'model' | 'organizationPublicId'>;
 
 export interface AssistantApp {
   ctx: IntegrationApp;
+  /** The platform primary (the fake, with a hold gate and scripted failures). */
   provider: HoldableFakeProvider;
+  /** The fake platform secondary (`fallback: true`), else null. */
+  fallback: HoldableFakeProvider | null;
+  /** Every spec the api built a provider for, in order (role, provider, model, organization). */
+  specs: BuiltSpec[];
 }
 
 /**
- * An integration app with the assistant on. The provider factory refuses anything but the fake
- * (and the result is checked again by `assertFakeProvider`).
+ * An integration app with the assistant on (step AI-6: the spec-based `LLM_PROVIDER_FACTORY` of
+ * WP3). Platform candidates are fakes only — the primary is a `HoldableFakeProvider`, the optional
+ * secondary another one — and a tenant candidate is the real Anthropic/OpenAI provider class over
+ * the suite's injected local `fetch` (`tenantFetch`); anything else is refused, so no suite can
+ * reach a real LLM or the internet (checked again by `assertFakeProvider`).
  */
 export async function createAssistantApp(options: AssistantAppOptions = {}): Promise<AssistantApp> {
   let provider: HoldableFakeProvider | undefined;
-  const factory: LlmProviderFactory = (config) => {
-    if (config.ASSISTANT_PROVIDER !== 'fake') {
+  let fallback: HoldableFakeProvider | null = null;
+  const specs: BuiltSpec[] = [];
+  const factory: LlmProviderFactory = (spec) => {
+    specs.push({
+      role: spec.role,
+      provider: spec.provider,
+      model: spec.model,
+      ...(spec.organizationPublicId !== undefined && {
+        organizationPublicId: spec.organizationPublicId,
+      }),
+    });
+    if (spec.role === 'tenant') {
+      if (!options.tenantFetch) {
+        throw new Error('a tenant provider needs the suite’s local fake fetch (tenantFetch)');
+      }
+      return createProviderFromSpec(spec, {
+        effort: 'medium',
+        refusalFallback: 'off',
+        timeoutMs: 10_000,
+        nodeEnv: spec.NODE_ENV,
+        fetch: options.tenantFetch,
+      });
+    }
+    if (spec.ASSISTANT_PROVIDER !== 'fake' || spec.provider !== 'fake') {
       throw new Error('assistant integration suites run the fake provider only');
     }
+    if (spec.role === 'fallback') {
+      fallback ??= new HoldableFakeProvider({
+        nodeEnv: spec.NODE_ENV,
+        model: spec.model,
+        obedient: options.obedient ?? false,
+      });
+      return fallback;
+    }
     provider ??= new HoldableFakeProvider({
-      nodeEnv: config.NODE_ENV,
+      nodeEnv: spec.NODE_ENV,
       model: 'fake',
       obedient: options.obedient ?? false,
     });
     return provider;
   };
-  const ctx = await createIntegrationApp(assistantEnv(options.env), {
+  const env = {
+    ...(options.fallback && {
+      ASSISTANT_FALLBACK_PROVIDER: 'fake',
+      ASSISTANT_FALLBACK_MODEL: FALLBACK_FAKE_MODEL,
+    }),
+    ...options.env,
+  };
+  const ctx = await createIntegrationApp(assistantEnv(env), {
     ...(options.imports && { imports: options.imports }),
     override: (builder) => {
       const next = builder.overrideProvider(LLM_PROVIDER_FACTORY).useValue(factory);
@@ -188,11 +310,17 @@ export async function createAssistantApp(options: AssistantAppOptions = {}): Pro
   });
   try {
     assertFakeProvider(ctx);
+    if (options.fallback) {
+      const candidates = ctx.get(AssistantProviderService).platformCandidates();
+      if (candidates.length !== 2 || fallback === null) {
+        throw new Error('the fake platform secondary was not built');
+      }
+    }
   } catch (error) {
     await ctx.close();
     throw error;
   }
-  return { ctx, provider: provider! };
+  return { ctx, provider: provider!, fallback, specs };
 }
 
 /** Guard (design §9, I8): the suite's assistant runs the deterministic fake provider. */
@@ -316,6 +444,11 @@ export interface SettingsInput {
   externalProcessingAcknowledged?: boolean;
   dailyTokenBudget?: number | null;
   retentionDays?: number;
+  /** Step AI-6 (absent = unchanged): D3 data sharing, D1 per-user budget, D7 tenant key use. */
+  dataSharing?: 'metadata' | 'pseudonymized';
+  userDailyTokenBudget?: number | null;
+  useTenantKey?: boolean;
+  tenantKeyFallbackToPlatform?: boolean;
 }
 
 /** `PUT /assistant/settings` from the current `rowVersion` (read first). */
@@ -332,7 +465,28 @@ export async function putSettings(
     externalProcessingAcknowledged: input.externalProcessingAcknowledged ?? true,
     dailyTokenBudget: input.dailyTokenBudget === undefined ? null : input.dailyTokenBudget,
     retentionDays: input.retentionDays ?? 30,
+    ...(input.dataSharing !== undefined && { dataSharing: input.dataSharing }),
+    ...(input.userDailyTokenBudget !== undefined && {
+      userDailyTokenBudget: input.userDailyTokenBudget,
+    }),
+    ...(input.useTenantKey !== undefined && { useTenantKey: input.useTenantKey }),
+    ...(input.tenantKeyFallbackToPlatform !== undefined && {
+      tenantKeyFallbackToPlatform: input.tenantKeyFallbackToPlatform,
+    }),
   });
+}
+
+/** `putSettings` that must succeed (step AI-6 fields included); returns the settings view. */
+export async function updateSettings(
+  ctx: IntegrationApp,
+  admin: Member,
+  input: SettingsInput,
+): Promise<Record<string, unknown>> {
+  const res = await putSettings(ctx, admin, input);
+  if (res.status !== 200) {
+    throw new Error(`assistant settings failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
+  return res.body as Record<string, unknown>;
 }
 
 /** The documented enablement: the platform feature, then the tenant setting (by `admin`). */

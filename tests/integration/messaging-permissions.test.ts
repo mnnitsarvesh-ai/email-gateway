@@ -320,10 +320,11 @@ const EXPECTED_TOPICS: Record<Role, TopicPermission[]> = {
       read: '^$',
     },
     // Step 5.2 P15 (v9): replay of email.policy.evaluate and email.notifications; step 5.3 Q27
-    // (v10): and of email.quarantine.
+    // (v10): and of email.quarantine; step AI-6 (v16): and of assistant.reports.
     {
       exchange: 'email.policy',
-      write: '^retry\\.email\\.(policy\\.evaluate|notifications|quarantine)\\.',
+      write:
+        '^retry\\.(email\\.(policy\\.evaluate|notifications|quarantine)|assistant\\.reports)\\.',
       read: '^$',
     },
     // Step 6.2 (v11): replay of email.webhooks (home exchange email.events), retry hops only.
@@ -503,6 +504,11 @@ describe('RabbitMQ role permissions on the real vhost', () => {
       policyWrite.test('retry.email.quarantine.org.1.mail.quarantine.release_requested.v1'),
     ).toBe(true);
     expect(policyWrite.test('retry.email.quarantines.org.1.x.v1')).toBe(false);
+    // v16 (step AI-6): assistant.reports is a replayable work queue; never its event key.
+    expect(
+      policyWrite.test('retry.assistant.reports.org.1.assistant.report.generate_requested.v1'),
+    ).toBe(true);
+    expect(policyWrite.test('org.1.assistant.report.generate_requested.v1')).toBe(false);
     const opsPermission = await api.get<{ write: string }>(
       `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
     );

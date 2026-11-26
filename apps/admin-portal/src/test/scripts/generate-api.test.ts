@@ -10,26 +10,40 @@ import {
 
 const snapshot = readFileSync(SNAPSHOT_PATH, 'utf8');
 
-describe('generate-api (design P7)', () => {
-  it('committed generated files match docs/api/openapi.json (drift check)', async () => {
-    expect(await check()).toEqual([]);
-  }, 120_000);
+/**
+ * Each check runs openapi-typescript over the whole snapshot (about 9.6 MB after step AI-6):
+ * about 30 s alone, several times that while the other portal test files run in parallel.
+ */
+const GENERATE_TIMEOUT_MS = 300_000;
 
-  it('detects drift when the snapshot changes', async () => {
-    const spec = JSON.parse(snapshot) as { paths: Record<string, Record<string, unknown>> };
-    spec.paths['/api/v1/drift-probe'] = {
-      get: {
-        operationId: 'DriftProbeController_get_v1',
-        tags: ['meta'],
-        responses: { '204': { description: '' } },
-      },
-    };
-    const drift = await check(JSON.stringify(spec));
-    expect(drift.map((d) => d.path.split('/').pop())).toEqual(
-      expect.arrayContaining(['schema.gen.ts', 'operations.gen.ts']),
-    );
-    expect(drift[0]?.summary).toMatch(/line\(s\) differ/);
-  }, 120_000);
+describe('generate-api (design P7)', () => {
+  it(
+    'committed generated files match docs/api/openapi.json (drift check)',
+    async () => {
+      expect(await check()).toEqual([]);
+    },
+    GENERATE_TIMEOUT_MS,
+  );
+
+  it(
+    'detects drift when the snapshot changes',
+    async () => {
+      const spec = JSON.parse(snapshot) as { paths: Record<string, Record<string, unknown>> };
+      spec.paths['/api/v1/drift-probe'] = {
+        get: {
+          operationId: 'DriftProbeController_get_v1',
+          tags: ['meta'],
+          responses: { '204': { description: '' } },
+        },
+      };
+      const drift = await check(JSON.stringify(spec));
+      expect(drift.map((d) => d.path.split('/').pop())).toEqual(
+        expect.arrayContaining(['schema.gen.ts', 'operations.gen.ts']),
+      );
+      expect(drift[0]?.summary).toMatch(/line\(s\) differ/);
+    },
+    GENERATE_TIMEOUT_MS,
+  );
 
   it('extracts the portal metadata of each operation', () => {
     const ops = extractOperations(JSON.parse(snapshot));

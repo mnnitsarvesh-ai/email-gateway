@@ -134,7 +134,6 @@ describe('Settings → AI assistant (D13)', () => {
       externalProcessingAcknowledged: true,
       dailyTokenBudget: 250000,
       retentionDays: 90,
-      dataSharing: 'metadata',
     });
     expectRequestMatchesContract('AssistantSettingsController_update_v1', bodies[0]);
     await expectNoAxeViolations(container);
@@ -228,7 +227,31 @@ describe('Settings → AI assistant (D13)', () => {
       externalProcessingAcknowledged: false,
       dailyTokenBudget: null,
       retentionDays: 30,
-      dataSharing: 'metadata',
     });
+    // Step AI-6: the AI-6 fields are absent = unchanged (the administration page edits them).
+    expect(
+      Object.keys(
+        settingsBody(
+          {
+            enabled: true,
+            externalProcessingAcknowledged: true,
+            dailyTokenBudget: 5,
+            retentionDays: 7,
+          },
+          2,
+        ),
+      ),
+    ).not.toContain('dataSharing');
+  });
+
+  it('shows the current data-sharing level and links to the AI administration page', async () => {
+    mockSettings({ ...SETTINGS, dataSharing: 'pseudonymized' });
+    renderWithProviders(<AssistantSettingsPanel />);
+    const form = await screen.findByRole('form', { name: 'AI assistant settings' });
+    expect(within(form).getByText('Pseudonymized')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open AI administration' })).toHaveAttribute(
+      'href',
+      '/assistant/admin',
+    );
   });
 });

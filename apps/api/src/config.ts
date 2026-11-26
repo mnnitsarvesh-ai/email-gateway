@@ -1444,6 +1444,13 @@ const assistantApiKey = z
   .max(1024, 'must be 8 to 1024 characters')
   .regex(/^[\x21-\x7e]+$/, 'must be printable ASCII without spaces');
 
+/** Secondary platform provider of the assistant (step AI-6 D6, ADR-0097); `none` = no fallback. */
+export const ASSISTANT_FALLBACK_PROVIDERS = ['none', ...ASSISTANT_PROVIDERS] as const;
+
+/** Providers a tenant may bring its own key for (step AI-6 D7, A6-7; no Azure). */
+export const ASSISTANT_TENANT_KEY_PROVIDER_IDS = ['anthropic', 'openai'] as const;
+export type AssistantTenantKeyProviderId = (typeof ASSISTANT_TENANT_KEY_PROVIDER_IDS)[number];
+
 /** Provider endpoint: https (http only in APP_ENV local/ci, checked in validateAssistantConfig). */
 const assistantEndpoint = z.url({ protocol: /^https?$/ });
 
@@ -1458,6 +1465,44 @@ const assistantModelPriceSchema = z.strictObject({
   cacheWritePerMTokMicros: z.number().int().min(0).max(1_000_000_000).optional(),
 });
 export type AssistantModelPrice = z.output<typeof assistantModelPriceSchema>;
+
+/**
+ * A comma-separated list (trimmed, de-duplicated, at least one entry, at most 32) whose every
+ * entry passes `check`; the message describes the rule, never the value.
+ */
+const csvList = <T extends string>(check: (entry: string) => entry is T, rule: string) =>
+  z.string().transform((value, ctx): readonly T[] => {
+    const entries = [
+      ...new Set(
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (entries.length === 0 || entries.length > 32) {
+      ctx.addIssue({ code: 'custom', message: `must list 1 to 32 entries, ${rule}` });
+      return z.NEVER;
+    }
+    if (!entries.every(check)) {
+      ctx.addIssue({ code: 'custom', message: `every entry must be ${rule}` });
+      return z.NEVER;
+    }
+    return Object.freeze(entries);
+  });
+
+/** `ASSISTANT_TENANT_KEY_PROVIDERS`: a non-empty subset of `anthropic,openai`. */
+const assistantTenantKeyProviders = csvList(
+  (entry): entry is AssistantTenantKeyProviderId =>
+    (ASSISTANT_TENANT_KEY_PROVIDER_IDS as readonly string[]).includes(entry),
+  'one of anthropic, openai',
+);
+
+/** `ASSISTANT_TENANT_KEY_MODELS`: the model ids a tenant key may be used with. */
+const assistantTenantKeyModels = csvList(
+  (entry): entry is string => ASSISTANT_MODEL_ID.test(entry),
+  '1-64 of [A-Za-z0-9._:-]',
+);
 
 /**
  * `ASSISTANT_MODEL_PRICES`: a JSON object `{ "<model id>": { inputPerMTokMicros,
@@ -1607,6 +1652,63 @@ export const assistantConfigShape = {
   ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY: int(1, 10_000).default(50),
   /** AI-R (D2 step 8, D5): size cap of a rendered report (`413 assistant_report_too_large`). */
   ASSISTANT_REPORT_MAX_HTML_BYTES: int(65_536, 2_097_152).default(524_288),
+  /**
+   * AI-6 (D6, ADR-0097): secondary platform provider tried when the primary's breaker is open
+   * (or its first call fails before any output); `none` = no fallback. Same credentials and
+   * endpoints as the primary keys of that provider (Azure: the ASSISTANT_AZURE_OPENAI_* keys).
+   */
+  ASSISTANT_FALLBACK_PROVIDER: z.enum(ASSISTANT_FALLBACK_PROVIDERS).default('none'),
+  /** AI-6 (D6): model of the secondary provider; required for an anthropic/openai fallback. */
+  ASSISTANT_FALLBACK_MODEL: z
+    .string()
+    .regex(ASSISTANT_MODEL_ID, 'must be 1-64 of [A-Za-z0-9._:-]')
+    .optional(),
+  /** AI-6 (D7, PO Q8, A6-7): platform gate of tenant-supplied provider keys. */
+  ASSISTANT_TENANT_KEYS_ENABLED: bool.default(false),
+  ASSISTANT_TENANT_KEY_PROVIDERS: assistantTenantKeyProviders.default(['anthropic', 'openai']),
+  ASSISTANT_TENANT_KEY_MODELS: assistantTenantKeyModels.default([
+    'claude-opus-5-5',
+    'claude-sonnet-5-5',
+  ]),
+  /**
+   * AI-6 (D7, I27): AES-256-GCM key that encrypts tenant provider keys (`ai_chat_provider_keys`,
+   * row-bound AAD): exactly 64 hex characters, `_FILE` accepted, required when
+   * ASSISTANT_TENANT_KEYS_ENABLED. The previous key decrypts only, while rotating.
+   */
+  ASSISTANT_TENANT_KEY_ENCRYPTION_KEY: aesKey.optional(),
+  ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS: aesKey.optional(),
+  /** AI-6 (D7): timeout of the probe that validates a tenant key. */
+  ASSISTANT_TENANT_KEY_VALIDATION_TIMEOUT_MS: int(1000, 30_000).default(10_000),
+  /** AI-6 (D3): pseudonym mappings per conversation; beyond it values become `[KIND_REDACTED]`. */
+  ASSISTANT_PSEUDONYMS_MAX_PER_CONVERSATION: int(100, 50_000).default(5000),
+  /** AI-6 (D4): most recent own messages one content search scans. */
+  ASSISTANT_SEARCH_SCAN_MAX_MESSAGES: int(1000, 200_000).default(20_000),
+  /** AI-6 (D4): `MAX_EXECUTION_TIME` of the search query (`503 assistant_search_timeout`). */
+  ASSISTANT_SEARCH_TIMEOUT_MS: int(500, 10_000).default(3000),
+  /** AI-6 (D5, ADR-0096): longer report windows become background jobs; false = always sync. */
+  ASSISTANT_REPORT_JOBS_ENABLED: bool.default(true),
+  /** AI-6 (D5): longest window generated synchronously (≤ REPORTS_MAX_RANGE_DAYS × 24). */
+  ASSISTANT_REPORT_SYNC_MAX_HOURS: int(24, 744).default(168),
+  /** AI-6 (D5, I26): lifetime of a report job (its row's `expires_at`). */
+  ASSISTANT_REPORT_JOB_TTL_SECONDS: int(300, 7200).default(1800),
+  /**
+   * AI-6 (D5): run the `assistant.reports` consumer in this process (the `api-assistant`
+   * Deployment and host-run development); requires RABBITMQ_ASSISTANT_URL.
+   */
+  ASSISTANT_REPORT_JOBS_CONSUMER: bool.default(false),
+  /** AI-6 (D5): prefetch (concurrent jobs) of the consumer. */
+  ASSISTANT_REPORT_JOB_CONCURRENCY: int(1, 8).default(2),
+  /**
+   * AI-6 (D5): the `eg-assistant` role user on the topology vhost (read `assistant.reports`,
+   * write `email.policy`/`email.events` retry and dead-letter keys of that queue); `_FILE`
+   * accepted. Optional: required only by the consumer.
+   */
+  RABBITMQ_ASSISTANT_URL: amqpUrlListSchema.optional(),
+  /**
+   * AI-6 (D13, A6-12): the archive-worker's eDiscovery export lifetime, read so the export
+   * confirmation card can state it (same key, bounds and default as the archive-worker).
+   */
+  ARCHIVE_EXPORT_TTL_HOURS: int(1, 8_760).default(168),
 };
 
 export type AssistantConfigKeys = {
@@ -1619,20 +1721,35 @@ export type AssistantConfigKeys = {
  * default, so a production deployment with the assistant off needs no provider) and the selected
  * provider needs its credential (Azure also its endpoint and deployment); provider endpoints are
  * https unless APP_ENV is local/ci; the tenant default budget is at most the tenant maximum; the
- * provider and tool timeouts fit in the turn deadline. Messages name the key, never the value.
+ * provider and tool timeouts fit in the turn deadline. Step AI-6 (§4.3): the fallback provider
+ * differs from the primary unless its model differs, is not `fake` in production while the
+ * assistant is enabled, names its model for anthropic/openai and has the credentials of its
+ * provider; tenant keys need the encryption key (and a different previous key); the synchronous
+ * report window fits in REPORTS_MAX_RANGE_DAYS; the report job consumer needs
+ * RABBITMQ_ASSISTANT_URL. Messages name the key, never the value.
  */
 export function validateAssistantConfig(
   cfg: Pick<
     AssistantConfigKeys,
     | 'ASSISTANT_ENABLED'
     | 'ASSISTANT_PROVIDER'
+    | 'ASSISTANT_MODEL'
     | 'ASSISTANT_OPENAI_BASE_URL'
     | 'ASSISTANT_TIMEOUT_MS'
     | 'ASSISTANT_TURN_DEADLINE_MS'
     | 'ASSISTANT_TOOL_TIMEOUT_MS'
     | 'ASSISTANT_TENANT_DAILY_TOKENS_DEFAULT'
     | 'ASSISTANT_TENANT_DAILY_TOKENS_MAX'
+    | 'ASSISTANT_FALLBACK_PROVIDER'
+    | 'ASSISTANT_TENANT_KEYS_ENABLED'
+    | 'ASSISTANT_REPORT_SYNC_MAX_HOURS'
+    | 'ASSISTANT_REPORT_JOBS_CONSUMER'
   > & {
+    ASSISTANT_FALLBACK_MODEL?: string | undefined;
+    ASSISTANT_TENANT_KEY_ENCRYPTION_KEY?: string | undefined;
+    ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS?: string | undefined;
+    RABBITMQ_ASSISTANT_URL?: readonly string[] | undefined;
+    REPORTS_MAX_RANGE_DAYS: number;
     ASSISTANT_ANTHROPIC_API_KEY?: string | undefined;
     ASSISTANT_ANTHROPIC_BASE_URL?: string | undefined;
     ASSISTANT_OPENAI_API_KEY?: string | undefined;
@@ -1706,6 +1823,86 @@ export function validateAssistantConfig(
     if (cfg[key] >= cfg.ASSISTANT_TURN_DEADLINE_MS) {
       refuse(key, 'must be below ASSISTANT_TURN_DEADLINE_MS');
     }
+  }
+  validateAssistantHardeningConfig(cfg, refuse);
+}
+
+/** Step AI-6 (§4.3, D5–D7) rules of validateAssistantConfig. */
+function validateAssistantHardeningConfig(
+  cfg: Parameters<typeof validateAssistantConfig>[0],
+  refuse: (key: keyof AssistantConfigKeys, message: string) => void,
+): void {
+  const fallback = cfg.ASSISTANT_FALLBACK_PROVIDER;
+  if (fallback !== 'none') {
+    if (
+      fallback === cfg.ASSISTANT_PROVIDER &&
+      (cfg.ASSISTANT_FALLBACK_MODEL === undefined ||
+        cfg.ASSISTANT_FALLBACK_MODEL === cfg.ASSISTANT_MODEL)
+    ) {
+      refuse(
+        'ASSISTANT_FALLBACK_PROVIDER',
+        'must differ from ASSISTANT_PROVIDER unless ASSISTANT_FALLBACK_MODEL differs from ASSISTANT_MODEL',
+      );
+    }
+    if ((fallback === 'anthropic' || fallback === 'openai') && !cfg.ASSISTANT_FALLBACK_MODEL) {
+      refuse(
+        'ASSISTANT_FALLBACK_MODEL',
+        `is required when ASSISTANT_FALLBACK_PROVIDER=${fallback}`,
+      );
+    }
+    if (cfg.ASSISTANT_ENABLED) {
+      if (fallback === 'fake' && cfg.NODE_ENV === 'production') {
+        refuse(
+          'ASSISTANT_FALLBACK_PROVIDER',
+          'fake is refused when NODE_ENV=production and ASSISTANT_ENABLED (test stand-in)',
+        );
+      }
+      const credentials: Record<
+        Exclude<typeof fallback, 'none' | 'fake'>,
+        readonly (keyof AssistantConfigKeys)[]
+      > = {
+        anthropic: ['ASSISTANT_ANTHROPIC_API_KEY'],
+        openai: ['ASSISTANT_OPENAI_API_KEY'],
+        azure_openai: [
+          'ASSISTANT_AZURE_OPENAI_ENDPOINT',
+          'ASSISTANT_AZURE_OPENAI_API_KEY',
+          'ASSISTANT_AZURE_OPENAI_DEPLOYMENT',
+        ],
+      };
+      // The primary rules above already name the primary's missing keys.
+      if (fallback !== 'fake' && fallback !== cfg.ASSISTANT_PROVIDER) {
+        for (const key of credentials[fallback]) {
+          if (cfg[key as keyof typeof cfg] === undefined) {
+            refuse(key, `is required when ASSISTANT_FALLBACK_PROVIDER=${fallback}`);
+          }
+        }
+      }
+    }
+  }
+  if (cfg.ASSISTANT_TENANT_KEYS_ENABLED && cfg.ASSISTANT_TENANT_KEY_ENCRYPTION_KEY === undefined) {
+    refuse(
+      'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY',
+      'is required when ASSISTANT_TENANT_KEYS_ENABLED=true',
+    );
+  }
+  if (
+    cfg.ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS !== undefined &&
+    cfg.ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS.toLowerCase() ===
+      cfg.ASSISTANT_TENANT_KEY_ENCRYPTION_KEY?.toLowerCase()
+  ) {
+    refuse(
+      'ASSISTANT_TENANT_KEY_ENCRYPTION_KEY_PREVIOUS',
+      'must differ from ASSISTANT_TENANT_KEY_ENCRYPTION_KEY',
+    );
+  }
+  if (cfg.ASSISTANT_REPORT_SYNC_MAX_HOURS > cfg.REPORTS_MAX_RANGE_DAYS * 24) {
+    refuse(
+      'ASSISTANT_REPORT_SYNC_MAX_HOURS',
+      'must be less than or equal to REPORTS_MAX_RANGE_DAYS × 24',
+    );
+  }
+  if (cfg.ASSISTANT_REPORT_JOBS_CONSUMER && cfg.RABBITMQ_ASSISTANT_URL === undefined) {
+    refuse('RABBITMQ_ASSISTANT_URL', 'is required when ASSISTANT_REPORT_JOBS_CONSUMER=true');
   }
 }
 

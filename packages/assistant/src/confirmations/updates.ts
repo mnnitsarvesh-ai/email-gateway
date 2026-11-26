@@ -6,6 +6,7 @@ import { sanitizeText } from '../results/sanitize';
  * confirmations of the conversation that reached a terminal state since the last report are
  * rendered as a server-authored block that prefixes the new user entry (before the
  * `Current user message:` marker the recap uses). Never stored in `ai_chat_messages.content`.
+ * Step AI-6 D5 adds the outcome of background report jobs (`ReportJobActionUpdate`).
  */
 
 /** The marker between server-authored context (recap, action updates) and the user's text. */
@@ -19,7 +20,10 @@ export const ACTION_UPDATES_MAX = 20;
 
 export type ActionUpdateStatus = 'executed' | 'failed' | 'cancelled' | 'expired';
 
+/** The outcome of a confirmation (step AI-2 D6). */
 export interface ActionUpdate {
+  /** Absent or `confirmation` (step AI-6 adds `ReportJobActionUpdate`). */
+  kind?: 'confirmation';
   tool: string;
   /** Execution ref sequence of the proposal (`call r<callSeq>`). */
   callSeq: number;
@@ -38,6 +42,25 @@ export interface ActionUpdate {
    */
   recipient?: string | null;
 }
+
+/** The outcome of a background report job (step AI-6 D5) of a `report_generate` call. */
+export interface ReportJobActionUpdate {
+  kind: 'report_job';
+  /** Execution ref of the queued `report_generate` call (`r<n>`). */
+  ref: string;
+  outcome: 'ready' | 'failed';
+  /** Job error code of a failed job (e.g. `assistant_report_job_expired`). */
+  code?: string | null;
+}
+
+/** The outcome of a confirmation (alias of `ActionUpdate`). */
+export type ConfirmationActionUpdate = ActionUpdate;
+
+/** Any line of the action-updates block: a confirmation or a background report job. */
+export type AnyActionUpdate = ActionUpdate | ReportJobActionUpdate;
+
+/** The native tool whose report jobs are reported (step AI-6 D5). */
+const REPORT_GENERATE_TOOL = 'report_generate';
 
 /** The native tool whose executed line names the queued recipient. */
 const REPORT_SEND_EMAIL_TOOL = 'report_send_email';
@@ -95,8 +118,19 @@ const httpOf = (value: number | null | undefined): number | null =>
     ? value
     : null;
 
+/** The line of a report job outcome (step AI-6 D5). */
+function reportJobLine(update: ReportJobActionUpdate): string {
+  const ref = /^r([1-9][0-9]{0,15})$/.exec(update.ref);
+  const call = ref ? seqOf(Number(ref[1])) : null;
+  const head = `- ${REPORT_GENERATE_TOOL}${call ? ` (call r${call})` : ''}:`;
+  if (update.outcome === 'ready') return `${head} the background report is ready.`;
+  const code = codeOf(update.code);
+  return `${head} the background report failed${code ? ` (${code})` : ''}.`;
+}
+
 /** One line of the block (D6). */
-export function actionUpdateLine(update: ActionUpdate): string {
+export function actionUpdateLine(update: AnyActionUpdate): string {
+  if (update.kind === 'report_job') return reportJobLine(update);
   const call = seqOf(update.callSeq);
   const head = `- ${toolOf(update.tool)}${call ? ` (call r${call})` : ''}:`;
   const http = httpOf(update.httpStatus);
@@ -139,7 +173,7 @@ export function actionUpdateLine(update: ActionUpdate): string {
 }
 
 /** The action-updates block (header + one line per update), or `''` when there is none. */
-export function buildActionUpdates(updates: readonly ActionUpdate[]): string {
+export function buildActionUpdates(updates: readonly AnyActionUpdate[]): string {
   if (updates.length === 0) return '';
   return [
     ACTION_UPDATES_HEADER,

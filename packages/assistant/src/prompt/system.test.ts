@@ -20,11 +20,11 @@ const context = {
   catalogueIndex: catalogue,
 };
 
-describe('assistant-system/6', () => {
+describe('assistant-system/7', () => {
   it('is versioned and hashed', () => {
     const template = loadSystemPromptTemplate();
     expect(template.version).toBe(PROMPT_VERSION);
-    expect(PROMPT_VERSION).toBe('assistant-system/6');
+    expect(PROMPT_VERSION).toBe('assistant-system/7');
     expect(template.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -126,7 +126,6 @@ describe('assistant-system/6', () => {
     const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
     const v5 = read('assistant-system-5.md');
     const v6 = read('assistant-system-6.md');
-    expect(loadSystemPromptTemplate().text).toBe(v6.trim());
     const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
     expect(scope(v6)).toBe(scope(v5));
     expect(scope(v6).length).toBeGreaterThan(20);
@@ -141,6 +140,32 @@ describe('assistant-system/6', () => {
     expect(v6.indexOf('\n14. ')).toBeLessThan(v6.indexOf('\n15. '));
     expect(v6.indexOf('\n15. ')).toBeLessThan(v6.indexOf('# Tools'));
     for (const n of [1, 2, 3, 4, 5])
+      expect(read(`assistant-system-${n}.md`).length, String(n)).toBeGreaterThan(0);
+  });
+
+  it('is assistant-system/6 with rule 13 extended and rule 16 (step AI-6 D9); the Scope section is byte-equal', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../../prompts', name), 'utf8');
+    const v6 = read('assistant-system-6.md');
+    const v7 = read('assistant-system-7.md');
+    expect(loadSystemPromptTemplate().text).toBe(v7.trim());
+    const scope = (text: string) => text.slice(text.indexOf('# Scope'), text.indexOf('# Rules'));
+    expect(scope(v7)).toBe(scope(v6));
+    expect(scope(v7).length).toBeGreaterThan(20);
+    const background =
+      ' If the result says the report is being generated in the background, tell the user it will appear in the chat when it is ready and do not state figures for it; an action update tells you when it is ready.';
+    const rule16 =
+      '16. Values may appear as placeholders such as `[EMAIL_3]`, `[PERSON_2]`, `[IP_1]` or `[DOMAIN_4]`. They stand for real values the user sees. Use them exactly as written in your answers and in tool arguments; never guess, expand or invent the real value, and never create a new placeholder.';
+    expect(v7).toContain(
+      `Never say an email was sent unless an action update says it was queued.${background}\n`,
+    );
+    expect(v7).toContain(`\n${rule16}\n`);
+    expect(v7.replace(background, '').replace(`${rule16}\n`, '')).toBe(v6);
+    expect([...v7.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]))).toEqual(
+      Array.from({ length: 16 }, (_, i) => i + 1),
+    );
+    expect(v7.indexOf('\n15. ')).toBeLessThan(v7.indexOf('\n16. '));
+    expect(v7.indexOf('\n16. ')).toBeLessThan(v7.indexOf('# Tools'));
+    for (const n of [1, 2, 3, 4, 5, 6])
       expect(read(`assistant-system-${n}.md`).length, String(n)).toBeGreaterThan(0);
   });
 

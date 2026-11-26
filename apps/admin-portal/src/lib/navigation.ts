@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  BotMessageSquare,
   Briefcase,
   Building2,
   CreditCard,
@@ -361,6 +362,20 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/audit-logs',
         icon: FileClock,
         gate: ['AuditLogsController_search_v1'],
+      },
+      {
+        // Step AI-6 (D1): tenant AI administration (usage per person, limits, data sharing, the
+        // provider key, feedback) and the metadata-only conversation audit; tabs are gated one by
+        // one inside the page, the item by any of the two entry operations.
+        id: 'assistant-admin',
+        label: 'AI administration',
+        href: '/assistant/admin',
+        icon: BotMessageSquare,
+        gate: [
+          'AssistantAdminController_usageByUser_v1',
+          'AssistantAdminAuditController_conversations_v1',
+        ],
+        landing: false,
       },
       {
         id: 'billing',

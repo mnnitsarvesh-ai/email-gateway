@@ -84,6 +84,8 @@ describe('EVENT_REGISTRY', () => {
       'integration.connection.health_changed.v1': ['email.events', 'provider_connection'],
       // Step AI-R D8: confirmed assistant report emails (aggregate assistant_report_delivery).
       'assistant.report.email_requested.v1': ['email.policy', 'assistant_report_delivery'],
+      // Step AI-6 D5: asynchronous assistant report jobs (aggregate assistant_report_job).
+      'assistant.report.generate_requested.v1': ['email.policy', 'assistant_report_job'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

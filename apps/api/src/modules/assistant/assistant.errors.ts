@@ -36,7 +36,43 @@ export const ASSISTANT_ERROR_CODES = {
   actionNotAllowed: 'assistant_action_not_allowed',
   // Step AI-R §4.1: `GET /assistant/reports/{reportId}` of another user or organization (404).
   reportNotFound: 'assistant_report_not_found',
+  // Step AI-6 §4.1 (contracts §35.6).
+  tenantKeysDisabled: 'assistant_tenant_keys_disabled',
+  tenantKeyRejected: 'assistant_tenant_key_rejected',
+  tenantKeyUnverified: 'assistant_tenant_key_unverified',
+  tenantKeyNotFound: 'assistant_tenant_key_not_found',
+  tenantKeyInvalid: 'assistant_tenant_key_invalid',
+  messageNotFound: 'assistant_message_not_found',
+  feedbackNotAllowed: 'assistant_feedback_not_allowed',
+  searchTimeout: 'assistant_search_timeout',
+  adminConversationNotFound: 'assistant_admin_conversation_not_found',
+  reportNotReady: 'assistant_report_not_ready',
 } as const;
+
+/**
+ * Step AI-6 D5: the stored `error_code` of a failed or expired report job (and its report).
+ * Never the answer of a request.
+ */
+export const REPORT_JOB_CODES = {
+  expired: 'assistant_report_job_expired',
+  sessionEnded: 'assistant_report_session_ended',
+  notAllowed: 'assistant_report_not_allowed',
+  /** The conversation's content was purged while the job waited (report `purged`). */
+  cancelled: 'assistant_report_purged',
+  /**
+   * An unexpected failure (or a crash) of the last attempt: the job ran REPORT_JOB_MAX_ATTEMPTS
+   * times without an outcome (also the requeue code of an earlier unexpected failure).
+   */
+  failed: 'assistant_report_job_failed',
+} as const;
+
+/**
+ * Step AI-6 D3: the executor's refusal of a tool-call argument with a placeholder unknown in this
+ * conversation (decision `denied_schema`). Same value as the package's `UNKNOWN_PLACEHOLDER_CODE`.
+ */
+export const UNKNOWN_PLACEHOLDER_ERROR = 'assistant_unknown_placeholder';
+export const unknownPlaceholderMessage = (token: string): string =>
+  `Unknown placeholder ${token}; use a value from this conversation.`;
 
 /**
  * Codes of the native report tools (step AI-R §4.1, design 31 D2, D5): the error envelope and
@@ -53,6 +89,8 @@ export const REPORT_ERROR_CODES = {
   sourcesUnavailable: 'assistant_report_sources_unavailable',
   storageFailed: 'assistant_report_storage_failed',
   invalidWindow: 'assistant_report_invalid_window',
+  // Step AI-6 D5: `report_send_email` on a report that is not `available` yet.
+  notReady: 'assistant_report_not_ready',
 } as const;
 
 /** The HTTP status each report code is recorded with (§4.1). */
@@ -64,6 +102,7 @@ export const REPORT_ERROR_STATUS: Readonly<Record<string, number>> = {
   assistant_report_email_limit: 429,
   assistant_report_sources_unavailable: 503,
   assistant_report_storage_failed: 502,
+  assistant_report_not_ready: 409,
 };
 
 /**
@@ -110,6 +149,8 @@ export const TURN_FAILURE_CODES = {
   abandoned: 'assistant_turn_abandoned',
   providerError: 'assistant_provider_error',
   internalError: 'assistant_internal_error',
+  /** Step AI-6 D6: the tenant key was refused (401/403) and no platform fallback is allowed. */
+  tenantKeyInvalid: 'assistant_tenant_key_invalid',
 } as const;
 export type TurnFailureCode = (typeof TURN_FAILURE_CODES)[keyof typeof TURN_FAILURE_CODES];
 
@@ -121,6 +162,8 @@ export const TURN_FAILURE_MESSAGES: Readonly<Record<TurnFailureCode, string>> = 
   assistant_turn_abandoned: 'The answer was interrupted by a server restart. Retry the message.',
   assistant_provider_error: 'The AI provider could not answer. Retry in a moment.',
   assistant_internal_error: 'The assistant failed unexpectedly. Retry in a moment.',
+  assistant_tenant_key_invalid:
+    'Your organization’s AI provider key was refused by the provider. An administrator must replace it.',
 };
 
 const C = ASSISTANT_ERROR_CODES;
@@ -178,7 +221,7 @@ export const assistantBusy = (): CodedHttpException =>
   );
 
 export const assistantBudgetExhausted = (
-  scope: 'tenant' | 'platform',
+  scope: 'tenant' | 'platform' | 'user',
   retryAfterSeconds: number,
 ): CodedHttpException =>
   new RetryableCodedException(
@@ -311,3 +354,63 @@ export const assistantReauthFailed = (reason: ReauthFailureReason): CodedHttpExc
     'Password or verification code is incorrect, or the account cannot re-authenticate',
     { reason },
   );
+
+// ---- step AI-6 (contracts §35.6) ------------------------------------------------------------------
+
+/** The platform gate `ASSISTANT_TENANT_KEYS_ENABLED` is off. */
+export const assistantTenantKeysDisabled = (): CodedHttpException =>
+  err(
+    HttpStatus.FORBIDDEN,
+    C.tenantKeysDisabled,
+    'Organization provider keys are not offered on this platform',
+  );
+
+/** The probe was answered 401/403: the key is not accepted by the provider (nothing stored). */
+export const assistantTenantKeyRejected = (
+  details: ConstructorParameters<typeof CodedHttpException>[3] = {},
+): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.tenantKeyRejected,
+    'The AI provider did not accept this key for the selected model',
+    details,
+  );
+
+/** The probe failed for another reason (network, timeout, 5xx): nothing stored. */
+export const assistantTenantKeyUnverified = (): CodedHttpException =>
+  err(
+    HttpStatus.BAD_GATEWAY,
+    C.tenantKeyUnverified,
+    'The key could not be verified with the AI provider; try again later',
+  );
+
+export const assistantTenantKeyNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.tenantKeyNotFound, 'No provider key is stored');
+
+/** A turn whose tenant key is not usable and the tenant allows no platform fallback. */
+export const assistantTenantKeyInvalid = (): CodedHttpException =>
+  err(
+    HttpStatus.SERVICE_UNAVAILABLE,
+    C.tenantKeyInvalid,
+    'Your organization’s AI provider key is not valid; an administrator must replace it',
+  );
+
+export const assistantMessageNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.messageNotFound, 'Message not found');
+
+export const assistantFeedbackNotAllowed = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.feedbackNotAllowed,
+    'Only answers of the assistant in completed turns can be rated',
+  );
+
+export const assistantSearchTimeout = (): CodedHttpException =>
+  err(
+    HttpStatus.SERVICE_UNAVAILABLE,
+    C.searchTimeout,
+    'The search took too long; use a more specific text',
+  );
+
+export const assistantAdminConversationNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.adminConversationNotFound, 'Conversation not found');

@@ -16,6 +16,7 @@ import {
 } from './reports/report-delivery.service';
 import {
   type GeneratedReport,
+  type QueuedReport,
   type ReportGenerateInput,
   type ReportGenerateResult,
   ReportGeneratorService,
@@ -64,6 +65,19 @@ export class NativeToolsService {
     tx: Prisma.TransactionClient,
   ): Promise<void> {
     return this.generator.finalize(ctx, generated, executionRowId, tx);
+  }
+
+  /**
+   * Step AI-6 D5: the persist-transaction half of a queued report (the `queued` report, the job,
+   * its outbox event and audit).
+   */
+  queueRead(
+    ctx: ExecutionContext,
+    queued: QueuedReport,
+    execution: { rowId: bigint; executionId: string; correlationId: string },
+    tx: Prisma.TransactionClient,
+  ): Promise<void> {
+    return this.generator.queue(ctx, queued, execution, tx);
   }
 
   /** A native write's proposal (instead of the precondition read). */

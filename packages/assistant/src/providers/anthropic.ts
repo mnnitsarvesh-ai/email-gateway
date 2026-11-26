@@ -47,7 +47,9 @@ import {
  * - client options `{ apiKey, baseURL, fetch, maxRetries: 0, timeout, logLevel: 'off',
  *   openTelemetry: false }`; request options `{ signal, timeout, maxRetries: 0 }`;
  * - errors: `APIUserAbortError`, `APIConnectionTimeoutError`, `APIConnectionError` (no status),
- *   `APIError` (`status`, `headers`); classified by class and status, never by message text.
+ *   `APIError` (`status`, `headers`); classified by class and status, never by message text
+ *   (401/403 → `auth`, step AI-6);
+ * - the probe (step AI-6 D7): `client.models.retrieve(modelID, params?, options?)`.
  *
  * The assistant content blocks of the final message are appended to the transcript **verbatim**
  * (thinking blocks, fallback blocks and signatures unmodified: preserved thinking, D7).
@@ -201,6 +203,23 @@ export class AnthropicProvider implements LlmProvider {
       throw this.classify(error, streamed);
     }
     return this.toResponse(final);
+  }
+
+  /**
+   * Validates the key and the model without generating tokens (step AI-6 D7): the SDK's
+   * `client.models.retrieve(modelID, params?, options?)` (`resources/models.d.ts` of SDK 1.1.0),
+   * `GET /v1/models/{model}`. Errors are classified like `complete` (401/403 → `auth`).
+   */
+  async probe(signal: AbortSignal): Promise<void> {
+    try {
+      await this.client.models.retrieve(this.options.model, null, {
+        signal,
+        timeout: this.options.timeoutMs,
+        maxRetries: 0,
+      });
+    } catch (error: unknown) {
+      throw this.classify(error, false);
+    }
   }
 
   private classify(error: unknown, afterDelta: boolean): LlmError {

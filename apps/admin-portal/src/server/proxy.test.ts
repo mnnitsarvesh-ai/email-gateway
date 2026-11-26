@@ -12,7 +12,7 @@ import {
   testConfig,
   testDeps,
 } from './test-helpers';
-import { UpstreamError } from './upstream';
+import { UpstreamError, upstreamOrigin } from './upstream';
 
 const now = Date.parse('2026-11-13T10:00:00.000Z');
 const config = testConfig();
@@ -454,5 +454,90 @@ describe('generic proxy (design P5)', () => {
     );
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('x-accel-buffering')).toBeNull();
+  });
+});
+
+describe('assistant route split (step AI-6 D10)', () => {
+  const ASSISTANT = 'http://api-assistant.test:3000';
+  const split = testConfig({ API_ASSISTANT_INTERNAL_URL: ASSISTANT });
+
+  it('chooses the origin by the upstream path prefix', () => {
+    expect(upstreamOrigin(split, '/api/v1/assistant/status')).toBe(ASSISTANT);
+    expect(upstreamOrigin(split, '/api/v1/assistant/search?q=ab')).toBe(ASSISTANT);
+    expect(upstreamOrigin(split, '/api/v1/assistant')).toBe(API);
+    expect(upstreamOrigin(split, '/api/v1/assistants/x')).toBe(API);
+    expect(upstreamOrigin(split, '/api/v1/auth/me')).toBe(API);
+    expect(upstreamOrigin(split, '/api/v1/reports/traffic?x=/api/v1/assistant/')).toBe(API);
+    // Without the key every path goes to API_INTERNAL_URL.
+    expect(upstreamOrigin(config, '/api/v1/assistant/status')).toBe(API);
+  });
+
+  it('sends /api/v1/assistant/* to API_ASSISTANT_INTERNAL_URL and everything else to the api', async () => {
+    const upstream = ok();
+    const deps = testDeps(upstream.fetch, { now, config: split });
+    const get = async (path: string) =>
+      handleProxy(await request(path, { headers: { 'x-forwarded-for': '127.0.0.1' } }), deps);
+    await get('/bff/api/v1/assistant/conversations?limit=50&status=active');
+    await get('/bff/api/v1/assistant/admin/usage/users');
+    await get('/bff/api/v1/domains?status=active');
+    await get('/bff/api/v1/reports/traffic?range=7d');
+    expect(upstream.calls.map((call) => call.url)).toEqual([
+      `${ASSISTANT}/api/v1/assistant/conversations?limit=50&status=active`,
+      `${ASSISTANT}/api/v1/assistant/admin/usage/users`,
+      `${API}/api/v1/domains?status=active`,
+      `${API}/api/v1/reports/traffic?range=7d`,
+    ]);
+    // Same session token and trusted forwarder headers on both origins.
+    for (const call of upstream.calls) {
+      expect(call.headers.get('authorization')).toBe('Bearer access-token-current');
+      expect(call.headers.get('x-eg-forwarder-token')).toBe(TEST_FORWARDER_TOKEN);
+    }
+  });
+
+  it('keeps CSRF, session checks and streaming on the assistant origin', async () => {
+    const upstream = fakeUpstream(
+      () =>
+        new Response('event: turn.started\ndata: {"turnId":"t"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+        }),
+    );
+    const deps = testDeps(upstream.fetch, { now, config: split });
+    const path = '/bff/api/v1/assistant/conversations/01930000-0000-7000-8000-00000000e001/turns';
+    const body = '{"clientTurnId":"5f0c2c1e-8b8a-4f7e-9a0e-2d3c4b5a6f70","message":"hi"}';
+    const noToken = await handleProxy(
+      await request(path, {
+        method: 'POST',
+        headers: { origin: PORTAL, 'content-type': 'application/json' },
+        body,
+      }),
+      deps,
+    );
+    expect(noToken.status).toBe(403);
+    const anonymous = await handleProxy(
+      await request(path.replace('/turns', ''), { session: null }),
+      deps,
+    );
+    expect(anonymous.status).toBe(401);
+    expect(upstream.calls).toHaveLength(0);
+    const streamed = await handleProxy(
+      await request(path, {
+        method: 'POST',
+        headers: {
+          origin: PORTAL,
+          'x-csrf-token': baseSession(now).csrf,
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+        },
+        body,
+      }),
+      deps,
+    );
+    expect(upstream.calls[0]!.url).toBe(
+      `${ASSISTANT}/api/v1/assistant/conversations/01930000-0000-7000-8000-00000000e001/turns`,
+    );
+    expect(streamed.headers.get('cache-control')).toBe('no-store, no-transform');
+    expect(streamed.headers.get('x-accel-buffering')).toBe('no');
+    expect(await streamed.text()).toContain('turn.started');
   });
 });

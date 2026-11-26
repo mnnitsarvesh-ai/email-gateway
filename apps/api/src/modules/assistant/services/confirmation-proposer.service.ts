@@ -397,6 +397,8 @@ export class ConfirmationProposer {
       validation: definition === undefined ? null : { ruleCount, definitionSha256 },
       request: { method: request.method, path: request.path },
       escalationWarnings: effective.warnings,
+      // Step AI-6 D13: the eDiscovery export card states the archive-worker's export lifetime.
+      archiveExportTtlHours: this.config.ARCHIVE_EXPORT_TTL_HOURS,
     });
 
     return this.plan(input, {

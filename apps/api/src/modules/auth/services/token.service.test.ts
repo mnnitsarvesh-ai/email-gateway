@@ -152,3 +152,59 @@ describe('TokenService', () => {
     expect(await service({ AUTH_JWT_SECRET: secret() }).verify(token)).toBeNull();
   });
 });
+
+describe('TokenService.issueAssistantJobAccess (step AI-6 D5, ADR-0096)', () => {
+  const jobId = randomUUID();
+
+  it('mints an ordinary access token of the session plus `ajb`, valid 300 s', async () => {
+    const tokens = service();
+    const now = new Date('2026-11-26T10:00:00Z');
+    const overrideId = randomUUID();
+    const issued = await tokens.issueAssistantJobAccess(
+      { ...input, amr: ['pwd', 'otp'], overrideId, jobId },
+      now,
+    );
+    expect(issued.expiresIn).toBe(300);
+    expect(issued.expiresAt.toISOString()).toBe('2026-11-26T10:05:00.000Z');
+    expect(await tokens.verify(issued.token, now)).toMatchObject({
+      sub: input.userPublicId,
+      org: input.organizationPublicId,
+      sid: input.sessionId,
+      amr: ['pwd', 'otp'],
+      ovr: overrideId,
+      ajb: jobId,
+      typ: 'access',
+    });
+    // Expired after 300 s (+ the 30 s clock tolerance).
+    expect(
+      await tokens.verify(issued.token, new Date(now.getTime() + (300 + 31) * 1000)),
+    ).toBeNull();
+    // Ordinary tokens carry no `ajb`.
+    const plain = await tokens.issue(input, now);
+    expect(await tokens.verify(plain.token, now)).not.toHaveProperty('ajb');
+  });
+
+  it('refuses a job id that is not a UUID and a forged non-UUID `ajb` claim', async () => {
+    const tokens = service();
+    await expect(tokens.issueAssistantJobAccess({ ...input, jobId: 'job-1' })).rejects.toThrow(
+      /job public id/,
+    );
+    const key = secret();
+    const forged = await new SignJWT({
+      org: input.organizationPublicId,
+      sid: input.sessionId,
+      typ: 'access',
+      amr: ['pwd'],
+      ajb: 'not-a-uuid',
+    })
+      .setProtectedHeader({ alg: 'HS256', kid: 'current', typ: 'JWT' })
+      .setIssuer('email-gateway')
+      .setAudience('email-gateway-api')
+      .setSubject(input.userPublicId)
+      .setJti(randomUUID())
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(new TextEncoder().encode(key));
+    expect(await service({ AUTH_JWT_SECRET: key }).verify(forged)).toBeNull();
+  });
+});

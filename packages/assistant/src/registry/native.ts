@@ -34,7 +34,7 @@ export const REPORT_GENERATE: OperationTool = {
   module: 'reports',
   summary: 'Generate a security report (HTML dashboard) for a period',
   description:
-    'Builds a dashboard-style HTML security report from the platform report APIs (traffic, threats, domains, delivery, processing, URL clicks, quarantine, account takeover) for the last 24 hours, 7 days (default), 30 days or an explicit UTC window. The report appears in the chat.',
+    'Builds a dashboard-style HTML security report from the report APIs (traffic, threats, domains, delivery, processing, URL clicks, quarantine, ATO) for the last 24 hours, 7 days (default), 30 days or a UTC range. Windows longer than 7 days are generated in the background. It appears in the chat.',
   inputSchema: {
     type: 'object',
     properties: {

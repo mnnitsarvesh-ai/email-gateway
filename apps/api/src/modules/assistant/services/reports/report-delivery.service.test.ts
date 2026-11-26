@@ -316,6 +316,23 @@ describe('report_send_email proposal (D5 steps 1–5)', () => {
     });
   });
 
+  it('refuses a report that is still being generated: 409 assistant_report_not_ready (step AI-6 D5)', async () => {
+    const t = setup();
+    t.addReport({ status: 'queued', sha256: null, sizeBytes: null, objectKey: null });
+    expect(await t.propose({ reportId: REPORT })).toMatchObject({
+      status: 'failed',
+      httpStatus: 409,
+      errorCode: 'assistant_report_not_ready',
+    });
+    // Without a report id ("send this report"), the newest report of the conversation is the
+    // queued one: 409 too, never 404 "generate one first" (WP5 fix).
+    expect(await t.propose()).toMatchObject({
+      status: 'failed',
+      httpStatus: 409,
+      errorCode: 'assistant_report_not_ready',
+    });
+  });
+
   it('the per-user and per-tenant daily limits refuse at proposal (denied_budget)', async () => {
     const t = setup({ ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY: '1' });
     const report = t.addReport();

@@ -40,7 +40,8 @@
 # event-relay (outbox relay and reconciler, ADR-0023) RABBITMQ_RELAY_URL, policy-engine
 # RABBITMQ_POLICY_ENGINE_URL, notification-worker RABBITMQ_NOTIFICATION_URL, webhook-worker
 # RABBITMQ_WEBHOOK_URL, archive-worker RABBITMQ_ARCHIVE_URL (topology v12, step 8.1: it consumes
-# email.archive as eg-archive).
+# email.archive as eg-archive); the api additionally gets RABBITMQ_ASSISTANT_URL (topology v16,
+# step AI-6: the assistant.reports consumer as eg-assistant, off in the container).
 #
 # Journaling and archiving (step 8.1, docs/plan/steps/23-journaling-archiving.md, ADR-0064..0069):
 # the `archive-worker` (roles ARCHIVE_WORKER_ROLES=capture,index,lifecycle,ediscovery in one
@@ -512,6 +513,10 @@ services:
       # publishes their own retry and dead-letter hops only.
       RABBITMQ_ATO_USER: ${RABBITMQ_ATO_USER:-eg-ato}
       RABBITMQ_ATO_PASSWORD: ${RABBITMQ_ATO_PASSWORD:?append the RabbitMQ keys from .env.example}
+      # api-assistant report job consumer (step AI-6 D5, topology v16): reads assistant.reports,
+      # publishes its own retry and dead-letter hops only.
+      RABBITMQ_ASSISTANT_USER: ${RABBITMQ_ASSISTANT_USER:-eg-assistant}
+      RABBITMQ_ASSISTANT_PASSWORD: ${RABBITMQ_ASSISTANT_PASSWORD:?append the RabbitMQ keys from .env.example}
     volumes: ['./infrastructure/rabbitmq:/rabbitmq:ro']
     depends_on:
       rabbitmq: { condition: service_healthy }
@@ -1295,6 +1300,14 @@ services:
       # Dead-letter replay and queue stats (step 3.2 Q9): role user eg-ops.
       RABBITMQ_OPS_URL: amqp://${RABBITMQ_OPS_USER:-eg-ops}:${RABBITMQ_OPS_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       DEAD_LETTER_REPLAY_SCAN_MAX: ${DEAD_LETTER_REPLAY_SCAN_MAX:-10000}
+      # Step AI-6 D5 (topology v16): role user eg-assistant of the assistant.reports consumer. The
+      # containerized api keeps the consumer off whatever the host .env says (the host-run api
+      # reads ASSISTANT_REPORT_JOBS_CONSUMER from .env); tests/portal-e2e/assistant.override.yml
+      # turns it on together with the assistant.
+      RABBITMQ_ASSISTANT_URL: amqp://${RABBITMQ_ASSISTANT_USER:-eg-assistant}:${RABBITMQ_ASSISTANT_PASSWORD:?append the RabbitMQ keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
+      ASSISTANT_REPORT_JOBS_CONSUMER: 'false'
+      # Step AI-6 D13: the archive-worker's export lifetime, stated in the export confirmation card.
+      ARCHIVE_EXPORT_TTL_HOURS: ${ARCHIVE_EXPORT_TTL_HOURS:-168}
       # URL protection (step 4.3 U13): the platform settings the url settings route validates
       # tenant overrides against (same keys as the email-worker / click-service). No URL secret.
       URL_SCAN_TIME_FETCH: ${URL_SCAN_TIME_FETCH:-suspicious}
@@ -2777,6 +2790,8 @@ services:
       # The browser connects to the portal directly (no proxy in front of it locally).
       PORTAL_TRUST_PROXY_HOPS: 0
       PORTAL_API_TIMEOUT_MS: ${PORTAL_API_TIMEOUT_MS:-15000}
+      # Step AI-6 D10: origin of /api/v1/assistant/* (empty = API_INTERNAL_URL: one api locally).
+      API_ASSISTANT_INTERNAL_URL: ${API_ASSISTANT_INTERNAL_URL:-}
     ports: ['127.0.0.1:${ADMIN_PORTAL_HOST_PORT:-3001}:3001']
     depends_on:
       api: { condition: service_healthy }

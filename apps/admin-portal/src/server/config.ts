@@ -44,6 +44,12 @@ const schema = z
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     APP_ENV: z.enum(['local', 'ci', 'staging', 'production']).default('local'),
     API_INTERNAL_URL: origin('API_INTERNAL_URL'),
+    /**
+     * Step AI-6 (D10): origin of the `api-assistant` Service. Upstream paths under
+     * `/api/v1/assistant/` go there (SSE turns and the other assistant routes); empty or absent =
+     * `API_INTERNAL_URL` for every path.
+     */
+    API_ASSISTANT_INTERNAL_URL: origin('API_ASSISTANT_INTERNAL_URL').optional(),
     PORTAL_PUBLIC_URL: origin('PORTAL_PUBLIC_URL'),
     PORTAL_SESSION_KEY: hexKey('PORTAL_SESSION_KEY'),
     PORTAL_SESSION_KEY_PREVIOUS: hexKey('PORTAL_SESSION_KEY_PREVIOUS').optional(),

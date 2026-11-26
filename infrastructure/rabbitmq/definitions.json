@@ -1,5 +1,5 @@
 {
-  "topology_version": 15,
+  "topology_version": 16,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -248,6 +248,15 @@
     },
     {
       "name": "ato.responses",
+      "vhost": "email-gateway",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "assistant.reports",
       "vhost": "email-gateway",
       "durable": true,
       "auto_delete": false,
@@ -513,6 +522,22 @@
       "destination": "email.events",
       "destination_type": "exchange",
       "routing_key": "org.#",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "assistant.reports",
+      "destination_type": "queue",
+      "routing_key": "org.*.assistant.report.generate_requested.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.policy",
+      "vhost": "email-gateway",
+      "destination": "assistant.reports",
+      "destination_type": "queue",
+      "routing_key": "retry.assistant.reports.#",
       "arguments": {}
     },
     {
@@ -1188,6 +1213,21 @@
         "delivery-limit": 20,
         "dead-letter-exchange": "email.events",
         "dead-letter-routing-key": "dead-letter.ato.responses",
+        "dead-letter-strategy": "at-least-once",
+        "overflow": "reject-publish",
+        "max-length": 1000000
+      }
+    },
+    {
+      "vhost": "email-gateway",
+      "name": "eg.assistant.reports",
+      "pattern": "^assistant\\.reports$",
+      "apply-to": "queues",
+      "priority": 10,
+      "definition": {
+        "delivery-limit": 20,
+        "dead-letter-exchange": "email.events",
+        "dead-letter-routing-key": "dead-letter.assistant.reports",
         "dead-letter-strategy": "at-least-once",
         "overflow": "reject-publish",
         "max-length": 1000000

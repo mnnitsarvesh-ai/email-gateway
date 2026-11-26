@@ -229,7 +229,9 @@ export class ReportWorld {
             (r) =>
               world.owns(owner, overrideId, r) &&
               r.conversationId === conversationId &&
-              (publicId === null ? r.status === 'available' : r.publicId === publicId),
+              (publicId === null
+                ? ['available', 'queued', 'pending'].includes(r.status)
+                : r.publicId === publicId),
           )
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1));
         return Promise.resolve(rows[0] ? structuredClone(rows[0]) : null);

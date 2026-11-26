@@ -4,6 +4,7 @@ import { isAbortError, openOperationStream } from '@/lib/api/stream';
 import {
   CARD_VERSION,
   CONFIRMATION_SUMMARY_VERSION,
+  REPORT_CARD_STATUSES,
   type AssistantStreamEvent,
   type ConfirmationView,
   type TurnResult,
@@ -143,6 +144,8 @@ const cardValue = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 /** `CardSchema.report` (step AI-R): a report card carries its id, period and figures only. */
 const reportCardSchema = z.object({
   reportId: z.string().regex(UUID),
+  // Step AI-6 (D5): `queued` cards carry no figures; absent on cards stored before AI-6.
+  status: z.enum(REPORT_CARD_STATUSES).optional(),
   title: z.string().max(500),
   period: z.object({
     from: z.string(),

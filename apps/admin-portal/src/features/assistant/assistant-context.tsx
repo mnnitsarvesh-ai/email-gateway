@@ -39,7 +39,17 @@ export interface AssistantContextValue {
   readonly panelOpen: boolean;
   readonly setPanelOpen: (open: boolean) => void;
   readonly conversationId: string | null;
-  readonly selectConversation: (conversationId: string | null) => void;
+  /**
+   * Opens a conversation; `messageId` (step AI-6 content search) asks the conversation view to
+   * scroll to that message and focus it once the messages are loaded.
+   */
+  readonly selectConversation: (
+    conversationId: string | null,
+    options?: { readonly messageId?: string },
+  ) => void;
+  /** The message the view should bring into view (consumed by `clearFocusMessage`). */
+  readonly focusMessageId: string | null;
+  readonly clearFocusMessage: () => void;
   readonly pending: PendingTurn | null;
   readonly running: boolean;
   /** Sends a message (creates the conversation first when none is open). */
@@ -123,6 +133,7 @@ export function AssistantProvider({
   const [panelOpen, setPanelOpen] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(initialConversationId);
   const [pending, setPending] = useState<PendingTurn | null>(null);
+  const [focusMessageId, setFocusMessageId] = useState<string | null>(null);
   const [confirmations, updateConfirmation] = useReducer(reduceConfirmations, EMPTY_CONFIRMATIONS);
   const controllerRef = useRef<AbortController | null>(null);
   const pendingRef = useRef<PendingTurn | null>(null);
@@ -177,6 +188,8 @@ export function AssistantProvider({
         }),
         queryClient.invalidateQueries({ queryKey: ['AssistantConversationsController_list_v1'] }),
         queryClient.invalidateQueries({ queryKey: ['AssistantStatusController_get_v1'] }),
+        // Step AI-6: the new question and answer are searchable.
+        queryClient.invalidateQueries({ queryKey: ['AssistantSearchController_search_v1'] }),
       ]);
     },
     [queryClient],
@@ -299,13 +312,18 @@ export function AssistantProvider({
     controllerRef.current?.abort();
   }, []);
 
-  const selectConversation = useCallback((id: string | null) => {
-    if (pendingRef.current?.status === 'running') return;
-    // Visible at once to the reload restore, which may run in the same commit.
-    conversationRef.current = id;
-    setPending(null);
-    setConversationId(id);
-  }, []);
+  const selectConversation = useCallback(
+    (id: string | null, options?: { readonly messageId?: string }) => {
+      if (pendingRef.current?.status === 'running') return;
+      // Visible at once to the reload restore, which may run in the same commit.
+      conversationRef.current = id;
+      setPending(null);
+      setConversationId(id);
+      setFocusMessageId(id && options?.messageId ? options.messageId : null);
+    },
+    [],
+  );
+  const clearFocusMessage = useCallback(() => setFocusMessageId(null), []);
 
   const value = useMemo<AssistantContextValue>(
     () => ({
@@ -313,6 +331,8 @@ export function AssistantProvider({
       setPanelOpen,
       conversationId,
       selectConversation,
+      focusMessageId,
+      clearFocusMessage,
       pending,
       running: pending?.status === 'running',
       send: ask,
@@ -321,7 +341,17 @@ export function AssistantProvider({
       confirmations,
       updateConfirmation,
     }),
-    [ask, cancel, confirmations, conversationId, panelOpen, pending, selectConversation],
+    [
+      ask,
+      cancel,
+      clearFocusMessage,
+      confirmations,
+      conversationId,
+      focusMessageId,
+      panelOpen,
+      pending,
+      selectConversation,
+    ],
   );
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>;
 }

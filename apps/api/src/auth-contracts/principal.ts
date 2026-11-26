@@ -24,6 +24,11 @@ export interface UserPrincipal {
   mfaEnrollmentRequired: boolean;
   permissions: ReadonlySet<string>; // effective (already intersected under override)
   override?: OverrideContext;
+  /**
+   * Step AI-6 D5 (informational): the assistant report job whose GET-only token authenticated
+   * this request (claim `ajb`; the guard limits such tokens to `ASSISTANT_JOB_ROUTES`).
+   */
+  assistantJobId?: string;
 }
 
 export interface ApiKeyPrincipal {

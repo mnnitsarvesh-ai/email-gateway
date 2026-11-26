@@ -1,11 +1,15 @@
 import { USER_MESSAGE_MARKER } from '../confirmations/updates';
-import type {
-  LlmProvider,
-  LlmRequest,
-  LlmResponse,
-  LlmToolCall,
-  LlmToolResult,
-  MetaToolName,
+import { abortableSleep } from './retry';
+import {
+  LLM_ERROR_REASONS,
+  LlmError,
+  type LlmErrorReason,
+  type LlmProvider,
+  type LlmRequest,
+  type LlmResponse,
+  type LlmToolCall,
+  type LlmToolResult,
+  type MetaToolName,
 } from './types';
 
 /**
@@ -45,6 +49,11 @@ import type {
  * - `obedient: true` (tests only): follows instruction-shaped text found in tool results
  *   (`call_tool <name> <json>`, "ignore previous instructions … <tool name>") once each, to prove
  *   that the server-side controls hold when the model is fooled.
+ * - Step AI-6: after a queued (background) `report_generate` result the answer says the report is
+ *   being generated, without figures. `latencyMs` (tests and the load test) waits that long,
+ *   abortably, before the first delta of every round and then streams the text in a few chunks;
+ *   `failure` makes every `complete()` and `probe()` throw `LlmError(failure)` before any delta
+ *   (provider fallback tests). Both are test options; the fake stays refused in production.
  *
  * Native transcript entries: `{ role: 'user', text }`, `{ role: 'assistant', text, toolCalls }`,
  * `{ role: 'tool', toolCallId, content, isError }`.
@@ -56,6 +65,23 @@ export interface FakeProviderOptions {
   model?: string;
   obedient?: boolean;
   now?: () => Date;
+  /** Step AI-6 D11: deterministic delay (ms) before the first delta of each round (0–60 000). */
+  latencyMs?: number;
+  /** Step AI-6 D6: every `complete()` / `probe()` throws `LlmError(failure)` before any delta. */
+  failure?: LlmErrorReason | null;
+}
+
+/** Most chunks of a streamed answer when `latencyMs` is set. */
+export const FAKE_STREAM_CHUNKS = 4;
+export const FAKE_MAX_LATENCY_MS = 60_000;
+
+/** The text in at most `FAKE_STREAM_CHUNKS` consecutive pieces (deterministic). */
+export function fakeChunks(text: string): string[] {
+  if (text.length === 0) return [];
+  const size = Math.ceil(text.length / FAKE_STREAM_CHUNKS);
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
+  return chunks;
 }
 
 export interface FakeUserEntry {
@@ -616,7 +642,10 @@ function planMayContinue(content: string): boolean {
   return disposition === null || disposition === 'quarantine';
 }
 
-/** The answer after a `report_generate` result: the period and figures of the envelope only. */
+/**
+ * The answer after a `report_generate` result: the period and figures of the envelope only; a
+ * queued background report (step AI-6 D5) has no figures yet.
+ */
 function reportAnswer(envelope: Record<string, unknown>): string {
   const data = asRecord(envelope.data);
   const period = asRecord(data?.period);
@@ -624,6 +653,8 @@ function reportAnswer(envelope: Record<string, unknown>): string {
   const when = /^Last /.test(label)
     ? `the ${label.toLowerCase()}`
     : label || 'the requested period';
+  if (data?.status === 'queued')
+    return `Your security report for ${when} is being generated; it will appear here when it is ready.`;
   const figures = Array.isArray(data?.figures) ? (data.figures as unknown[]) : [];
   const value = (name: string): string | null => {
     const figure = figures.map(asRecord).find((f) => f?.label === name);
@@ -747,6 +778,8 @@ export class FakeProvider implements LlmProvider {
   readonly model: string;
   private readonly obedient: boolean;
   private readonly now: () => Date;
+  private readonly latencyMs: number;
+  private readonly failure: LlmErrorReason | null;
 
   constructor(options: FakeProviderOptions) {
     if (options.nodeEnv === 'production')
@@ -754,6 +787,21 @@ export class FakeProvider implements LlmProvider {
     this.model = options.model ?? 'fake';
     this.obedient = options.obedient ?? false;
     this.now = options.now ?? (() => new Date());
+    const latency = options.latencyMs ?? 0;
+    if (!Number.isSafeInteger(latency) || latency < 0 || latency > FAKE_MAX_LATENCY_MS)
+      throw new Error(`fake latencyMs must be an integer from 0 to ${FAKE_MAX_LATENCY_MS}`);
+    this.latencyMs = latency;
+    const failure = options.failure ?? null;
+    if (failure !== null && !(LLM_ERROR_REASONS as readonly string[]).includes(failure))
+      throw new Error('fake failure must be an LLM error reason');
+    this.failure = failure;
+  }
+
+  /** Resolves (no network); throws the configured `failure`. */
+  probe(signal: AbortSignal): Promise<void> {
+    if (this.failure) return Promise.reject(new LlmError(this.failure));
+    if (signal.aborted) return Promise.reject(new LlmError('aborted'));
+    return Promise.resolve();
   }
 
   userEntry(text: string): unknown[] {
@@ -769,11 +817,21 @@ export class FakeProvider implements LlmProvider {
     }));
   }
 
-  complete(
+  async complete(
     request: LlmRequest,
-    _signal: AbortSignal,
+    signal: AbortSignal,
     onDelta: (text: string) => void,
   ): Promise<LlmResponse> {
+    if (this.failure) throw new LlmError(this.failure);
+    if (this.latencyMs === 0) return this.answer(request, onDelta);
+    const response = await this.answer(request, () => undefined);
+    await abortableSleep(this.latencyMs, signal);
+    for (const chunk of fakeChunks(response.text)) onDelta(chunk);
+    return response;
+  }
+
+  /** The deterministic answer of a round (deltas through `onDelta`). */
+  private answer(request: LlmRequest, onDelta: (text: string) => void): Promise<LlmResponse> {
     const transcript = request.transcript as readonly FakeTranscriptEntry[];
     const input = request.system + JSON.stringify(transcript);
     const callCount = transcript.reduce(

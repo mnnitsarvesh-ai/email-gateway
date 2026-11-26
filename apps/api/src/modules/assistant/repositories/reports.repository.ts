@@ -130,6 +130,38 @@ export class ReportsRepository {
     return result.count === 1;
   }
 
+  /** Step AI-6 D5: the `queued` report of a background job (no object, no figures yet). */
+  async insertQueued(owner: Owner, data: QueuedReportCreate, tx: Tx): Promise<bigint> {
+    const row = await tx.aiChatReport.create({
+      data: {
+        ...data,
+        organizationId: owner.scope.organizationId,
+        userId: owner.userId,
+        status: 'queued',
+        figures: [],
+      },
+      select: { id: true },
+    });
+    return row.id;
+  }
+
+  /**
+   * Step AI-6 D5 finalize (inside its transaction): `queued → available` with the object and the
+   * digest. False when the report moved meanwhile (purged with the conversation content).
+   */
+  async markJobReportAvailable(
+    organizationId: bigint,
+    id: bigint,
+    data: ReportAvailable,
+    tx: Tx,
+  ): Promise<boolean> {
+    const result = await tx.aiChatReport.updateMany({
+      where: { organizationId, id, status: 'queued' },
+      data: { ...data, status: 'available', errorCode: null },
+    });
+    return result.count === 1;
+  }
+
   /** D2 step 2: the user's reports since `since` (the UTC day), any status. */
   countSince(owner: Owner, since: Date): Promise<number> {
     return this.writer.aiChatReport.count({
@@ -170,7 +202,10 @@ export class ReportsRepository {
 
   /**
    * D5 step 1: a report of the owner in THIS conversation, by public id (any status: purged and
-   * oversize are refused by the caller with their own codes), or the latest `available` one.
+   * oversize are refused by the caller with their own codes), or the latest one that is
+   * `available` or still being generated (step AI-6 D5: a newer `queued`/`pending` report is
+   * "this report" of the chat, refused `409 assistant_report_not_ready` by the caller instead of
+   * falling back to an older report or to `404`).
    */
   findForConversation(
     owner: Owner,
@@ -185,7 +220,7 @@ export class ReportsRepository {
           where: {
             ...this.ownerWhere(owner, platformOverrideId),
             conversationId,
-            status: 'available',
+            status: { in: ['available', 'queued', 'pending'] },
           },
           orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           select: reportSelect,
@@ -253,6 +288,31 @@ export class ReportsRepository {
   }
 }
 
+/** Step AI-6 D5: a `queued` report (no object yet), inside the execution's transaction. */
+export interface QueuedReportCreate {
+  publicId: string;
+  platformOverrideId: string | null;
+  conversationId: bigint;
+  title: string;
+  periodFrom: Date;
+  periodTo: Date;
+  granularity: AiChatReportGranularity;
+  sections: Prisma.InputJsonValue;
+  templateVersion: string;
+  createdAt: Date;
+}
+
+/** Step AI-6 D5 finalize: the stored object and digest of a job's report. */
+export interface ReportAvailable {
+  executionId: bigint;
+  title: string;
+  sections: Prisma.InputJsonValue;
+  figures: Prisma.InputJsonValue;
+  objectKey: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
 /**
  * D7: the report transitions of a conversation content purge, inside the purge transaction (the
  * retention job at `purge_after` and `DELETE /assistant/conversations/{id}`): the reports
@@ -277,7 +337,7 @@ export async function purgeReportsOfConversations(
     where: {
       organizationId,
       conversationId: { in: ids },
-      status: { in: ['available', 'pending', 'failed'] },
+      status: { in: ['available', 'pending', 'failed', 'queued'] },
     },
     data: { status: 'purged', purgedAt: now },
   });

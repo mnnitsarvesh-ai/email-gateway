@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { assistantReportEmailRequestedV1 } from './assistant-events';
+import {
+  assistantReportEmailRequestedV1,
+  assistantReportGenerateRequestedV1,
+} from './assistant-events';
 import { parseEvent } from './envelope';
 import { EventTypes } from './events';
 import { EXAMPLE_EVENT_PAYLOADS } from './examples';
@@ -100,6 +103,76 @@ describe('assistant.report.email_requested.v1 (§4.3)', () => {
       const payload: Record<string, unknown> = { ...example };
       delete payload[field];
       expect(assistantReportEmailRequestedV1.safeParse(payload).success, field).toBe(false);
+    }
+  });
+});
+
+/**
+ * Step AI-6 §4.2 (docs/plan/steps/34-ai-chat-hardening-operations.md D5, ADR-0096):
+ * `assistant.report.generate_requested.v1` — strict; the job and report public ids and the
+ * request time only (no window, session id or credential: the job row holds them).
+ */
+describe('assistant.report.generate_requested.v1 (AI-6 §4.2)', () => {
+  const jobType = EventTypes.AssistantReportGenerateRequested;
+  const jobExample = EXAMPLE_EVENT_PAYLOADS[jobType] as Record<string, unknown>;
+  const valid = (fields: Record<string, unknown>) =>
+    assistantReportGenerateRequestedV1.safeParse({ ...jobExample, ...fields }).success;
+
+  it('is registered on email.policy (aggregate assistant_report_job), version 1', () => {
+    expect(jobType).toBe('assistant.report.generate_requested.v1');
+    expect(EVENT_REGISTRY[jobType]).toMatchObject({
+      type: jobType,
+      exchange: 'email.policy',
+      aggregateType: 'assistant_report_job',
+      version: 1,
+    });
+    expect(EVENT_REGISTRY[jobType].schema).toBe(assistantReportGenerateRequestedV1);
+  });
+
+  it('routes to the api-assistant consumer and the firehose only (topology v16)', () => {
+    expect(routeMessage('email.policy', eventRoutingKey('42', jobType))).toEqual([
+      'assistant.reports',
+      'email.analytics',
+    ]);
+    expect(
+      routeMessage('email.policy', retryRoutingKey('assistant.reports', '42', jobType)),
+    ).toEqual(['assistant.reports']);
+    expect(queueDefinition('assistant.reports').bindings).toContainEqual({
+      exchange: 'email.policy',
+      routingKey: `org.*.${jobType}`,
+    });
+  });
+
+  it('parses the example in an envelope (eventId = the job id)', () => {
+    const wrapped = {
+      eventId: String(jobExample.jobId),
+      eventType: jobType,
+      occurredAt: '2026-11-26T08:00:00.000Z',
+      correlationId: 'corr-12345678',
+      organizationId: '42',
+      payload: jobExample,
+    };
+    expect(parseEvent(wrapped, assistantReportGenerateRequestedV1).payload).toEqual(jobExample);
+  });
+
+  it('accepts only the strict ids-only shape', () => {
+    expect(valid({})).toBe(true);
+    expect(valid({ jobId: randomUUID(), reportId: randomUUID() })).toBe(true);
+    expect(valid({ jobId: 'not-a-uuid' })).toBe(false);
+    expect(valid({ reportId: 42 })).toBe(false);
+    expect(valid({ requestedAt: '26.11.2026' })).toBe(false);
+    // No window, session or credential may ride along.
+    for (const extra of [
+      { from: '2026-10-27T00:00:00.000Z' },
+      { sessionId: randomUUID() },
+      { accessToken: 'x' },
+      { title: 'Security report' },
+    ]) {
+      expect(valid(extra), JSON.stringify(extra)).toBe(false);
+    }
+    for (const key of ['jobId', 'reportId', 'requestedAt']) {
+      const { [key]: _omit, ...rest } = jobExample;
+      expect(assistantReportGenerateRequestedV1.safeParse(rest).success, key).toBe(false);
     }
   });
 });

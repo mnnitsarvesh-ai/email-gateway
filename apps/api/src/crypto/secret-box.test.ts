@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { SecretBox, SecretBoxError } from './secret-box';
+import { keyKidOf, SecretBox, SecretBoxError } from './secret-box';
 
 const key = () => randomBytes(32).toString('hex');
 
@@ -68,5 +68,42 @@ describe('SecretBox', () => {
 
   it('refuses keys that are not 32 bytes', () => {
     expect(() => new SecretBox({ DATA_ENCRYPTION_KEY: 'ab'.repeat(16) })).toThrow();
+  });
+});
+
+describe('SecretBox.withKeys (step AI-6 D7: an explicit key pair)', () => {
+  const aad = 'assistant-provider-key:v1:7:1';
+
+  it('labels ciphertexts with k + 7 hex of the key SHA-256 and round-trips', () => {
+    const current = key();
+    const box = SecretBox.withKeys({ current, name: 'TEST_KEY' });
+    expect(box.kid).toBe(keyKidOf(current));
+    expect(box.kid).toMatch(/^k[0-9a-f]{7}$/);
+    const sealed = box.encrypt('test-tenant-key-0001-not-a-secret', aad);
+    expect(sealed.split('.').slice(0, 2)).toEqual(['v1', box.kid]);
+    expect(box.decrypt(sealed, aad)).toEqual({
+      plaintext: 'test-tenant-key-0001-not-a-secret',
+      usedPreviousKey: false,
+    });
+    expect(() => box.decrypt(sealed, 'assistant-provider-key:v1:7:2')).toThrow(SecretBoxError);
+  });
+
+  it('decrypts with the previous key during rotation and stays separate from the DI box', () => {
+    const old = key();
+    const sealed = SecretBox.withKeys({ current: old, name: 'TEST_KEY' }).encrypt('value', aad);
+    const rotated = SecretBox.withKeys({ current: key(), previous: old, name: 'TEST_KEY' });
+    expect(rotated.decrypt(sealed, aad)).toEqual({ plaintext: 'value', usedPreviousKey: true });
+    const di = new SecretBox({ DATA_ENCRYPTION_KEY: key() });
+    expect(di.kid).toBe('k1');
+    expect(() => di.decrypt(sealed, aad)).toThrow(SecretBoxError);
+  });
+
+  it('names the key, never the value, when it is not 32 bytes', () => {
+    expect(() => SecretBox.withKeys({ current: 'ab'.repeat(16), name: 'TEST_KEY' })).toThrow(
+      /^TEST_KEY must be 32 bytes/,
+    );
+    expect(() =>
+      SecretBox.withKeys({ current: key(), previous: 'zz'.repeat(32), name: 'TEST_KEY' }),
+    ).toThrow(/TEST_KEY/);
   });
 });

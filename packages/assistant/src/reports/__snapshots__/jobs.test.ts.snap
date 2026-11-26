@@ -1,0 +1,86 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`queued report card and envelope > card: kind report, status queued, no figures, the full-size link and the row ref 1`] = `
+{
+  "executionId": "0193aaaa-0000-7000-8000-0000000000e2",
+  "kind": "report",
+  "portalLinks": [
+    {
+      "href": "/assistant/reports/0193aaaa-0000-7000-8000-000000000002",
+      "label": "Open full size",
+    },
+  ],
+  "refs": [
+    "r6.1",
+  ],
+  "report": {
+    "figures": [],
+    "generatedAt": "",
+    "omitted": [],
+    "period": {
+      "atoRange": "30d",
+      "from": "2026-10-24T09:00:00.000Z",
+      "granularity": "day",
+      "label": "Last 30 days",
+      "to": "2026-11-23T09:00:00.000Z",
+    },
+    "reportId": "0193aaaa-0000-7000-8000-000000000002",
+    "sections": [
+      "summary",
+      "traffic",
+      "threats",
+      "domains",
+      "delivery",
+      "processing",
+      "url_clicks",
+      "quarantine",
+      "ato",
+    ],
+    "sizeBytes": 0,
+    "status": "queued",
+    "title": "Security report: Last 30 days",
+  },
+  "status": "ok",
+  "title": "Security report: Last 30 days",
+  "tool": "report_generate",
+  "version": "assistant-card/1",
+}
+`;
+
+exports[`queued report card and envelope > envelope: ok, HTTP 202, data { ref, reportId, status, title, period, sections }, the queued note 1`] = `
+{
+  "data": {
+    "period": {
+      "atoRange": "30d",
+      "from": "2026-10-24T09:00:00.000Z",
+      "granularity": "day",
+      "label": "Last 30 days",
+      "to": "2026-11-23T09:00:00.000Z",
+    },
+    "ref": "r6.1",
+    "reportId": "0193aaaa-0000-7000-8000-000000000002",
+    "sections": [
+      "summary",
+      "traffic",
+      "threats",
+      "domains",
+      "delivery",
+      "processing",
+      "url_clicks",
+      "quarantine",
+      "ato",
+    ],
+    "status": "queued",
+    "title": "Security report: Last 30 days",
+  },
+  "hasMore": false,
+  "httpStatus": 202,
+  "kind": "tool_result/1",
+  "note": "The report is being generated in the background and appears in the chat when it is ready. Do not state any figures for it.",
+  "ref": "r6",
+  "returned": 1,
+  "status": "ok",
+  "tool": "report_generate",
+  "truncated": false,
+}
+`;

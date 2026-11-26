@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import { API_CONFIG } from '../api-config.token';
 import type { ApiConfig } from '../config';
@@ -9,6 +9,21 @@ const CURRENT_KID = 'k1';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const PART = /^[A-Za-z0-9_-]+$/;
+/** `k1` (the DI box) or `k` + 7 hex of the key's SHA-256 (boxes built by `withKeys`). */
+const KID = /^k(?:\d+|[0-9a-f]{7})$/;
+
+/** `k` + the first 7 hex characters of SHA-256 of the raw key (ADR-0077 `kid` format). */
+export function keyKidOf(hexKey: string): string {
+  return `k${createHash('sha256').update(Buffer.from(hexKey, 'hex')).digest('hex').slice(0, 7)}`;
+}
+
+/** An explicit key pair (`SecretBox.withKeys`): 64 hex characters each. */
+export interface SecretBoxKeys {
+  current: string;
+  previous?: string | undefined;
+  /** The configuration key named in the length error (never the value). */
+  name: string;
+}
 
 export type SecretBoxConfig = Pick<
   ApiConfig,
@@ -33,20 +48,50 @@ export class SecretBoxError extends Error {
  * Application-level encryption of short secrets (MFA secrets, D4): AES-256-GCM, 12-byte random
  * IV, caller-supplied additional authenticated data that binds the ciphertext to its row (e.g.
  * `mfa:user:<id>`). Output: `v1.<kid>.<iv>.<tag>.<ciphertext>` (base64url parts).
+ *
+ * The injectable box uses DATA_ENCRYPTION_KEY (`kid` `k1`). `SecretBox.withKeys` builds the same
+ * construction over a dedicated key pair (step AI-6 D7: tenant provider keys under
+ * ASSISTANT_TENANT_KEY_ENCRYPTION_KEY), labelled `k` + 7 hex of the key's SHA-256. Decryption
+ * always tries the current key, then the previous one (rotation).
  */
 @Injectable()
 export class SecretBox {
-  private readonly current: Buffer;
-  private readonly previous: Buffer | undefined;
+  private current!: Buffer;
+  private previous: Buffer | undefined;
+  private currentKid!: string;
 
   constructor(@Inject(API_CONFIG) config: SecretBoxConfig) {
-    this.current = Buffer.from(config.DATA_ENCRYPTION_KEY, 'hex');
-    this.previous = config.DATA_ENCRYPTION_KEY_PREVIOUS
-      ? Buffer.from(config.DATA_ENCRYPTION_KEY_PREVIOUS, 'hex')
-      : undefined;
-    if (this.current.length !== 32 || (this.previous && this.previous.length !== 32)) {
-      throw new Error('DATA_ENCRYPTION_KEY must be 32 bytes (64 hex characters)');
+    this.useKeys(
+      {
+        current: config.DATA_ENCRYPTION_KEY,
+        previous: config.DATA_ENCRYPTION_KEY_PREVIOUS,
+        name: 'DATA_ENCRYPTION_KEY',
+      },
+      CURRENT_KID,
+    );
+  }
+
+  /** A box over an explicit key pair (not DI); `kid` = `keyKidOf(current)`. */
+  static withKeys(keys: SecretBoxKeys): SecretBox {
+    const box = Object.create(SecretBox.prototype) as SecretBox;
+    box.useKeys(keys, null);
+    return box;
+  }
+
+  /** The label of the encrypting key (stored next to the ciphertext, e.g. `key_kid`). */
+  get kid(): string {
+    return this.currentKid;
+  }
+
+  private useKeys(keys: SecretBoxKeys, fixedKid: string | null): void {
+    const hex = /^[0-9a-fA-F]{64}$/;
+    const previous = keys.previous ? keys.previous : undefined;
+    if (!hex.test(keys.current) || (previous !== undefined && !hex.test(previous))) {
+      throw new Error(`${keys.name} must be 32 bytes (64 hex characters)`);
     }
+    this.current = Buffer.from(keys.current, 'hex');
+    this.previous = previous ? Buffer.from(previous, 'hex') : undefined;
+    this.currentKid = fixedKid ?? keyKidOf(keys.current);
   }
 
   encrypt(plaintext: string, aad: string): string {
@@ -56,7 +101,7 @@ export class SecretBox {
     const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
     return [
       VERSION,
-      CURRENT_KID,
+      this.currentKid,
       iv.toString('base64url'),
       cipher.getAuthTag().toString('base64url'),
       ciphertext.toString('base64url'),
@@ -74,7 +119,7 @@ export class SecretBox {
       string,
       string,
     ];
-    if (version !== VERSION || !/^k\d+$/.test(kid)) throw new SecretBoxError();
+    if (version !== VERSION || !KID.test(kid)) throw new SecretBoxError();
     if (![ivPart, tagPart].every((p) => PART.test(p)) || !(ctPart === '' || PART.test(ctPart))) {
       throw new SecretBoxError();
     }

@@ -380,6 +380,45 @@ export class OpenAiProvider extends ChatCompletionsProvider {
   protected authHeaders(): Record<string, string> {
     return { authorization: `Bearer ${this.options.apiKey}` };
   }
+
+  /**
+   * Validates the key and the model without generating tokens (step AI-6 D7):
+   * `GET {baseURL}/models/{model}` with the bearer key through the injected `fetch`; the body is
+   * discarded. 401/403 → `auth`, 404 (unknown model) → `client_error`.
+   */
+  async probe(signal: AbortSignal): Promise<void> {
+    const fetchImpl = this.options.fetch ?? fetch;
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), this.options.timeoutMs);
+    const combined = AbortSignal.any([signal, timeout.signal]);
+    try {
+      let response: Response;
+      try {
+        response = await fetchImpl(
+          `${this.options.baseURL.replace(/\/+$/, '')}/models/${encodeURIComponent(this.options.model)}`,
+          {
+            method: 'GET',
+            headers: { accept: 'application/json', ...this.authHeaders() },
+            signal: combined,
+          },
+        );
+      } catch {
+        if (combined.aborted) throw new LlmError(signal.aborted ? 'aborted' : 'timeout');
+        throw new LlmError('connection');
+      }
+      await discardBody(response);
+      if (!response.ok)
+        throw new LlmError(reasonOfStatus(response.status), {
+          httpStatus: response.status,
+          retryAfterMs: parseRetryAfter(
+            response.headers.get('retry-after'),
+            (this.options.now ?? Date.now)(),
+          ),
+        });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export interface AzureOpenAiProviderOptions extends Omit<OpenAiCompatibleOptions, 'model'> {

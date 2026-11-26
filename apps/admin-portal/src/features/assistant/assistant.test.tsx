@@ -25,6 +25,7 @@ import {
   CONVERSATION_ID_2,
   EXECUTION_ID,
   GUARD_TOOL_TITLE,
+  MESSAGE_ID,
   SELF_GUARD_MESSAGE,
   ATO_FOUR_EYES_MESSAGE,
   STATUS_AVAILABLE,
@@ -493,33 +494,81 @@ describe('conversation history', () => {
 
   const SECOND = { ...CONVERSATION, id: CONVERSATION_ID_2, title: 'Quarantine questions' };
 
-  it('searches by title (q) and switches between active and archived', async () => {
+  it('switches between active and archived; one character keeps the list (no content search)', async () => {
     const queries: Record<string, string | null>[] = [];
+    let searches = 0;
     mockApi({
       AssistantConversationsController_list_v1: ({ url }) => {
         queries.push({ q: url.searchParams.get('q'), status: url.searchParams.get('status') });
-        const q = url.searchParams.get('q');
-        const rows = [CONVERSATION, SECOND].filter(
-          (c) => !q || (c.title ?? '').toLowerCase().includes(q.toLowerCase()),
-        );
-        return okJson({ data: rows, nextCursor: null });
+        return okJson({ data: [CONVERSATION, SECOND], nextCursor: null });
+      },
+      AssistantSearchController_search_v1: () => {
+        searches += 1;
+        return okJson({ data: [], nextCursor: null });
       },
     });
     const { user } = renderPage();
     const history = await screen.findByRole('list', { name: 'Conversations' });
     expect(within(history).getAllByRole('listitem')).toHaveLength(2);
-    await user.type(
-      screen.getByRole('searchbox', { name: 'Search conversations by title' }),
-      'quar',
-    );
-    await waitFor(() =>
-      expect(
-        within(screen.getByRole('list', { name: 'Conversations' })).getAllByRole('listitem'),
-      ).toHaveLength(1),
-    );
-    expect(queries.at(-1)).toEqual({ q: 'quar', status: 'active' });
+    await user.type(screen.getByRole('searchbox', { name: 'Search conversations' }), 'q');
     await user.click(screen.getByRole('switch', { name: 'Show archived' }));
-    await waitFor(() => expect(queries.at(-1)).toEqual({ q: 'quar', status: 'archived' }));
+    await waitFor(() => expect(queries.at(-1)).toEqual({ q: null, status: 'archived' }));
+    expect(searches).toBe(0);
+  });
+
+  it('searches the text of the own conversations from two characters and opens a hit at its message (step AI-6 D4)', async () => {
+    const searches: Record<string, string | null>[] = [];
+    mockApi({
+      AssistantConversationsController_list_v1: () =>
+        okJson({ data: [CONVERSATION, SECOND], nextCursor: null }),
+      AssistantSearchController_search_v1: ({ url }) => {
+        searches.push({ q: url.searchParams.get('q'), limit: url.searchParams.get('limit') });
+        return okJson({
+          data: [
+            {
+              conversationId: CONVERSATION_ID,
+              conversationTitle: 'Policy review',
+              messageId: MESSAGE_ID,
+              role: 'assistant',
+              seq: 2,
+              createdAt: '2026-11-20T09:00:03.000Z',
+              snippet: '… Two policies are active and one quarantines executables …',
+            },
+          ],
+          nextCursor: null,
+        });
+      },
+    });
+    const { user } = renderPage();
+    await screen.findByRole('list', { name: 'Conversations' });
+    await user.type(screen.getByRole('searchbox', { name: 'Search conversations' }), 'executables');
+    const results = await screen.findByRole('list', { name: 'Search results' });
+    expect(searches.at(-1)).toEqual({ q: 'executables', limit: '20' });
+    expect(screen.queryByRole('list', { name: 'Conversations' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Show archived' })).not.toBeInTheDocument();
+    const hit = within(results).getByRole('button', { name: /Policy review/ });
+    expect(hit).toHaveTextContent(
+      'Assistant: … Two policies are active and one quarantines executables …',
+    );
+    await user.click(hit);
+    // The conversation opens with the matching answer focused (and outlined).
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute('data-message-id')).toBe(MESSAGE_ID),
+    );
+    expect(currentTestUrl()).toContain(`conversation=${CONVERSATION_ID}`);
+  });
+
+  it('explains a search timeout (503 assistant_search_timeout)', async () => {
+    mockApi({
+      AssistantConversationsController_list_v1: () =>
+        okJson({ data: [CONVERSATION], nextCursor: null }),
+      AssistantSearchController_search_v1: () =>
+        apiErrorJson(503, 'assistant_search_timeout', 'The search took too long'),
+    });
+    const { user } = renderPage();
+    await screen.findByRole('list', { name: 'Conversations' });
+    await user.type(screen.getByRole('searchbox', { name: 'Search conversations' }), 'ab');
+    expect(await screen.findByText(/The search took too long/)).toBeInTheDocument();
   });
 
   it('renames, archives and clears a conversation (ConfirmDialog "Clear conversation")', async () => {

@@ -40,6 +40,14 @@
  *   organization B's turn fail at the precondition read with the api's `404` and store no
  *   confirmation; the new read `archive_admin_capture_issue` and the mail-flow preview answer
  *   `404` for A's message and connection; nothing of A changes.
+ * - step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md §9 item 5): organization B
+ *   gets `404 assistant_message_not_found` for feedback on A's assistant message (set and
+ *   remove), finds none of A's text with the content search, sees none of A's users, ratings,
+ *   conversations or executions in the admin and audit views (`404
+ *   assistant_admin_conversation_not_found` for A's conversation, empty pages for A's ids as
+ *   filters), gets `404 assistant_report_not_found` for A's queued background report (its job),
+ *   and never sees or removes A's provider key (`tenantKey: null`, `404
+ *   assistant_tenant_key_not_found`); API keys get `403 user_required` on the 11 new routes.
  *
  * Synthetic `it-*` organizations only.
  */
@@ -81,6 +89,17 @@
 // @covers get /api/v1/ediscovery/cases/:caseId/searches/:searchId
 // @covers get /api/v1/provider-connections/:id
 // @covers post /api/v1/provider-connections/:id/mail-flow/preview
+// @covers put /api/v1/assistant/settings/provider-key
+// @covers delete /api/v1/assistant/settings/provider-key
+// @covers post /api/v1/assistant/settings/provider-key/validate
+// @covers get /api/v1/assistant/search
+// @covers put /api/v1/assistant/messages/:messageId/feedback
+// @covers delete /api/v1/assistant/messages/:messageId/feedback
+// @covers get /api/v1/assistant/admin/usage/users
+// @covers get /api/v1/assistant/admin/feedback
+// @covers get /api/v1/assistant/admin/conversations
+// @covers get /api/v1/assistant/admin/conversations/:conversationId
+// @covers get /api/v1/assistant/admin/executions
 import { createHash, randomUUID } from 'node:crypto';
 import { FAKE_EXECUTABLES_DEFINITION } from '@email-gateway/assistant';
 import { uuidv7 } from '@email-gateway/common';
@@ -404,7 +423,12 @@ describe('platform override (Q11)', () => {
 describe('API keys cannot use the assistant (user only)', () => {
   it('answers 403 user_required on every assistant route', async () => {
     const key = apiKeyHeader(
-      await fx.createApiKey(orgA, ['assistant:use', 'assistant:configure', 'user:read']),
+      await fx.createApiKey(orgA, [
+        'assistant:use',
+        'assistant:configure',
+        'audit:read',
+        'user:read',
+      ]),
     );
     const routes = [
       ['get', `${A}/status`, undefined],
@@ -445,8 +469,29 @@ describe('API keys cannot use the assistant (user only)', () => {
       ['post', `${A}/confirmations/${randomUUID()}/cancel`, undefined],
       // Step AI-R §4.1.
       ['get', `${A}/reports/${randomUUID()}`, undefined],
+      // Step AI-6 §4.1 (contracts §35.6).
+      [
+        'put',
+        `${A}/settings/provider-key`,
+        {
+          provider: 'openai',
+          model: 'claude-opus-5-5',
+          apiKey: 'test-tenant-key-0001-not-a-secret',
+          expectedRowVersion: 1,
+        },
+      ],
+      ['delete', `${A}/settings/provider-key?expectedRowVersion=1`, undefined],
+      ['post', `${A}/settings/provider-key/validate`, undefined],
+      ['get', `${A}/search?q=organization`, undefined],
+      ['put', `${A}/messages/${randomUUID()}/feedback`, { rating: 'up' }],
+      ['delete', `${A}/messages/${randomUUID()}/feedback`, undefined],
+      ['get', `${A}/admin/usage/users`, undefined],
+      ['get', `${A}/admin/feedback`, undefined],
+      ['get', `${A}/admin/conversations`, undefined],
+      ['get', `${A}/admin/conversations/${conversationA}`, undefined],
+      ['get', `${A}/admin/executions`, undefined],
     ] as const;
-    expect(routes).toHaveLength(19);
+    expect(routes).toHaveLength(30);
     for (const [method, path, body] of routes) {
       const res = await call(ctx, key, method, path, body);
       expect(res.status, `${method} ${path}`).toBe(403);
@@ -1295,4 +1340,156 @@ describe('step AI-5 writes and reads naming another organization’s records (de
     expect(own).toMatchObject({ messageId: identity.publicId, status: 'failed' });
     expect(await snapshot()).toEqual(before);
   }, 300_000);
+});
+
+describe('step AI-6 feedback, search, admin and audit views, report jobs and provider keys (§9 item 5)', () => {
+  const COMMENT_A = 'Organization A only feedback comment';
+
+  it('B never reads, rates, finds, audits or removes anything of organization A', async () => {
+    // A: an answer with a rating and a comment, a queued background report (no consumer runs
+    // in this app) and a stored provider key row.
+    const textA = `/text Organization A secret ${randomUUID().slice(0, 8)}`;
+    const own = await turn(ctx, adminA.headers, conversationA, textA);
+    expect(own.status).toBe(200);
+    const answerA = own.body.message.id as string;
+    expect(
+      (
+        await call(ctx, adminA.headers, 'put', `${A}/messages/${answerA}/feedback`, {
+          rating: 'down',
+          reason: 'other',
+          comment: COMMENT_A,
+        })
+      ).status,
+    ).toBe(200);
+    const reportTurn = await turn(
+      ctx,
+      adminA.headers,
+      conversationA,
+      directive('report_generate', { range: '30d', sections: ['traffic'] }),
+    );
+    const queued = (reportTurn.body.executions as Array<Record<string, unknown>>).find(
+      (e) => e.tool === 'report_generate',
+    ) as { httpStatus: number; card: { report: { reportId: string; status: string } } };
+    expect(queued).toMatchObject({ httpStatus: 202, card: { report: { status: 'queued' } } });
+    const reportA = queued.card.report.reportId;
+    await ctx.prisma.aiChatProviderKey.create({
+      data: {
+        organizationId: orgA.id,
+        provider: 'openai',
+        model: 'claude-opus-5-5',
+        keyCiphertext: 'v1.k0000000.fixture.fixture.fixture',
+        keyKid: 'k0000000',
+        keyFingerprint: '0123456789abcdef',
+        keyVersion: 1,
+        status: 'valid',
+        setByUserId: adminA.user.id,
+        setAt: new Date(),
+      },
+    });
+    fx.registerCleanup(() =>
+      ctx.prisma.aiChatProviderKey.deleteMany({ where: { organizationId: orgA.id } }),
+    );
+    const executionA = (
+      await ctx.prisma.aiChatToolExecution.findFirstOrThrow({
+        where: { conversation: { publicId: conversationA } },
+        select: { correlationId: true },
+      })
+    ).correlationId;
+
+    // Feedback on A's message: 404 for set and remove.
+    for (const method of ['put', 'delete'] as const) {
+      const res = await call(
+        ctx,
+        adminB.headers,
+        method,
+        `${A}/messages/${answerA}/feedback`,
+        method === 'put' ? { rating: 'up' } : undefined,
+      );
+      expect(res.status, method).toBe(404);
+      expect(res.body.code).toBe('assistant_message_not_found');
+    }
+    // Content search: nothing of A.
+    const search = await call(
+      ctx,
+      adminB.headers,
+      'get',
+      `${A}/search?q=${encodeURIComponent(textA.slice(6))}`,
+    );
+    expect(search.status).toBe(200);
+    expect(search.body.data).toEqual([]);
+    // Admin views of B: none of A's users, ratings, conversations or executions.
+    const scan = JSON.stringify;
+    const usage = await call(ctx, adminB.headers, 'get', `${A}/admin/usage/users`);
+    expect(usage.status).toBe(200);
+    expect(scan(usage.body)).not.toContain(adminA.user.publicId);
+    const usageOfA = await call(
+      ctx,
+      adminB.headers,
+      'get',
+      `${A}/admin/usage/users?userId=${adminA.user.publicId}`,
+    );
+    expect(usageOfA.body.data).toEqual([]);
+    expect(usageOfA.body.totals.overall.turns).toBe(0);
+    const feedback = await call(ctx, adminB.headers, 'get', `${A}/admin/feedback`);
+    expect(feedback.status).toBe(200);
+    expect(scan(feedback.body)).not.toContain(answerA);
+    expect(scan(feedback.body)).not.toContain(COMMENT_A);
+    const conversations = await call(ctx, adminB.headers, 'get', `${A}/admin/conversations`);
+    expect(conversations.status).toBe(200);
+    expect(scan(conversations.body)).not.toContain(conversationA);
+    const detail = await call(
+      ctx,
+      adminB.headers,
+      'get',
+      `${A}/admin/conversations/${conversationA}`,
+    );
+    expect(detail.status).toBe(404);
+    expect(detail.body.code).toBe('assistant_admin_conversation_not_found');
+    for (const filter of [
+      `conversationId=${conversationA}`,
+      `correlationId=${encodeURIComponent(executionA)}`,
+      `userId=${adminA.user.publicId}`,
+    ]) {
+      const res = await call(ctx, adminB.headers, 'get', `${A}/admin/executions?${filter}`);
+      expect(res.status, filter).toBe(200);
+      expect(res.body.data, filter).toEqual([]);
+    }
+    expect(
+      await ctx.prisma.auditLog.count({
+        where: { organizationId: orgB.id, action: 'assistant.audit_viewed' },
+      }),
+    ).toBe(0);
+    // A's queued background report and its job.
+    const report = await call(ctx, adminB.headers, 'get', `${REPORTS}/${reportA}`);
+    expect(report.status).toBe(404);
+    expect(report.body.code).toBe('assistant_report_not_found');
+    // A's provider key: invisible and not removable by B.
+    const settingsB = await call(ctx, adminB.headers, 'get', `${A}/settings`);
+    expect(settingsB.body.tenantKey).toBeNull();
+    expect(scan(settingsB.body)).not.toContain('0123456789abcdef');
+    const removed = await call(
+      ctx,
+      adminB.headers,
+      'delete',
+      `${A}/settings/provider-key?expectedRowVersion=${String(settingsB.body.rowVersion)}`,
+    );
+    expect(removed.status).toBe(404);
+    expect(removed.body.code).toBe('assistant_tenant_key_not_found');
+
+    // Nothing of A changed.
+    expect(await ctx.prisma.aiChatProviderKey.count({ where: { organizationId: orgA.id } })).toBe(
+      1,
+    );
+    const rated = await ctx.prisma.aiChatFeedback.findFirstOrThrow({
+      where: { message: { publicId: answerA } },
+    });
+    expect(rated).toMatchObject({ rating: 'down', comment: COMMENT_A });
+    expect(
+      (await call(ctx, adminA.headers, 'get', `${REPORTS}/${reportA}`)).body.report,
+    ).toMatchObject({ status: 'queued', job: { status: 'queued' } });
+    // A's own audit view reads its conversation (the contrast).
+    expect(
+      (await call(ctx, adminA.headers, 'get', `${A}/admin/conversations/${conversationA}`)).status,
+    ).toBe(200);
+  });
 });

@@ -12,6 +12,17 @@ const REPORT_BYTE_BUCKETS = [
   8192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152,
 ];
 
+/** Seconds of one model call (≤ ASSISTANT_TIMEOUT_MS). */
+const LLM_BUCKETS = [0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120];
+/** Seconds from a queued report job to its end (≤ ASSISTANT_REPORT_JOB_TTL_SECONDS ≤ 2 h). */
+const REPORT_JOB_BUCKETS = [1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600, 1800, 3600, 7200];
+
+/** Outcomes of `assistant_report_jobs_total` (step AI-6 D8). */
+export type ReportJobOutcome =
+  'queued' | 'succeeded' | 'failed' | 'expired' | 'cancelled' | 'retried';
+/** Outcomes of `assistant_tenant_key_validations_total` (step AI-6 D7). */
+export type TenantKeyValidationOutcome = 'valid' | 'rejected' | 'unverified';
+
 /** Outcomes of `assistant_reports_total` (step AI-R D11). */
 export type ReportOutcome = 'generated' | 'failed' | 'denied';
 /** Outcomes of `assistant_report_sources_total` (step AI-R D11). */
@@ -58,6 +69,16 @@ export class AssistantMetrics {
   readonly reportBytes: Histogram;
   readonly reportSources: Counter<'tool' | 'outcome'>;
   readonly reportEmails: Counter<'outcome'>;
+  // Step AI-6 D8.
+  readonly llmRequests: Counter<'provider' | 'role' | 'outcome'>;
+  readonly llmSeconds: Histogram<'provider' | 'role'>;
+  readonly providerSwitches: Counter<'from' | 'to' | 'reason'>;
+  readonly providerFallbackActive: Gauge;
+  readonly providerBreakerOpen: Gauge<'provider' | 'role'>;
+  readonly tenantKeyValidations: Counter<'outcome'>;
+  readonly pseudonyms: Counter<'kind'>;
+  readonly reportJobs: Counter<'outcome'>;
+  readonly reportJobSeconds: Histogram;
 
   constructor(metrics: MetricsService) {
     this.turns = metrics.counter(
@@ -95,7 +116,8 @@ export class AssistantMetrics {
     );
     this.budgetRefusals = metrics.counter(
       'assistant_budget_refusals_total',
-      'Turns refused at start by budget scope (tenant, platform, user, concurrency)',
+      'Turns refused at start by budget scope (tenant, platform, user = the per-minute window, ' +
+        'user_tokens = the per-user daily budget, concurrency)',
       ['scope'],
     );
     this.activeTurns = metrics.gauge(
@@ -136,6 +158,58 @@ export class AssistantMetrics {
       'assistant_report_emails_total',
       'Assistant report emails by outcome (queued, refused_recipient, limit, failed)',
       ['outcome'],
+    );
+    // Step AI-6 D8 (no organization or user labels; `role` = primary, fallback or tenant).
+    this.llmRequests = metrics.counter(
+      'assistant_llm_requests_total',
+      'Model calls by provider, candidate role (primary, fallback, tenant) and outcome (ok or ' +
+        'the failure reason code)',
+      ['provider', 'role', 'outcome'],
+    );
+    this.llmSeconds = metrics.histogram(
+      'assistant_llm_seconds',
+      'Duration of one model call by provider and candidate role',
+      ['provider', 'role'],
+      LLM_BUCKETS,
+    );
+    this.providerSwitches = metrics.counter(
+      'assistant_provider_switches_total',
+      'Provider candidate switches by from/to role and reason (breaker_open at turn start, the ' +
+        'failure reason of a same-turn switch, tenant_key_invalid)',
+      ['from', 'to', 'reason'],
+    );
+    this.providerFallbackActive = metrics.gauge(
+      'assistant_provider_fallback_active',
+      '1 when the last turn start of this process selected the platform secondary provider ' +
+        'because the primary was unhealthy',
+    );
+    this.providerBreakerOpen = metrics.gauge(
+      'assistant_provider_breaker_open',
+      'Breaker state of the platform provider candidates (1 open) by provider and role, ' +
+        'refreshed at turn start and by GET /assistant/status',
+      ['provider', 'role'],
+    );
+    this.tenantKeyValidations = metrics.counter(
+      'assistant_tenant_key_validations_total',
+      'Probes of organization provider keys by outcome (valid, rejected, unverified)',
+      ['outcome'],
+    );
+    this.pseudonyms = metrics.counter(
+      'assistant_pseudonyms_total',
+      'New pseudonym mappings by kind (email, ip, domain, name) and values over the ' +
+        'per-conversation cap (overflow)',
+      ['kind'],
+    );
+    this.reportJobs = metrics.counter(
+      'assistant_report_jobs_total',
+      'Background report jobs by outcome (queued, succeeded, failed, expired, cancelled, retried)',
+      ['outcome'],
+    );
+    this.reportJobSeconds = metrics.histogram(
+      'assistant_report_job_seconds',
+      'Time from a queued report job to its end',
+      [],
+      REPORT_JOB_BUCKETS,
     );
   }
 }

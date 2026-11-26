@@ -142,4 +142,40 @@ describe('planWindow', () => {
     });
     expect(plan.newSegment).toBe(false);
   });
+
+  it('opens a new recap segment when forced even though the segment fits (step AI-6 D6)', () => {
+    const base = {
+      system: 'S',
+      segmentTranscript: segment,
+      userMessage: 'second',
+      maxTokens: 10_000,
+      userEntry: (t: string) => provider.userEntry(t),
+      recap,
+    };
+    const forced = planWindow({ ...base, forceNewSegment: true });
+    expect(forced.newSegment).toBe(true);
+    expect(forced.transcript).toHaveLength(1);
+    expect(forced.appended).toEqual(forced.transcript);
+    const text = (forced.transcript[0] as { text: string }).text;
+    expect(text.startsWith(buildRecap(recap))).toBe(true);
+    expect(text.endsWith('Current user message:\nsecond')).toBe(true);
+    // identical to the overflow recap of the same input
+    const overflow = planWindow({ ...base, system: 'S'.repeat(100), maxTokens: 20 });
+    expect((overflow.transcript[0] as { text: string }).text).toBe(text);
+    expect(planWindow({ ...base, forceNewSegment: false }).newSegment).toBe(false);
+  });
+
+  it('does not force a new segment for an empty segment', () => {
+    const plan = planWindow({
+      system: 'S',
+      segmentTranscript: [],
+      userMessage: 'hello',
+      maxTokens: 10_000,
+      userEntry: (t) => provider.userEntry(t),
+      recap,
+      forceNewSegment: true,
+    });
+    expect(plan.newSegment).toBe(false);
+    expect(plan.transcript).toEqual(provider.userEntry('hello'));
+  });
 });

@@ -4,6 +4,7 @@ import {
   Logger,
   type OnApplicationBootstrap,
   type OnModuleDestroy,
+  Optional,
 } from '@nestjs/common';
 import { PRECONDITION_MAX_READS } from '@email-gateway/assistant';
 import type { Prisma } from '@email-gateway/database';
@@ -19,6 +20,7 @@ import {
   assistantKeys,
   CONFIRMATION_EXECUTING_GRACE_MS,
   REPORT_DELIVERY_TIMEOUT_MS,
+  REPORT_JOB_SWEEP_BATCH,
   REPORT_OBJECT_BATCH,
   REPORT_PENDING_MAX_AGE_MS,
   REPORT_ROW_CODES,
@@ -28,7 +30,7 @@ import {
   RETENTION_LOCK_SECONDS,
   TURN_ABANDON_GRACE_MS,
 } from '../assistant.constants';
-import { CONFIRMATION_ROW_CODES, TURN_FAILURE_CODES } from '../assistant.errors';
+import { CONFIRMATION_ROW_CODES, REPORT_JOB_CODES, TURN_FAILURE_CODES } from '../assistant.errors';
 import {
   ConfirmationsRepository,
   type StaleExecutingCutoff,
@@ -37,6 +39,7 @@ import {
 import { ConversationsRepository } from '../repositories/conversations.repository';
 import { ExecutionsRepository } from '../repositories/executions.repository';
 import { ReportDeliveriesRepository } from '../repositories/report-deliveries.repository';
+import { ReportJobsRepository } from '../repositories/report-jobs.repository';
 import { ReportsRepository } from '../repositories/reports.repository';
 import { UsageRepository } from '../repositories/usage.repository';
 import { AssistantMetrics } from './assistant-metrics';
@@ -64,6 +67,8 @@ export interface RetentionResult {
   reportsAbandoned: number;
   /** Step AI-R D7: `queued` deliveries older than 25 hours marked `failed`. */
   deliveriesTimedOut: number;
+  /** Step AI-6 D5: unfinished report jobs past `expires_at` failed (and their reports). */
+  reportJobsExpired?: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -94,7 +99,10 @@ const DAY_MS = 86_400_000;
  *   and becomes `failed` (`assistant_report_abandoned`); a `queued` delivery older than 25 hours
  *   (beyond the notification queue's 24 h retry age) becomes `failed`
  *   (`assistant_report_email_timeout`). The hard delete skips a conversation whose report still
- *   has an object.
+ *   has an object. The `pending` sweep ignores `queued` reports (step AI-6).
+ * - report jobs (step AI-6 D5): an unfinished job past `expires_at` becomes `failed`
+ *   (`assistant_report_job_expired`) with its `queued` report; the content purge cancels the
+ *   unfinished jobs of its conversations (in the purge transaction).
  *
  * Organization deletion purges everything separately (`AssistantTenantDataRepository`).
  */
@@ -118,6 +126,7 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
     private readonly deliveries: ReportDeliveriesRepository,
     private readonly store: ReportObjectStore,
     private readonly reportObjects: ReportsService,
+    @Optional() private readonly reportJobs?: ReportJobsRepository,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -172,6 +181,7 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
     result.reportObjects = await this.deletePurgedReportObjects(now);
     result.reportsAbandoned = await this.sweepPendingReports(now);
     result.deliveriesTimedOut = await this.sweepQueuedDeliveries(now);
+    if (this.reportJobs) result.reportJobsExpired = await this.expireReportJobs(now);
     const before = new Date(
       now.getTime() - this.config.ASSISTANT_EXECUTION_RETENTION_DAYS * DAY_MS,
     );
@@ -221,7 +231,11 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
             now,
             tx,
           );
-          await this.conversations.purgeContent(organizationId, still, now, tx);
+          // Step AI-6 D5: unfinished report jobs of the purged conversations are cancelled.
+          const cancelled = await this.conversations.purgeContent(organizationId, still, now, tx);
+          if (typeof cancelled === 'number' && cancelled > 0) {
+            this.metrics.reportJobs.inc({ outcome: 'cancelled' }, cancelled);
+          }
           purged += still.length;
         }
         return purged;
@@ -271,6 +285,32 @@ export class AssistantRetentionService implements OnApplicationBootstrap, OnModu
         continue;
       }
       if (await this.reports.abandon(row.organizationId, row.id, now)) total += 1;
+    }
+    return total;
+  }
+
+  /**
+   * Step AI-6 D5: unfinished report jobs past `expires_at` → `failed`
+   * (`assistant_report_job_expired`), their `queued` reports too (one batch per run).
+   */
+  async expireReportJobs(now: Date, batch = REPORT_JOB_SWEEP_BATCH): Promise<number> {
+    const jobs = this.reportJobs;
+    if (!jobs) return 0;
+    let total = 0;
+    for (const row of await jobs.dueToExpire(now, batch)) {
+      const moved = await this.runner.run((tx) =>
+        jobs.fail(row.organizationId, row, REPORT_JOB_CODES.expired, now, tx),
+      );
+      if (moved) {
+        total += 1;
+        this.metrics.reportJobs.inc({ outcome: 'expired' });
+        this.metrics.reportJobSeconds.observe((now.getTime() - row.createdAt.getTime()) / 1000);
+        this.logger.warn({
+          message: 'Assistant report job expired',
+          jobId: row.publicId,
+          code: REPORT_JOB_CODES.expired,
+        });
+      }
     }
     return total;
   }

@@ -1,6 +1,6 @@
 # Chat API
 
-The assistant's HTTP interface: 19 routes under (step AI-R added `GET /assistant/reports/{reportId}`) `/api/v1/assistant` (OpenAPI tag `assistant`), one Server-Sent Events stream, coded errors. The normative contract is [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) and, for confirmations (step AI-2), [§35.1](../architecture/contracts.md#351-confirmations-step-ai-2) and, for the identity and tenant administration tools (step AI-3), [§35.2](../architecture/contracts.md#352-identity-and-tenant-administration-tools-step-ai-3); AI-3 added no assistant route; request and response schemas with examples are in the OpenAPI snapshot [`docs/api/openapi.json`](../api/openapi.json) (tag `assistant`). Examples below use synthetic values.
+The assistant's HTTP interface: 30 routes under `/api/v1/assistant` (step AI-R added `GET /assistant/reports/{reportId}`, step AI-6 eleven more, see [Hardening and operations](#hardening-and-operations-step-ai-6)) (OpenAPI tag `assistant`), one Server-Sent Events stream, coded errors. The normative contract is [contracts §35](../architecture/contracts.md#35-ai-assistant-step-ai-1) and, for confirmations (step AI-2), [§35.1](../architecture/contracts.md#351-confirmations-step-ai-2) and, for the identity and tenant administration tools (step AI-3), [§35.2](../architecture/contracts.md#352-identity-and-tenant-administration-tools-step-ai-3); AI-3 added no assistant route; request and response schemas with examples are in the OpenAPI snapshot [`docs/api/openapi.json`](../api/openapi.json) (tag `assistant`). Examples below use synthetic values.
 
 ## Conventions
 
@@ -306,7 +306,7 @@ The summary above is abbreviated. A write the operation itself refuses (for exam
 | `assistant_tenant_disabled`               | 403  | Tenant setting is off                                                                                                                                                                                                                                                                                                                                       |
 | `assistant_provider_unavailable`          | 503  | Provider breaker is open                                                                                                                                                                                                                                                                                                                                    |
 | `assistant_busy`                          | 503  | `ASSISTANT_MAX_CONCURRENT_TURNS` reached in this api process                                                                                                                                                                                                                                                                                                |
-| `assistant_budget_exhausted`              | 429  | Tenant or platform daily token budget used up (`scope: tenant \| platform`)                                                                                                                                                                                                                                                                                 |
+| `assistant_budget_exhausted`              | 429  | Tenant or platform daily token budget used up (`scope: tenant \| platform`; since AI-6 also `user`, the per-user daily budget)                                                                                                                                                                                                                              |
 | `assistant_turn_in_progress`              | 409  | A turn of this conversation is running (or the same `clientTurnId` is still running)                                                                                                                                                                                                                                                                        |
 | `assistant_conversation_limit`            | 409  | `ASSISTANT_MAX_CONVERSATIONS_PER_USER` reached                                                                                                                                                                                                                                                                                                              |
 | `assistant_conversation_not_found`        | 404  | Unknown, foreign or deleted conversation                                                                                                                                                                                                                                                                                                                    |
@@ -519,3 +519,209 @@ The portal card of an executed export says "Export queued. Download it on the ca
 | `archive_admin_capture_issue` | `GET /api/v1/archive/capture-issues/{messageId}` | `journal:manage` or `archive:manage` (API keys allowed) |
 
 The capture intent of the message in the capture-issue list's view, for any intent status; no intent, an unknown or another organization's message is `404 archive_capture_issue_not_found`, a non-uuid `400`. `provider_mail_flow_preview` (`POST …/mail-flow/preview`, `integration:manage`) is a side-effect-free read tool; its envelope and card never contain the impact token.
+
+## Hardening and operations (step AI-6)
+
+Contracts [§35.6](../architecture/contracts.md#356-hardening-and-operations-step-ai-6), [design](../plan/steps/34-ai-chat-hardening-operations.md) D1–D7, D13, [ADR-0096](../architecture/adr/0096-assistant-async-report-jobs-session-job-token.md), [ADR-0097](../architecture/adr/0097-assistant-provider-routing-tenant-keys-pseudonymization.md). Eleven new routes (30 assistant routes in all), every one `@UserOnly()`, classified `not_applicable` in the registry (never a chat tool). In Kubernetes every `/api/v1/assistant/*` route is served by the `api-assistant` Deployment ([deployment](../deployment/assistant.md)); the URLs do not change.
+
+### Routes
+
+| Method | Path                                              | Operation id                                     | Permission            | Purpose                                                                                                                                                                                                       |
+| ------ | ------------------------------------------------- | ------------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PUT    | `/assistant/settings/provider-key`                | `AssistantProviderKeyController_set_v1`          | `assistant:configure` | Store the organization's own provider key: `{ provider, model, apiKey, expectedRowVersion }` (the settings document's `rowVersion`); MFA session, rate class `sensitive`; probed first; `200 TenantKeyView`   |
+| DELETE | `/assistant/settings/provider-key`                | `AssistantProviderKeyController_remove_v1`       | `assistant:configure` | Remove it (query `?expectedRowVersion=`; no body); also sets `useTenantKey=false`; `204`; works with the platform gate off                                                                                    |
+| POST   | `/assistant/settings/provider-key/validate`       | `AssistantProviderKeyController_validate_v1`     | `assistant:configure` | Re-probe the stored key (no body, no CAS); updates its status only; `200 TenantKeyView`                                                                                                                       |
+| GET    | `/assistant/search`                               | `AssistantSearchController_search_v1`            | `assistant:use`       | Search the text of the caller's **own** conversations: `q` (2–200 characters after trimming; `%` and `_` match literally), `cursor`, `limit`; rate class `expensive`                                          |
+| PUT    | `/assistant/messages/{messageId}/feedback`        | `AssistantFeedbackController_set_v1`             | `assistant:use`       | Rate an assistant answer of the caller's own conversation: `{ rating: 'up' \| 'down', reason?, comment? }`; upsert; `200 FeedbackView`                                                                        |
+| DELETE | `/assistant/messages/{messageId}/feedback`        | `AssistantFeedbackController_remove_v1`          | `assistant:use`       | Remove the rating; `204`                                                                                                                                                                                      |
+| GET    | `/assistant/admin/usage/users`                    | `AssistantAdminController_usageByUser_v1`        | `assistant:configure` | Usage and **estimated** cost per user and UTC day: `from`, `to` (days, default the last 30, at most 92), `userId?`, cursor v1                                                                                 |
+| GET    | `/assistant/admin/feedback`                       | `AssistantAdminController_feedback_v1`           | `assistant:configure` | Ratings with comments of the organization: `from`, `to` (instants, ≤ 92 days), `rating?`, `reason?` (comma list), `userId?`, cursor v1                                                                        |
+| GET    | `/assistant/admin/conversations`                  | `AssistantAdminAuditController_conversations_v1` | `audit:read`          | Metadata-only list of the organization's conversations, newest `lastTurnAt` first; `userId?`, `from?`, `to?` (on `last_turn_at`, ≤ 92 days when given), `status?` (incl. `deleted`); **no title**             |
+| GET    | `/assistant/admin/conversations/{conversationId}` | `AssistantAdminAuditController_conversation_v1`  | `audit:read`          | One conversation's metadata: header plus `turns[]`, `executions[]`, `confirmations[]`, `reports[]`, `feedback[]` (each ≤ 1 000 rows, oldest first, with a `truncated` flag); audited `assistant.audit_viewed` |
+| GET    | `/assistant/admin/executions`                     | `AssistantAdminAuditController_executions_v1`    | `audit:read`          | Search tool executions (the "audit view search"): `from`, `to` (≤ 92 days), `userId?`, `tool?`, `module?`, `decision?`, `status?`, `risk?`, `access?`, `correlationId?`, `conversationId?`, cursor v1         |
+
+The new routes do not answer `503 assistant_disabled` while `ASSISTANT_ENABLED` is off: administrators can read usage, feedback and the audit view, and users can search and rate, with the assistant off (none of them calls a model or a tool).
+
+### Changed views
+
+- `GET /assistant/settings` / `PUT`: `dataSharing` (`metadata` \| `pseudonymized`, applies from the next turn), `userDailyTokenBudget` (null or 1 … the tenant's effective daily budget; above it `400 validation_failed`), `useTenantKey`, `tenantKeyFallbackToPlatform`, read-only `tenantKey` (`TenantKeyView` or null), `tenantKeysOffered` `{ enabled, providers, models }` and `effectiveLimits` (`turnDeadlineSeconds` in seconds). The four editable fields are optional in a `PUT`: absent = unchanged.
+- `GET /assistant/status`: `keySource` (`platform` \| `tenant`), `fallbackActive`, `dataSharing`.
+- `GET /assistant/conversations/{id}/messages`: assistant messages carry `feedback: { rating, reason, comment } | null`.
+- `GET /assistant/reports/{reportId}`: `status` may be `queued`; `job: { status, attempts, errorCode, expiresAt } | null`.
+- Turn start: the per-user daily budget refuses with `429 assistant_budget_exhausted` and `scope: 'user'` (a top-level field of the error body, as `tenant`/`platform` since AI-1; contracts §35.6 words it `details.scope`).
+
+### Examples
+
+All identifiers below are synthetic.
+
+Search one's own conversations:
+
+```http
+GET /api/v1/assistant/search?q=quarantine%20summary&limit=2
+Authorization: Bearer <access-token>
+```
+
+```json
+{
+  "data": [
+    {
+      "conversationId": "01936b1e-0000-7000-8000-00000000c001",
+      "conversationTitle": "Morning review",
+      "messageId": "01936b1e-0000-7000-8000-00000000a011",
+      "role": "assistant",
+      "seq": 4,
+      "createdAt": "2026-11-26T08:15:02.120Z",
+      "snippet": "…the quarantine summary for today shows 12 held messages, 3 of them…"
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Rate an answer:
+
+```http
+PUT /api/v1/assistant/messages/01936b1e-0000-7000-8000-00000000a011/feedback
+Content-Type: application/json
+
+{ "rating": "down", "reason": "incomplete", "comment": "It did not list the senders." }
+```
+
+```json
+{
+  "messageId": "01936b1e-0000-7000-8000-00000000a011",
+  "rating": "down",
+  "reason": "incomplete",
+  "comment": "It did not list the senders.",
+  "createdAt": "2026-11-26T08:16:40.002Z",
+  "updatedAt": "2026-11-26T08:16:40.002Z"
+}
+```
+
+The comment is visible to the organization's AI administrators (`GET /assistant/admin/feedback`); the portal says so next to the field. It is deleted with the conversation's content.
+
+Usage per user and day (an administrator with `assistant:configure`):
+
+```json
+{
+  "from": "2026-11-20",
+  "to": "2026-11-26",
+  "data": [
+    {
+      "day": "2026-11-26",
+      "user": {
+        "id": "01936b1e-0000-7000-8000-00000000b001",
+        "displayName": "Analyst One",
+        "email": "analyst1@example.com"
+      },
+      "keySource": "platform",
+      "turns": 14,
+      "inputTokens": 182000,
+      "outputTokens": 9100,
+      "cacheReadTokens": 120000,
+      "cacheWriteTokens": 15000,
+      "totalTokens": 326100,
+      "estimatedCostMicros": 1210500
+    }
+  ],
+  "totals": {
+    "users": [],
+    "overall": {
+      "turns": 14,
+      "inputTokens": 182000,
+      "outputTokens": 9100,
+      "cacheReadTokens": 120000,
+      "cacheWriteTokens": 15000,
+      "totalTokens": 326100,
+      "estimatedCostMicros": 1210500
+    }
+  },
+  "nextCursor": null
+}
+```
+
+`estimatedCostMicros` is micro-USD from the price table (`ASSISTANT_MODEL_PRICES` over the built-in prices) and `null` when no price is known; it is an estimate, not an invoice. `user.displayName` and `email` are `null` for platform operators who worked under an override (their public id is shown).
+
+Store a tenant provider key (platform gate `ASSISTANT_TENANT_KEYS_ENABLED` on, MFA session):
+
+```http
+PUT /api/v1/assistant/settings/provider-key
+Content-Type: application/json
+
+{ "provider": "anthropic", "model": "claude-sonnet-5-5", "apiKey": "<the organization's provider API key>", "expectedRowVersion": 7 }
+```
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-5-5",
+  "fingerprint": "3f9c0a1b2c3d4e5f",
+  "status": "valid",
+  "setAt": "2026-11-26T09:00:00.000Z",
+  "setBy": { "id": "01936b1e-0000-7000-8000-00000000b002", "displayName": "Admin Two" },
+  "lastValidatedAt": "2026-11-26T09:00:00.000Z",
+  "lastErrorCode": null
+}
+```
+
+`apiKey` is write-only: it is never returned, logged, audited, sent to the model or shown again; the `fingerprint` (first 16 hex of its SHA-256) is the only visible trace. The key is probed with a metadata request (no tokens) before it is stored; nothing is stored when the probe fails. `provider` or `model` outside the offered lists answers `400 validation_failed`.
+
+Audit view (an administrator with `audit:read`), list item:
+
+```json
+{
+  "id": "01936b1e-0000-7000-8000-00000000c001",
+  "user": {
+    "id": "01936b1e-0000-7000-8000-00000000b001",
+    "displayName": "Analyst One",
+    "email": "analyst1@example.com"
+  },
+  "status": "active",
+  "createdAt": "2026-11-26T08:00:00.000Z",
+  "lastTurnAt": "2026-11-26T08:15:02.000Z",
+  "turnCount": 2,
+  "segmentCount": 1,
+  "contentPurged": false,
+  "underPlatformOverride": false,
+  "totals": {
+    "tokens": 41200,
+    "estimatedCostMicros": 151000,
+    "toolCalls": 3,
+    "deniedCalls": 0,
+    "confirmations": {
+      "pending": 0,
+      "executing": 0,
+      "executed": 1,
+      "failed": 0,
+      "expired": 0,
+      "cancelled": 0
+    },
+    "reports": 0,
+    "feedback": { "up": 0, "down": 1 }
+  }
+}
+```
+
+Never a title, a message, a transcript, a result card or report HTML: the detail returns the stored `paramsRedacted` of each execution exactly as audited, and reports with the recipient **domain** of each delivery only.
+
+### Queued (background) report card
+
+`report_generate` for a window longer than `ASSISTANT_REPORT_SYNC_MAX_HOURS` (168 h, e.g. "report for the last 30 days") is queued when `ASSISTANT_REPORT_JOBS_ENABLED` (ADR-0096): the execution is `allowed`/`succeeded` with HTTP **202**, the card kind `report` has `report.status: 'queued'`, no figures and `generatedAt: ''`, and the envelope to the model is `{ ref, reportId, status: 'queued', title, period, sections }` with the note not to state figures. The portal polls `GET /assistant/reports/{reportId}` every 5 s while `queued`/`running` and shows the report when it is `available` (or the job's `errorCode` when it failed). The next turn's action updates tell the model "report_generate (call r5): the background report is ready." or "… failed (<code>)." `report_send_email` on a report that is not `available` is refused with `409 assistant_report_not_ready`. There is no automatic e-mail when a job finishes.
+
+### Error codes (AI-6)
+
+| Code                                     | HTTP | When                                                                                                                    |
+| ---------------------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------- |
+| `assistant_tenant_keys_disabled`         | 403  | Tenant keys are off platform-wide (or no encryption key is configured): key routes and `useTenantKey: true`             |
+| `assistant_tenant_key_rejected`          | 422  | The provider refused the key (or the model) at the probe; or `useTenantKey: true` with a stored key that is not `valid` |
+| `assistant_tenant_key_unverified`        | 502  | The probe could not reach the provider (network, timeout, 5xx); nothing stored                                          |
+| `assistant_tenant_key_not_found`         | 404  | No stored key (`DELETE`, `validate`, `useTenantKey: true`)                                                              |
+| `assistant_tenant_key_invalid`           | 503  | Turn start: the tenant key is invalid and the tenant did not allow the platform fallback                                |
+| `assistant_message_not_found`            | 404  | Feedback on an unknown, foreign, `user` or deleted-conversation message, or `DELETE` of a missing rating                |
+| `assistant_feedback_not_allowed`         | 409  | Feedback on an assistant message whose turn is not `completed`, or of a conversation whose content was purged           |
+| `assistant_search_timeout`               | 503  | The search query hit `ASSISTANT_SEARCH_TIMEOUT_MS`                                                                      |
+| `assistant_admin_conversation_not_found` | 404  | Audit detail of an unknown conversation or one of another organization                                                  |
+| `assistant_report_not_ready`             | 409  | `report_send_email` on a `queued` or `pending` report                                                                   |
+| `assistant_budget_exhausted`             | 429  | Now also `scope: 'user'` (top-level field of the error body; the per-user daily budget)                                 |
+
+Executor message code `assistant_unknown_placeholder` (decision `denied_schema`): at `pseudonymized`, the model used a placeholder that does not exist in the conversation ("Unknown placeholder [EMAIL_99]; use a value from this conversation."). Job error codes (`ai_chat_report_jobs.error_code`, shown on the report card): `assistant_report_job_expired`, `assistant_report_session_ended`, `assistant_report_not_allowed`, `assistant_report_sources_unavailable`, `assistant_report_storage_failed`, `assistant_report_purged`, `assistant_report_job_failed` (an unexpected failure, or the api-assistant pod crashed, on the fifth attempt).

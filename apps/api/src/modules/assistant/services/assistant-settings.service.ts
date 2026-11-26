@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
 import { API_CONFIG } from '../../../api-config.token';
 import { AuditService } from '../../../audit/audit.service';
 import type { UserPrincipal } from '../../../auth-contracts/principal';
@@ -11,7 +11,13 @@ import {
   AUDIT_RESOURCE,
   type AssistantConfig,
 } from '../assistant.constants';
-import { assistantNotEnabled, assistantSettingsConflict } from '../assistant.errors';
+import {
+  assistantNotEnabled,
+  assistantSettingsConflict,
+  assistantTenantKeyNotFound,
+  assistantTenantKeyRejected,
+  assistantTenantKeysDisabled,
+} from '../assistant.errors';
 import { scopeOrganizationPublicId } from '../domain/tool-catalog';
 import type { AssistantSettingsView, UpdateAssistantSettingsBody } from '../dto/assistant.schemas';
 import {
@@ -20,7 +26,9 @@ import {
   type SettingsWrite,
 } from '../repositories/assistant-settings.repository';
 import { ConversationsRepository } from '../repositories/conversations.repository';
+import { ProviderKeysRepository } from '../repositories/provider-keys.repository';
 import { AssistantLimitsService } from './assistant-limits.service';
+import { TenantKeyService } from './tenant-key.service';
 
 /**
  * The organization's assistant settings `assistant-settings/1` (design D13, §4.1): one row per
@@ -30,6 +38,13 @@ import { AssistantLimitsService } from './assistant-limits.service';
  * budget is capped by ASSISTANT_TENANT_DAILY_TOKENS_MAX. Audited `assistant.settings_updated`
  * (changed field names and the new switches, never other values). Lowering `retentionDays`
  * moves the purge date of the organization's existing conversations earlier (D12).
+ *
+ * Step AI-6 (D1, D3, D7): `dataSharing` (`metadata` | `pseudonymized`), the per-user daily
+ * budget (1 … the effective tenant budget), `useTenantKey` (only with the platform gate on —
+ * `403 assistant_tenant_keys_disabled` — and a stored key: `404 assistant_tenant_key_not_found`,
+ * one with status `valid`: `422 assistant_tenant_key_rejected`) and `tenantKeyFallbackToPlatform`
+ * (absent in the body = unchanged); the view adds `tenantKey`, `tenantKeysOffered` and the
+ * read-only `effectiveLimits`.
  */
 @Injectable()
 export class AssistantSettingsService {
@@ -41,6 +56,8 @@ export class AssistantSettingsService {
     private readonly runner: TransactionRunner,
     private readonly audit: AuditService,
     private readonly conversations: ConversationsRepository,
+    @Optional() private readonly keys?: ProviderKeysRepository,
+    @Optional() private readonly tenantKeys?: TenantKeyService,
   ) {}
 
   now(): Date {
@@ -73,12 +90,23 @@ export class AssistantSettingsService {
         `dailyTokenBudget: must be at most ${this.config.ASSISTANT_TENANT_DAILY_TOKENS_MAX}`,
       );
     }
+    const effectiveBudget = this.limits.tenantBudget(body.dailyTokenBudget);
+    if (
+      body.userDailyTokenBudget !== undefined &&
+      body.userDailyTokenBudget !== null &&
+      body.userDailyTokenBudget > effectiveBudget
+    ) {
+      issues.push(
+        `userDailyTokenBudget: must be at most the effective daily budget (${effectiveBudget})`,
+      );
+    }
     if (issues.length > 0) throw new BadRequestException(issues);
     const featureEnabled = await this.features.isEffectivelyEnabled(
       scope.organizationId,
       ASSISTANT_FEATURE,
     );
     if (body.enabled && !featureEnabled) throw assistantNotEnabled();
+    if (body.useTenantKey === true) await this.assertTenantKeyUsable(scope);
 
     const now = this.now();
     await this.runner.run(async (tx) => {
@@ -103,6 +131,14 @@ export class AssistantSettingsService {
         dailyTokenBudget: body.dailyTokenBudget,
         retentionDays: body.retentionDays,
         updatedByUserId: principal.userId,
+        ...(body.dataSharing !== undefined && { dataSharing: body.dataSharing }),
+        ...(body.userDailyTokenBudget !== undefined && {
+          userDailyTokenBudget: body.userDailyTokenBudget,
+        }),
+        ...(body.useTenantKey !== undefined && { useTenantKey: body.useTenantKey }),
+        ...(body.tenantKeyFallbackToPlatform !== undefined && {
+          tenantKeyFallbackToPlatform: body.tenantKeyFallbackToPlatform,
+        }),
       };
       const written = current
         ? await this.repo.update(scope, body.expectedRowVersion, data, tx)
@@ -131,6 +167,8 @@ export class AssistantSettingsService {
             changed,
             enabled: data.enabled,
             externalProcessingAcknowledged: data.externalProcessingAckAt !== null,
+            dataSharing: data.dataSharing ?? current?.dataSharing ?? 'metadata',
+            useTenantKey: data.useTenantKey ?? current?.useTenantKey ?? false,
             rowVersion: currentVersion + 1,
           },
         },
@@ -138,6 +176,14 @@ export class AssistantSettingsService {
       );
     });
     return this.view(await this.repo.get(scope), featureEnabled);
+  }
+
+  /** `useTenantKey: true` needs the platform gate and a stored key with status `valid` (D7). */
+  private async assertTenantKeyUsable(scope: TenantScope): Promise<void> {
+    if (!this.tenantKeys?.enabled) throw assistantTenantKeysDisabled();
+    const key = await this.keys?.find(scope.organizationId);
+    if (!key) throw assistantTenantKeyNotFound();
+    if (key.status !== 'valid') throw assistantTenantKeyRejected({ keyStatus: key.status });
   }
 
   private async view(
@@ -148,6 +194,9 @@ export class AssistantSettingsService {
       row?.externalProcessingAckByUserId != null
         ? await this.repo.userPublicId(row.externalProcessingAckByUserId)
         : null;
+    const tenantKey =
+      row && this.tenantKeys ? await this.tenantKeys.view(row.organizationId) : null;
+    const c = this.config;
     return {
       version: 'assistant-settings/1',
       enabled: row?.enabled ?? false,
@@ -157,7 +206,30 @@ export class AssistantSettingsService {
       dailyTokenBudget: row?.dailyTokenBudget ?? null,
       effectiveDailyTokenBudget: this.limits.tenantBudget(row?.dailyTokenBudget ?? null),
       retentionDays: row?.retentionDays ?? this.config.ASSISTANT_RETENTION_DEFAULT_DAYS,
-      dataSharing: 'metadata',
+      dataSharing: row?.dataSharing ?? 'metadata',
+      userDailyTokenBudget: row?.userDailyTokenBudget ?? null,
+      useTenantKey: row?.useTenantKey ?? false,
+      tenantKeyFallbackToPlatform: row?.tenantKeyFallbackToPlatform ?? false,
+      tenantKey,
+      tenantKeysOffered: this.tenantKeys?.offered() ?? {
+        enabled: false,
+        providers: [...c.ASSISTANT_TENANT_KEY_PROVIDERS],
+        models: [...c.ASSISTANT_TENANT_KEY_MODELS],
+      },
+      effectiveLimits: {
+        turnsPerUserPerMinute: c.ASSISTANT_TURNS_PER_USER_PER_MINUTE,
+        messageMaxChars: c.ASSISTANT_USER_MESSAGE_MAX_CHARS,
+        toolRoundsPerTurn: c.ASSISTANT_MAX_TOOL_ROUNDS,
+        toolCallsPerTurn: c.ASSISTANT_MAX_TOOL_CALLS_PER_TURN,
+        turnDeadlineSeconds: Math.ceil(c.ASSISTANT_TURN_DEADLINE_MS / 1000),
+        platformDailyCapSet: c.ASSISTANT_PLATFORM_DAILY_TOKENS > 0,
+        tenantDailyTokensMax: c.ASSISTANT_TENANT_DAILY_TOKENS_MAX,
+        reportsPerUserPerDay: c.ASSISTANT_REPORTS_PER_USER_PER_DAY,
+        reportEmailsPerUserPerDay: c.ASSISTANT_REPORT_EMAILS_PER_USER_PER_DAY,
+        reportEmailsPerTenantPerDay: c.ASSISTANT_REPORT_EMAILS_PER_TENANT_PER_DAY,
+        confirmationTtlSeconds: c.ASSISTANT_CONFIRMATION_TTL_SECONDS,
+        retentionDays: { min: 1, max: 365 },
+      },
       featureEnabled,
       rowVersion: row?.rowVersion ?? 0,
       updatedAt: row?.updatedAt.toISOString() ?? null,
@@ -172,12 +244,25 @@ export function changedFields(current: SettingsRow | null, next: SettingsWrite):
     externalProcessingAcknowledged: current?.externalProcessingAckAt != null,
     dailyTokenBudget: current?.dailyTokenBudget ?? null,
     retentionDays: current?.retentionDays ?? null,
+    dataSharing: current?.dataSharing ?? 'metadata',
+    userDailyTokenBudget: current?.userDailyTokenBudget ?? null,
+    useTenantKey: current?.useTenantKey ?? false,
+    tenantKeyFallbackToPlatform: current?.tenantKeyFallbackToPlatform ?? false,
   };
+  // Step AI-6: an absent field keeps its value (unchanged).
   const after = {
     enabled: next.enabled,
     externalProcessingAcknowledged: next.externalProcessingAckAt !== null,
     dailyTokenBudget: next.dailyTokenBudget,
     retentionDays: next.retentionDays,
+    dataSharing: next.dataSharing ?? before.dataSharing,
+    userDailyTokenBudget:
+      next.userDailyTokenBudget === undefined
+        ? before.userDailyTokenBudget
+        : next.userDailyTokenBudget,
+    useTenantKey: next.useTenantKey ?? before.useTenantKey,
+    tenantKeyFallbackToPlatform:
+      next.tenantKeyFallbackToPlatform ?? before.tenantKeyFallbackToPlatform,
   };
   return (Object.keys(after) as Array<keyof typeof after>).filter((k) => before[k] !== after[k]);
 }

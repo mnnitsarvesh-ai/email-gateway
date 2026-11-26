@@ -161,14 +161,17 @@ export class AssistantTurnsController {
   @ApiCodedError(
     429,
     'Too many turns this minute (`rate_limited`, `scope: route` or a rate-class scope) or the ' +
-      'daily token budget is used up (`assistant_budget_exhausted`, `scope: tenant | platform`)',
+      'daily token budget is used up (`assistant_budget_exhausted`, `scope: tenant | user | ' +
+      'platform`; `user` is the per-user budget of step AI-6)',
     ['rate_limited', C.budgetExhausted],
     { scope: { type: 'string' } },
   )
   @ApiAssistantUnavailable(
-    [C.disabled, C.providerUnavailable, C.busy],
+    [C.disabled, C.providerUnavailable, C.tenantKeyInvalid, C.busy],
     'the assistant is off on this platform (`assistant_disabled`), the provider is unavailable ' +
-      '(`assistant_provider_unavailable`) or this api process is busy (`assistant_busy`)',
+      '(`assistant_provider_unavailable`), your organization’s own provider key is not valid ' +
+      'and the platform fallback is not allowed (`assistant_tenant_key_invalid`) or this api ' +
+      'process is busy (`assistant_busy`)',
   )
   async create(
     @CurrentPrincipal() principal: Principal,

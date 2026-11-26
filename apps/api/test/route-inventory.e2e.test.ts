@@ -58,7 +58,12 @@
  * (docs/plan/steps/32-ai-chat-security-operations.md D8) adds four single-item reads of existing
  * modules (`NEW_IN_AI_4`, examples required, in the legacy manifest next to their lists). Step
  * AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8) adds the capture-issue read
- * (`NEW_IN_AI_5`, example required, in the archive manifest next to its list).
+ * (`NEW_IN_AI_5`, example required, in the archive manifest next to its list). Step AI-6
+ * (docs/plan/steps/34-ai-chat-hardening-operations.md §4.1) adds the 11 hardening operations
+ * (`NEW_IN_AI_6`, examples required, the assistant manifest): the three tenant-key routes
+ * `sensitive` without an Idempotency-Key (`SENSITIVE_UNKEYED_AI_6`: CAS on the settings
+ * `rowVersion`, validate changes a status only), the content search `expensive` and a v1 list,
+ * and the four admin/audit lists v1.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -551,6 +556,37 @@ const NEW_IN_AI_4 = [
 /** Step AI-5 D8: the capture-issue read the assistant's capture retry card needs (archive). */
 const NEW_IN_AI_5 = ['get /api/v1/archive/capture-issues/:messageId'];
 
+/**
+ * Step AI-6 §4.1 (docs/plan/steps/34-ai-chat-hardening-operations.md, contracts §35.6): the 11
+ * hardening operations (examples required, four v1 lists plus the search, the assistant manifest).
+ */
+const NEW_IN_AI_6 = [
+  'put /api/v1/assistant/settings/provider-key',
+  'delete /api/v1/assistant/settings/provider-key',
+  'post /api/v1/assistant/settings/provider-key/validate',
+  'get /api/v1/assistant/search',
+  'put /api/v1/assistant/messages/:messageId/feedback',
+  'delete /api/v1/assistant/messages/:messageId/feedback',
+  'get /api/v1/assistant/admin/usage/users',
+  'get /api/v1/assistant/admin/feedback',
+  'get /api/v1/assistant/admin/conversations',
+  'get /api/v1/assistant/admin/conversations/:conversationId',
+  'get /api/v1/assistant/admin/executions',
+];
+
+/**
+ * Step AI-6 D7, I27: request bodies that carry a write-only secret and therefore no example (an
+ * example would be a key-shaped value in the published document); the schema describes it.
+ */
+const WRITE_ONLY_SECRET_BODIES = ['put /api/v1/assistant/settings/provider-key'];
+
+/** Step AI-6 D7: the tenant-key routes are `sensitive` without an Idempotency-Key (CAS/status). */
+const SENSITIVE_UNKEYED_AI_6 = [
+  'put /api/v1/assistant/settings/provider-key',
+  'delete /api/v1/assistant/settings/provider-key',
+  'post /api/v1/assistant/settings/provider-key/validate',
+];
+
 /** Step AI-2: confirm and cancel are `sensitive`, unkeyed (the row's transition is single use). */
 const SENSITIVE_UNKEYED_AI_2 = [
   'post /api/v1/assistant/confirmations/:confirmationId/confirm',
@@ -615,6 +651,8 @@ const EXPENSIVE = [
   // Step AI-1 §4.1: an assistant turn and the next page of a result (loopback calls count too).
   'post /api/v1/assistant/conversations/:conversationId/turns',
   'post /api/v1/assistant/executions/:executionId/more',
+  // Step AI-6 D4: the owner's content search (a bounded replica scan).
+  'get /api/v1/assistant/search',
 ];
 
 /**
@@ -787,7 +825,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (428 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (439 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
@@ -798,8 +836,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // operations of step 8.6, plus the 15 assistant operations of step AI-1, plus the 3
     // confirmation operations of step AI-2, plus the API key read of step AI-3 (D8), plus the
     // report read of step AI-R (§4.1), plus the four single-item reads of step AI-4 (D8), plus
-    // the capture-issue read of step AI-5 (D8).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(428);
+    // the capture-issue read of step AI-5 (D8), plus the 11 hardening operations of step AI-6
+    // (§4.1, contracts §35.6).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(439);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -894,7 +933,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5, 8.6, AI-1, AI-2, AI-R, AI-4 and AI-5 explicit response examples (D14)', () => {
+  it('gives every route new in 6.1, 6.2, 7.1, 7.2, 7.3, 8.1, 8.4, 8.2, 8.5, 8.6, AI-1, AI-2, AI-R, AI-4, AI-5 and AI-6 explicit response examples (D14)', () => {
     const failures: string[] = [];
     for (const key of [
       ...NEW_IN_6_1,
@@ -912,6 +951,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_AI_R,
       ...NEW_IN_AI_4,
       ...NEW_IN_AI_5,
+      ...NEW_IN_AI_6,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -924,11 +964,21 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           failures.push(`${key}: ${status} without an example`);
         }
       }
-      if (op.requestBody && !Object.values(op.requestBody.content ?? {}).some(hasExample)) {
+      if (
+        op.requestBody &&
+        !WRITE_ONLY_SECRET_BODIES.includes(key) &&
+        !Object.values(op.requestBody.content ?? {}).some(hasExample)
+      ) {
         failures.push(`${key}: requestBody without an example`);
       }
     }
     expect(failures).toEqual([]);
+    // The write-only secret bodies really have no example anywhere (I27).
+    for (const key of WRITE_ONLY_SECRET_BODIES) {
+      expect(Object.values(operation(key)!.requestBody?.content ?? {}).some(hasExample), key).toBe(
+        false,
+      );
+    }
     // NEW_IN_6_1 is exactly the 6.1 part of the WP2/WP3 manifests (the rest of messages.ts is
     // the pre-6.1 messages module).
     const preSixOneMessages = COVERAGE_BY_AREA.messages
@@ -986,10 +1036,12 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
-    // NEW_IN_AI_1 + NEW_IN_AI_2 + NEW_IN_AI_R is exactly the assistant manifest (15 + 3 + 1).
+    // NEW_IN_AI_1 + NEW_IN_AI_2 + NEW_IN_AI_R + NEW_IN_AI_6 is exactly the assistant manifest
+    // (15 + 3 + 1 + 11).
     expect(COVERAGE_BY_AREA.assistant.map((c) => c.route).sort()).toEqual(
-      [...NEW_IN_AI_1, ...NEW_IN_AI_2, ...NEW_IN_AI_R].sort(),
+      [...NEW_IN_AI_1, ...NEW_IN_AI_2, ...NEW_IN_AI_R, ...NEW_IN_AI_6].sort(),
     );
+    expect(NEW_IN_AI_6).toHaveLength(11);
     expect(NEW_IN_AI_R).toHaveLength(1);
     expect(NEW_IN_AI_1).toHaveLength(15);
     expect(NEW_IN_AI_2).toHaveLength(3);
@@ -1023,6 +1075,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       expect(NEW_IN_AI_2.includes(route), route).toBe(false);
       expect(NEW_IN_AI_R.includes(route), route).toBe(false);
       expect(NEW_IN_AI_5.includes(route), route).toBe(false);
+      expect(NEW_IN_AI_6.includes(route), route).toBe(false);
     }
   });
 
@@ -1079,7 +1132,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_AI_1.includes(key) ||
           NEW_IN_AI_2.includes(key) ||
           NEW_IN_AI_R.includes(key) ||
-          NEW_IN_AI_5.includes(key)) &&
+          NEW_IN_AI_5.includes(key) ||
+          NEW_IN_AI_6.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -1093,8 +1147,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // 33 pre-6.1 lists keep the unsigned v0 cursors; the 9 lists of 6.1, the 2 of 6.2
     // (webhooks, deliveries), the saved views list of 7.2, the 10 lists of 8.1 and the 11 lists
     // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
-    // sources list of 8.6 and the 2 of AI-1 (conversations, messages) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 38 });
+    // sources list of 8.6 and the 2 of AI-1 (conversations, messages) and the 5 of AI-6 (search,
+    // usage per user, admin feedback, audit conversations and executions) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 43 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1221,6 +1276,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           ...SENSITIVE_UNKEYED_8_6,
           ...SENSITIVE_UNKEYED_AI_1,
           ...SENSITIVE_UNKEYED_AI_2,
+          ...SENSITIVE_UNKEYED_AI_6,
         ]),
       ].sort(),
     );

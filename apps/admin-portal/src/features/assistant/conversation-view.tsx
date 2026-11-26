@@ -21,6 +21,7 @@ import { ApiError } from '@/lib/api/errors';
 import { cn } from '@/lib/utils';
 import { useAssistant } from './assistant-context';
 import { ConfirmationCard } from './confirmation-card';
+import { MessageFeedbackControls } from './feedback';
 import { useAssistantTools, useConversationMessages } from './hooks';
 import { AssistantMarkdown } from './markdown';
 import { suggestedPrompts, turnErrorText } from './model';
@@ -241,10 +242,39 @@ function ToolResults({
   );
 }
 
-function UserBubble({ text }: { text: string }) {
+/** `data-message-id` + focus target of a stored message (step AI-6: search opens it). */
+function messageAnchor(messageId: string | null | undefined, highlighted: boolean) {
+  return messageId
+    ? {
+        'data-message-id': messageId,
+        tabIndex: -1,
+        className: cn(
+          'rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          highlighted && 'ring-2 ring-ring ring-offset-2 ring-offset-background',
+        ),
+      }
+    : {};
+}
+
+function UserBubble({
+  text,
+  messageId,
+  highlighted = false,
+}: {
+  text: string;
+  messageId?: string | null;
+  highlighted?: boolean;
+}) {
+  const anchor = messageAnchor(messageId, highlighted);
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground">
+      <div
+        {...anchor}
+        className={cn(
+          'max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm whitespace-pre-wrap text-primary-foreground',
+          anchor.className,
+        )}
+      >
         <span className="sr-only">You: </span>
         {text}
       </div>
@@ -252,9 +282,18 @@ function UserBubble({ text }: { text: string }) {
   );
 }
 
-function AssistantBlock({ children }: { children: React.ReactNode }) {
+function AssistantBlock({
+  children,
+  messageId,
+  highlighted = false,
+}: {
+  children: React.ReactNode;
+  messageId?: string | null;
+  highlighted?: boolean;
+}) {
+  const anchor = messageAnchor(messageId, highlighted);
   return (
-    <div className="flex gap-2">
+    <div {...anchor} className={cn('flex gap-2', anchor.className)}>
       <span
         className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
         aria-hidden
@@ -311,6 +350,9 @@ function FailedNote({
 function ExchangeArticle({
   label,
   user,
+  userMessageId,
+  assistantMessageId,
+  highlightId,
   tools,
   hasMore,
   showAssistant,
@@ -320,6 +362,9 @@ function ExchangeArticle({
 }: {
   label: string;
   user: string | null;
+  userMessageId?: string | null;
+  assistantMessageId?: string | null;
+  highlightId?: string | null;
   tools: readonly ToolEntry[];
   hasMore?: ReadonlyMap<string, boolean>;
   showAssistant: boolean;
@@ -329,9 +374,18 @@ function ExchangeArticle({
 }) {
   return (
     <article className="grid gap-2" aria-label={label}>
-      {user !== null ? <UserBubble text={user} /> : null}
+      {user !== null ? (
+        <UserBubble
+          text={user}
+          messageId={userMessageId}
+          highlighted={Boolean(highlightId) && highlightId === userMessageId}
+        />
+      ) : null}
       {showAssistant ? (
-        <AssistantBlock>
+        <AssistantBlock
+          messageId={assistantMessageId}
+          highlighted={Boolean(highlightId) && highlightId === assistantMessageId}
+        >
           <ToolChips tools={tools} />
           <ToolResults
             tools={tools}
@@ -351,6 +405,10 @@ interface Exchange {
   readonly turnId: string;
   readonly user: string | null;
   readonly assistant: string | null;
+  readonly userMessageId: string | null;
+  readonly assistantMessageId: string | null;
+  /** The assistant message's rating (step AI-6 D2). */
+  readonly feedback: StoredMessage['feedback'];
   readonly status: StoredMessage['turn']['status'];
   readonly errorCode: string | null;
   readonly tools: ToolEntry[];
@@ -373,6 +431,9 @@ export function exchangesOf(messages: readonly StoredMessage[]): Exchange[] {
         turnId: message.turnId,
         user: null,
         assistant: null,
+        userMessageId: null,
+        assistantMessageId: null,
+        feedback: null,
         status: message.turn.status,
         errorCode: message.turn.errorCode,
         tools: [],
@@ -386,6 +447,9 @@ export function exchangesOf(messages: readonly StoredMessage[]): Exchange[] {
       ...target,
       user: message.role === 'user' ? text : target.user,
       assistant: message.role === 'assistant' ? text : target.assistant,
+      userMessageId: message.role === 'user' ? message.id : target.userMessageId,
+      assistantMessageId: message.role === 'assistant' ? message.id : target.assistantMessageId,
+      feedback: message.role === 'assistant' ? (message.feedback ?? null) : target.feedback,
       tools: [...target.tools],
       hasMore: target.hasMore,
     };
@@ -466,8 +530,17 @@ export function ConversationView({
   onNavigate?: () => void;
   className?: string;
 }) {
-  const { conversationId, pending, running, send, retry, confirmations, selectConversation } =
-    useAssistant();
+  const {
+    conversationId,
+    pending,
+    running,
+    send,
+    retry,
+    confirmations,
+    selectConversation,
+    focusMessageId,
+    clearFocusMessage,
+  } = useAssistant();
   const messages = useConversationMessages(conversationId);
 
   // A remembered conversation that no longer exists (deleted, purged by retention, or another
@@ -506,6 +579,34 @@ export function ConversationView({
     if (container) container.scrollTop = container.scrollHeight;
   }, [exchanges.length, pending?.text, pending?.tools.length, pending?.status]);
 
+  // Step AI-6 (D4): a search hit opens its conversation at the matching message: scroll only the
+  // conversation's own container (never the window), focus the message and outline it briefly.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const loaded = messages.data !== undefined && !messages.isFetching;
+  useEffect(() => {
+    if (!focusMessageId || !loaded) return;
+    const root = rootRef.current;
+    const target = [...(root?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])].find(
+      (element) => element.dataset.messageId === focusMessageId,
+    );
+    clearFocusMessage();
+    if (!target) return;
+    const container = scrollContainerOf(target);
+    if (container) {
+      const offset =
+        target.getBoundingClientRect().top - container.getBoundingClientRect().top - 16;
+      container.scrollTop += offset;
+    }
+    target.focus({ preventScroll: true });
+    setHighlightId(focusMessageId);
+  }, [clearFocusMessage, focusMessageId, loaded]);
+  useEffect(() => {
+    if (!highlightId) return;
+    const timer = setTimeout(() => setHighlightId(null), 4000);
+    return () => clearTimeout(timer);
+  }, [highlightId]);
+
   // The running turn stays visible while the stored messages (re)load.
   if (conversationId && messages.isLoading && !showPending)
     return <LoadingState label="Loading the conversation" rows={4} className={className} />;
@@ -520,7 +621,7 @@ export function ConversationView({
 
   const empty = exchanges.length === 0 && !showPending;
   return (
-    <div className={cn('grid content-start gap-4', className)}>
+    <div ref={rootRef} className={cn('grid content-start gap-4', className)}>
       {empty ? (
         <SuggestedPrompts onPick={(prompt) => void send(prompt)} disabled={running} />
       ) : null}
@@ -542,6 +643,9 @@ export function ConversationView({
               key={exchange.key}
               label="Question and answer"
               user={exchange.user}
+              userMessageId={exchange.userMessageId}
+              assistantMessageId={exchange.assistantMessageId}
+              highlightId={highlightId}
               tools={exchange.tools}
               hasMore={exchange.hasMore}
               showAssistant={
@@ -555,6 +659,13 @@ export function ConversationView({
             >
               {exchange.assistant ? (
                 <AssistantMarkdown source={exchange.assistant} onNavigate={onNavigate} />
+              ) : null}
+              {exchange.status === 'completed' && exchange.assistantMessageId && conversationId ? (
+                <MessageFeedbackControls
+                  conversationId={conversationId}
+                  messageId={exchange.assistantMessageId}
+                  feedback={exchange.feedback}
+                />
               ) : null}
               {exchange.status === 'cancelled' ? (
                 <p className="text-xs text-muted-foreground">Stopped.</p>
