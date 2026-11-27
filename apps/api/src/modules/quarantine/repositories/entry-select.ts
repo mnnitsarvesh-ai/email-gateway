@@ -48,6 +48,12 @@ export const entrySelect = {
   approvalRequestId: true,
   objectPurgedAt: true,
   rowVersion: true,
+  location: true,
+  mailboxContainer: true,
+  apiCopyId: true,
+  apiCopyReceivedAt: true,
+  apiMailboxId: true,
+  apiRemediationActionId: true,
 } satisfies Prisma.QuarantineMessageSelect;
 
 export type EntrySelected = Prisma.QuarantineMessageGetPayload<{ select: typeof entrySelect }>;

@@ -39,6 +39,9 @@ function sweeper(options: {
   ensure?: () => Promise<boolean>;
   prisma?: unknown;
   digests?: () => Promise<{ runs: number; digests: number; alerts: number }>;
+  store?: { casEntry: unknown; cancelPendingRequests: unknown; createEntries: unknown };
+  objects?: { exists: unknown; purgeKey: unknown; purgePrefix: unknown };
+  disposal?: { read: unknown };
 }) {
   const service = new MetricsService({ service: 't' });
   const metrics = new QuarantineMetrics(service);
@@ -49,10 +52,18 @@ function sweeper(options: {
   const s = new QuarantineSweeper({
     prisma: (options.prisma ?? emptyPrisma()) as never,
     locks,
-    objects: { exists: vi.fn(), purgeKey: vi.fn(), purgePrefix: vi.fn() },
-    store: { casEntry: vi.fn(), cancelPendingRequests: vi.fn(), createEntries: vi.fn() },
+    objects: (options.objects ?? {
+      exists: vi.fn(),
+      purgeKey: vi.fn(),
+      purgePrefix: vi.fn(),
+    }) as never,
+    store: (options.store ?? {
+      casEntry: vi.fn(),
+      cancelPendingRequests: vi.fn(),
+      createEntries: vi.fn(),
+    }) as never,
     settings: { resolve: vi.fn() },
-    disposal: { read: vi.fn() },
+    disposal: (options.disposal ?? { read: vi.fn() }) as never,
     digests: {
       run: vi.fn(options.digests ?? (() => Promise.resolve({ runs: 0, digests: 0, alerts: 0 }))),
     },
@@ -153,5 +164,279 @@ describe('object purge scope (Q17)', () => {
     expect(isOrganizationKey('org/70/eml/a.eml', 7n)).toBe(false);
     expect(isOrganizationKey('org/7/../8/eml/a.eml', 7n)).toBe(false);
     expect(isOrganizationKey('org/7//a.eml', 7n)).toBe(false);
+  });
+});
+
+describe('mailbox-located entries (step API-2 R11, ADR-0102)', () => {
+  const RECEIVED = new Date('2026-11-01T08:00:00.000Z');
+  const PAST = new Date('2026-11-02T08:00:00.000Z');
+  const mailboxEntry = (over: Record<string, unknown> = {}) => ({
+    id: 5n,
+    publicId: '0190f0f0-0000-7000-8000-0000000000e5',
+    organizationId: 7n,
+    messageId: 100n,
+    messageReceivedAt: RECEIVED,
+    recipientId: 500n,
+    kind: 'quarantine',
+    status: 'pending_approval',
+    expiresAt: PAST,
+    approvalRequestId: 9n,
+    rowVersion: 2,
+    location: 'mailbox',
+    ...over,
+  });
+  /** The copy's registry message (`journaled`, API-mode intake) as `lockLifecycle` reads it. */
+  const copyRow = {
+    id: 100n,
+    received_at: RECEIVED,
+    organization_id: 7n,
+    status: 'journaled',
+    version: 3,
+    lifecycle_round: 0,
+    status_changed_at: RECEIVED,
+    status_reason: 'mailbox_api_journaled',
+    direction: 'inbound',
+    eml_object_key: 'org/7/eml/copy.eml',
+    ingest_source: 'mailbox_api',
+  };
+
+  /** A writer double for one message: the copy row, then its locked entries. */
+  function copyTx(entries: Array<Record<string, unknown>>, requests: unknown[]) {
+    const writes: string[] = [];
+    const tx = {
+      $queryRaw: vi.fn((strings: TemplateStringsArray) =>
+        Promise.resolve(
+          strings.join('?').includes('FROM email_messages')
+            ? [copyRow]
+            : entries.map((e) => ({ id: e.id })),
+        ),
+      ),
+      quarantineMessage: { findMany: vi.fn(() => Promise.resolve(entries)) },
+      quarantineApprovalRequest: {
+        findMany: vi.fn(() => Promise.resolve(requests)),
+        updateMany: vi.fn(() => {
+          writes.push('request.update');
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      quarantineAction: {
+        create: vi.fn(() => {
+          writes.push('action.create');
+          return Promise.resolve({ id: 1n });
+        }),
+        createMany: vi.fn(() => {
+          writes.push('action.createMany');
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      emailRecipient: {
+        updateMany: vi.fn(() => {
+          writes.push('recipient.update');
+          return Promise.resolve({ count: 0 });
+        }),
+        count: vi.fn(() => Promise.resolve(0)),
+      },
+      emailMessageStatusHistory: {
+        create: vi.fn(() => {
+          writes.push('lifecycle');
+          return Promise.resolve({});
+        }),
+      },
+      messageOutbox: {
+        create: vi.fn(() => {
+          writes.push('outbox');
+          return Promise.resolve({ id: 1n });
+        }),
+      },
+      emailEvent: {
+        create: vi.fn(() => {
+          writes.push('event');
+          return Promise.resolve({ id: 1n });
+        }),
+      },
+      quarantineObjectPurge: {
+        findFirst: vi.fn(() => Promise.resolve(null)),
+        create: vi.fn(() => {
+          writes.push('purge.create');
+          return Promise.resolve({ id: 1n });
+        }),
+      },
+    };
+    return { tx, writes };
+  }
+
+  /** `prisma` whose `$transaction` runs on `tx` (the one message of a test). */
+  const onTx = (prisma: object, tx: unknown): object =>
+    new Proxy(prisma as Record<string, unknown>, {
+      get(t, prop: string) {
+        if (prop === '$transaction') return (fn: (x: unknown) => unknown) => fn(tx);
+        return t[prop];
+      },
+    });
+
+  const store = () => ({
+    casEntry: vi.fn((..._a: unknown[]) => Promise.resolve()),
+    cancelPendingRequests: vi.fn(() => Promise.resolve([])),
+    createEntries: vi.fn(),
+  });
+
+  it('entry expiry selects location = gateway only; a mailbox candidate is a wrong read', async () => {
+    const findMany = vi.fn((_args: unknown) => Promise.resolve([] as unknown[]));
+    const { s } = sweeper({ prisma: emptyPrisma({ quarantineMessage: { findMany } }) });
+    expect((await s.sweepOnce()).failedSteps).toEqual([]);
+    const expiry = findMany.mock.calls
+      .map(([a]) => a as { where: Record<string, unknown> })
+      .find((a) => a.where.expiresAt !== undefined)!;
+    expect(expiry.where).toMatchObject({
+      location: 'gateway',
+      status: { in: ['held', 'pending_approval'] },
+    });
+
+    const leaked = sweeper({
+      prisma: emptyPrisma({
+        quarantineMessage: {
+          findMany: () =>
+            Promise.resolve([
+              {
+                messageId: 100n,
+                messageReceivedAt: RECEIVED,
+                organizationId: 7n,
+                status: 'held',
+                expiresAt: PAST,
+                location: 'mailbox',
+              },
+            ]),
+        },
+      }),
+    });
+    expect((await leaked.s.sweepOnce()).failedSteps).toContain('expiry');
+  });
+
+  it('approval-request expiry of a mailbox entry only CASes the entry back to held (no lifecycle edge, recipient or purge)', async () => {
+    const entry = mailboxEntry();
+    const request = {
+      id: 9n,
+      publicId: '0190f0f0-0000-7000-8000-0000000000c9',
+      organizationId: 7n,
+      quarantineMessageId: 5n,
+      kind: 'release_approval',
+      status: 'pending',
+      requestedByType: 'user',
+      requestedByUserId: 11n,
+      rowVersion: 1,
+    };
+    const { tx, writes } = copyTx([entry], [request]);
+    const st = store();
+    const disposal = { read: vi.fn() };
+    const prisma = emptyPrisma({
+      quarantineApprovalRequest: {
+        findMany: () =>
+          Promise.resolve([{ quarantineMessageId: 5n, status: 'pending', expiresAt: PAST }]),
+      },
+      quarantineMessage: {
+        findMany: (args: { where: Record<string, unknown> }) =>
+          Promise.resolve(
+            args.where.id !== undefined
+              ? [{ messageId: 100n, messageReceivedAt: RECEIVED, organizationId: 7n }]
+              : [],
+          ),
+      },
+    });
+    const withTx = onTx(prisma, tx);
+    const { s } = sweeper({ prisma: withTx, store: st, disposal });
+    const report = await s.sweepOnce();
+    expect(report.failedSteps).toEqual([]);
+    expect(report).toMatchObject({ approvalsExpired: 1, expired: 0, messagesExpired: 0 });
+    expect(st.casEntry).toHaveBeenCalledTimes(1);
+    expect(st.casEntry).toHaveBeenCalledWith(tx, expect.objectContaining({ id: 5n }), {
+      status: 'held',
+      stateChangedAt: expect.any(Date),
+    });
+    expect(writes).toEqual(['request.update', 'action.create', 'outbox']);
+    expect(writes).not.toContain('lifecycle');
+    expect(writes).not.toContain('recipient.update');
+    expect(disposal.read).not.toHaveBeenCalled();
+  });
+
+  it('a policy_review request of a mailbox entry never expires the entry here', async () => {
+    const entry = mailboxEntry({ kind: 'review' });
+    const { tx, writes } = copyTx(
+      [entry],
+      [
+        {
+          id: 9n,
+          publicId: 'r9',
+          organizationId: 7n,
+          quarantineMessageId: 5n,
+          kind: 'policy_review',
+          status: 'pending',
+          requestedByType: 'system',
+          requestedByUserId: null,
+          rowVersion: 1,
+        },
+      ],
+    );
+    const st = store();
+    const prisma = onTx(
+      emptyPrisma({
+        quarantineApprovalRequest: {
+          findMany: () =>
+            Promise.resolve([{ quarantineMessageId: 5n, status: 'pending', expiresAt: PAST }]),
+        },
+        quarantineMessage: {
+          findMany: (args: { where: Record<string, unknown> }) =>
+            Promise.resolve(
+              args.where.id !== undefined
+                ? [{ messageId: 100n, messageReceivedAt: RECEIVED, organizationId: 7n }]
+                : [],
+            ),
+        },
+      }),
+      tx,
+    );
+    const { s } = sweeper({ prisma, store: st });
+    const report = await s.sweepOnce();
+    expect(report).toMatchObject({ failedSteps: [], approvalsExpired: 0, expired: 0 });
+    expect(st.casEntry).not.toHaveBeenCalled();
+    expect(st.cancelPendingRequests).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it('an object purge of a message with mailbox entries is refused before any deletion', async () => {
+    const { tx } = copyTx([mailboxEntry({ status: 'expired' })], []);
+    const objects = { exists: vi.fn(), purgeKey: vi.fn(), purgePrefix: vi.fn() };
+    const disposal = { read: vi.fn() };
+    const updateMany = vi.fn((_a: unknown) => Promise.resolve({ count: 1 }));
+    const prisma = onTx(
+      emptyPrisma({
+        quarantineObjectPurge: {
+          findMany: () =>
+            Promise.resolve([
+              {
+                id: 1n,
+                organizationId: 7n,
+                messageId: 100n,
+                messageReceivedAt: RECEIVED,
+                status: 'pending',
+                attempts: 0,
+                purgeAfter: PAST,
+              },
+            ]),
+          updateMany,
+        },
+      }),
+      tx,
+    );
+    const { s } = sweeper({ prisma, objects, disposal });
+    const report = await s.sweepOnce();
+    expect(report).toMatchObject({ purged: 0, purgeFailures: 1 });
+    expect(objects.purgeKey).not.toHaveBeenCalled();
+    expect(objects.purgePrefix).not.toHaveBeenCalled();
+    expect(disposal.read).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'failed', lastErrorCode: 'mailbox_location' }),
+      }),
+    );
   });
 });

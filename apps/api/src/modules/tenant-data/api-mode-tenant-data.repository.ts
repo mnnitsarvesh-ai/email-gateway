@@ -10,9 +10,16 @@ import type { TenantScope } from '../../auth-contracts/tenant-scope';
  * mailboxes before the API-mode connections (`api_mailboxes.api_connection_id` RESTRICT). Run
  * BEFORE the provider-connection purge: `api_mode_connections.provider_connection_id` references
  * `provider_connections` with RESTRICT. Copies reference registry messages, never the reverse,
- * so the message purge is unaffected (its EMLs follow the message retention).
+ * so the message purge is unaffected (its EMLs follow the message retention). Step API-2 §3.4
+ * (docs/plan/steps/36-api-mode-remediation.md): the remediation actions go first (they reference
+ * the mailboxes and the API-mode connections with RESTRICT; `organization_id` has no FK) and the
+ * remediation policies with them (they reference `domains` and `organizations` with RESTRICT, so
+ * this purge also runs BEFORE the domain purge). Mailbox-located quarantine entries carry no FK
+ * to these tables and go with the quarantine purge.
  */
 export const API_MODE_PURGE_ORDER = [
+  'api_remediation_actions',
+  'api_remediation_policies',
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mailbox_addresses',
@@ -64,6 +71,14 @@ export class ApiModeTenantDataRepository {
     batch: number,
   ): Promise<number> {
     switch (table) {
+      case 'api_remediation_actions':
+        // Index (organization_id, created_at, id); FKs to mailboxes and connections (RESTRICT).
+        return this.prisma.$executeRaw`DELETE FROM api_remediation_actions
+          WHERE organization_id = ${organizationId} ORDER BY created_at, id LIMIT ${batch}`;
+      case 'api_remediation_policies':
+        // Unique (organization_id, scope_key); FKs to organizations and domains (RESTRICT).
+        return this.prisma.$executeRaw`DELETE FROM api_remediation_policies
+          WHERE organization_id = ${organizationId} ORDER BY scope_key, id LIMIT ${batch}`;
       case 'api_message_copies':
         // Index (organization_id, received_at, id); partitioned by received_at, no FK.
         return this.prisma.$executeRaw`DELETE FROM api_message_copies

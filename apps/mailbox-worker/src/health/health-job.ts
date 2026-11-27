@@ -14,13 +14,15 @@ import {
   lagPercentileSeconds,
   type ApiModeHealthConfig,
   type ApiModeHealthInput,
+  type ApiModeRemediationHealthInput,
   type LagBucket,
 } from '@email-gateway/mailbox-api';
 import { isApiSide, loadOrgApiModeState, type OrgApiModeState } from '../domain/api-mode-state';
 import { loadConnectionContext, type ConnectionContext } from '../domain/connections';
 import type { MailboxMetrics } from '../metrics/mailbox-metrics';
+import type { RemediationPolicyLoader } from '../remediation/policy-loader';
 import { hourOf } from '../runtime/redis-stores';
-import { systemAudit } from '../shared/db';
+import { bool, systemAudit } from '../shared/db';
 import { errorFields } from '../shared/errors';
 
 /** Leader lock of the health role (D5, D11). */
@@ -45,6 +47,8 @@ export interface HealthConfig extends ApiModeHealthConfig {
   renewBeforeMinutes: number;
   /** Notifications available (URL and secret configured): `notify` connections poll safely. */
   notificationsAvailable: boolean;
+  /** Step API-2 R14 thresholds of the four `remediation.*` checks. */
+  remediation: ApiModeRemediationHealthInput['thresholds'];
 }
 
 export interface HealthDeps {
@@ -53,6 +57,8 @@ export interface HealthDeps {
   logger: Logger;
   now: () => Date;
   config: HealthConfig;
+  /** Effective remediation policies (`remediation.access`), shared with the copies role. */
+  policies: RemediationPolicyLoader;
   organizationIds?: readonly bigint[];
 }
 
@@ -159,6 +165,10 @@ export class HealthJob {
     }
     const m = this.deps.metrics;
     if (m) {
+      for (const [provider, b] of await this.remediationBacklog(now)) {
+        m.remediationBacklog.set({ provider }, b.count);
+        m.remediationOldestPending.set({ provider }, b.oldestSeconds);
+      }
       for (const [h, n] of health) m.connections.set({ health: h }, n);
       for (const [c, n] of coverage) m.mailboxes.set({ coverage: c }, n);
       m.subscriptions.set({ state: 'active' }, subscriptions.active);
@@ -293,6 +303,8 @@ export class HealthJob {
         lagMaxMs: true,
         throttled429: true,
         throttled503: true,
+        remediationSucceeded: true,
+        remediationFailed: true,
       },
     });
     const buckets: Record<LagBucket, number> = {
@@ -304,7 +316,11 @@ export class HealthJob {
     };
     let maxMs = 0;
     let throttles = 0;
+    let remediationSucceeded = 0;
+    let remediationFailed = 0;
     for (const c of counters) {
+      remediationSucceeded += c.remediationSucceeded;
+      remediationFailed += c.remediationFailed;
       buckets.le_60s += c.lagLe60s;
       buckets.le_300s += c.lagLe300s;
       buckets.le_900s += c.lagLe900s;
@@ -352,6 +368,10 @@ export class HealthJob {
       lagP95SecondsLastHour: lagPercentileSeconds(buckets, 0.95, maxMs),
       throttleEventsLastHour: throttles,
       apiModeDomainsWithGatewayMx: gatewayMx,
+      remediation: await this.remediationInput(ctx, state, now, {
+        succeeded1h: remediationSucceeded,
+        failed1h: remediationFailed,
+      }),
     };
     const result = evaluateApiModeHealth(input, this.deps.config);
     const document = result.document as unknown as Prisma.InputJsonValue;
@@ -424,6 +444,94 @@ export class HealthJob {
       'api-mode connection health changed',
     );
     return result.status;
+  }
+
+  /**
+   * Step API-2 R14: the remediation facts of a connection — the last hour's remediation counters,
+   * the age of the oldest `pending` / `in_progress` action (throttle-delayed rows count; policy
+   * rows of a paused connection do not, the pause is its own check), whether the effective policy
+   * of an api/hybrid domain of the connection enforces while no mailbox-access grant is active,
+   * and the pause flag.
+   */
+  private async remediationInput(
+    ctx: ConnectionContext,
+    state: OrgApiModeState,
+    now: Date,
+    counts: { succeeded1h: number; failed1h: number },
+  ): Promise<ApiModeRemediationHealthInput> {
+    const prisma = this.deps.prisma;
+    const flags = await prisma.$queryRaw<Array<{ remediation_paused: unknown }>>`
+      SELECT remediation_paused FROM api_mode_connections
+      WHERE id = ${ctx.id} AND organization_id = ${ctx.organizationId}`;
+    const paused = bool(flags[0]?.remediation_paused);
+    const oldest = await prisma.apiRemediationAction.findFirst({
+      where: {
+        apiConnectionId: ctx.id,
+        organizationId: ctx.organizationId,
+        status: { in: ['pending', 'in_progress'] },
+        trigger: {
+          in: paused
+            ? ['admin', 'release', 'end_user']
+            : ['policy', 'admin', 'release', 'end_user'],
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+    let enforceWithoutGrant = false;
+    if (ctx.grant?.status !== 'active') {
+      const linked = new Set(ctx.linkedDomainIds.map(String));
+      for (const d of state.domains) {
+        if (!linked.has(d.id.toString()) || !isApiSide(d.effectiveMode)) continue;
+        const effective = await this.deps.policies.effective(prisma, ctx.organizationId, d.id);
+        if (effective.policy.mode === 'enforce' && effective.policy.document.rules.length > 0) {
+          enforceWithoutGrant = true;
+          break;
+        }
+      }
+    }
+    return {
+      succeeded1h: counts.succeeded1h,
+      failed1h: counts.failed1h,
+      oldestPendingAgeSeconds: oldest
+        ? Math.max(0, Math.floor((now.getTime() - oldest.createdAt.getTime()) / 1000))
+        : null,
+      enforceWithoutGrant,
+      paused,
+      thresholds: this.deps.config.remediation,
+    };
+  }
+
+  /**
+   * `api_mode_remediation_backlog{provider}` and `api_mode_remediation_oldest_pending_seconds`:
+   * pending or in-progress actions per provider and the age of the oldest (0 when none).
+   */
+  async remediationBacklog(
+    now: Date,
+  ): Promise<Map<string, { count: number; oldestSeconds: number }>> {
+    const orgs = this.deps.organizationIds;
+    const rows = await this.deps.prisma.$queryRaw<
+      Array<{ provider: string; n: bigint | number; oldest: Date | null }>
+    >`
+      SELECT c.provider AS provider, COUNT(*) AS n, MIN(a.created_at) AS oldest
+      FROM api_remediation_actions a
+      JOIN api_mode_connections c ON c.id = a.api_connection_id
+      WHERE a.status IN ('pending', 'in_progress')
+        ${orgs ? Prisma.sql`AND a.organization_id IN (${Prisma.join(orgs)})` : Prisma.empty}
+      GROUP BY c.provider`;
+    const out = new Map<string, { count: number; oldestSeconds: number }>([
+      ['microsoft_365', { count: 0, oldestSeconds: 0 }],
+      ['google_workspace', { count: 0, oldestSeconds: 0 }],
+    ]);
+    for (const r of rows) {
+      out.set(r.provider, {
+        count: Number(r.n),
+        oldestSeconds: r.oldest
+          ? Math.max(0, Math.floor((now.getTime() - r.oldest.getTime()) / 1000))
+          : 0,
+      });
+    }
+    return out;
   }
 
   /**

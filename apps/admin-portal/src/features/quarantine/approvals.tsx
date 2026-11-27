@@ -29,6 +29,7 @@ import {
 import { BulkActionBar, BulkResultNotice } from './bulk-actions';
 import { approvalDecisionBody } from './forms';
 import { approvalHref, entryHref, releaseHref } from './links';
+import { CONTAINER_TEXT, mailboxLocation } from './location';
 import { ReasonConfirm } from './reason-confirm';
 import { APPROVAL_STATUS_TONE } from './semantic';
 import type { Approval, BulkResult } from './types';
@@ -303,6 +304,7 @@ function ApprovalDetailContent({ approvalId }: { approvalId: string }) {
   }
   const a = approval.data;
   const pending = a.status === 'pending';
+  const mailbox = mailboxLocation(entry.data?.location);
   const maxChars = catalog.data?.limits.reasonMaxChars;
   return (
     <div className="grid gap-4">
@@ -337,7 +339,9 @@ function ApprovalDetailContent({ approvalId }: { approvalId: string }) {
       <div role="status" aria-live="polite">
         {releaseId ? (
           <p className="rounded-md bg-tone-success px-3 py-2 text-sm text-tone-success-foreground">
-            Approved. The release executor re-validates and delivers the message.{' '}
+            {mailbox
+              ? 'Approved. The mailbox worker restores the message to the Inbox.'
+              : 'Approved. The release executor re-validates and delivers the message.'}{' '}
             <Link href={releaseHref(releaseId)} className="font-medium underline">
               Follow the release status
             </Link>
@@ -437,6 +441,18 @@ function ApprovalDetailContent({ approvalId }: { approvalId: string }) {
                   />
                 ),
               },
+              {
+                label: 'Location',
+                value: mailbox ? (
+                  <span>
+                    {CONTAINER_TEXT[mailbox.container]} (
+                    <UntrustedText value={mailbox.mailboxAddress} mono />
+                    ); approving restores it to the Inbox
+                  </span>
+                ) : (
+                  'Held by the gateway'
+                ),
+              },
               { label: 'Reason', value: humanize(entry.data.reason) },
               { label: 'Hard blocks', value: <CodeList codes={entry.data.hardBlocks} /> },
               {
@@ -452,7 +468,14 @@ function ApprovalDetailContent({ approvalId }: { approvalId: string }) {
         onOpenChange={(open) => !open && setDialog(null)}
         title="Approve this request?"
         description={
-          <p>The release is queued and re-validated by the release executor before delivery.</p>
+          mailbox ? (
+            <p>
+              The restore is queued: the message is moved back to the Inbox of the mailbox (
+              {CONTAINER_TEXT[mailbox.container]} now).
+            </p>
+          ) : (
+            <p>The release is queued and re-validated by the release executor before delivery.</p>
+          )
         }
         confirmLabel="Approve"
         maxChars={maxChars}

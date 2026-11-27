@@ -131,7 +131,7 @@ export function ApiModeHealthBadge({ health }: { health: ApiModeHealth }) {
   return <ToneBadge tone={HEALTH_TONE[health] ?? 'neutral'}>{HEALTH_LABEL[health]}</ToneBadge>;
 }
 
-/** Titles of the health checks of `api-mode-health/1` (D11.3). */
+/** Titles of the health checks of `api-mode-health/1` (D11.3; step API-2 R14). */
 export const CHECK_TITLE: Record<string, string> = {
   'connection.active': 'Provider connection active and bound',
   'intake.present': 'Journal copy or mailbox feeds present',
@@ -142,6 +142,11 @@ export const CHECK_TITLE: Record<string, string> = {
   'throttling.1h': 'Provider throttling (last hour)',
   'feeds.errors': 'Mailbox feed errors',
   'domains.api_mode_mx': 'API-mode domain whose MX points to the gateway',
+  // Step API-2 R14.
+  'remediation.failures_1h': 'Remediation failures (last hour)',
+  'remediation.backlog': 'Remediation backlog',
+  'remediation.access': 'Remediation possible (mailbox access for an enforcing policy)',
+  'remediation.paused': 'Remediation paused',
 };
 
 export function checkTitle(code: string): string {

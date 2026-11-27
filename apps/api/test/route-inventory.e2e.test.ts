@@ -110,6 +110,11 @@ import {
   PutOrganizationModeBodySchema,
   UpdateSettingsBodySchema,
 } from '../src/modules/api-mode/dto/api-mode.schemas';
+import {
+  PutRemediationPolicyBodySchema,
+  RemediateBodySchema,
+  RestoreBodySchema,
+} from '../src/modules/api-mode/dto/api-mode-remediation.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -241,6 +246,13 @@ const SENSITIVE_TRANSACTIONAL = [
   'put /api/v1/api-mode/connections/:connectionId/settings',
   'post /api/v1/api-mode/connections/:connectionId/inventory-sync',
   'post /api/v1/api-mode/mailboxes/:mailboxId/resync',
+  // Step API-2 R13 (the keyed remediation mutations).
+  'put /api/v1/api-mode/remediation-policy',
+  'put /api/v1/api-mode/remediation-policy/domains/:domainId',
+  'delete /api/v1/api-mode/remediation-policy/domains/:domainId',
+  'post /api/v1/api-mode/remediations/:remediationId/retry',
+  'post /api/v1/api-mode/detections/:detectionId/remediate',
+  'post /api/v1/api-mode/detections/:detectionId/restore',
   'post /api/v1/messages/:messageId/rescan',
   'post /api/v1/messages/:messageId/release',
   'post /api/v1/quarantine/bulk',
@@ -624,6 +636,22 @@ const NEW_IN_API_1 = [
 ];
 
 /**
+ * Step API-2 R13 (docs/plan/steps/36-api-mode-remediation.md): the 9 remediation operations
+ * (examples required; in the api-mode manifest): six keyed `sensitive` mutations and one v1 list.
+ */
+const NEW_IN_API_2 = [
+  'get /api/v1/api-mode/remediation-policy',
+  'put /api/v1/api-mode/remediation-policy',
+  'put /api/v1/api-mode/remediation-policy/domains/:domainId',
+  'delete /api/v1/api-mode/remediation-policy/domains/:domainId',
+  'get /api/v1/api-mode/remediations',
+  'get /api/v1/api-mode/remediations/:remediationId',
+  'post /api/v1/api-mode/remediations/:remediationId/retry',
+  'post /api/v1/api-mode/detections/:detectionId/remediate',
+  'post /api/v1/api-mode/detections/:detectionId/restore',
+];
+
+/**
  * Step AI-6 D7, I27: request bodies that carry a write-only secret and therefore no example (an
  * example would be a key-shaped value in the published document); the schema describes it.
  */
@@ -749,6 +777,11 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['ProtectionModeController.putOrganization', PutOrganizationModeBodySchema],
   ['ProtectionModeController.putDomain', PutDomainModeBodySchema],
   ['ApiModeController.updateSettings', UpdateSettingsBodySchema],
+  // Step API-2: the keyed remediation mutations parse after the key checks.
+  ['ApiModeRemediationController.putPolicy', PutRemediationPolicyBodySchema],
+  ['ApiModeRemediationController.putDomainPolicy', PutRemediationPolicyBodySchema],
+  ['ApiModeRemediationController.remediate', RemediateBodySchema],
+  ['ApiModeRemediationController.restore', RestoreBodySchema],
   ['ProviderNotificationsController.graph', graphNotificationSchema],
   ['ProviderNotificationsController.lifecycle', graphNotificationSchema],
 ]);
@@ -883,7 +916,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (455 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (464 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
@@ -896,8 +929,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // report read of step AI-R (§4.1), plus the four single-item reads of step AI-4 (D8), plus
     // the capture-issue read of step AI-5 (D8), plus the 11 hardening operations of step AI-6
     // (§4.1, contracts §35.6), plus the 16 operations of step API-1 (D12: 14 API-mode and
-    // protection-mode operations and the 2 public Graph callbacks).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(455);
+    // protection-mode operations and the 2 public Graph callbacks), plus the 9 remediation
+    // operations of step API-2 (R13).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(464);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -1012,6 +1046,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_AI_5,
       ...NEW_IN_AI_6,
       ...NEW_IN_API_1,
+      ...NEW_IN_API_2,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -1093,11 +1128,13 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [...NEW_IN_8_5].sort(),
     );
     expect(NEW_IN_8_5).toHaveLength(13);
-    // NEW_IN_API_1 + PROVIDER_CALLBACKS is exactly the step API-1 manifest (16 operations).
+    // NEW_IN_API_1 + PROVIDER_CALLBACKS + NEW_IN_API_2 is exactly the api-mode manifest (16
+    // operations of step API-1, 9 of step API-2).
     expect(COVERAGE_BY_AREA['api-mode'].map((c) => c.route).sort()).toEqual(
-      [...NEW_IN_API_1, ...PROVIDER_CALLBACKS].sort(),
+      [...NEW_IN_API_1, ...PROVIDER_CALLBACKS, ...NEW_IN_API_2].sort(),
     );
     expect(NEW_IN_API_1).toHaveLength(14);
+    expect(NEW_IN_API_2).toHaveLength(9);
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
@@ -1199,7 +1236,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_AI_R.includes(key) ||
           NEW_IN_AI_5.includes(key) ||
           NEW_IN_AI_6.includes(key) ||
-          NEW_IN_API_1.includes(key)) &&
+          NEW_IN_API_1.includes(key) ||
+          NEW_IN_API_2.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -1215,8 +1253,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
     // sources list of 8.6 and the 2 of AI-1 (conversations, messages) and the 5 of AI-6 (search,
     // usage per user, admin feedback, audit conversations and executions) and the 2 of API-1
-    // (mailboxes, detections) are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 45 });
+    // (mailboxes, detections) and the remediation history of API-2 are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 46 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1292,8 +1330,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // the 14 keyed ATO and incident mutations of step 8.4, plus the 12 keyed provider-connection
     // mutations of step 8.2, plus the 8 keyed identity-provider and mailbox state mutations of
     // step 8.5, plus the 4 keyed journaling mutations of step 8.6, plus the 5 keyed
-    // protection-mode and API-mode mutations of step API-1.
-    expect(operations).toHaveLength(100);
+    // protection-mode and API-mode mutations of step API-1, plus the 6 keyed remediation
+    // mutations of step API-2.
+    expect(operations).toHaveLength(106);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

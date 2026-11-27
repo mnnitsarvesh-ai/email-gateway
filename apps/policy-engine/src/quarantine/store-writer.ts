@@ -88,6 +88,8 @@ export class QuarantineStoreWriter {
    * Q5 rescan interplay, before a round is decided: every non-terminal entry of an earlier round
    * → `superseded` (its pending approval requests → `cancelled`), then every `quarantined`
    * recipient → `pending` (re-decided by this round). Returns the number of superseded entries.
+   * Gateway-held entries only (step API-2 R11, ADR-0102): a mailbox-located entry belongs to an
+   * API-mode copy's registry message, which is never evaluated; the predicate keeps it that way.
    */
   async supersedeEarlierRounds(
     tx: Prisma.TransactionClient,
@@ -98,6 +100,7 @@ export class QuarantineStoreWriter {
     const locked = await tx.$queryRaw<Array<{ id: bigint }>>`
       SELECT id FROM quarantine_messages
       WHERE message_id = ${message.messageId} AND message_received_at = ${message.receivedAt}
+        AND location = 'gateway'
         AND lifecycle_round < ${round} AND status IN ('held', 'pending_approval', 'releasing')
       ORDER BY id
       FOR UPDATE`;
@@ -113,6 +116,7 @@ export class QuarantineStoreWriter {
           lifecycleRound: true,
           status: true,
           rowVersion: true,
+          location: true,
         },
       });
       if (entries.length !== ids.length) quarantineWrongRead(this.sink, 'entries', 'locked rows');
@@ -120,6 +124,7 @@ export class QuarantineStoreWriter {
         if (
           e.organizationId !== message.organizationId ||
           e.messageId !== message.messageId ||
+          e.location !== 'gateway' ||
           e.lifecycleRound >= round ||
           !(NON_TERMINAL_STATES as readonly string[]).includes(e.status)
         ) {

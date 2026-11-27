@@ -1,6 +1,13 @@
 'use client';
 
-import { DownloadIcon, SendIcon, ShieldXIcon, Trash2Icon, UserCheckIcon } from 'lucide-react';
+import {
+  DownloadIcon,
+  InboxIcon,
+  SendIcon,
+  ShieldXIcon,
+  Trash2Icon,
+  UserCheckIcon,
+} from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -24,6 +31,7 @@ import {
   ReleasesList,
 } from './entry-parts';
 import { deleteBody, rejectBody, releaseBody, requestReleaseBody } from './forms';
+import { CONTAINER_TEXT, isMailboxEntry, mailboxLocation } from './location';
 import { PreviewSection } from './preview-panel';
 import { ReasonConfirm } from './reason-confirm';
 import type { EntryAction, EntryDetailBody, ReleaseOutcome } from './types';
@@ -69,23 +77,27 @@ export function EntryActionButtons({
   can,
   onAction,
   label,
+  mailbox = false,
 }: {
   can: EntryActionFlags;
   onAction: (action: EntryAction) => void;
   /** Appended to each button's accessible name when several entries share a page. */
   label?: string;
+  /** A mailbox-located entry: its release is "Restore to inbox" (step API-2 R15). */
+  mailbox?: boolean;
 }) {
   const suffix = label ? ` ${label}` : '';
+  const releaseLabel = mailbox ? 'Restore to inbox' : 'Release';
   return (
     <>
       {can.release ? (
         <Button
           size="sm"
           onClick={() => onAction('release')}
-          aria-label={label ? `Release${suffix}` : undefined}
+          aria-label={label ? `${releaseLabel}${suffix}` : undefined}
         >
-          <SendIcon aria-hidden />
-          Release
+          {mailbox ? <InboxIcon aria-hidden /> : <SendIcon aria-hidden />}
+          {releaseLabel}
         </Button>
       ) : null}
       {can.request_release ? (
@@ -184,16 +196,21 @@ function EntryView({
   const [dialog, setDialog] = useState<EntryAction | null>(null);
   const [outcome, setOutcome] = useState<ReleaseOutcome | null>(null);
   const anyAction = Object.values(can).some(Boolean);
+  const mailbox = isMailboxEntry(entry);
   return (
     <div className="grid gap-4">
       <PageHeader
         title="Quarantine entry"
         breadcrumbs={breadcrumbs}
-        description="One recipient's copy of a held message. Actions apply to this recipient only."
-        actions={<EntryActionButtons can={actions} onAction={setDialog} />}
+        description={
+          mailbox
+            ? "One recipient's message, moved in their mailbox by API-mode remediation. Actions apply to this recipient only."
+            : "One recipient's copy of a held message. Actions apply to this recipient only."
+        }
+        actions={<EntryActionButtons can={actions} onAction={setDialog} mailbox={mailbox} />}
       />
       <div role="status" aria-live="polite">
-        {outcome ? <ReleaseOutcomeNotice outcome={outcome} /> : null}
+        {outcome ? <ReleaseOutcomeNotice outcome={outcome} mailbox={mailbox} /> : null}
       </div>
       <EntryStateNotices entry={entry} />
       {!anyAction ? (
@@ -310,13 +327,16 @@ export function OperatorDialogs({
     successMessage: null,
     onSuccess: (data) =>
       void toast.success(
-        data.purge === 'retained'
-          ? 'Entry deleted. The stored copy is kept until retention or other recipients allow purging it.'
-          : 'Entry deleted. The stored copy will be purged.',
+        mailboxLocation(entry.location)
+          ? "Entry deleted. The message is moved to the mailbox's deleted items unless it is already there."
+          : data.purge === 'retained'
+            ? 'Entry deleted. The stored copy is kept until retention or other recipients allow purging it.'
+            : 'Entry deleted. The stored copy will be purged.',
       ),
   });
   const [notify, setNotify] = useState(true);
-  const canNotify = entry.direction !== 'inbound';
+  const mailbox = mailboxLocation(entry.location);
+  const canNotify = entry.direction !== 'inbound' && !mailbox;
   const open = (kind: EntryAction) => dialog === kind;
   const onOpenChange = (next: boolean) => {
     if (!next) onClose();
@@ -326,15 +346,24 @@ export function OperatorDialogs({
       <ReasonConfirm
         open={open('release')}
         onOpenChange={onOpenChange}
-        title="Release this message?"
+        title={mailbox ? 'Restore this message to the inbox?' : 'Release this message?'}
         description={
-          <p>
-            The message is re-validated against the current policy before delivery to{' '}
-            <UntrustedText value={entry.recipient} />. If approval reasons apply (hard block, engine
-            failure, review), an approval request is created instead.
-          </p>
+          mailbox ? (
+            <p>
+              The message is moved from the mailbox ({CONTAINER_TEXT[mailbox.container]}) back to
+              the Inbox of <UntrustedText value={entry.recipient} /> through the provider API;
+              nothing is delivered again. If approval reasons apply (hard block, failed scan), an
+              approval request is created instead.
+            </p>
+          ) : (
+            <p>
+              The message is re-validated against the current policy before delivery to{' '}
+              <UntrustedText value={entry.recipient} />. If approval reasons apply (hard block,
+              engine failure, review), an approval request is created instead.
+            </p>
+          )
         }
-        confirmLabel="Release"
+        confirmLabel={mailbox ? 'Restore to inbox' : 'Release'}
         maxChars={maxChars}
         pending={release.isPending}
         onSubmit={(reason) =>
@@ -358,10 +387,17 @@ export function OperatorDialogs({
         onOpenChange={onOpenChange}
         title="Reject this message?"
         description={
-          <p>
-            The message is not delivered to <UntrustedText value={entry.recipient} />. This cannot
-            be undone.
-          </p>
+          mailbox ? (
+            <p>
+              The entry is closed and the message stays where it is (
+              {CONTAINER_TEXT[mailbox.container]}). This cannot be undone.
+            </p>
+          ) : (
+            <p>
+              The message is not delivered to <UntrustedText value={entry.recipient} />. This cannot
+              be undone.
+            </p>
+          )
         }
         confirmLabel="Reject"
         destructive
@@ -403,10 +439,17 @@ export function OperatorDialogs({
         onOpenChange={onOpenChange}
         title="Delete this entry?"
         description={
-          <p>
-            The entry is deleted and the stored message is purged when no retention, legal hold or
-            other recipient needs it. This cannot be undone.
-          </p>
+          mailbox ? (
+            <p>
+              The entry is deleted and the message is moved to the mailbox&apos;s deleted items
+              (recoverable by the user) unless it is already there. This cannot be undone.
+            </p>
+          ) : (
+            <p>
+              The entry is deleted and the stored message is purged when no retention, legal hold or
+              other recipient needs it. This cannot be undone.
+            </p>
+          )
         }
         confirmLabel="Delete"
         destructive

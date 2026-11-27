@@ -25,6 +25,8 @@ import {
   SELF_RELEASE_MAX_LEVELS,
   SELF_RELEASE_REASONS,
   BULK_ITEM_STATUSES,
+  MAILBOX_CONTAINERS,
+  QUARANTINE_LOCATIONS,
 } from '@email-gateway/quarantine';
 import { quarantinePreviewSchema } from '@email-gateway/mail-safety';
 import { z } from 'zod';
@@ -124,6 +126,13 @@ export const EntrySearchQuerySchema = z
       .describe(
         'Message public id. With it `from`/`to` may be left out: every entry of the message ' +
           '(any recipient and round) is searched, whenever it was quarantined',
+      ),
+    location: z
+      .enum(QUARANTINE_LOCATIONS)
+      .optional()
+      .describe(
+        'Step API-2: `gateway` (held by the gateway) or `mailbox` (an API-mode copy held in ' +
+          'the recipient’s mailbox; release = restore to the Inbox)',
       ),
     cursor: z.string().min(1).max(512).optional(),
     limit: Limit.describe('Page size (default 50, at most QUARANTINE_SEARCH_MAX_PAGE_SIZE)'),
@@ -248,9 +257,36 @@ export const BulkBodySchema = z.strictObject({
 
 // ---- Responses --------------------------------------------------------------------------------
 
-export const EntryPageSchema = pageSchema(quarantineEntrySummarySchema, 500);
+/**
+ * Step API-2 R10.5 (ADR-0102): where the entry's message is. `mailbox`: the container in the
+ * recipient's mailbox, the mailbox address (masked like the recipient), the provider, the 8.2
+ * connection (operator routes only), the API-mode detection and its latest remediation action.
+ * Provider and detection are null once the API-mode rows are past their retention.
+ */
+export const EntryLocationSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('gateway') }),
+  z.strictObject({
+    kind: z.literal('mailbox'),
+    container: z.enum(MAILBOX_CONTAINERS),
+    mailboxAddress: z.string().max(320),
+    provider: z.enum(['microsoft_365', 'google_workspace']).nullable(),
+    connectionId: z.uuid().optional().describe('Operator routes only'),
+    detectionId: z.uuid().nullable().describe('GET /api-mode/detections/{detectionId}'),
+    remediationId: z.uuid().nullable().describe('GET /api-mode/remediations/{remediationId}'),
+    remediationStatus: z
+      .enum(['pending', 'in_progress', 'succeeded', 'failed', 'skipped', 'simulated', 'cancelled'])
+      .nullable(),
+  }),
+]);
+
+export const EntrySummarySchema = quarantineEntrySummarySchema.extend({
+  location: EntryLocationSchema,
+});
+export const EntryPageSchema = pageSchema(EntrySummarySchema, 500);
 export const ApprovalPageSchema = pageSchema(quarantineApprovalViewSchema, 500);
-export const EntryDetailSchema = quarantineEntryDetailSchema;
+export const EntryDetailSchema = quarantineEntryDetailSchema.extend({
+  location: EntryLocationSchema,
+});
 export const ApprovalViewSchema = quarantineApprovalViewSchema;
 export const PreviewSchema = quarantinePreviewSchema;
 

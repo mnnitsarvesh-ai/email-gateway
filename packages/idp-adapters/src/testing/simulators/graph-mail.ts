@@ -16,6 +16,7 @@ import {
   chunked,
   emlBytes,
   GRAPH_SUBSCRIPTION_MAX_MINUTES,
+  inGraphInbox,
   isLocalCallbackTarget,
   mailboxOf,
   validateEndpoint,
@@ -95,6 +96,9 @@ function deltaItem(message: SimMailMessage): Record<string, unknown> {
 function changes(mailbox: SimMailbox, from: number, to: number): Record<string, unknown>[] {
   const out: { seq: number; item: Record<string, unknown> }[] = [];
   for (const message of mailbox.messages) {
+    // Step API-2: only Inbox messages are in the Inbox delta (a move out is a removal under the
+    // old id; a move in is a new id).
+    if (!inGraphInbox(message)) continue;
     const removedBy = message.removedSeq !== undefined && message.removedSeq <= to;
     if (from < 0) {
       if (message.seq <= to && !removedBy) out.push({ seq: message.seq, item: deltaItem(message) });

@@ -6,7 +6,10 @@
  * organization's entry is 404), end-user scoping (another address is 404), validation before
  * any work, Idempotency-Key replay and reuse, the config-driven rate limits (preview, grants,
  * bulk), the bulk limits and the audit row of every action. The SQL behaviour runs in
- * integration/quarantine.test.ts.
+ * integration/quarantine.test.ts. Step API-2 (R10, ADR-0102): the same routes on mailbox-located
+ * entries (release = a `restore_inbox` action row, no `release_requested` event; approvals;
+ * self-release bounds; reject/delete without lifecycle or purge; the location block and filter;
+ * SQL in integration/api-mode-remediation.test.ts).
  */
 // ---- Route coverage (step 6.1 §3.8, test/route-coverage/legacy.ts) ----
 // @covers get /api/v1/quarantine/approvals
@@ -65,7 +68,9 @@ import { SessionService } from '../src/modules/auth/services/session.service';
 import { TokenService } from '../src/modules/auth/services/token.service';
 import { MessageLifecycleRepository } from '../src/modules/messages/repositories/message-lifecycle.repository';
 import { LifecycleGateway } from '../src/modules/messages/services/lifecycle-gateway';
+import { RemediationActionWriter } from '../src/modules/api-mode/repositories/remediation-action-writer';
 import { QuarantineFactsRepository } from '../src/modules/quarantine/repositories/quarantine-facts.repository';
+import { QuarantineMailboxRepository } from '../src/modules/quarantine/repositories/quarantine-mailbox.repository';
 import { QuarantineReadRepository } from '../src/modules/quarantine/repositories/quarantine-read.repository';
 import { QuarantineWriteRepository } from '../src/modules/quarantine/repositories/quarantine-write.repository';
 import { QuarantineObjectStore } from '../src/modules/quarantine/services/quarantine-object-store';
@@ -216,6 +221,10 @@ describe('quarantine routes (e2e, in-memory world)', () => {
       .useValue(world.facts())
       .overrideProvider(QuarantineObjectStore)
       .useValue(world.objects())
+      .overrideProvider(QuarantineMailboxRepository)
+      .useValue(world.mailboxRepository())
+      .overrideProvider(RemediationActionWriter)
+      .useValue(world.actionWriter())
       .overrideProvider(LifecycleGateway)
       .useValue(world.lifecycle())
       .overrideProvider(IdempotencyRepository)
@@ -737,6 +746,132 @@ describe('quarantine routes (e2e, in-memory world)', () => {
         (await post('/bulk', { action: 'deny', ids: [randomUUID()], reason }, randomUUID(), false))
           .status,
       ).toBe(403);
+    });
+  });
+
+  describe('mailbox-located entries (step API-2 R10)', () => {
+    const releaseEvents = () =>
+      world.outbox.filter((o) => o.eventType === 'mail.quarantine.release_requested.v1');
+
+    it('release: 202 queued with the unchanged shape, a restore_inbox row, no release_requested event', async () => {
+      const entry = world.addMailboxEntry();
+      const res = await post(`/entries/${entry.publicId}/release`, { reason });
+      expect(res.status).toBe(202);
+      expect(Object.keys(res.body).sort()).toEqual(
+        ['entryId', 'outcome', 'releaseId', 'rowVersion', 'state'].sort(),
+      );
+      expect(res.body).toMatchObject({ outcome: 'queued', state: 'releasing' });
+      expect(releaseEvents()).toHaveLength(0);
+      expect(world.remediationActions).toEqual([
+        expect.objectContaining({
+          action: 'restore_inbox',
+          trigger: 'release',
+          quarantineEntryId: entry.id,
+        }),
+      ]);
+      expect(world.releases[0]).toMatchObject({ mode: 'operator', status: 'pending' });
+    });
+
+    it('approval flow: hard block → request; an API key requested it, the user approves; restore queued', async () => {
+      const entry = world.addMailboxEntry({ hasHardBlock: true });
+      apiKeyPermissions = [P.read, P.release];
+      const requested = await http()
+        .post(`/api/v1/quarantine/entries/${entry.publicId}/release`)
+        .set(apiKey)
+        .set('Idempotency-Key', randomUUID())
+        .send({ reason });
+      expect(requested.status).toBe(202);
+      expect(requested.body).toMatchObject({
+        outcome: 'approval_requested',
+        approvalReasons: ['hard_block'],
+      });
+      expect(world.remediationActions).toHaveLength(0);
+      const approval = world.approvals.at(-1)!;
+      const approved = await post(`/approvals/${approval.publicId}/approve`, { reason });
+      expect(approved.status).toBe(202);
+      expect(approved.body).toMatchObject({ status: 'approved', entryState: 'releasing' });
+      expect(world.remediationActions).toEqual([
+        expect.objectContaining({ action: 'restore_inbox', trigger: 'release' }),
+      ]);
+      expect(releaseEvents()).toHaveLength(0);
+    });
+
+    it('self-release: the end-user bounds; allowed → restore_inbox with trigger end_user', async () => {
+      principalWith([P.self]);
+      world.identities.set(USER_ID, { email: 'alice@acme.example', verified: true });
+      const own = world.addMailboxEntry({
+        address: 'alice@acme.example',
+        reason: 'spam',
+        riskLevel: 'low',
+      });
+      const off = await post(`/me/entries/${own.publicId}/release`, { reason });
+      expect(off.status).toBe(403);
+      expect(off.body.code).toBe('quarantine_self_release_not_allowed');
+      world.settings.set(1n, { settings: { endUser: { selfRelease: true } }, rowVersion: 1 });
+      const ok = await post(`/me/entries/${own.publicId}/release`, { reason });
+      expect(ok.status).toBe(202);
+      expect(world.remediationActions).toEqual([
+        expect.objectContaining({ action: 'restore_inbox', trigger: 'end_user' }),
+      ]);
+      const page = await get('/me/entries', window());
+      expect(page.body.items[0].location).toMatchObject({
+        kind: 'mailbox',
+        mailboxAddress: 'alice@acme.example',
+      });
+      expect(page.body.items[0].location).not.toHaveProperty('connectionId');
+    });
+
+    it('reject and delete: no lifecycle edge, no purge; delete queues the soft delete', async () => {
+      const a = world.addMailboxEntry();
+      const rejected = await post(`/entries/${a.publicId}/reject`, { reason });
+      expect(rejected.status).toBe(200);
+      expect(rejected.body).toMatchObject({
+        state: 'rejected',
+        messageTransition: null,
+        purge: null,
+      });
+      const b = world.addMailboxEntry();
+      const deleted = await post(`/entries/${b.publicId}/delete`, { reason });
+      expect(deleted.status).toBe(200);
+      expect(deleted.body).toMatchObject({
+        state: 'deleted',
+        messageTransition: null,
+        purge: null,
+      });
+      expect(world.transitions).toHaveLength(0);
+      expect(world.purges).toHaveLength(0);
+      expect(world.remediationActions).toEqual([
+        expect.objectContaining({
+          action: 'soft_delete',
+          trigger: 'admin',
+          quarantineEntryId: b.id,
+        }),
+      ]);
+    });
+
+    it('list and detail: the location block and the location filter', async () => {
+      world.addEntry();
+      const m = world.addMailboxEntry();
+      const mailbox = await get('/entries', { ...window(), location: 'mailbox' });
+      expect(mailbox.status).toBe(200);
+      expect(mailbox.body.items.map((i: { id: string }) => i.id)).toEqual([m.publicId]);
+      expect(mailbox.body.items[0].location).toMatchObject({
+        kind: 'mailbox',
+        container: 'quarantine_folder',
+        provider: 'microsoft_365',
+        detectionId: expect.any(String),
+      });
+      const gateway = await get('/entries', { ...window(), location: 'gateway' });
+      expect(gateway.body.items.length).toBeGreaterThan(0);
+      for (const item of gateway.body.items as Array<{ location: { kind: string } }>) {
+        expect(item.location).toEqual({ kind: 'gateway' });
+      }
+      expect((await get('/entries', { ...window(), location: 'cloud' })).status).toBe(400);
+      const detail = await get(`/entries/${m.publicId}`);
+      expect(detail.body.location).toMatchObject({
+        kind: 'mailbox',
+        connectionId: expect.any(String),
+      });
     });
   });
 

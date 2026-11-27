@@ -21,6 +21,7 @@ import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-sc
 import type { ApprovalRow, EntryRow } from '../domain/entry';
 import { resolveJournalScope } from '../../archive/domain/journal-scope';
 import { ARCHIVING_FEATURE } from '../../archive/archive.constants';
+import { GATEWAY_MESSAGE_WHERE } from '../../tenant-data/gateway-messages';
 import { InconsistentQuarantineReadError } from '../quarantine.errors';
 import { approvalSelect, entrySelect, toApprovalRow, toEntryRow } from './entry-select';
 
@@ -617,12 +618,26 @@ export class QuarantineWriteRepository {
   // ------------------------------------------------------------------ messages and users
 
   /** The message by its registry public id (manual quarantine). */
+  /**
+   * A gateway message by public id (manual quarantine, Q7). Journal intake and API-mode copies
+   * (`ingest_source` other than `gateway`) read as missing: they are never quarantined manually
+   * (step 8.6 D5; step API-1 N1, API-2 R10.4).
+   */
   async message(tx: Tx, scope: TenantScope, publicId: string): Promise<MessageRow | null> {
     const identity = await tx.messageIdentity.findFirst({
       where: tenantWhere(scope, { publicId }),
       select: { id: true, publicId: true, receivedAt: true },
     });
     if (identity === null) return null;
+    const gateway = await tx.emailMessage.findFirst({
+      where: tenantWhere(scope, {
+        id: identity.id,
+        receivedAt: identity.receivedAt,
+        ...GATEWAY_MESSAGE_WHERE,
+      }),
+      select: { id: true },
+    });
+    if (gateway === null) return null;
     return this.messageById(tx, scope, { ...identity, organizationId: scope.organizationId });
   }
 

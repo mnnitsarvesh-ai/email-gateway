@@ -873,6 +873,10 @@ describe('organization purge of the API-mode tables (§3.2)', () => {
     const purge = ctx.get(ApiModeTenantDataRepository);
     const counts = await purge.purgeOrganization(systemScope(orgB.id), 1);
     expect(counts).toEqual({
+      // Step API-2 §3.4: the remediation tables go first (none seeded here; see
+      // integration/api-mode-remediation.test.ts).
+      api_remediation_actions: 0,
+      api_remediation_policies: 0,
       api_message_copies: 1,
       api_copy_dedupe_keys: 1,
       api_mailbox_addresses: 2,
@@ -895,7 +899,7 @@ describe('organization purge of the API-mode tables (§3.2)', () => {
     expect(await p.apiMailbox.count({ where: { organizationId: orgA.id } })).toBe(1);
     // A re-run is a no-op.
     expect(Object.values(await purge.purgeOrganization(systemScope(orgB.id)))).toEqual([
-      0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0,
     ]);
   });
 });

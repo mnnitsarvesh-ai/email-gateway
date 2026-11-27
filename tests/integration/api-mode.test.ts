@@ -868,7 +868,11 @@ describe.skipIf(gate.skip)(
         }),
       ).toBe(1);
       const calls = await sim.calls({ simulator: 'graph' });
-      expect(calls.some((c) => c.path.includes(delivered.messageId))).toBe(false);
+      // No content fetch of the provider copy. (Since step API-2 the P1 policy may tag the
+      // copy — the synthetic body scans `suspicious` — so remediation calls may name the id.)
+      expect(
+        calls.some((c) => c.path.includes(delivered.messageId) && c.path.endsWith('/$value')),
+      ).toBe(false);
       expect(
         await fx.prisma.emailMessage.count({
           where: {

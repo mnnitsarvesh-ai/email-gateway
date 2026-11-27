@@ -6,8 +6,8 @@ API mode is for domains whose MX records stay with Google Workspace. The gateway
 
 What the gateway does and does not do:
 
-- It **never** changes your MX records, mail flow or Google Workspace configuration; it never delivers, forwards, delays, quarantines or bounces a message from the API side. A domain cannot switch to `api` while its MX still points to the gateway (choose `hybrid` or move the MX first).
-- **Mailbox access** is a separate domain-wide delegation (permission profile `google.mailbox_remediation`: scopes `https://www.googleapis.com/auth/gmail.modify` and `https://www.googleapis.com/auth/admin.directory.user.readonly`), apart from the mail-flow and account takeover delegations. Granting, verifying and revoking it needs the console rights `integration:manage` and `remediation:write`. In this release the gateway only **reads** (users, Gmail history, the content of new Inbox messages it has no copy of); removing threats from mailboxes comes with step API-2.
+- It **never** changes your MX records, mail flow or Google Workspace configuration; it never delivers, forwards, delays or bounces a message from the API side. After delivery it can **remediate** detected threats inside the mailbox (step API-2, see [What remediation does in your tenant](#what-remediation-does-in-your-tenant)). A domain cannot switch to `api` while its MX still points to the gateway (choose `hybrid` or move the MX first).
+- **Mailbox access** is a separate domain-wide delegation (permission profile `google.mailbox_remediation`: scopes `https://www.googleapis.com/auth/gmail.modify` and `https://www.googleapis.com/auth/admin.directory.user.readonly`), apart from the mail-flow and account takeover delegations. Granting, verifying and revoking it needs the console rights `integration:manage` and `remediation:write`. The gateway reads users, the Gmail history and the content of new Inbox messages it has no copy of, and (step API-2) uses the same `gmail.modify` scope to remediate threats; no further delegation is needed.
 - History polling is **off by default** and never backfills existing mail. Service-account keys live only in the encrypted credential store; tokens stay in memory.
 
 Placeholders in this template:
@@ -20,6 +20,26 @@ Placeholders in this template:
 | `111122223333444455556`, `C0example`           | The operator service account's client ID and your Google customer ID                              |
 
 Related: [journal intake from Google Workspace](journal-intake-google-workspace.md), [Google Workspace connection](google-workspace.md), [API mode for Microsoft 365](api-mode-microsoft-365.md).
+
+## What remediation does in your tenant
+
+From step API-2 the gateway acts on the verdict of each mailbox copy according to your **remediation policy** (Mailbox protection → Remediation; default P1: high-confidence malware and phishing go to the quarantine label, other malware/phishing and suspicious or BEC mail is labelled, spam and bulk are left to Gmail's own filtering; **Detect only** records what would have happened without touching mailboxes and is the recommended start). Every action uses the Gmail API as the mailbox with the **same** `google.mailbox_remediation` delegation (`gmail.modify`); there is **no new scope** and nothing changes in your mail flow or Admin console settings.
+
+| Action           | What happens in the mailbox                                                                                                                                                                                                                                                                                                     | Undo                                                                                  |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Quarantine label | The gateway creates (once per mailbox) a **hidden** label `Email Gateway/Quarantine` (hidden in the label list and the message list), adds it and removes `INBOX`: the message leaves the Inbox.                                                                                                                                | "Restore to inbox" on the quarantine page (approvals and end-user self-service apply) |
+| Junk             | Adds `SPAM` and removes `INBOX`.                                                                                                                                                                                                                                                                                                | Restore to inbox                                                                      |
+| Tag              | Adds the visible label `Email Gateway: Suspicious`; the message stays in the Inbox.                                                                                                                                                                                                                                             | Restore removes the label                                                             |
+| Soft delete      | Moves the message to **Trash** (Gmail deletes it for good after 30 days).                                                                                                                                                                                                                                                       | Restore to inbox (untrash)                                                            |
+| Hard delete      | **Not available on Google**: permanent deletion needs the full `https://mail.google.com/` scope, which the gateway does not request. A hard-delete rule moves the message to **Trash** instead and records `hard_delete_unsupported_provider`. Hard delete is off by default (`API_MODE_HARD_DELETE_ENABLED`) and never manual. | Restore to inbox while in Trash                                                       |
+
+Notes:
+
+- A hidden label is still searchable by the user (Gmail search by label name); P1 moves only high-confidence threats there.
+- The gateway finds journal copies in the mailbox by their Message-ID (`rfc822msgid:`, Spam and Trash included); messages only in Sent and drafts are never touched.
+- A restore always goes back to the **Inbox** (untrash, add `INBOX`, remove `SPAM` and the quarantine label). Labelled messages appear on the quarantine pages as "in mailbox quarantine folder" / "Junk" / "deleted items"; when such an entry expires, the message stays where it is.
+- Hybrid domains: copies of messages the gateway already delivered inline are never remediated automatically.
+- Remediation shares the connection's Gmail request budget and pauses when Google throttles (`429`, rate-limit `403`, `503` with `Retry-After`). An administrator can **pause remediation** per connection (restores continue). Removing the client ID from domain-wide delegation stops remediation; pending actions fail with `mailbox_access_revoked`.
 
 ## The example guide
 

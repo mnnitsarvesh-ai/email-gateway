@@ -129,6 +129,7 @@ interface EntryRow {
   status: string;
   riskLevel: QuarantineRiskLevel | null;
   rowVersion: number;
+  location: 'gateway' | 'mailbox';
 }
 
 interface LogRow {
@@ -160,9 +161,11 @@ const EDGE_REASON = {
  * The release executor (step 5.3 Q13.2, Q13.3, Q13.5, Q13.6, ADR-0047): one writer transaction
  * per `mail.quarantine.release_requested.v1` (inside the consumer's `processOnce`):
  *
- * 1. lock the message (`lockLifecycle`), then the release's entries (`FOR UPDATE`); every entry
- *    must be `releasing` with a `pending` release log of this release id (else `stale`: the
- *    logs are marked `stale`, nothing else changes);
+ * 1. lock the message (`lockLifecycle`), then the release's entries (`FOR UPDATE`); an entry
+ *    with `location = mailbox` (step API-2 R11.1) makes the event `stale` with no write at all
+ *    (the mailbox-worker restores those); every entry must be `releasing` with a `pending`
+ *    release log of this release id (else `stale`: the logs are marked `stale`, nothing else
+ *    changes);
  * 2. `mode = approved`: the stored approval request must be `approved` with a decider who is not
  *    the requester nor the creator of a requesting API key (separation of duties re-checked on
  *    the stored decision);
@@ -229,6 +232,13 @@ export class ReleaseExecutor {
       return done('stale');
     }
     const entries = await this.lockEntries(tx, message, p.entryIds);
+    // Step API-2 R11.1 (ADR-0102): a mailbox-located entry is restored by the mailbox-worker,
+    // never released here; such an event is never emitted (defensive). Ledger only: its release
+    // logs belong to the restore flow and stay untouched; no lifecycle change, no approval.
+    if (entries.some((e) => e.location !== 'gateway')) {
+      this.logger.warn(ids, 'release event names mailbox-located entries; ledger only');
+      return done('stale');
+    }
     const logs = await this.releaseLogs(tx, organizationId, p.releaseId, entries);
     const stale =
       entries.length !== p.entryIds.length ||
@@ -433,6 +443,7 @@ export class ReleaseExecutor {
         status: true,
         riskLevel: true,
         rowVersion: true,
+        location: true,
       },
       orderBy: { id: 'asc' },
     });

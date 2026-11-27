@@ -312,3 +312,27 @@ From the generated documents (registry version `09af9aaf56a4569d`, program phase
 | Confirmation classes (enabled tools) | `none` 188, `confirm` 46, `confirm+impact` 52, `confirm+impact+reauth` 70                                                                                                                                                                                  |
 | Conditional risk escalations         | 55 rules on 28 write tools                                                                                                                                                                                                                                 |
 | Not applicable by reason             | the assistant's own routes 30; credential/session ceremony 20; content, preview, download or unmasking 12; returns a secret 9; critical, portal only 9; changes the caller identity/tenant 2; credential or OAuth consent ceremony 2; file export stream 1 |
+
+## API-mode tools (API-1, API-2)
+
+Design [note 35](../plan/steps/35-api-mode-protection.md) D15 and [note 36](../plan/steps/36-api-mode-remediation.md) R16. The program phase stays `AI-6` and the prompt is unchanged (`assistant-system/7`).
+
+- **Reads** (enabled `read` tools, phase AI-1, covered by the read sweep `READ_TOOLS_TESTED_BY`): the 9 API-1 reads (organization protection mode, overview, connections, connection detail, setup guide, mailboxes, mailbox detail, detections, detection detail) and the 3 API-2 reads `api_mode_remediation_get_policy`, `api_mode_remediation_list` and `api_mode_remediation_detail`. `untrustedFields` mark mailbox addresses (customer directory), tenant-authored names, policy rule ids and the operator-typed request reasons (the whole `decision` of a remediation, a union of the policy decision record and `{ requestedAction, reason }`). Provider message ids are never in these views.
+- **Writes deferred to API-3** (`API_MODE_DEFERRED_WRITES`, reason `apiModeDeferred`: "API-mode write: assistant tool planned for step API-3 (portal only until then)"): the 5 API-1 writes and the 6 API-2 writes `ApiModeRemediationController_putPolicy_v1`, `_putDomainPolicy_v1`, `_deleteDomainPolicy_v1`, `_retry_v1`, `_remediate_v1`, `_restore_v1` (11 in all). Hard delete is never offered through chat (R-I2).
+- **Quarantine write tools act on mailbox-located entries too** (ADR-0102): `quarantine_entries_release`, `_request_release`, `_reject`, `_delete`, the approval decisions and `quarantine_tools_bulk` are the same operations with the same confirmation and risk. For an entry with `location.kind = mailbox` a release is a restore to the recipient's Inbox (a `restore_inbox` action the mailbox-worker executes, never a delivery), a reject leaves the message in the mailbox container, and a delete soft-deletes it in the mailbox. No registry change; the preview shows the entry's `location` block.
+
+### Counts after API-2
+
+From the generated documents (registry version `3ec15105b97e1cc3`, program phase AI-6):
+
+| Measure                              | Count                                                                                                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| OpenAPI operations                   | 464 (439 after AI-6 + 16 of API-1 + 9 of API-2)                                                                                                                    |
+| Operation tools                      | 366, all enabled                                                                                                                                                   |
+| Native tools                         | 2                                                                                                                                                                  |
+| Enabled chat tools in all            | **368 (200 reads, 168 writes)**                                                                                                                                    |
+| By status (operations)               | `IMPLEMENTED` 366, `PARTIALLY_IMPLEMENTED` 0, **`MISSING` 0**, `NOT_APPLICABLE` 98                                                                                 |
+| By phase                             | AI-1 186, AI-2 35, AI-3 48, AI-4 70, AI-5 27                                                                                                                       |
+| By risk (all enabled tools)          | `read` 192, `read_audited` 8, `low` 46, `medium` 52, `high` 70                                                                                                     |
+| Confirmation classes (enabled tools) | `none` 200, `confirm` 46, `confirm+impact` 52, `confirm+impact+reauth` 70                                                                                          |
+| Not applicable by reason             | the assistant's own routes 30; ceremony 20; content 12; API-mode write (API-3) 11; secret 9; critical 9; provider callback 2; identity 2; consent 2; file export 1 |

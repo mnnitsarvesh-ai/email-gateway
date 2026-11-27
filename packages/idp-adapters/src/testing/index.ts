@@ -56,14 +56,19 @@ export {
   expireCursors,
   findMailboxOwner,
   isLocalCallbackTarget,
+  messageLocation,
   pushLifecycle,
   removeMessage,
+  GRAPH_WELL_KNOWN_FOLDERS as SIM_GRAPH_WELL_KNOWN_FOLDERS,
+  type SimMessageLocation,
   type DeliverMessageInput,
   type DeliverMessageResult,
   type LifecycleEvent,
 } from './simulators/mail';
 export { GMAIL_MAIL_SCOPES } from './simulators/gmail-mail';
 export { GRAPH_MAIL_READ_PERMISSIONS } from './simulators/graph-mail';
+export { GRAPH_MAIL_WRITE_PERMISSIONS } from './simulators/graph-mail-write';
+export { GMAIL_SYSTEM_LABEL_IDS } from './simulators/gmail-mail-write';
 export {
   SimulatorServer,
   json,

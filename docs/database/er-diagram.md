@@ -100,6 +100,8 @@ flowchart LR
     api_mailboxes[api_mailboxes, api_mailbox_addresses]
     api_message_copies[(api_message_copies P)]
     api_mode_counters[api_mode_counters, api_copy_dedupe_keys]
+    api_remediation_policies
+    api_remediation_actions
   end
   subgraph assistant[AI assistant]
     ai_chat_settings
@@ -176,6 +178,12 @@ flowchart LR
   api_mode_connections --> api_mode_counters
   email_messages -.-> api_message_copies
   api_mailboxes -.-> api_message_copies
+  organizations --> api_remediation_policies
+  domains --> api_remediation_policies
+  api_mode_connections --> api_remediation_actions
+  api_mailboxes --> api_remediation_actions
+  api_message_copies -.-> api_remediation_actions
+  api_remediation_actions -.-> quarantine_messages
   organizations --> archive_encryption_keys
   organizations --> ediscovery_cases
   email_messages -.-> message_outbox
@@ -1469,6 +1477,60 @@ erDiagram
     bigint organization_id
     bigint api_connection_id FK "UQ with hour"
     datetime hour
+  }
+```
+
+### API-mode remediation
+
+Step API-2 ([design §3](../plan/steps/36-api-mode-remediation.md#3-data-model-one-forward-migration-utc-timestamp_api_mode_remediation-wp1), ADR-0101, ADR-0102). Solid lines are foreign keys (all RESTRICT); dotted lines are logical references without a foreign key. A remediation that moves the message (quarantine folder, Junk, soft delete) creates a **mailbox-located** quarantine entry (`location = mailbox`, `lifecycle_round` = the copy's remediation generation); a release of that entry queues a `restore_inbox` action that points back at it and at its release log.
+
+```mermaid
+erDiagram
+  organizations ||--o{ api_remediation_policies : "RESTRICT"
+  domains |o--o{ api_remediation_policies : "domain override, RESTRICT"
+  api_mode_connections ||--o{ api_remediation_actions : "RESTRICT"
+  api_mailboxes ||--o{ api_remediation_actions : "RESTRICT"
+  api_message_copies ||..o{ api_remediation_actions : "copy_id + copy_received_at"
+  api_remediation_actions |o..o| api_remediation_actions : "reverses_action_id / reversed_by_action_id"
+  api_remediation_actions |o..o| quarantine_messages : "quarantine_entry_id / api_remediation_action_id"
+  api_remediation_actions |o..o| quarantine_release_logs : "release_log_id"
+  api_message_copies ||..o{ quarantine_messages : "api_copy_id + api_copy_received_at (location = mailbox)"
+  api_remediation_policies {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UQ with scope_key"
+    bigint domain_id FK "NULL = organization policy"
+    bigint scope_key "STORED COALESCE(domain_id, 0)"
+    enum mode "detect_only, enforce"
+    json document "api-remediation-policy/1"
+    char document_sha256
+    int row_version
+  }
+  api_remediation_actions {
+    bigint id PK
+    char public_id UK
+    bigint organization_id
+    bigint api_connection_id FK
+    bigint mailbox_id FK
+    bigint copy_id
+    datetime copy_received_at
+    enum action "move_quarantine, move_junk, tag, soft_delete, hard_delete, restore_inbox, remove_tag"
+    smallint generation
+    char action_key UK
+    enum trigger "policy, admin, release, end_user, system"
+    enum status "pending, in_progress, succeeded, failed, skipped, simulated, cancelled"
+    bigint quarantine_entry_id
+    json provider_refs "opaque provider ids"
+  }
+  api_message_copies {
+    enum remediation_state "none, pending, simulated, remediated, restored, failed, skipped"
+    enum remediation_action
+    smallint remediation_generation
+  }
+  quarantine_messages {
+    enum location "gateway, mailbox"
+    enum mailbox_container "quarantine_folder, junk, deleted_items"
+    smallint lifecycle_round "mailbox: remediation generation"
   }
 ```
 

@@ -28,6 +28,7 @@ import { QuarantineReadRepository } from '../repositories/quarantine-read.reposi
 import { QuarantineWriteRepository } from '../repositories/quarantine-write.repository';
 import { type SelfCaller, QuarantineContext, permissionsOf } from './quarantine-context';
 import { type LockedEntry, QuarantineEntryOps, actorOf } from './quarantine-entry-ops';
+import { isMailboxEntry, QuarantineMailboxOps } from './quarantine-mailbox-ops';
 import { QuarantineMetrics } from './quarantine-metrics';
 import { QuarantinePrecheckService } from './quarantine-precheck.service';
 import { QuarantineWriter } from './quarantine-writer';
@@ -65,6 +66,10 @@ function refusalError(decision: ReleaseDecision) {
  * `409`/`403` with only the audit row `quarantine.release_refused` written; `approval_required`
  * creates a `release_approval` request (entry `pending_approval`); `release` queues the release
  * for the executor (release log `pending`, entry `releasing`, outbox event). The executor decides.
+ * Step API-2 R10.2 (ADR-0102): a mailbox-located entry is pre-checked from its stored facts
+ * (`decideMailboxRestore`, no replica policy facts) and its release queues a `restore_inbox`
+ * action row for the mailbox-worker instead of the outbox event; request and response shapes are
+ * unchanged.
  */
 @Injectable()
 export class QuarantineReleaseService {
@@ -76,7 +81,20 @@ export class QuarantineReleaseService {
     private readonly context: QuarantineContext,
     private readonly precheck: QuarantinePrecheckService,
     private readonly metrics: QuarantineMetrics,
+    private readonly mailbox: QuarantineMailboxOps,
   ) {}
+
+  /**
+   * The operator release inside the caller's writer transaction (no Idempotency-Key handling of
+   * its own): the API-mode restore of a remediated detection (R12) releases the copy's
+   * mailbox-located entry under its own key. Audited refusals propagate as `AuditedRefusal`.
+   */
+  releaseInTx(
+    tx: Tx,
+    input: MutationInput<ReleaseBody>,
+  ): Promise<{ statusCode: number; body: ReleaseOutcome }> {
+    return this.applyRelease(tx, input, null);
+  }
 
   release(input: MutationInput<ReleaseBody>): Promise<IdempotentResult<ReleaseOutcome>> {
     return this.counted('release', () =>
@@ -181,13 +199,16 @@ export class QuarantineReleaseService {
     } else if (entry.state !== 'held') {
       throw stateConflict(entry.state);
     }
-    const pre = await this.runPrecheck(
-      locked,
-      scope,
-      self === null ? 'operator' : 'self',
-      settings,
-      now,
-    );
+    const pre = isMailboxEntry(entry)
+      ? await this.mailbox.precheck(
+          tx,
+          scope,
+          entry,
+          self === null ? 'operator' : 'self',
+          settings,
+          now,
+        )
+      : await this.runPrecheck(locked, scope, self === null ? 'operator' : 'self', settings, now);
     const refused =
       pre.decision.outcome === 'rescan_required' || pre.decision.outcome === 'refused';
     if (refused) {
@@ -307,7 +328,9 @@ export class QuarantineReleaseService {
       throw stateConflict(entry.state);
     }
     // The pre-check computes the reasons the approver sees (operator mode: no self bounds).
-    const pre = await this.runPrecheck(locked, scope, 'operator', settings, now);
+    const pre = isMailboxEntry(entry)
+      ? await this.mailbox.precheck(tx, scope, entry, 'operator', settings, now)
+      : await this.runPrecheck(locked, scope, 'operator', settings, now);
     if (pre.decision.outcome === 'refused') {
       throw new AuditedRefusal(refusalError(pre.decision), {
         action: QUARANTINE_AUDIT.releaseRefused,

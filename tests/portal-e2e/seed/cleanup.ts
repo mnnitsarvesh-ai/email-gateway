@@ -86,7 +86,11 @@ const ORDER = [
   // Step 8.4: account takeover and security incident rows (seed/ato.ts ATO_TABLES order).
   ...ATO_TABLES,
   // Step API-1: the API-mode tables (copies and dedupe keys before mailboxes, counters and
-  // mailboxes before the API-mode connections, those before the provider connections).
+  // mailboxes before the API-mode connections, those before the provider connections). Step
+  // API-2: remediation actions (RESTRICT on mailboxes and connections) and policies (RESTRICT on
+  // domains) first, as API_MODE_PURGE_ORDER.
+  'api_remediation_actions',
+  'api_remediation_policies',
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mailbox_addresses',

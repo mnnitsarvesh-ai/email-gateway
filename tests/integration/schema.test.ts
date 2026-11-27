@@ -32,7 +32,8 @@ import { stack } from './support/env';
  * integration tables and columns of step 8.2 (25-m365-google-connectors.md §3) and the AI
  * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3) and
  * the AI assistant reports and report emails of step AI-R (31-ai-chat-reports.md §3) and the
- * API-mode protection tables and columns of step API-1 (35-api-mode-protection.md §3).
+ * API-mode protection tables and columns of step API-1 (35-api-mode-protection.md §3) and the
+ * API-mode remediation tables and columns of step API-2 (36-api-mode-remediation.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -354,17 +355,20 @@ const TENANT_OWNED = [
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mode_counters',
+  // Step API-2 §3.1: remediation policies and mailbox actions (organization_id NOT NULL on both).
+  'api_remediation_policies',
+  'api_remediation_actions',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 189 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 191 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(189);
-    expect(new Set(ALL_TABLES).size).toBe(189);
+    expect(ALL_TABLES).toHaveLength(191);
+    expect(new Set(ALL_TABLES).size).toBe(191);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -4340,11 +4344,13 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
       "enum('spam','bulk','phishing','malware','bec','dlp','policy','suspicious','engine_unavailable','manual')",
     );
     expect(cols.get('quarantine_actions.action')?.columnType).toBe(
-      "enum('release','delete','request_release','approve_release','deny_release','report_false_positive','expire','preview','view','download_grant','download','download_refused','reject','quarantine','release_queued','release_blocked','approval_cancelled','approval_expired','supersede','adopt','object_purged','object_retained','self_release')",
+      // Step API-2 §3.2 appended the four mailbox_* actions (ADR-0102).
+      "enum('release','delete','request_release','approve_release','deny_release','report_false_positive','expire','preview','view','download_grant','download','download_refused','reject','quarantine','release_queued','release_blocked','approval_cancelled','approval_expired','supersede','adopt','object_purged','object_retained','self_release','mailbox_remediated','mailbox_restored','mailbox_restore_failed','mailbox_deleted')",
     );
     expect(cols.get('quarantine_release_logs.status')).toMatchObject({
       columnType:
-        "enum('pending','delivered','failed','blocked_by_revalidation','dispatched','approval_required','rescan_required','refused','stale','message_busy')",
+        // Step API-2 §3.2 appended restored / restore_failed (mailbox restores, R10.3).
+        "enum('pending','delivered','failed','blocked_by_revalidation','dispatched','approval_required','rescan_required','refused','stale','message_busy','restored','restore_failed')",
       columnDefault: 'pending',
     });
   });
@@ -4358,7 +4364,8 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
       rcpt_seq: ['smallint unsigned', 'NO', '0'],
       direction: ["enum('inbound','outbound','internal')", 'NO', null],
       kind: ["enum('quarantine','review')", 'NO', null],
-      origin: ["enum('policy','manual','adopted')", 'NO', null],
+      // Step API-2 §3.2 appended api_remediation (ADR-0102).
+      origin: ["enum('policy','manual','adopted','api_remediation')", 'NO', null],
       header_from: ['varchar(320)', 'YES', null],
       has_attachments: ['tinyint(1)', 'NO', '0'],
       attachment_count: ['smallint unsigned', 'NO', '0'],
@@ -4408,8 +4415,8 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
         columnDefault,
       });
     }
-    // 20 columns of step 1.1 + 33 of step 5.3.
-    expect(cols.size).toBe(53);
+    // 20 columns of step 1.1 + 33 of step 5.3 + 6 of step API-2 (asserted in the API-2 block).
+    expect(cols.size).toBe(59);
   });
 
   it('has the per-round unique key and the search, sweeper and retention indexes (Q9, Q19)', async () => {
@@ -4434,6 +4441,9 @@ describe('quarantine schema (step 5.3, docs/plan/steps/17-quarantine.md §3)', (
         'decided_by_user_id',
         // Step 7.2 §3.1: the explorer's quarantineStatus driver.
         'organization_id,status,message_received_at,message_id',
+        // Step API-2 §3.2: the location filter and the entry of a remediated copy.
+        'organization_id,location,quarantined_at,id',
+        'api_copy_id,api_copy_received_at',
       ].sort(),
     );
     expect(await foreignKeys('quarantine_messages')).toEqual([
@@ -7006,6 +7016,9 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       row_version: ['int unsigned', 'NO'],
       created_at: ['datetime(3)', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-2 §3.2: per-connection remediation pause.
+      remediation_paused: ['tinyint(1)', 'NO'],
+      remediation_paused_at: ['datetime(3)', 'YES'],
     });
     await expectIndexes(table, {
       api_mode_connections_public_id_key: { columns: ['public_id'], unique: true },
@@ -7061,6 +7074,10 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       deleted_at: ['datetime(3)', 'YES'],
       created_at: ['datetime(3)', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-2 §3.2: cached provider container ids.
+      quarantine_container_id: ['varchar(256)', 'YES'],
+      tag_container_id: ['varchar(256)', 'YES'],
+      containers_checked_at: ['datetime(3)', 'YES'],
     });
     expect(cols.get('api_mailboxes.status')!.columnDefault).toBe('discovered');
     expect(cols.get('api_mailboxes.coverage_state')!.columnDefault).toBe('out_of_scope');
@@ -7141,6 +7158,18 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       inline_received_at: ['datetime(3)', 'YES'],
       created_at: ['datetime(3)', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-2 §3.2: remediation state of the copy.
+      remediation_state: [
+        "enum('none','pending','simulated','remediated','restored','failed','skipped')",
+        'NO',
+      ],
+      remediation_action: [
+        "enum('move_quarantine','move_junk','tag','soft_delete','hard_delete')",
+        'YES',
+      ],
+      remediation_generation: ['smallint unsigned', 'NO'],
+      last_action_id: ['bigint unsigned', 'YES'],
+      remediation_updated_at: ['datetime(3)', 'YES'],
     });
     const idx = await indexes(table);
     expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
@@ -7207,6 +7236,8 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       fetch_bytes: ['bigint unsigned', 'NO'],
       lag_sum_ms: ['bigint unsigned', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-2 §3.2.
+      remediation_latency_sum_ms: ['bigint unsigned', 'NO'],
     };
     for (const column of [
       'journal_copies',
@@ -7226,6 +7257,16 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       'lag_le_3600s',
       'lag_gt_3600s',
       'lag_max_ms',
+      // Step API-2 §3.2 (R14).
+      'remediation_succeeded',
+      'remediation_failed',
+      'remediation_skipped',
+      'remediation_simulated',
+      'restores_succeeded',
+      'restores_failed',
+      'remediation_throttled',
+      'remediation_latency_count',
+      'remediation_latency_max_ms',
     ]) {
       counters[column] = ['int unsigned', 'NO'];
     }
@@ -7400,6 +7441,348 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
       await prisma.apiCopyDedupeKey.deleteMany({ where: { organizationId } });
       await prisma.apiModeCounter.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
+      await prisma.providerConnection.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step API-2 API-mode remediation schema (36-api-mode-remediation.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<
+      { columnName: string; referenced: string; onDelete: string; onUpdate: string }[]
+    >`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete, r.UPDATE_RULE AS onUpdate
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  const expectIndexes = async (
+    table: string,
+    expected: Record<string, { columns: string[]; unique: boolean }>,
+  ) => {
+    const idx = await indexes(table);
+    for (const [name, definition] of Object.entries(expected)) {
+      expect(idx.get(name), name).toEqual(definition);
+    }
+  };
+
+  const ACTION =
+    "enum('move_quarantine','move_junk','tag','soft_delete','hard_delete','restore_inbox','remove_tag')";
+
+  it('creates api_remediation_policies with the STORED generated scope_key', async () => {
+    const table = 'api_remediation_policies';
+    await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      domain_id: ['bigint unsigned', 'YES'],
+      scope_key: ['bigint unsigned', 'YES'],
+      mode: ["enum('detect_only','enforce')", 'NO'],
+      document: ['json', 'NO'],
+      document_sha256: ['char(64)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    const [generated] = await prisma.$queryRaw<{ expression: string; extra: string }[]>`
+      SELECT GENERATION_EXPRESSION AS expression, EXTRA AS extra FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ${table} AND COLUMN_NAME = 'scope_key'`;
+    expect(generated).toEqual({ expression: 'coalesce(`domain_id`,0)', extra: 'STORED GENERATED' });
+    await expectIndexes(table, {
+      api_remediation_policies_public_id_key: { columns: ['public_id'], unique: true },
+      api_remediation_policies_organization_id_scope_key_key: {
+        columns: ['organization_id', 'scope_key'],
+        unique: true,
+      },
+      api_remediation_policies_domain_id_idx: { columns: ['domain_id'], unique: false },
+    });
+    // domain_id is the base column of the generated scope_key: ON UPDATE RESTRICT.
+    expect(await foreignKeys(table)).toEqual([
+      {
+        columnName: 'domain_id',
+        referenced: 'domains',
+        onDelete: 'RESTRICT',
+        onUpdate: 'RESTRICT',
+      },
+      {
+        columnName: 'organization_id',
+        referenced: 'organizations',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+  });
+
+  it('creates api_remediation_actions (not partitioned, unique action_key)', async () => {
+    const table = 'api_remediation_actions';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      mailbox_id: ['bigint unsigned', 'NO'],
+      copy_id: ['bigint unsigned', 'NO'],
+      copy_received_at: ['datetime(3)', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      action: [ACTION, 'NO'],
+      generation: ['smallint unsigned', 'NO'],
+      action_key: ['char(64)', 'NO'],
+      trigger: ["enum('policy','admin','release','end_user','system')", 'NO'],
+      status: [
+        "enum('pending','in_progress','succeeded','failed','skipped','simulated','cancelled')",
+        'NO',
+      ],
+      reason_code: ['varchar(64)', 'YES'],
+      decision: ['json', 'YES'],
+      reverses_action_id: ['bigint unsigned', 'YES'],
+      reversed_by_action_id: ['bigint unsigned', 'YES'],
+      quarantine_entry_id: ['bigint unsigned', 'YES'],
+      release_log_id: ['bigint unsigned', 'YES'],
+      requested_by_type: ["enum('system','user','api_key')", 'NO'],
+      requested_by_user_id: ['bigint unsigned', 'YES'],
+      request_reason: ['varchar(512)', 'YES'],
+      attempts: ['smallint unsigned', 'NO'],
+      locate_attempts: ['smallint unsigned', 'NO'],
+      next_attempt_at: ['datetime(3)', 'YES'],
+      lease_until: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      last_http_status: ['smallint unsigned', 'YES'],
+      provider_refs: ['json', 'YES'],
+      verdict_at: ['datetime(3)', 'YES'],
+      started_at: ['datetime(3)', 'YES'],
+      completed_at: ['datetime(3)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect(cols.get(`${table}.generation`)!.columnDefault).toBe('0');
+    await expectIndexes(table, {
+      api_remediation_actions_public_id_key: { columns: ['public_id'], unique: true },
+      api_remediation_actions_action_key_key: { columns: ['action_key'], unique: true },
+      api_remediation_actions_status_next_attempt_at_idx: {
+        columns: ['status', 'next_attempt_at'],
+        unique: false,
+      },
+      api_remediation_actions_api_connection_id_status_idx: {
+        columns: ['api_connection_id', 'status'],
+        unique: false,
+      },
+      api_remediation_actions_organization_id_created_at_id_idx: {
+        columns: ['organization_id', 'created_at', 'id'],
+        unique: false,
+      },
+      api_remediation_actions_organization_id_copy_id_copy_receive_idx: {
+        columns: ['organization_id', 'copy_id', 'copy_received_at'],
+        unique: false,
+      },
+      api_remediation_actions_organization_id_mailbox_id_created_a_idx: {
+        columns: ['organization_id', 'mailbox_id', 'created_at'],
+        unique: false,
+      },
+      api_remediation_actions_organization_id_status_created_at_idx: {
+        columns: ['organization_id', 'status', 'created_at'],
+        unique: false,
+      },
+      api_remediation_actions_quarantine_entry_id_idx: {
+        columns: ['quarantine_entry_id'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      {
+        columnName: 'api_connection_id',
+        referenced: 'api_mode_connections',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+      {
+        columnName: 'mailbox_id',
+        referenced: 'api_mailboxes',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+    expect(PARTITIONED[table]).toBeUndefined();
+  });
+
+  it('adds the mailbox location to quarantine_messages (gateway by default, no FKs)', async () => {
+    const cols = await columns(['quarantine_messages']);
+    const expected: Record<string, [string, string, string | null]> = {
+      location: ["enum('gateway','mailbox')", 'NO', 'gateway'],
+      mailbox_container: ["enum('quarantine_folder','junk','deleted_items')", 'YES', null],
+      api_copy_id: ['bigint unsigned', 'YES', null],
+      api_copy_received_at: ['datetime(3)', 'YES', null],
+      api_mailbox_id: ['bigint unsigned', 'YES', null],
+      api_remediation_action_id: ['bigint unsigned', 'YES', null],
+    };
+    for (const [column, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(`quarantine_messages.${column}`), column).toMatchObject({
+        columnType,
+        nullable,
+        columnDefault,
+      });
+    }
+    await expectIndexes('quarantine_messages', {
+      quarantine_messages_organization_id_location_quarantined_at__idx: {
+        columns: ['organization_id', 'location', 'quarantined_at', 'id'],
+        unique: false,
+      },
+      quarantine_messages_api_copy_id_api_copy_received_at_idx: {
+        columns: ['api_copy_id', 'api_copy_received_at'],
+        unique: false,
+      },
+    });
+    await expectIndexes('api_message_copies', {
+      api_message_copies_organization_id_remediation_state_receive_idx: {
+        columns: ['organization_id', 'remediation_state', 'received_at'],
+        unique: false,
+      },
+    });
+    const [gatewayOnly] = await prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT COUNT(*) AS n FROM quarantine_messages WHERE location <> 'gateway' AND origin <> 'api_remediation'`;
+    expect(gatewayOnly!.n).toBe(0n);
+  });
+
+  it('enforces one policy per scope, one action per key and the RESTRICT foreign keys', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const provider = await prisma.providerConnection.create({
+      data: { organizationId, provider: 'google_workspace', displayName: `it-apirem-${suffix}` },
+    });
+    try {
+      const domain = await prisma.domain.create({
+        data: { organizationId, name: `it-apirem-${suffix}.example.test` },
+      });
+      const policy = (domainId: bigint | null) => ({
+        organizationId,
+        domainId,
+        mode: 'enforce' as const,
+        document: { v: 1, rules: [] },
+        documentSha256: 'b'.repeat(64),
+      });
+      const organizationPolicy = await prisma.apiRemediationPolicy.create({ data: policy(null) });
+      expect(organizationPolicy).toMatchObject({ scopeKey: 0n, rowVersion: 1 });
+      expect(organizationPolicy.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      // A second organization row collides on (organization_id, scope_key = 0).
+      await expect(
+        prisma.apiRemediationPolicy.create({ data: policy(null) }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      const domainPolicy = await prisma.apiRemediationPolicy.create({ data: policy(domain.id) });
+      expect(domainPolicy.scopeKey).toBe(domain.id);
+      await expect(
+        prisma.apiRemediationPolicy.create({ data: policy(domain.id) }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+      // MySQL refuses writes to the generated column.
+      await expect(
+        prisma.$executeRaw`UPDATE api_remediation_policies SET scope_key = 5 WHERE id = ${organizationPolicy.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // RESTRICT: the domain cannot go while its override exists.
+      await expect(
+        prisma.$executeRaw`DELETE FROM domains WHERE id = ${domain.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+
+      const connection = await prisma.apiModeConnection.create({
+        data: { organizationId, providerConnectionId: provider.id, provider: 'google_workspace' },
+      });
+      expect(connection).toMatchObject({ remediationPaused: false, remediationPausedAt: null });
+      const mailbox = await prisma.apiMailbox.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          primaryAddress: `user@it-apirem-${suffix}.example.test`,
+        },
+      });
+      expect(mailbox).toMatchObject({ quarantineContainerId: null, tagContainerId: null });
+      const receivedAt = new Date();
+      const copy = await prisma.apiMessageCopy.create({
+        data: {
+          receivedAt,
+          publicId: randomUUID(),
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          messageId: 9_300_000_000n,
+          source: 'gmail',
+          status: 'scanned',
+          verdict: 'malware',
+        },
+      });
+      expect(copy).toMatchObject({
+        remediationState: 'none',
+        remediationAction: null,
+        remediationGeneration: 0,
+        lastActionId: null,
+      });
+      const action = {
+        organizationId,
+        apiConnectionId: connection.id,
+        mailboxId: mailbox.id,
+        copyId: copy.id,
+        copyReceivedAt: receivedAt,
+        messageId: copy.messageId,
+        action: 'move_quarantine' as const,
+        actionKey: 'c'.repeat(64),
+        trigger: 'policy' as const,
+        status: 'pending' as const,
+        requestedByType: 'system' as const,
+      };
+      const created = await prisma.apiRemediationAction.create({ data: action });
+      expect(created).toMatchObject({
+        generation: 0,
+        attempts: 0,
+        locateAttempts: 0,
+        rowVersion: 1,
+      });
+      await expect(prisma.apiRemediationAction.create({ data: action })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      // INSERT IGNORE on the key is the writers' backstop (R-I4): 0 rows, no error.
+      const ignored = await prisma.$executeRaw`
+        INSERT IGNORE INTO api_remediation_actions
+          (public_id, organization_id, api_connection_id, mailbox_id, copy_id, copy_received_at,
+           message_id, action, action_key, \`trigger\`, status, requested_by_type, updated_at)
+        VALUES (${randomUUID()}, ${organizationId}, ${connection.id}, ${mailbox.id}, ${copy.id},
+           ${receivedAt}, ${copy.messageId}, 'move_quarantine', ${'c'.repeat(64)}, 'policy',
+           'pending', 'system', NOW(3))`;
+      expect(ignored).toBe(0);
+
+      // RESTRICT: mailbox and connection cannot go while an action references them.
+      await expect(
+        prisma.$executeRaw`DELETE FROM api_mailboxes WHERE id = ${mailbox.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      await expect(
+        prisma.$executeRaw`DELETE FROM api_mode_connections WHERE id = ${connection.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // Purge order (§3.4): actions, then mailboxes and connections; policies before domains.
+      await prisma.apiRemediationAction.deleteMany({ where: { organizationId } });
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.delete({ where: { id: connection.id } });
+      await prisma.apiRemediationPolicy.deleteMany({ where: { organizationId } });
+      await prisma.domain.delete({ where: { id: domain.id } });
+    } finally {
+      await prisma.apiRemediationAction.deleteMany({ where: { organizationId } });
+      await prisma.apiRemediationPolicy.deleteMany({ where: { organizationId } });
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
       await prisma.apiMailbox.deleteMany({ where: { organizationId } });
       await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
       await prisma.providerConnection.deleteMany({ where: { organizationId } });

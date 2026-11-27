@@ -22,6 +22,11 @@ export const API_MODE_AUDIT = {
   settingsUpdated: 'api_mode.settings_updated',
   inventorySyncRequested: 'api_mode.inventory_sync_requested',
   mailboxResyncRequested: 'api_mode.mailbox_resync_requested',
+  // Step API-2 §5 (docs/plan/steps/36-api-mode-remediation.md).
+  remediationPolicyUpdated: 'api_mode.remediation_policy_updated',
+  remediationRequested: 'api_mode.remediation_requested',
+  restoreRequested: 'api_mode.restore_requested',
+  remediationRetryRequested: 'api_mode.remediation_retry_requested',
 } as const;
 
 /** `audit_logs.resource_type` of the module's rows. */
@@ -30,6 +35,9 @@ export const API_MODE_RESOURCES = {
   domain: 'domain',
   connection: 'api_mode_connection',
   mailbox: 'api_mailbox',
+  remediationPolicy: 'api_remediation_policy',
+  remediation: 'api_remediation_action',
+  detection: 'api_message_copy',
 } as const;
 
 /** Stable Idempotency-Key operation names. */
@@ -39,12 +47,20 @@ export const API_MODE_OPERATIONS = {
   settingsUpdate: 'api_mode.settings_update',
   inventorySync: 'api_mode.inventory_sync',
   mailboxResync: 'api_mode.mailbox_resync',
+  // Step API-2 R13.
+  policyPut: 'api_mode.remediation_policy_put',
+  domainPolicyPut: 'api_mode.remediation_domain_policy_put',
+  domainPolicyDelete: 'api_mode.remediation_domain_policy_delete',
+  remediationRetry: 'api_mode.remediation_retry',
+  remediate: 'api_mode.remediate',
+  restore: 'api_mode.restore',
 } as const;
 
 /** v1 cursor resources (ADR-0051). */
 export const API_MODE_CURSOR_RESOURCES = {
   mailboxes: 'api_mailboxes',
   detections: 'api_message_copies',
+  remediations: 'api_remediation_actions',
 } as const;
 
 /** Writer transaction budget of the module's mutations. */
@@ -57,6 +73,14 @@ export const DETECTION_REASON_CODES = 10;
 /** `GET /api-mode/detections`: default window and the longest range (D12 #13). */
 export const DETECTIONS_DEFAULT_DAYS = 7;
 export const DETECTIONS_MAX_DAYS = 31;
+/** `GET /api-mode/remediations`: default window and the longest range (R13 #5). */
+export const REMEDIATIONS_DEFAULT_DAYS = 7;
+export const REMEDIATIONS_MAX_DAYS = 31;
+/** The live pending count of the overview's remediation block stops counting here (R13). */
+export const REMEDIATION_BACKLOG_COUNT_CAP = 10_000;
+/** `quarantine:release`: the extra permission of a restore that delegates to the release (R12). */
+export const QUARANTINE_RELEASE_PERMISSION = 'quarantine:release';
+
 /** `GET /api-mode/connections/{id}`: days of counters. */
 export const CONNECTION_COUNTER_DAYS = 7;
 
@@ -77,4 +101,5 @@ export type ApiModeConfig = Pick<
   | 'API_MODE_GRAPH_NOTIFICATION_URL'
   | 'PROVIDER_M365_MAILBOX_APP_CLIENT_ID'
   | 'PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID'
+  | 'API_MODE_HARD_DELETE_ENABLED'
 >;

@@ -3,6 +3,7 @@ import type { Logger } from '@email-gateway/logger';
 import { isApiSide, loadOrgApiModeState } from '../domain/api-mode-state';
 import { grantActive, loadConnectionContext } from '../domain/connections';
 import { DELETED_MAILBOX_RETENTION_DAYS } from '../inventory/inventory-runner';
+import { expireMailboxEntries } from '../remediation/quarantine-entries';
 import type { ProviderRuntime } from '../runtime/provider-runtime';
 import { errorFields } from '../shared/errors';
 
@@ -10,6 +11,10 @@ import { errorFields } from '../shared/errors';
 export const COUNTER_RETENTION_DAYS = 400;
 const DAY_MS = 86_400_000;
 const BATCH = 5_000;
+/** Mailbox entries expired per maintenance run (one short transaction each). */
+const ENTRY_EXPIRY_BATCH = 500;
+/** Terminal remediation actions pruned per statement. */
+const ACTION_PRUNE_BATCH = 1_000;
 
 export interface MaintenanceReport {
   dedupeKeys: number;
@@ -18,6 +23,10 @@ export interface MaintenanceReport {
   deletedMailboxes: number;
   feedsStopped: number;
   feedsActivated: number;
+  /** Step API-2 R11.4: mailbox-located quarantine entries expired. */
+  mailboxEntriesExpired: number;
+  /** Step API-2 §3.1: terminal `api_remediation_actions` rows pruned. */
+  remediationActions: number;
 }
 
 export interface MaintenanceDeps {
@@ -26,7 +35,7 @@ export interface MaintenanceDeps {
   runtime: ProviderRuntime | null;
   logger: Logger;
   now: () => Date;
-  config: { dedupeWindowHours: number };
+  config: { dedupeWindowHours: number; remediationRetentionDays: number };
   organizationIds?: readonly bigint[];
 }
 
@@ -37,6 +46,10 @@ export interface MaintenanceDeps {
  * of connections whose feeds were disabled (Graph subscriptions deleted best effort, cursors
  * cleared) and starts `pending` feeds for in-scope mailboxes of connections with feeds enabled and
  * an active grant (a domain switched to api/hybrid, a grant restored). Batched deletes.
+ *
+ * Step API-2: expires due mailbox-located quarantine entries (R11.4; no mailbox change, no
+ * lifecycle edge) and prunes terminal remediation actions older than
+ * `API_MODE_REMEDIATION_RETENTION_DAYS` whose quarantine entry is terminal or gone (§3.1).
  */
 export class Maintenance {
   constructor(private readonly deps: MaintenanceDeps) {}
@@ -56,6 +69,8 @@ export class Maintenance {
       deletedMailboxes: 0,
       feedsStopped: 0,
       feedsActivated: 0,
+      mailboxEntriesExpired: 0,
+      remediationActions: 0,
     };
     const prisma = this.deps.prisma;
     const dedupeCutoff = new Date(now.getTime() - this.deps.config.dedupeWindowHours * 3_600_000);
@@ -86,6 +101,30 @@ export class Maintenance {
     const feeds = await this.feedSweeps(now);
     report.feedsStopped = feeds.stopped;
     report.feedsActivated = feeds.activated;
+    report.mailboxEntriesExpired = await expireMailboxEntries(prisma, {
+      now,
+      batch: ENTRY_EXPIRY_BATCH,
+      ...(this.deps.organizationIds ? { organizationIds: this.deps.organizationIds } : {}),
+    });
+    const actionCutoff = new Date(
+      now.getTime() - this.deps.config.remediationRetentionDays * DAY_MS,
+    );
+    for (let i = 0; i < 100; i++) {
+      const n = await prisma.$executeRaw`
+        DELETE a FROM api_remediation_actions a
+        JOIN (
+          SELECT x.id FROM api_remediation_actions x
+          LEFT JOIN quarantine_messages q ON q.id = x.quarantine_entry_id
+          WHERE x.status IN ('succeeded', 'failed', 'skipped', 'simulated', 'cancelled')
+            AND COALESCE(x.completed_at, x.updated_at) < ${actionCutoff}
+            AND (q.id IS NULL OR q.status NOT IN ('held', 'pending_approval', 'releasing'))
+            ${this.orgFilter('x.organization_id')}
+          ORDER BY x.id
+          LIMIT ${ACTION_PRUNE_BATCH}
+        ) d ON d.id = a.id`;
+      report.remediationActions += n;
+      if (n < ACTION_PRUNE_BATCH) break;
+    }
     return report;
   }
 

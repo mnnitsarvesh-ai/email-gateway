@@ -111,6 +111,8 @@ export function ReasonConfirm({
   onRetry,
   pending = false,
   reasonLabel = 'Reason',
+  reasonHelp = 'Stored with the action and shown in the entry history',
+  explainError,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -124,6 +126,10 @@ export function ReasonConfirm({
   onRetry?: () => Promise<Outcome>;
   pending?: boolean;
   reasonLabel?: string;
+  /** Help text under the reason field (the length limit is appended). */
+  reasonHelp?: string;
+  /** Plain-language text of an error (default: the quarantine codes). */
+  explainError?: (error: ApiError) => string[];
 }) {
   const id = useId();
   const [reason, setReason] = useState('');
@@ -190,7 +196,7 @@ export function ReasonConfirm({
               aria-describedby={`${id}-help${fieldError ? ` ${id}-error` : ''}`}
             />
             <p id={`${id}-help`} className="text-xs text-muted-foreground">
-              Stored with the action and shown in the entry history (at most {maxChars} characters).
+              {reasonHelp} (at most {maxChars} characters).
             </p>
             {fieldError ? (
               <p id={`${id}-error`} className="text-xs font-medium text-destructive">
@@ -202,7 +208,10 @@ export function ReasonConfirm({
           {apiError ? (
             <div className="grid gap-2">
               <FormErrorSummary
-                messages={[...explainQuarantineError(apiError), `Code: ${apiError.code}`]}
+                messages={[
+                  ...(explainError ?? explainQuarantineError)(apiError),
+                  `Code: ${apiError.code}`,
+                ]}
                 requestId={apiError.requestId}
               />
               {onRetry && isRetryable(apiError) ? (

@@ -41,6 +41,8 @@ export interface EntrySearch {
   hasAttachments?: boolean;
   hasHardBlock?: boolean;
   messageId?: bigint;
+  /** Step API-2 R10.5: `gateway` or `mailbox` entries only. */
+  location?: 'gateway' | 'mailbox';
   after?: Keyset;
   take: number;
 }
@@ -127,6 +129,7 @@ export class QuarantineReadRepository {
         ...(f.hasAttachments !== undefined && { hasAttachments: f.hasAttachments }),
         ...(f.hasHardBlock !== undefined && { hasHardBlock: f.hasHardBlock }),
         ...(f.messageId !== undefined && { messageId: f.messageId }),
+        ...(f.location !== undefined && { location: f.location }),
         ...(and.length > 0 && { AND: and }),
       }),
       select: entrySelect,

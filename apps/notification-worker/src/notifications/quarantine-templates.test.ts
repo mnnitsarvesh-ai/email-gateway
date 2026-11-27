@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mailboxLocationText,
   quarantineNoticeMessageId,
   reasonText,
   renderAdminAlert,
@@ -110,6 +111,42 @@ describe('quarantine notice templates (step 5.3 Q20 privacy)', () => {
     });
     const line = digest.text.split('\n').find((l) => l.includes('Subject: '))!;
     expect(line.trim()).toBe(`Subject: ${'x'.repeat(78)}`);
+  });
+
+  it('a mailbox-located digest entry names its container (API-2 R10.5)', () => {
+    const render = (location?: 'gateway' | 'mailbox', mailboxContainer?: string | null) =>
+      renderUserDigest({
+        organizationName: 'Acme',
+        portalUrl: PORTAL,
+        window: { from: 'a', to: 'b' },
+        includeSubject: false,
+        more: 0,
+        entries: [
+          {
+            entryId: 'e',
+            receivedAt: 'r',
+            sender: 's@x.example',
+            subject: null,
+            reason: 'phishing',
+            expiresAt: 'z',
+            ...(location ? { location } : {}),
+            ...(mailboxContainer !== undefined
+              ? { mailboxContainer: mailboxContainer as 'junk' | null }
+              : {}),
+          },
+        ],
+      }).text;
+    expect(render('mailbox', 'quarantine_folder')).toContain(
+      "   Location: in your mailbox's quarantine folder\n   Held until: z",
+    );
+    expect(render('mailbox', 'junk')).toContain("Location: in your mailbox's Junk folder");
+    expect(render('mailbox', 'deleted_items')).toContain(
+      "Location: in your mailbox's deleted items",
+    );
+    expect(render('mailbox', null)).toContain("Location: in your mailbox's quarantine folder");
+    expect(render('gateway', null)).not.toContain('Location:');
+    expect(render()).not.toContain('Location:');
+    expect(mailboxLocationText('junk')).toBe("in your mailbox's Junk folder");
   });
 
   it('names reasons in words and builds a deterministic Message-ID', () => {

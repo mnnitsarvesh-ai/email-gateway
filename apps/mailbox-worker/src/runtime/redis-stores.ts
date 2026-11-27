@@ -140,15 +140,28 @@ export const COUNTER_FIELDS = [
   'lag_gt_3600s',
   'fetch_bytes',
   'lag_sum_ms',
+  // Step API-2 (note 36 R14, migration 44).
+  'remediation_succeeded',
+  'remediation_failed',
+  'remediation_skipped',
+  'remediation_simulated',
+  'restores_succeeded',
+  'restores_failed',
+  'remediation_throttled',
+  'remediation_latency_count',
+  'remediation_latency_sum_ms',
 ] as const;
 export type CounterField = (typeof COUNTER_FIELDS)[number];
-export type CounterDelta = Partial<Record<CounterField, number>> & { lag_max_ms?: number };
+/** Maximum fields (kept with GREATEST, never summed). */
+export const COUNTER_MAX_FIELDS = ['lag_max_ms', 'remediation_latency_max_ms'] as const;
+export type CounterMaxField = (typeof COUNTER_MAX_FIELDS)[number];
+export type CounterDelta = Partial<Record<CounterField | CounterMaxField, number>>;
 
 const ADD_SCRIPT = `
 for i = 1, #ARGV, 2 do
   local field = ARGV[i]
   local value = tonumber(ARGV[i + 1])
-  if field == 'lag_max_ms' then
+  if field == 'lag_max_ms' or field == 'remediation_latency_max_ms' then
     local current = tonumber(redis.call('HGET', KEYS[1], field) or '0')
     if value > current then redis.call('HSET', KEYS[1], field, value) end
   else
@@ -289,19 +302,29 @@ export class CounterStore {
     delta: CounterDelta,
   ): Promise<void> {
     const v = (field: CounterField): number => Math.max(0, Math.round(delta[field] ?? 0));
-    const max = Math.max(0, Math.min(4_294_967_295, Math.round(delta.lag_max_ms ?? 0)));
+    const uint = (value: number | undefined): number =>
+      Math.max(0, Math.min(4_294_967_295, Math.round(value ?? 0)));
+    const max = uint(delta.lag_max_ms);
+    const remediationMax = uint(delta.remediation_latency_max_ms);
     await this.prisma.$executeRaw`
       INSERT INTO api_mode_counters
         (organization_id, api_connection_id, hour, journal_copies, feed_copies, duplicates,
          skipped_internal, too_large, provider_requests, throttled_429, throttled_503,
          provider_errors, cursor_resets, lag_count, lag_le_60s, lag_le_300s, lag_le_900s,
-         lag_le_3600s, lag_gt_3600s, lag_max_ms, fetch_bytes, lag_sum_ms, updated_at)
+         lag_le_3600s, lag_gt_3600s, lag_max_ms, fetch_bytes, lag_sum_ms,
+         remediation_succeeded, remediation_failed, remediation_skipped, remediation_simulated,
+         restores_succeeded, restores_failed, remediation_throttled, remediation_latency_count,
+         remediation_latency_sum_ms, remediation_latency_max_ms, updated_at)
       VALUES (${organizationId}, ${apiConnectionId}, ${hour}, ${v('journal_copies')},
         ${v('feed_copies')}, ${v('duplicates')}, ${v('skipped_internal')}, ${v('too_large')},
         ${v('provider_requests')}, ${v('throttled_429')}, ${v('throttled_503')},
         ${v('provider_errors')}, ${v('cursor_resets')}, ${v('lag_count')}, ${v('lag_le_60s')},
         ${v('lag_le_300s')}, ${v('lag_le_900s')}, ${v('lag_le_3600s')}, ${v('lag_gt_3600s')},
-        ${max}, ${v('fetch_bytes')}, ${v('lag_sum_ms')}, NOW(3))
+        ${max}, ${v('fetch_bytes')}, ${v('lag_sum_ms')}, ${v('remediation_succeeded')},
+        ${v('remediation_failed')}, ${v('remediation_skipped')}, ${v('remediation_simulated')},
+        ${v('restores_succeeded')}, ${v('restores_failed')}, ${v('remediation_throttled')},
+        ${v('remediation_latency_count')}, ${v('remediation_latency_sum_ms')}, ${remediationMax},
+        NOW(3))
       ON DUPLICATE KEY UPDATE
         journal_copies = journal_copies + VALUES(journal_copies),
         feed_copies = feed_copies + VALUES(feed_copies),
@@ -322,6 +345,18 @@ export class CounterStore {
         lag_max_ms = GREATEST(lag_max_ms, VALUES(lag_max_ms)),
         fetch_bytes = fetch_bytes + VALUES(fetch_bytes),
         lag_sum_ms = lag_sum_ms + VALUES(lag_sum_ms),
+        remediation_succeeded = remediation_succeeded + VALUES(remediation_succeeded),
+        remediation_failed = remediation_failed + VALUES(remediation_failed),
+        remediation_skipped = remediation_skipped + VALUES(remediation_skipped),
+        remediation_simulated = remediation_simulated + VALUES(remediation_simulated),
+        restores_succeeded = restores_succeeded + VALUES(restores_succeeded),
+        restores_failed = restores_failed + VALUES(restores_failed),
+        remediation_throttled = remediation_throttled + VALUES(remediation_throttled),
+        remediation_latency_count = remediation_latency_count + VALUES(remediation_latency_count),
+        remediation_latency_sum_ms =
+          remediation_latency_sum_ms + VALUES(remediation_latency_sum_ms),
+        remediation_latency_max_ms =
+          GREATEST(remediation_latency_max_ms, VALUES(remediation_latency_max_ms)),
         updated_at = NOW(3)`;
   }
 }
@@ -333,8 +368,9 @@ export function deltaOf(flat: readonly string[]): CounterDelta {
     const field = flat[i]!;
     const value = Number(flat[i + 1]);
     if (!Number.isFinite(value) || value < 0) continue;
-    if (field === 'lag_max_ms') delta.lag_max_ms = value;
-    else if ((COUNTER_FIELDS as readonly string[]).includes(field)) {
+    if ((COUNTER_MAX_FIELDS as readonly string[]).includes(field)) {
+      delta[field as CounterMaxField] = value;
+    } else if ((COUNTER_FIELDS as readonly string[]).includes(field)) {
       delta[field as CounterField] = value;
     }
   }

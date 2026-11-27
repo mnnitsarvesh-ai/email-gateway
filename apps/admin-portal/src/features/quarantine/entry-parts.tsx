@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangleIcon, CheckCircle2Icon, ClockIcon, LockIcon } from 'lucide-react';
+import { AlertTriangleIcon, CheckCircle2Icon, ClockIcon, InboxIcon, LockIcon } from 'lucide-react';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import {
@@ -17,7 +17,14 @@ import { formatBytes, formatNumber, humanize } from '@/lib/format';
 import { CodeList, DetailList, EnumBadge, Section } from '@/features/messages/controls';
 import { messageHref } from '@/features/messages/links';
 import { RISK_LEVEL_TONE } from '@/features/messages/semantic';
+import { PROVIDER_LABEL } from '@/features/integrations/providers/model';
+import {
+  RemediationStatusBadge,
+  detectionHref,
+  historyHref,
+} from '@/features/api-mode/remediation-model';
 import { approvalHref, releaseHref } from './links';
+import { CONTAINER_TEXT, mailboxLocation } from './location';
 import { RELEASE_STATUS_TONE } from './semantic';
 import type { EntryDetailBody, ReleaseOutcome, ReleaseSummary, SelfEntryDetailBody } from './types';
 
@@ -27,8 +34,78 @@ type AnyDetail = EntryDetailBody | SelfEntryDetailBody;
 export function EntryMetadata({ entry, self = false }: { entry: AnyDetail; self?: boolean }) {
   const canMessage = useCan('MessagesController_detail_v1');
   const canPolicy = useCan('PolicyManagementController_get_v1');
+  const canDetection = useCan('ApiModeController_getDetection_v1');
+  const canHistory = useCan('ApiModeRemediationController_detail_v1');
+  const mailbox = mailboxLocation(entry.location);
   return (
     <Section title="Entry">
+      {mailbox ? (
+        <div
+          className="grid gap-2 rounded-md border bg-muted/40 p-3"
+          role="group"
+          aria-label="Location"
+        >
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <InboxIcon className="size-4 shrink-0" aria-hidden />
+            {CONTAINER_TEXT[mailbox.container]}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            The message was moved in the recipient&apos;s mailbox by API-mode remediation; it was
+            not held by the gateway. A release restores it to the Inbox through the provider API.
+          </p>
+          <DetailList
+            items={[
+              {
+                label: 'Mailbox',
+                value: <UntrustedText value={mailbox.mailboxAddress} mono maxLength={320} />,
+              },
+              {
+                label: 'Provider',
+                value: mailbox.provider ? PROVIDER_LABEL[mailbox.provider] : 'No longer recorded',
+              },
+              {
+                label: 'Remediation status',
+                value: mailbox.remediationStatus ? (
+                  <span className="flex flex-wrap items-center gap-2">
+                    <RemediationStatusBadge status={mailbox.remediationStatus} />
+                    {!self && canHistory && mailbox.remediationId ? (
+                      <Link
+                        href={historyHref({ remediationId: mailbox.remediationId })}
+                        className="text-xs text-primary underline-offset-2 hover:underline"
+                      >
+                        Mailbox action
+                      </Link>
+                    ) : null}
+                  </span>
+                ) : (
+                  'Not recorded'
+                ),
+              },
+              ...(self
+                ? []
+                : [
+                    {
+                      label: 'Detection',
+                      value: mailbox.detectionId ? (
+                        canDetection ? (
+                          <Link
+                            href={detectionHref(mailbox.detectionId)}
+                            className="text-primary underline-offset-2 hover:underline"
+                          >
+                            Open the API-mode detection
+                          </Link>
+                        ) : (
+                          <CopyableId value={mailbox.detectionId} label="detection ID" max={40} />
+                        )
+                      ) : (
+                        <span className="text-muted-foreground">Past its retention</span>
+                      ),
+                    },
+                  ]),
+            ]}
+          />
+        </div>
+      ) : null}
       <DetailList
         items={[
           {
@@ -123,8 +200,14 @@ export function EntryMetadata({ entry, self = false }: { entry: AnyDetail; self?
           },
           { label: 'Entry ID', value: <CopyableId value={entry.id} label="entry ID" max={40} /> },
           {
+            label: 'Location',
+            value: mailbox ? CONTAINER_TEXT[mailbox.container] : 'Held by the gateway',
+          },
+          {
             label: 'Message',
-            hidden: self,
+            // A mailbox entry's message is an API-mode copy (404 in the explorer): the location
+            // block above links the detection instead.
+            hidden: self || mailbox !== null,
             value: canMessage ? (
               <Link
                 href={messageHref(entry.messageId)}
@@ -185,6 +268,7 @@ function Notice({
 /** Hard-block, approval and release states explained in words. */
 export function EntryStateNotices({ entry, self = false }: { entry: AnyDetail; self?: boolean }) {
   const notices: ReactNode[] = [];
+  const mailbox = mailboxLocation(entry.location);
   if (entry.hardBlocks.length > 0) {
     notices.push(
       <Notice key="hb" icon={LockIcon} tone="warning">
@@ -211,16 +295,31 @@ export function EntryStateNotices({ entry, self = false }: { entry: AnyDetail; s
   }
   if (entry.state === 'releasing') {
     notices.push(
-      <Notice key="releasing" icon={ClockIcon} tone="info">
-        <strong>Release queued.</strong> The release executor re-validates the message against the
-        current policy and then delivers it; the entry changes to released when it ran.
-      </Notice>,
+      mailbox ? (
+        <Notice key="releasing" icon={ClockIcon} tone="info">
+          <strong>Restore queued.</strong> The mailbox worker moves the message back to the Inbox
+          through the provider API; the entry changes to released when it ran.
+        </Notice>
+      ) : (
+        <Notice key="releasing" icon={ClockIcon} tone="info">
+          <strong>Release queued.</strong> The release executor re-validates the message against the
+          current policy and then delivers it; the entry changes to released when it ran.
+        </Notice>
+      ),
     );
   }
   if (entry.state === 'released') {
     notices.push(
       <Notice key="released" icon={CheckCircle2Icon} tone="success">
-        <strong>Released.</strong> The message was handed to delivery.
+        {mailbox ? (
+          <>
+            <strong>Restored.</strong> The message was moved back to the Inbox.
+          </>
+        ) : (
+          <>
+            <strong>Released.</strong> The message was handed to delivery.
+          </>
+        )}
       </Notice>,
     );
   }
@@ -240,14 +339,26 @@ export function EntryStateNotices({ entry, self = false }: { entry: AnyDetail; s
 export function ReleaseOutcomeNotice({
   outcome,
   self = false,
+  mailbox = false,
 }: {
   outcome: ReleaseOutcome;
   self?: boolean;
+  /** A mailbox entry: the release is a restore to the Inbox (step API-2 R10). */
+  mailbox?: boolean;
 }) {
   if (outcome.outcome === 'queued') {
     return (
       <Notice icon={CheckCircle2Icon} tone="success">
-        <strong>Release queued.</strong> The release executor re-validates and delivers the message.{' '}
+        {mailbox ? (
+          <>
+            <strong>Restore queued.</strong> The mailbox worker moves the message back to the Inbox.
+          </>
+        ) : (
+          <>
+            <strong>Release queued.</strong> The release executor re-validates and delivers the
+            message.
+          </>
+        )}{' '}
         {!self ? (
           <Link href={releaseHref(outcome.releaseId)} className="font-medium underline">
             Follow the release status

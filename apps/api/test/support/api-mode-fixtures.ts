@@ -9,7 +9,23 @@
  */
 /* eslint-disable @typescript-eslint/no-this-alias -- the doubles close over the world's state */
 import type { TestingModuleBuilder } from '@nestjs/testing';
+import { remediationActionKey, type RemediationActionKind } from '@email-gateway/mailbox-api';
 import type { TenantScope } from '../../src/auth-contracts/tenant-scope';
+import {
+  ApiRemediationRepository,
+  type CopyFacts,
+  type DomainPolicyRow,
+  type LockedRemediation,
+  type PolicyRow,
+  type PolicyWrite,
+  type RemediationDetailRow,
+  type RemediationFilter,
+} from '../../src/modules/api-mode/repositories/api-remediation.repository';
+import {
+  type QueuedAction,
+  type QueueRemediationAction,
+  RemediationActionWriter,
+} from '../../src/modules/api-mode/repositories/remediation-action-writer';
 import {
   type ApiConnectionRow,
   type ApiConnectionUpdate,
@@ -22,6 +38,7 @@ import {
   type MailboxDetailRow,
   type MailboxFilter,
   type OrganizationModeRow,
+  type RemediationCounterRow,
 } from '../../src/modules/api-mode/repositories/api-mode.repository';
 import type { OrganizationAccess } from '../../src/modules/organizations/domain/organization-access';
 import {
@@ -60,6 +77,53 @@ export interface StoredCopy extends CopyRow {
   organizationId: bigint;
   apiConnectionId: bigint;
   mailboxId: bigint;
+  /** Step API-2: the copy's remediation generation and last action. */
+  remediationGeneration: number;
+  lastActionId: bigint | null;
+}
+
+/** Step API-2: one stored remediation policy row. */
+export interface StoredPolicy extends PolicyRow {
+  organizationId: bigint;
+}
+
+/** Step API-2: one stored remediation action row (provider refs as stored, ids included). */
+export interface StoredAction {
+  id: bigint;
+  publicId: string;
+  organizationId: bigint;
+  apiConnectionId: bigint;
+  mailboxId: bigint;
+  copyId: bigint;
+  copyReceivedAt: Date;
+  action: RemediationActionKind;
+  generation: number;
+  actionKey: string;
+  trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+  status:
+    'pending' | 'in_progress' | 'succeeded' | 'failed' | 'skipped' | 'simulated' | 'cancelled';
+  reasonCode: string | null;
+  decision: unknown;
+  reversesActionId: bigint | null;
+  reversedByActionId: bigint | null;
+  quarantineEntryId: bigint | null;
+  quarantineEntryPublicId: string | null;
+  releaseLogId: bigint | null;
+  requestedByType: 'system' | 'user' | 'api_key';
+  requestedByUserId: bigint | null;
+  requestReason: string | null;
+  attempts: number;
+  locateAttempts: number;
+  nextAttemptAt: Date | null;
+  lastErrorCode: string | null;
+  lastHttpStatus: number | null;
+  providerRefs: unknown;
+  verdictAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  rowVersion: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export class ApiModeWorld {
@@ -74,6 +138,15 @@ export class ApiModeWorld {
   entitled = new Set<bigint>();
   /** The UPDATEs of the public callbacks (mailbox id → effect). */
   notifications: Array<{ mailboxId: bigint; effect: Record<string, boolean> }> = [];
+  /** Step API-2: remediation policies, actions, counters and the copies' quarantine entries. */
+  policies: StoredPolicy[] = [];
+  actions: StoredAction[] = [];
+  remediationCounters: Array<RemediationCounterRow & { organizationId: bigint }> = [];
+  /** copy id → its latest mailbox-located quarantine entry (public id, state). */
+  copyEntries = new Map<bigint, { publicId: string; state: string }>();
+  /** `markCopyPending` calls (copy id, action, last action id). */
+  copyUpdates: Array<{ copyId: bigint; remediationAction: string | null; lastActionId: bigint }> =
+    [];
   private nextId = 7000n;
 
   id(): bigint {
@@ -91,6 +164,11 @@ export class ApiModeWorld {
     this.reasonCodes.clear();
     this.entitled.clear();
     this.notifications = [];
+    this.policies = [];
+    this.actions = [];
+    this.remediationCounters = [];
+    this.copyEntries.clear();
+    this.copyUpdates = [];
   }
 
   addOrganization(id: bigint, publicId: string, mode: ProtectionModeValue = 'inline') {
@@ -158,6 +236,8 @@ export class ApiModeWorld {
       healthChangedAt: null,
       throttledUntil: null,
       lastErrorCode: null,
+      remediationPaused: false,
+      remediationPausedAt: null,
       rowVersion: 1,
       ...patch,
     };
@@ -229,9 +309,65 @@ export class ApiModeWorld {
       lagMs: 1000,
       subject: 'Quarterly invoice',
       headerFrom: 'billing@fabrikam.example',
+      remediationState: 'none',
+      remediationAction: null,
+      remediationId: null,
+      quarantineEntryId: null,
+      remediationGeneration: 0,
+      lastActionId: null,
       ...patch,
     };
     this.copies.push(row);
+    return row;
+  }
+
+  /** Step API-2: a remediation action of a copy (defaults: a succeeded policy quarantine move). */
+  addAction(c: StoredCopy, patch: Partial<StoredAction> = {}): StoredAction {
+    const action = patch.action ?? 'move_quarantine';
+    const generation = patch.generation ?? c.remediationGeneration;
+    const now = new Date();
+    const row: StoredAction = {
+      id: this.id(),
+      publicId: crypto.randomUUID(),
+      organizationId: c.organizationId,
+      apiConnectionId: c.apiConnectionId,
+      mailboxId: c.mailboxId,
+      copyId: c.id,
+      copyReceivedAt: c.receivedAt,
+      action,
+      generation,
+      actionKey: remediationActionKey(c.publicId, action, generation),
+      trigger: 'policy',
+      status: 'succeeded',
+      reasonCode: null,
+      decision: null,
+      reversesActionId: null,
+      reversedByActionId: null,
+      quarantineEntryId: null,
+      quarantineEntryPublicId: null,
+      releaseLogId: null,
+      requestedByType: 'system',
+      requestedByUserId: null,
+      requestReason: null,
+      attempts: 1,
+      locateAttempts: 0,
+      nextAttemptAt: null,
+      lastErrorCode: null,
+      lastHttpStatus: null,
+      providerRefs: {
+        before: ['AAMkAGI2-provider-id'],
+        after: ['AAMkAGI3-provider-id'],
+        container: 'quarantine_folder',
+      },
+      verdictAt: new Date(now.getTime() - 5_000),
+      startedAt: new Date(now.getTime() - 2_000),
+      completedAt: now,
+      rowVersion: 1,
+      createdAt: new Date(now.getTime() - 4_000),
+      updatedAt: now,
+      ...patch,
+    };
+    this.actions.push(row);
     return row;
   }
 
@@ -271,8 +407,19 @@ export class ApiModeWorld {
       return copy({ ...view, subscribed: m.subscriptionId !== null });
     };
     const copyView = (c: StoredCopy): CopyRow => {
-      const { organizationId: _o, apiConnectionId: _a, mailboxId: _m, ...view } = c;
-      return copy(view);
+      const {
+        organizationId: _o,
+        apiConnectionId: _a,
+        mailboxId: _m,
+        remediationGeneration: _g,
+        lastActionId: _l,
+        ...view
+      } = c;
+      return copy({
+        ...view,
+        remediationId: w.actions.find((a) => a.id === c.lastActionId)?.publicId ?? c.remediationId,
+        quarantineEntryId: w.copyEntries.get(c.id)?.publicId ?? c.quarantineEntryId,
+      });
     };
     return {
       findOrganization: (access: OrganizationAccess, publicId: string) => {
@@ -497,6 +644,8 @@ export class ApiModeWorld {
                 (filter.connectionPublicId === undefined ||
                   c.connectionPublicId === filter.connectionPublicId) &&
                 (filter.minRiskScore === undefined || (c.riskScore ?? -1) >= filter.minRiskScore) &&
+                (!filter.remediationState ||
+                  filter.remediationState.includes(c.remediationState)) &&
                 (page.before === undefined ||
                   c.receivedAt < page.before.at ||
                   (c.receivedAt.getTime() === page.before.at.getTime() && c.id < page.before.id)),
@@ -520,6 +669,35 @@ export class ApiModeWorld {
             .slice(0, take)
             .map((c) => copyView(c)),
         ),
+      remediationCounters: (scope: TenantScope, ids: readonly bigint[], from: Date) =>
+        Promise.resolve(
+          w
+            .mine(w.remediationCounters, scope)
+            .filter((c) => ids.includes(c.apiConnectionId) && c.hour >= from)
+            .map(({ organizationId: _o, ...c }) => ({ ...c })),
+        ),
+      remediationBacklog: (scope: TenantScope, ids: readonly bigint[], cap: number) => {
+        const out = new Map<
+          bigint,
+          { pending: number; capped: boolean; oldestCreatedAt: Date | null }
+        >();
+        for (const id of ids) {
+          const pending = w
+            .mine(w.actions, scope)
+            .filter((a) => a.apiConnectionId === id && a.status === 'pending')
+            .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+          out.set(id, {
+            pending: Math.min(pending.length, cap),
+            capped: pending.length > cap,
+            oldestCreatedAt: pending[0]?.createdAt ?? null,
+          });
+        }
+        return Promise.resolve(out);
+      },
+      organizationRemediationMode: (scope: TenantScope) => {
+        const row = w.mine(w.policies, scope).find((p) => p.domainId === null);
+        return Promise.resolve(row ? { mode: row.mode } : null);
+      },
       reasonCodes: (_scope: TenantScope, messageId: bigint) =>
         Promise.resolve([...(w.reasonCodes.get(messageId.toString()) ?? [])]),
       mailboxBySubscription: (subscriptionId: string) => {
@@ -539,6 +717,335 @@ export class ApiModeWorld {
         if (effect.requestSync) m.syncRequestedAt ??= new Date();
         if (effect.expireSubscription) m.subscriptionExpiresAt = new Date();
         if (effect.clearSubscription) m.subscriptionId = null;
+        return Promise.resolve();
+      },
+    };
+  }
+
+  /** Step API-2: the `ApiRemediationRepository` double. */
+  remediationDouble(): Partial<Record<keyof ApiRemediationRepository, unknown>> {
+    const w = this;
+    const policyView = (p: StoredPolicy): PolicyRow => {
+      const { organizationId: _o, ...row } = p;
+      return copy(row);
+    };
+    const actionRow = (a: StoredAction): RemediationDetailRow => {
+      const mailbox = w.mailboxes.find((m) => m.id === a.mailboxId)!;
+      const c = w.copies.find((x) => x.id === a.copyId);
+      const refs = a.providerRefs as {
+        before?: unknown[];
+        after?: unknown[];
+        container?: string;
+      } | null;
+      return {
+        id: a.id,
+        publicId: a.publicId,
+        action: a.action,
+        trigger: a.trigger,
+        status: a.status,
+        reasonCode: a.reasonCode,
+        attempts: a.attempts,
+        locateAttempts: a.locateAttempts,
+        lastErrorCode: a.lastErrorCode,
+        lastHttpStatus: a.lastHttpStatus,
+        generation: a.generation,
+        mailboxPublicId: mailbox.publicId,
+        mailboxAddress: mailbox.primaryAddress,
+        connectionPublicId: mailbox.connectionPublicId,
+        detectionPublicId: c?.publicId ?? null,
+        quarantineEntryPublicId: a.quarantineEntryPublicId,
+        createdAt: a.createdAt,
+        nextAttemptAt: a.nextAttemptAt,
+        verdictAt: a.verdictAt,
+        startedAt: a.startedAt,
+        completedAt: a.completedAt,
+        updatedAt: a.updatedAt,
+        decision: copy(a.decision) as RemediationDetailRow['decision'],
+        requestedByType: a.requestedByType,
+        requestedByUserPublicId: null,
+        requestReason: a.requestReason,
+        providerRefs:
+          refs === null || refs === undefined
+            ? null
+            : {
+                container: refs.container ?? null,
+                before: refs.before?.length ?? 0,
+                after: refs.after?.length ?? 0,
+              },
+        reversesPublicId: w.actions.find((x) => x.id === a.reversesActionId)?.publicId ?? null,
+        reversedByPublicId: w.actions.find((x) => x.id === a.reversedByActionId)?.publicId ?? null,
+        releasePublicId: null,
+      };
+    };
+    return {
+      policies: (scope: TenantScope) => {
+        const rows = w.mine(w.policies, scope);
+        const org = rows.find((p) => p.domainId === null);
+        const domains: DomainPolicyRow[] = rows
+          .filter((p) => p.domainId !== null)
+          .flatMap((p) => {
+            const d = w.domains.find((x) => x.id === p.domainId);
+            return d ? [{ ...policyView(p), domain: { publicId: d.publicId, name: d.name } }] : [];
+          });
+        return Promise.resolve({ organization: org ? policyView(org) : null, domains });
+      },
+      lockOrganization: (_tx: unknown, scope: TenantScope) =>
+        Promise.resolve(w.organizations.some((o) => o.id === scope.organizationId)),
+      lockDomain: (_tx: unknown, scope: TenantScope, publicId: string) => {
+        const d = w.mine(w.domains, scope).find((x) => x.publicId === publicId);
+        return Promise.resolve(d ? { id: d.id, publicId: d.publicId, name: d.name } : null);
+      },
+      lockPolicy: (_tx: unknown, scope: TenantScope, domainId: bigint | null) => {
+        const p = w.mine(w.policies, scope).find((x) => x.domainId === domainId);
+        return Promise.resolve(p ? policyView(p) : null);
+      },
+      createPolicy: (
+        _tx: unknown,
+        scope: TenantScope,
+        domainId: bigint | null,
+        write: PolicyWrite,
+      ) => {
+        const row: StoredPolicy = {
+          id: w.id(),
+          publicId: crypto.randomUUID(),
+          organizationId: scope.organizationId,
+          domainId,
+          mode: write.mode,
+          document: copy(write.document) as PolicyRow['document'],
+          documentSha256: write.documentSha256,
+          rowVersion: 1,
+          updatedAt: new Date(),
+        };
+        w.policies.push(row);
+        return Promise.resolve(policyView(row));
+      },
+      updatePolicy: (
+        _tx: unknown,
+        scope: TenantScope,
+        id: bigint,
+        rowVersion: number,
+        write: PolicyWrite,
+      ) => {
+        const p = w.mine(w.policies, scope).find((x) => x.id === id && x.rowVersion === rowVersion);
+        if (!p) return Promise.resolve(false);
+        Object.assign(p, {
+          mode: write.mode,
+          document: copy(write.document),
+          documentSha256: write.documentSha256,
+          rowVersion: p.rowVersion + 1,
+          updatedAt: new Date(),
+        });
+        return Promise.resolve(true);
+      },
+      policyById: (_tx: unknown, scope: TenantScope, id: bigint) => {
+        const p = w.mine(w.policies, scope).find((x) => x.id === id);
+        return Promise.resolve(p ? policyView(p) : null);
+      },
+      deletePolicy: (_tx: unknown, scope: TenantScope, id: bigint) => {
+        const before = w.policies.length;
+        w.policies = w.policies.filter(
+          (p) => !(p.id === id && p.organizationId === scope.organizationId),
+        );
+        return Promise.resolve(w.policies.length < before);
+      },
+      remediations: (
+        scope: TenantScope,
+        filter: RemediationFilter,
+        range: { from: Date; to: Date },
+        page: { take: number; before?: { at: Date; id: bigint } },
+      ) =>
+        Promise.resolve(
+          w
+            .mine(w.actions, scope)
+            .map((a) => actionRow(a))
+            .filter(
+              (a) =>
+                a.createdAt >= range.from &&
+                a.createdAt < range.to &&
+                (!filter.status || filter.status.includes(a.status)) &&
+                (!filter.action || filter.action.includes(a.action)) &&
+                (!filter.trigger || filter.trigger.includes(a.trigger)) &&
+                (filter.mailboxPublicId === undefined ||
+                  a.mailboxPublicId === filter.mailboxPublicId) &&
+                (filter.connectionPublicId === undefined ||
+                  a.connectionPublicId === filter.connectionPublicId) &&
+                (filter.detectionPublicId === undefined ||
+                  a.detectionPublicId === filter.detectionPublicId) &&
+                (page.before === undefined ||
+                  a.createdAt < page.before.at ||
+                  (a.createdAt.getTime() === page.before.at.getTime() && a.id < page.before.id)),
+            )
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : -1))
+            .slice(0, page.take),
+        ),
+      remediation: (scope: TenantScope, publicId: string) => {
+        const a = w.mine(w.actions, scope).find((x) => x.publicId === publicId);
+        return Promise.resolve(a ? actionRow(a) : null);
+      },
+      lockCopy: (_tx: unknown, scope: TenantScope, publicId: string): Promise<CopyFacts | null> => {
+        const c = w.mine(w.copies, scope).find((x) => x.publicId === publicId);
+        if (!c) return Promise.resolve(null);
+        const mailbox = w.mailboxes.find((m) => m.id === c.mailboxId)!;
+        return Promise.resolve({
+          id: c.id,
+          receivedAt: c.receivedAt,
+          publicId: c.publicId,
+          organizationId: c.organizationId,
+          messageId: c.messageId,
+          apiConnectionId: c.apiConnectionId,
+          mailboxId: c.mailboxId,
+          status: c.status,
+          verdictAuthority: c.verdictAuthority,
+          remediationState: c.remediationState,
+          remediationAction: c.remediationAction,
+          remediationGeneration: c.remediationGeneration,
+          lastActionId: c.lastActionId,
+          grantActive: mailbox.grantActive,
+        });
+      },
+      hasActiveAction: (
+        _tx: unknown,
+        scope: TenantScope,
+        c: { id: bigint },
+        exceptId: bigint | null = null,
+      ) =>
+        Promise.resolve(
+          w
+            .mine(w.actions, scope)
+            .some(
+              (a) =>
+                a.copyId === c.id &&
+                a.id !== exceptId &&
+                (a.status === 'pending' || a.status === 'in_progress'),
+            ),
+        ),
+      lastSucceeded: (_tx: unknown, scope: TenantScope, c: { id: bigint }, action: string) => {
+        const rows = w
+          .mine(w.actions, scope)
+          .filter(
+            (a) =>
+              a.copyId === c.id &&
+              a.action === action &&
+              a.status === 'succeeded' &&
+              a.reversedByActionId === null,
+          );
+        const last = rows[rows.length - 1];
+        return Promise.resolve(last ? { id: last.id } : null);
+      },
+      entryOfCopy: (_tx: unknown, _scope: TenantScope, c: { id: bigint }) =>
+        Promise.resolve(w.copyEntries.get(c.id) ?? null),
+      lockRemediation: (_tx: unknown, scope: TenantScope, publicId: string) => {
+        const a = w.mine(w.actions, scope).find((x) => x.publicId === publicId);
+        const c = a ? w.mine(w.copies, scope).find((x) => x.id === a.copyId) : undefined;
+        return Promise.resolve<{ row: LockedRemediation; copyGeneration: number } | null>(
+          a && c
+            ? {
+                row: {
+                  id: a.id,
+                  publicId: a.publicId,
+                  action: a.action,
+                  status: a.status,
+                  quarantineEntryId: a.quarantineEntryId,
+                  copyId: a.copyId,
+                  copyReceivedAt: a.copyReceivedAt,
+                  generation: a.generation,
+                  rowVersion: a.rowVersion,
+                },
+                copyGeneration: c.remediationGeneration,
+              }
+            : null,
+        );
+      },
+      retry: (_tx: unknown, scope: TenantScope, row: LockedRemediation, now: Date) => {
+        const a = w
+          .mine(w.actions, scope)
+          .find((x) => x.id === row.id && x.rowVersion === row.rowVersion && x.status === 'failed');
+        if (!a) return Promise.resolve(false);
+        Object.assign(a, {
+          status: 'pending',
+          attempts: 0,
+          locateAttempts: 0,
+          nextAttemptAt: now,
+          reasonCode: null,
+          lastErrorCode: null,
+          lastHttpStatus: null,
+          startedAt: null,
+          completedAt: null,
+          rowVersion: a.rowVersion + 1,
+        });
+        return Promise.resolve(true);
+      },
+    };
+  }
+
+  /** Step API-2: the `RemediationActionWriter` double (the unique key collapses like MySQL's). */
+  actionWriterDouble(): Partial<RemediationActionWriter> {
+    const w = this;
+    return {
+      queue: (_tx: unknown, row: QueueRemediationAction): Promise<QueuedAction> => {
+        const actionKey = remediationActionKey(row.copyPublicId, row.action, row.generation);
+        const existing = w.actions.find((a) => a.actionKey === actionKey);
+        if (existing) {
+          if (existing.status === 'in_progress' || existing.status === 'succeeded') {
+            return Promise.resolve({
+              id: existing.id,
+              publicId: existing.publicId,
+              outcome: existing.status === 'in_progress' ? 'busy' : 'succeeded',
+            });
+          }
+          Object.assign(existing, {
+            status: 'pending',
+            trigger: row.trigger,
+            decision: copy(row.decision),
+            attempts: 0,
+            nextAttemptAt: row.now,
+            requestReason: row.requestReason,
+          });
+          return Promise.resolve({
+            id: existing.id,
+            publicId: existing.publicId,
+            outcome: 'rearmed',
+          });
+        }
+        const c = w.copies.find((x) => x.id === row.copyId)!;
+        const created = w.addAction(c, {
+          action: row.action,
+          generation: row.generation,
+          actionKey,
+          trigger: row.trigger as StoredAction['trigger'],
+          status: 'pending',
+          decision: copy(row.decision),
+          reversesActionId: row.reversesActionId,
+          quarantineEntryId: row.quarantineEntryId,
+          releaseLogId: row.releaseLogId,
+          requestedByType: row.requestedByType,
+          requestedByUserId: row.requestedByUserId,
+          requestReason: row.requestReason,
+          attempts: 0,
+          nextAttemptAt: row.now,
+          providerRefs: null,
+          verdictAt: null,
+          startedAt: null,
+          completedAt: null,
+          createdAt: row.now,
+          updatedAt: row.now,
+        });
+        return Promise.resolve({ id: created.id, publicId: created.publicId, outcome: 'inserted' });
+      },
+      markCopyPending: (
+        _tx: unknown,
+        target: { copyId: bigint },
+        update: { remediationAction: string | null; lastActionId: bigint },
+      ) => {
+        w.copyUpdates.push({ copyId: target.copyId, ...update });
+        const c = w.copies.find((x) => x.id === target.copyId);
+        if (c) {
+          c.remediationState = 'pending';
+          if (update.remediationAction !== null) {
+            c.remediationAction = update.remediationAction as StoredCopy['remediationAction'];
+          }
+          c.lastActionId = update.lastActionId;
+        }
         return Promise.resolve();
       },
     };
@@ -584,7 +1091,10 @@ export class ApiModeWorld {
   }
 }
 
-/** Overrides the API-mode repository, the API-mode status and the feature lookup. */
+/**
+ * Overrides the API-mode repository, the API-mode status and the feature lookup; step API-2: the
+ * remediation repository and the action-row writer.
+ */
 export function overrideApiMode(
   builder: TestingModuleBuilder,
   world: ApiModeWorld,
@@ -592,6 +1102,10 @@ export function overrideApiMode(
   return builder
     .overrideProvider(ApiModeRepository)
     .useValue(world.double())
+    .overrideProvider(ApiRemediationRepository)
+    .useValue(world.remediationDouble())
+    .overrideProvider(RemediationActionWriter)
+    .useValue(world.actionWriterDouble())
     .overrideProvider(ApiModeStatusService)
     .useValue(world.statusDouble())
     .overrideProvider(OrganizationFeaturesService)

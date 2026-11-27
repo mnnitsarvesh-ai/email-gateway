@@ -34,6 +34,7 @@ import { QuarantineWriteRepository } from '../repositories/quarantine-write.repo
 import { QuarantineContext } from './quarantine-context';
 import { QuarantineDispositionService } from './quarantine-disposition.service';
 import { type LockedEntry, QuarantineEntryOps } from './quarantine-entry-ops';
+import { isMailboxEntry, QuarantineMailboxOps } from './quarantine-mailbox-ops';
 import { QuarantineMetrics } from './quarantine-metrics';
 import { QuarantinePrecheckService } from './quarantine-precheck.service';
 import { QuarantineWriter } from './quarantine-writer';
@@ -82,6 +83,7 @@ export class QuarantineApprovalsService {
     private readonly precheck: QuarantinePrecheckService,
     private readonly disposition: QuarantineDispositionService,
     private readonly metrics: QuarantineMetrics,
+    private readonly mailbox: QuarantineMailboxOps,
   ) {}
 
   approve(input: ApprovalInput): Promise<IdempotentResult<ApprovalDecisionResponse>> {
@@ -268,23 +270,32 @@ export class QuarantineApprovalsService {
     const { scope } = input;
     const principal = input.principal as UserPrincipal;
     const settings = await this.context.settingsTx(tx, scope);
-    const ids = await this.reads.messagePublicIds(scope, [locked.entry.messageId]);
-    const base = {
-      scope,
-      entry: locked.entry,
-      messagePublicId: ids.get(locked.entry.messageId) ?? '',
-      messageState: gatewayMessageState(locked.snapshot.state),
-      settings,
-      now,
-    };
     // The reasons the approver approves: the request's ∪ the current pre-check's (Q14). With
     // that set, `decideRelease` in `approved` mode releases unless the round is stale (rescan)
     // or the tenant refuses hard-block releases; one operator-mode evaluation decides both.
-    const pre = await this.precheck.run({
-      ...base,
-      mode: 'operator',
-      entry: { ...locked.entry, state: 'held' },
-    });
+    // Step API-2 R10.2: a mailbox-located entry is pre-checked from its stored facts
+    // (`decideMailboxRestore`; never stale) and the release queues its restore action row.
+    const pre = isMailboxEntry(locked.entry)
+      ? await this.mailbox.precheck(
+          tx,
+          scope,
+          { ...locked.entry, state: 'held' },
+          'operator',
+          settings,
+          now,
+        )
+      : await this.precheck.run({
+          scope,
+          entry: { ...locked.entry, state: 'held' },
+          messagePublicId:
+            (await this.reads.messagePublicIds(scope, [locked.entry.messageId])).get(
+              locked.entry.messageId,
+            ) ?? '',
+          messageState: gatewayMessageState(locked.snapshot.state),
+          settings,
+          now,
+          mode: 'operator',
+        });
     const approvedReasons = union(approval.approvalReasons, pre.decision.approvalReasons);
     if (pre.decision.outcome === 'rescan_required' || pre.decision.outcome === 'refused') {
       const error =

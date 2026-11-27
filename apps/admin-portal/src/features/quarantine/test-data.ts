@@ -51,6 +51,27 @@ export function entrySummary(overrides: Partial<EntrySummary> = {}): EntrySummar
     sizeBytes: 48_213,
     approvalRequestId: null,
     rowVersion: 2,
+    location: { kind: 'gateway' },
+    ...overrides,
+  };
+}
+
+export const DETECTION_ID = '01933c3a-1b2c-7d4e-8f00-0000000d0001';
+export const REMEDIATION_ID = '01933c3a-1b2c-7d4e-8f00-0000000f0001';
+
+/** Step API-2 R10.5: the location block of a mailbox-located entry (operator view). */
+export function mailboxLocationView(
+  overrides: Partial<Extract<EntrySummary['location'], { kind: 'mailbox' }>> = {},
+): EntrySummary['location'] {
+  return {
+    kind: 'mailbox',
+    container: 'quarantine_folder',
+    mailboxAddress: 'priya.rao4@alpha.example.test',
+    provider: 'microsoft_365',
+    connectionId: '01933c3a-1b2c-7d4e-8f00-0000000c0002',
+    detectionId: DETECTION_ID,
+    remediationId: REMEDIATION_ID,
+    remediationStatus: 'succeeded',
     ...overrides,
   };
 }

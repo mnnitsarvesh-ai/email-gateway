@@ -87,6 +87,8 @@ const row = (over: Partial<Row> = {}): Row => ({
   health: { status: 'degraded', changedAt: T },
   throttledUntil: null,
   lastErrorCode: null,
+  remediationPaused: false,
+  remediationPausedAt: null,
   grant: { profile: 'm365.mailbox_remediation', status: 'active', authMethod: 'platform_app' },
   journalSources: [
     {
@@ -103,6 +105,25 @@ const row = (over: Partial<Row> = {}): Row => ({
 });
 
 type Overview = SuccessBody<'ApiModeController_overview_v1'>;
+const remediationSummary = (
+  over: Partial<Overview['remediation']> = {},
+): Overview['remediation'] => ({
+  policyMode: 'enforce',
+  policySource: 'platform_default',
+  paused: false,
+  succeeded1h: 2,
+  failed1h: 1,
+  succeeded24h: 14,
+  failed24h: 3,
+  skipped24h: 4,
+  simulated24h: 0,
+  restores24h: 1,
+  throttled24h: 2,
+  backlog: { pending: 5, capped: false, oldestPendingAgeSeconds: 420 },
+  latencyAvgSeconds24h: 6.5,
+  latencyMaxSeconds24h: 41,
+  ...over,
+});
 const overview = (over: Partial<Overview> = {}): Overview => ({
   generatedAt: T,
   entitled: true,
@@ -114,6 +135,7 @@ const overview = (over: Partial<Overview> = {}): Overview => ({
   lag: { p50Seconds1h: 45, p95Seconds1h: 300, p50Seconds24h: 60, p95Seconds24h: 420 },
   throttling: { events1h: 0, events24h: 2 },
   copiesToday: 17,
+  remediation: remediationSummary(),
   connections: [
     {
       id: CONN,
@@ -130,6 +152,7 @@ const overview = (over: Partial<Overview> = {}): Overview => ({
       throttling: { events1h: 0, events24h: 2 },
       copiesToday: 17,
       throttledUntil: null,
+      remediation: remediationSummary(),
     },
   ],
   ...over,
@@ -168,6 +191,10 @@ const detection = {
   subject: null,
   subjectMasked: true,
   headerFrom: 'evil‮sender@attacker.example.test',
+  remediationState: 'none' as const,
+  remediationAction: null,
+  remediationId: null,
+  quarantineEntryId: null,
 };
 
 // ---- wizard ------------------------------------------------------------------------------------

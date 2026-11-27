@@ -66,11 +66,14 @@ export class MailboxRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 }
 
 /**
- * mailbox-worker (step API-1 D5, ADR-0100; docs/deployment/mailbox-worker.md). Roles
- * (`MAILBOX_WORKER_ROLES`, default `copies,feeds,inventory,health`): `copies` consumes
- * `email.mailbox` as `eg-mailbox` (ledger `mailbox-worker.copies`, reconciled: retry and
- * dead-letter hops are recorded), `feeds` and `inventory` call provider mailbox APIs with the
- * decrypted `*.mailbox_remediation` grants, `health` is leader-locked. HTTP
+ * mailbox-worker (step API-1 D5, ADR-0100; step API-2 ADR-0101/0102;
+ * docs/deployment/mailbox-worker.md). Roles (`MAILBOX_WORKER_ROLES`, default
+ * `copies,feeds,inventory,health,remediate`): `copies` consumes `email.mailbox` as `eg-mailbox`
+ * (ledger `mailbox-worker.copies`, reconciled: retry and dead-letter hops are recorded) and takes
+ * the remediation decision in the same transaction, `feeds`, `inventory` and `remediate` call
+ * provider mailbox APIs with the decrypted `*.mailbox_remediation` grants (`remediate` claims
+ * `api_remediation_actions` from MySQL; no broker), `health` is leader-locked. Readiness is the
+ * same for every role: MySQL writer, Redis and S3 (plus the broker with `copies`). HTTP
  * `MAILBOX_WORKER_HTTP_PORT` (3087) serves `/health/live`, `/health/ready` and `/metrics` only.
  * Data plane: the MySQL writer only (ADR-0014), Redis, the mail bucket; every outbound event is an
  * outbox row relayed by the event-relay (the worker publishes only its own retry hops).

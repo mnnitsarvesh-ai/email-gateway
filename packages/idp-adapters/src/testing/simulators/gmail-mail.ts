@@ -9,6 +9,7 @@
  */
 import type { GsCustomer, GsUser } from './google-types';
 import { base64UrlChunks, emlBytes, headerFields, mailboxOf } from './mail';
+import { gmailMailWrite } from './gmail-mail-write';
 import { json, type SimRequest, type SimResponse } from './server';
 import { hasPermission, type ResolvedToken } from './tokens';
 import type { SimMailMessage } from './types';
@@ -22,7 +23,12 @@ export const GMAIL_MAIL_SCOPES = {
 } as const;
 const READ_SCOPES = [GMAIL_MAIL_SCOPES.modify, GMAIL_MAIL_SCOPES.readonly, GMAIL_MAIL_SCOPES.full];
 
-export const GMAIL_MAIL_PATH = /^\/gmail\/v1\/users\/([^/]+)\/(profile|history|messages\/([^/]+))$/;
+/**
+ * Profile, history and messages (API-1); step API-2 adds `labels`, the `messages` list and
+ * `messages/{id}/modify|trash|untrash` (handled by `gmail-mail-write.ts`).
+ */
+export const GMAIL_MAIL_PATH =
+  /^\/gmail\/v1\/users\/([^/]+)\/(profile|history|labels|messages(?:\/([^/]+)(?:\/(modify|trash|untrash))?)?)$/;
 
 type ErrorFn = (status: number, reason?: string, statusCode?: string) => SimResponse;
 
@@ -51,8 +57,12 @@ export function gmailMail(
   kind: string,
   messageKey: string | undefined,
   error: ErrorFn,
+  op?: string,
 ): SimResponse {
-  if (request.method !== 'GET') return error(405, 'methodNotAllowed');
+  // Step API-2 (R7): labels, message search and the label/trash writes.
+  if (kind === 'labels' || kind === 'messages' || op !== undefined || request.method !== 'GET') {
+    return gmailMailWrite(request, token, customer, user, kind, messageKey, op, error);
+  }
   const format = request.query.get('format') ?? 'full';
   const metadataOnly = messageKey !== undefined && (format === 'metadata' || format === 'minimal');
   const allowed = metadataOnly

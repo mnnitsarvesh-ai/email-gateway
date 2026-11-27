@@ -118,7 +118,8 @@ describe('db:seed', () => {
     // Step 8.6: 10 system roles (compliance_officer), two more limits (journal intake). Step AI-1:
     // assistant:use, assistant:configure and one more feature (ai_assistant, off in every plan).
     // Step API-1: 76 permissions (remediation:read, remediation:write) and one more feature
-    // (api_mode_protection: enterprise and dedicated only).
+    // (api_mode_protection: enterprise and dedicated only). Step API-2 (§3.3): unchanged (no
+    // permission, role, feature or plan data; the seed stays a no-op for the two new tables).
     expect(afterFirst).toMatchObject({
       permissions: 76,
       systemRoles: 10,

@@ -20,11 +20,14 @@ function writerDouble(answers: number[]) {
 }
 
 describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () => {
-  it('deletes the six tables in FK-safe order, in batches until a short batch', async () => {
-    // copies 2+1, dedupe 0, addresses 2+0, mailboxes 1, counters 2+2+1, connections 1
-    const { writer, statements } = writerDouble([2, 1, 0, 2, 0, 1, 2, 2, 1, 1]);
+  it('deletes the eight tables in FK-safe order, in batches until a short batch', async () => {
+    // actions 2+0, policies 1, copies 2+1, dedupe 0, addresses 2+0, mailboxes 1,
+    // counters 2+2+1, connections 1
+    const { writer, statements } = writerDouble([2, 0, 1, 2, 1, 0, 2, 0, 1, 2, 2, 1, 1]);
     const counts = await new ApiModeTenantDataRepository(writer).purgeOrganization(SCOPE, 2);
     expect(counts).toEqual({
+      api_remediation_actions: 2,
+      api_remediation_policies: 1,
       api_message_copies: 3,
       api_copy_dedupe_keys: 0,
       api_mailbox_addresses: 2,
@@ -34,6 +37,9 @@ describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () 
     });
     const tableOf = (sql: string) => /^DELETE FROM (\w+)/.exec(sql)![1];
     expect(statements.map((s) => tableOf(s.sql))).toEqual([
+      'api_remediation_actions',
+      'api_remediation_actions',
+      'api_remediation_policies',
       'api_message_copies',
       'api_message_copies',
       'api_copy_dedupe_keys',
@@ -57,6 +63,15 @@ describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () 
     expect(at('api_copy_dedupe_keys')).toBeLessThan(at('api_mailboxes'));
     expect(at('api_mailboxes')).toBeLessThan(at('api_mode_connections'));
     expect(at('api_mode_counters')).toBeLessThan(at('api_mode_connections'));
+  });
+
+  it('step API-2 §3.4: remediation actions before mailboxes and connections, policies first', () => {
+    const at = (t: (typeof API_MODE_PURGE_ORDER)[number]) => API_MODE_PURGE_ORDER.indexOf(t);
+    expect(at('api_remediation_actions')).toBeLessThan(at('api_mailboxes'));
+    expect(at('api_remediation_actions')).toBeLessThan(at('api_mode_connections'));
+    // Policies reference domains and the organization (RESTRICT): the whole API-mode purge runs
+    // before the domain purge, and the policies go in it.
+    expect(API_MODE_PURGE_ORDER).toContain('api_remediation_policies');
   });
 
   it('refuses a non-positive batch', async () => {

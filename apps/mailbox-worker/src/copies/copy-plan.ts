@@ -47,12 +47,13 @@ export function lagDelta(lagMs: number): CounterDelta {
   };
 }
 
-/** Sums counter deltas (max for `lag_max_ms`). */
+/** Sums counter deltas (max for `lag_max_ms` and `remediation_latency_max_ms`). */
 export function mergeDelta(into: CounterDelta, add: CounterDelta): CounterDelta {
   for (const [key, value] of Object.entries(add) as [keyof CounterDelta, number][]) {
     if (value === undefined) continue;
-    if (key === 'lag_max_ms') into.lag_max_ms = Math.max(into.lag_max_ms ?? 0, value);
-    else into[key] = (into[key] ?? 0) + value;
+    if (key === 'lag_max_ms' || key === 'remediation_latency_max_ms') {
+      into[key] = Math.max(into[key] ?? 0, value);
+    } else into[key] = (into[key] ?? 0) + value;
   }
   return into;
 }

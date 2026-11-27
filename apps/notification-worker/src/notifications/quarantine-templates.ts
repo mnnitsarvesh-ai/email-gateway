@@ -42,6 +42,19 @@ const REASON_TEXT: Readonly<Record<string, string>> = {
 
 export const reasonText = (reason: string): string => REASON_TEXT[reason] ?? 'held';
 
+/**
+ * Step API-2 R10.5: where a mailbox-located entry's message sits (fixed text per container; an
+ * unknown or missing container reads as the quarantine folder, the default action's container).
+ */
+const MAILBOX_CONTAINER_TEXT: Readonly<Record<string, string>> = {
+  quarantine_folder: "in your mailbox's quarantine folder",
+  junk: "in your mailbox's Junk folder",
+  deleted_items: "in your mailbox's deleted items",
+};
+
+export const mailboxLocationText = (container: string | null | undefined): string =>
+  MAILBOX_CONTAINER_TEXT[container ?? ''] ?? MAILBOX_CONTAINER_TEXT.quarantine_folder!;
+
 export interface DigestEntryFacts {
   entryId: string;
   receivedAt: string;
@@ -49,6 +62,12 @@ export interface DigestEntryFacts {
   subject: string | null;
   reason: string;
   expiresAt: string;
+  /**
+   * Step API-2 R10.5: `mailbox` adds a `Location:` line (the message was removed into a mailbox
+   * container after delivery); gateway entries (and a missing value) render as before.
+   */
+  location?: 'gateway' | 'mailbox';
+  mailboxContainer?: 'quarantine_folder' | 'junk' | 'deleted_items' | null;
 }
 
 /** A per-user digest of held mail (Q20 `user_digest`). */
@@ -72,6 +91,9 @@ export function renderUserDigest(facts: {
       lines.push(`   Subject: ${clean(subject, DIGEST_SUBJECT_MAX_CHARS) || '(no subject)'}`);
     }
     lines.push(`   Reason: ${reasonText(e.reason)}`);
+    if (e.location === 'mailbox') {
+      lines.push(`   Location: ${mailboxLocationText(e.mailboxContainer)}`);
+    }
     lines.push(`   Held until: ${e.expiresAt}`);
     lines.push(`   Review: ${facts.portalUrl}/quarantine/me/${e.entryId}`);
     lines.push('');

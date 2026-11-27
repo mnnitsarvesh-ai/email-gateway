@@ -60,6 +60,8 @@ function setup(
     direction?: 'inbound' | 'outbound';
     domainActive?: boolean;
     approvers?: string[];
+    /** Step API-2: the second digest entry is mailbox-located in this container. */
+    mailboxContainer?: 'quarantine_folder' | 'junk' | 'deleted_items';
   } = {},
 ) {
   const sent: NoticeMail[] = [];
@@ -95,6 +97,9 @@ function setup(
           reason: 'spam',
           expiresAt: new Date('2026-12-11T09:00:00.000Z'),
           subject: 'Win‮ a prize\r\nBcc: x@y <script> now '.repeat(4),
+          ...(i === 1 && options.mailboxContainer !== undefined
+            ? { location: 'mailbox' as const, mailboxContainer: options.mailboxContainer }
+            : { location: 'gateway' as const, mailboxContainer: null }),
         })),
       }),
     ),
@@ -202,6 +207,21 @@ describe('QuarantineNotificationHandler (step 5.3 Q20)', () => {
     // The subject never injects a header line.
     expect(mail.text).not.toMatch(/^Bcc:/m);
     expect(s.counts).toEqual([{ kind: 'user_digest', result: 'sent' }]);
+  });
+
+  it('user_digest (API-2 R10.5): a mailbox-located entry names its mailbox container; gateway entries unchanged', async () => {
+    const s = setup({ mailboxContainer: 'junk' });
+    expect(await s.handler.handle(digestEvent, tx)).toBe('sent');
+    const text = s.sent[0]!.text;
+    const locations = text.split('\n').filter((l) => l.trim().startsWith('Location: '));
+    expect(locations.map((l) => l.trim())).toEqual(["Location: in your mailbox's Junk folder"]);
+    // The location line belongs to the second entry only.
+    const second = text.slice(text.indexOf('2. Received:'));
+    expect(second).toContain("Location: in your mailbox's Junk folder");
+    expect(text.slice(0, text.indexOf('2. Received:'))).not.toContain('Location:');
+    const plain = setup();
+    await plain.handler.handle(digestEvent, tx);
+    expect(plain.sent[0]!.text).not.toContain('Location:');
   });
 
   it('user_digest: no subject without digest.includeSubject; capped by digest.maxEntries with a "more" line', async () => {

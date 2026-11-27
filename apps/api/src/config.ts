@@ -1456,6 +1456,12 @@ export const apiModeApiConfigShape = {
     .string()
     .regex(/^[0-9]{6,32}$/, 'must be a numeric OAuth client id')
     .optional(),
+  /**
+   * Step API-2 R-I2 (docs/plan/steps/36-api-mode-remediation.md R13, R17): the platform setting
+   * that allows `hard_delete` rules in remediation policies. Off by default; the mailbox-worker
+   * reads the same key before executing one.
+   */
+  API_MODE_HARD_DELETE_ENABLED: bool.default(false),
 };
 
 export type ApiModeApiConfigKeys = {

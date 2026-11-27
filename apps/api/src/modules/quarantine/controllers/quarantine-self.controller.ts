@@ -14,11 +14,7 @@ import {
 import { ApiAcceptedResponse, ApiBody, ApiOkResponse, ApiOperation } from '@nestjs/swagger';
 import type { Response } from 'express';
 import type { QuarantinePreview } from '@email-gateway/mail-safety';
-import type {
-  Page,
-  QuarantineEntryDetail,
-  QuarantineEntrySummary,
-} from '@email-gateway/quarantine';
+import type { Page } from '@email-gateway/quarantine';
 import {
   CurrentPrincipal,
   CurrentScope,
@@ -64,6 +60,7 @@ import {
   type SelfSearchQuery,
   SelfSearchQuerySchema,
 } from '../dto/quarantine.schemas';
+import type { EntryDetailView, EntrySummaryView } from '../domain/entry';
 import { NO_STORE, Q, QUARANTINE_OPERATIONS } from '../quarantine.constants';
 import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineRateLimit } from '../quarantine-rate-limit';
@@ -118,7 +115,7 @@ export class QuarantineSelfController {
     @CurrentScope() scope: TenantScope,
     @Query(new ZodValidationPipe(SelfSearchQuerySchema)) query: SelfSearchQuery,
     @Client() client: ClientContext,
-  ): Promise<Page<QuarantineEntrySummary>> {
+  ): Promise<Page<EntrySummaryView>> {
     return this.queries.selfSearch(principal, scope, query, client);
   }
 
@@ -143,7 +140,7 @@ export class QuarantineSelfController {
     @CurrentScope() scope: TenantScope,
     @Param('entryId', entryIdPipe) entryId: string,
     @Client() client: ClientContext,
-  ): Promise<QuarantineEntryDetail> {
+  ): Promise<EntryDetailView> {
     return this.queries.selfDetail(principal, scope, entryId, client);
   }
 

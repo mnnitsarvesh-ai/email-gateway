@@ -19,11 +19,7 @@ import {
 } from '@nestjs/swagger';
 import type { Response } from 'express';
 import type { QuarantinePreview } from '@email-gateway/mail-safety';
-import type {
-  Page,
-  QuarantineEntryDetail,
-  QuarantineEntrySummary,
-} from '@email-gateway/quarantine';
+import type { Page } from '@email-gateway/quarantine';
 import {
   CurrentPrincipal,
   CurrentScope,
@@ -86,6 +82,7 @@ import {
   ReleaseOutcomeSchema,
   type ReleaseOutcome,
 } from '../dto/quarantine.schemas';
+import type { EntryDetailView, EntrySummaryView } from '../domain/entry';
 import { NO_STORE, Q, QUARANTINE_OPERATIONS } from '../quarantine.constants';
 import { TransactionalIdempotency } from '../../messages/api-docs';
 import { QuarantineRateLimit } from '../quarantine-rate-limit';
@@ -173,7 +170,7 @@ export class QuarantineEntriesController {
     @CurrentScope() scope: TenantScope,
     @Query(searchQueryPipe) query: EntrySearchQuery,
     @Client() client: ClientContext,
-  ): Promise<Page<QuarantineEntrySummary>> {
+  ): Promise<Page<EntrySummaryView>> {
     return this.queries.search(principal, scope, query, client);
   }
 
@@ -232,7 +229,7 @@ export class QuarantineEntriesController {
     @CurrentScope() scope: TenantScope,
     @Param('entryId', entryIdPipe) entryId: string,
     @Client() client: ClientContext,
-  ): Promise<QuarantineEntryDetail> {
+  ): Promise<EntryDetailView> {
     return this.queries.detail(principal, scope, entryId, client);
   }
 

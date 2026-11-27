@@ -197,6 +197,7 @@ function buildState(): QuarantineState {
         reasonCodes: ['policy.rule.matched', ...(hardBlocks.length > 0 ? ['risk.hard_block'] : [])],
         releases: [],
         contentAvailable: state !== 'deleted',
+        location: { kind: 'gateway' },
       };
       entries.set(id, {
         detail,
@@ -300,6 +301,157 @@ function state(): QuarantineState {
   return globalState.__egDevFixtureQuarantine;
 }
 
+// ---- step API-2: mailbox-located entries (R9, R10; ADR-0102) ----------------------------------
+
+type Location = Detail['location'];
+type MailboxLocation = Extract<Location, { kind: 'mailbox' }>;
+
+/**
+ * Hooks of the API-mode fixtures (api-mode.ts registers them; this module never imports it):
+ * `seed` creates the organization's remediated detections and their mailbox entries before a
+ * quarantine read, `restored` follows a completed restore to the Inbox on the detection.
+ */
+interface MailboxHooks {
+  seed: (organizationId: string) => void;
+  /** A release of a mailbox entry was queued (R10.2: a `restore_inbox` action). */
+  queued: (entryId: string, releaseId: string, trigger: 'release' | 'end_user') => void;
+  restored: (entryId: string) => void;
+}
+const hookStore = globalThis as typeof globalThis & { __egDevFixtureMailboxHooks?: MailboxHooks };
+
+export function registerMailboxHooks(hooks: MailboxHooks): void {
+  hookStore.__egDevFixtureMailboxHooks = hooks;
+}
+
+function seedMailboxEntries(request: FixtureRequest): void {
+  const organizationId = principalOf(request)?.organizationId;
+  if (organizationId) hookStore.__egDevFixtureMailboxHooks?.seed(organizationId);
+}
+
+export interface MailboxEntryInput {
+  readonly key: string;
+  readonly messageId: string;
+  readonly generation: number;
+  readonly recipient: string;
+  readonly reason: Detail['reason'];
+  readonly riskScore: number | null;
+  readonly hardBlocks: readonly string[];
+  readonly receivedAt: string;
+  readonly quarantinedAt: string;
+  readonly ruleId: string;
+  readonly location: Omit<MailboxLocation, 'kind'>;
+}
+
+/**
+ * A mailbox entry as the mailbox-worker writes it when a quarantine-folder, Junk or soft-delete
+ * action succeeded (R9.1): origin `api_remediation`, no decisive policy, content-free
+ * explanation. Idempotent per key (the unique-key adoption of the worker).
+ */
+export function addMailboxEntry(input: MailboxEntryInput): string {
+  const s = state();
+  const id = stableUuid(`qentry:mailbox:${input.key}`);
+  if (s.entries.has(id)) return id;
+  const hardBlocks = [...input.hardBlocks];
+  const quarantinedAt = input.quarantinedAt;
+  s.entries.set(id, {
+    legalHold: false,
+    detail: {
+      id,
+      messageId: input.messageId,
+      lifecycleRound: input.generation,
+      state: 'held',
+      kind: 'quarantine',
+      origin: 'api_remediation',
+      reason: input.reason,
+      direction: 'inbound',
+      recipient: input.recipient,
+      recipientMasked: false,
+      sender: {
+        envelope: 'billing@sender-2.example.test',
+        headerFrom: 'billing@sender-2.example.test',
+      },
+      subject: 'Payment overdue (API-mode copy)',
+      receivedAt: input.receivedAt,
+      quarantinedAt,
+      expiresAt: new Date(Date.parse(quarantinedAt) + 30 * DAY).toISOString(),
+      riskLevel: levelOf(input.riskScore),
+      riskScore: input.riskScore,
+      hardBlocks,
+      primaryEngine: hardBlocks.length > 0 ? 'rspamd' : 'none',
+      decisive: { source: null, policyId: null, versionNo: null, ruleId: null },
+      hasAttachments: false,
+      attachmentCount: 0,
+      sizeBytes: 4096,
+      approvalRequestId: null,
+      rowVersion: 1,
+      explanation: {
+        lines: [],
+        text: `Removed from the mailbox by the API-mode remediation policy (rule ${input.ruleId}).`,
+      },
+      floorReasons: [],
+      reasonCodes: [],
+      releases: [],
+      contentAvailable: true,
+      location: { kind: 'mailbox', ...input.location },
+    },
+    history: [
+      {
+        action: 'mailbox_remediated',
+        actor: { type: 'system', id: null },
+        result: 'move_quarantine',
+        reason: null,
+        at: quarantinedAt,
+      },
+    ],
+  });
+  entriesByMessage = null;
+  return id;
+}
+
+/** The entry's location and remediation status follow the API-mode action (fixture link). */
+export function updateMailboxEntry(
+  entryId: string,
+  patch: Partial<Pick<MailboxLocation, 'remediationId' | 'remediationStatus'>>,
+): void {
+  const record = state().entries.get(entryId);
+  if (record?.detail.location.kind === 'mailbox')
+    record.detail.location = { ...record.detail.location, ...patch };
+}
+
+/** Lets the API-mode fixtures see completed restores on their own reads. */
+export function runQuarantineExecutor(): void {
+  runExecutor();
+}
+
+/**
+ * API-mode restore of an entry-creating remediation (R12): the entry's release with the same
+ * rules, approvals and outcomes; a terminal or missing entry cannot be restored.
+ */
+export function releaseMailboxEntry(
+  entryId: string,
+  request: FixtureRequest,
+  reason: string,
+): FixtureResponse {
+  const record = state().entries.get(entryId);
+  if (!record || record.detail.state !== 'held')
+    return apiError(409, 'api_mode_restore_not_possible', 'This remediation cannot be restored', {
+      cause: record ? `entry_${record.detail.state}` : 'entry_missing',
+    });
+  return doRelease(record, request, reason);
+}
+
+/** An entry's view of the location: masked with the recipient, no connection on self routes. */
+function locationFor(record: EntryRecord, masked: boolean, self: boolean): Location {
+  const location = record.detail.location;
+  if (location.kind !== 'mailbox') return location;
+  const { connectionId, ...rest } = location;
+  return {
+    ...rest,
+    ...(self ? {} : { connectionId }),
+    mailboxAddress: masked ? maskAddress(location.mailboxAddress) : location.mailboxAddress,
+  };
+}
+
 // The explorer's `quarantineStatus` filter reads the live entry states (releases, rejections).
 // Entries are created once (buildState), so the per-message index is built once too.
 let entriesByMessage: Map<string, EntryRecord[]> | null = null;
@@ -367,6 +519,25 @@ function runExecutor(now = Date.now()): void {
     for (const entryId of record.release.entryIds) {
       const entry = s.entries.get(entryId);
       if (!entry) continue;
+      if (entry.detail.location.kind === 'mailbox') {
+        // R10.3: the mailbox-worker's `restore_inbox` moved the message back to the Inbox.
+        record.release.status = 'restored';
+        record.release.deliveredObject = null;
+        entry.detail.state = 'released';
+        entry.detail.rowVersion += 1;
+        entry.detail.releases = entry.detail.releases.map((r) =>
+          r.id === record.release.id ? summaryOfRelease(record.release) : r,
+        );
+        entry.history.push({
+          action: 'mailbox_restored',
+          actor: { type: 'system', id: null },
+          result: 'restored',
+          reason: null,
+          at: new Date(now).toISOString(),
+        });
+        hookStore.__egDevFixtureMailboxHooks?.restored(entryId);
+        continue;
+      }
       record.release.revalidation = revalidationOf(entry.detail);
       entry.detail.state = 'released';
       entry.detail.rowVersion += 1;
@@ -473,9 +644,11 @@ function recipientOf(
 }
 
 function detailFor(record: EntryRecord, request: FixtureRequest, self = false): Detail {
+  const recipient = recipientOf(record, request, self);
   return {
     ...record.detail,
-    ...recipientOf(record, request, self),
+    ...recipient,
+    location: locationFor(record, recipient.recipientMasked, self),
     subject: self || has(request, 'quarantine:preview') ? record.detail.subject : null,
     allowedActions: self ? selfAllowed(record) : allowedActions(record, request),
   };
@@ -489,9 +662,11 @@ function summaryFor(record: EntryRecord, request: FixtureRequest, self = false):
   void reasonCodes;
   void releases;
   void contentAvailable;
+  const recipient = recipientOf(record, request, self);
   return {
     ...summary,
-    ...recipientOf(record, request, self),
+    ...recipient,
+    location: locationFor(record, recipient.recipientMasked, self),
     subject: self || has(request, 'quarantine:preview') ? summary.subject : null,
   };
 }
@@ -599,6 +774,12 @@ function queueRelease(
     entryIds: [record.detail.id],
   };
   state().releases.set(id, { release, requestedAtMs: Date.now() });
+  if (record.detail.location.kind === 'mailbox')
+    hookStore.__egDevFixtureMailboxHooks?.queued(
+      record.detail.id,
+      id,
+      mode === 'self' ? 'end_user' : 'release',
+    );
   record.detail.state = 'releasing';
   record.detail.rowVersion += 1;
   record.detail.releases = [...record.detail.releases, summaryOfRelease(release)];
@@ -617,7 +798,7 @@ function doRelease(record: EntryRecord, request: FixtureRequest, reason: string)
       'Hard-blocked entries cannot be released',
     );
   }
-  if (d.lifecycleRound > 0 && d.reason === 'phishing') {
+  if (d.location.kind === 'gateway' && d.lifecycleRound > 0 && d.reason === 'phishing') {
     return apiError(409, 'quarantine_rescan_required', 'The verdict is stale', {
       staleness: 'verdict_age',
     });
@@ -685,7 +866,8 @@ function doReject(record: EntryRecord, request: FixtureRequest, reason: string):
     state: 'rejected',
     rowVersion: d.rowVersion,
     messageTransition: null,
-    purge: 'pending',
+    // R10.4: a mailbox entry's message stays in the mailbox (no purge).
+    purge: d.location.kind === 'mailbox' ? null : 'pending',
   });
 }
 
@@ -714,7 +896,12 @@ function doDelete(record: EntryRecord, request: FixtureRequest, reason: string):
     state: 'deleted',
     rowVersion: d.rowVersion,
     messageTransition: null,
-    purge: d.recipient.endsWith('@alpha.example.test') ? 'pending' : 'retained',
+    purge:
+      d.location.kind === 'mailbox'
+        ? null
+        : d.recipient.endsWith('@alpha.example.test')
+          ? 'pending'
+          : 'retained',
   });
 }
 
@@ -873,6 +1060,7 @@ function searchEntries(
   records: EntryRecord[],
   self: boolean,
 ): FixtureResponse {
+  seedMailboxEntries(request);
   runExecutor();
   const q = request.query;
   // Step 7.2 (ADR-0062): a caller who reads recipients masked may not confirm one by search.
@@ -920,6 +1108,7 @@ function searchEntries(
         eq('senderDomain', d.sender.envelope?.split('@')[1] ?? null) &&
         eq('recipient', d.recipient) &&
         eq('messageId', d.messageId) &&
+        eq('location', d.location.kind) &&
         (!q.get('hasAttachments') || String(d.hasAttachments) === q.get('hasAttachments')) &&
         (!q.get('hasHardBlock') || String(d.hardBlocks.length > 0) === q.get('hasHardBlock'))
       );
@@ -943,6 +1132,7 @@ function withEntry(
   return (request: FixtureRequest): FixtureResponse => {
     const denied = fixtureGuard(request);
     if (denied) return denied;
+    seedMailboxEntries(request);
     runExecutor();
     const record = state().entries.get(request.params.entryId ?? '');
     if (!record || (self && record.detail.recipient !== selfAddress(request))) {
@@ -1509,6 +1699,7 @@ export const fixtures: FixtureHandlers = {
     (record) =>
       ok('QuarantineSelfController_detail_v1', {
         ...record.detail,
+        location: locationFor(record, false, true),
         recipientMasked: false,
         allowedActions: selfAllowed(record),
       }),

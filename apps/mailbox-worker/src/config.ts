@@ -23,15 +23,21 @@ const optionalText = (max: number) =>
 const url = (fallback: string) =>
   z.preprocess(blankToUndefined, z.url().max(512).default(fallback));
 
-/** Roles of one mailbox-worker process (design D5; API-2 adds `remediate`). */
-export const MAILBOX_WORKER_ROLES = ['copies', 'feeds', 'inventory', 'health'] as const;
+/** Roles of one mailbox-worker process (design D5; step API-2 R1 adds `remediate`). */
+export const MAILBOX_WORKER_ROLES = [
+  'copies',
+  'feeds',
+  'inventory',
+  'health',
+  'remediate',
+] as const;
 export type MailboxWorkerRole = (typeof MAILBOX_WORKER_ROLES)[number];
 
 const roles = list.transform((entries, ctx): MailboxWorkerRole[] => {
   if (entries.length === 0) {
     ctx.addIssue({
       code: 'custom',
-      message: 'must list at least one of copies, feeds, inventory, health',
+      message: 'must list at least one of copies, feeds, inventory, health, remediate',
     });
     return z.NEVER;
   }
@@ -39,7 +45,7 @@ const roles = list.transform((entries, ctx): MailboxWorkerRole[] => {
     if (!(MAILBOX_WORKER_ROLES as readonly string[]).includes(entry)) {
       ctx.addIssue({
         code: 'custom',
-        message: 'may only list copies, feeds, inventory and health',
+        message: 'may only list copies, feeds, inventory, health and remediate',
       });
       return z.NEVER;
     }
@@ -80,7 +86,25 @@ const platformCredentialShape = Object.fromEntries(
 ) as Record<(typeof MAILBOX_PLATFORM_CREDENTIAL_KEYS)[number], ReturnType<typeof optionalText>>;
 
 /** Roles that call provider APIs (and therefore decrypt grants). */
-export const PROVIDER_CALLING_ROLES: readonly MailboxWorkerRole[] = ['feeds', 'inventory'];
+export const PROVIDER_CALLING_ROLES: readonly MailboxWorkerRole[] = [
+  'feeds',
+  'inventory',
+  'remediate',
+];
+
+/** A provider container name (Graph folder, Gmail label, category): no control characters. */
+const containerName = (max: number, fallback: string) =>
+  z.preprocess(
+    blankToUndefined,
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(max)
+      // eslint-disable-next-line no-control-regex
+      .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), 'must not contain control characters')
+      .default(fallback),
+  );
 
 /**
  * mailbox-worker (step API-1 D5, D16; docs/plan/steps/35-api-mode-protection.md, ADR-0100). The
@@ -147,6 +171,37 @@ export const configSchema = baseConfigSchema
     API_MODE_DEDUPE_WINDOW_HOURS: int(1, 2160).default(168),
     API_MODE_HYBRID_LINK_WINDOW_HOURS: int(1, 720).default(72),
     API_MODE_COUNTER_FLUSH_SECONDS: int(1, 3600).default(30),
+
+    // Step API-2 remediation (note 36 R17; ADR-0101, ADR-0102).
+    API_MODE_REMEDIATION_TICK_MS: int(200, 600_000).default(2000),
+    API_MODE_REMEDIATION_BATCH: int(1, 1000).default(50),
+    API_MODE_REMEDIATION_LEASE_SECONDS: int(30, 3600).default(120),
+    API_MODE_REMEDIATION_CONCURRENCY: int(1, 256).default(8),
+    API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: int(1, 64).default(2),
+    API_MODE_REMEDIATION_MAX_ATTEMPTS: int(1, 50).default(8),
+    API_MODE_REMEDIATION_LOCATE_ATTEMPTS: int(1, 20).default(6),
+    API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS: int(30, 86_400).default(3600),
+    /** Graph folder under `msgfolderroot` (Graph display names: ≤ 255). */
+    API_MODE_QUARANTINE_FOLDER_NAME: containerName(255, 'Email Gateway Quarantine'),
+    API_MODE_QUARANTINE_FOLDER_HIDDEN: flag.default(true),
+    /** Gmail label names: ≤ 225 characters. */
+    API_MODE_GMAIL_QUARANTINE_LABEL: containerName(225, 'Email Gateway/Quarantine'),
+    /** Graph category and Gmail label of the `tag` action. */
+    API_MODE_TAG_NAME: containerName(225, 'Email Gateway: Suspicious'),
+    /** R-I2: hard delete needs this platform setting and an explicit tenant rule. */
+    API_MODE_HARD_DELETE_ENABLED: flag.default(false),
+    API_MODE_REMEDIATION_FAILURE_WARN_PERCENT: int(1, 100).default(10),
+    API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT: int(1, 100).default(50),
+    API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES: int(1, 10_080).default(15),
+    API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: int(1, 10_080).default(60),
+    API_MODE_REMEDIATION_RETENTION_DAYS: int(30, 3650).default(400),
+    /**
+     * Quarantine platform bounds (same names and bounds as the policy-engine, which validates
+     * them against the lifecycle deadlines): mailbox-located entries resolve the organization's
+     * quarantine settings and `computeExpiry` with them (R9.1).
+     */
+    QUARANTINE_MAX_HOLD_DAYS: int(7, 80).default(60),
+    QUARANTINE_MAX_REVIEW_DAYS: int(1, 13).default(13),
   })
   .superRefine((cfg, ctx) => {
     const testEnv = TEST_ENVIRONMENTS.includes(cfg.APP_ENV);
@@ -191,7 +246,7 @@ export const configSchema = baseConfigSchema
     if (callsProviders && cfg.PROVIDER_CREDENTIAL_ENCRYPTION_KEY === undefined) {
       refuse(
         'PROVIDER_CREDENTIAL_ENCRYPTION_KEY',
-        'is required for the feeds and inventory roles (decrypting mailbox access grants)',
+        'is required for the feeds, inventory and remediate roles (decrypting mailbox access grants)',
       );
     }
     if (
@@ -213,6 +268,30 @@ export const configSchema = baseConfigSchema
     }
     if (cfg.API_MODE_LAG_FAIL_SECONDS < cfg.API_MODE_LAG_WARN_SECONDS) {
       refuse('API_MODE_LAG_FAIL_SECONDS', 'must not be below API_MODE_LAG_WARN_SECONDS');
+    }
+    if (
+      cfg.API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT < cfg.API_MODE_REMEDIATION_FAILURE_WARN_PERCENT
+    ) {
+      refuse(
+        'API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT',
+        'must not be below API_MODE_REMEDIATION_FAILURE_WARN_PERCENT',
+      );
+    }
+    if (
+      cfg.API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES < cfg.API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES
+    ) {
+      refuse(
+        'API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES',
+        'must not be below API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES',
+      );
+    }
+    if (
+      cfg.API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION > cfg.API_MODE_REMEDIATION_CONCURRENCY
+    ) {
+      refuse(
+        'API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION',
+        'must not exceed API_MODE_REMEDIATION_CONCURRENCY',
+      );
     }
     if (cfg.API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES >= cfg.API_MODE_GRAPH_SUBSCRIPTION_MINUTES) {
       refuse(

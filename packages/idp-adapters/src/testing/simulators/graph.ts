@@ -12,6 +12,7 @@ import {
   SUBSCRIPTIONS_PATH,
   VALUE_PATH,
 } from './graph-mail';
+import { graphMailbox } from './graph-mail-write';
 import { json, type SimRequest, type SimResponse, type Simulator } from './server';
 import type { SimScript } from './script';
 import { hasPermission, type ResolvedToken } from './tokens';
@@ -273,6 +274,15 @@ export class GraphSimulator implements Simulator {
         error,
       ).then(respond);
     }
+    // Step API-2 (R7): remediation endpoints (locate, state, folders, move, categories, delete).
+    const mailbox = graphMailbox(
+      request,
+      token,
+      directory,
+      (key) => this.user(directory, key),
+      error,
+    );
+    if (mailbox) return respond(mailbox);
     return this.error(404, 'Request_ResourceNotFound');
   }
 

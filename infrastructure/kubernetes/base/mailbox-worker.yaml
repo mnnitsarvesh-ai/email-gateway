@@ -1,12 +1,21 @@
 # API-mode protection (step API-1 D5, D16; ADR-0098..0100; docs/deployment/mailbox-worker.md): the
-# mailbox-worker image with MAILBOX_WORKER_ROLES=copies,feeds,inventory,health.
+# mailbox-worker image with MAILBOX_WORKER_ROLES=copies,feeds,inventory,health,remediate.
 #   copies:    consumes email.mailbox (topology v17) as the role user eg-mailbox (ledger
-#              mailbox-worker.copies, reconciled by the event-relay) and records per-mailbox copies.
+#              mailbox-worker.copies, reconciled by the event-relay), records per-mailbox copies
+#              and (step API-2 R4) writes the remediation decision in the same transaction.
 #   feeds:     claims due mailboxes (FOR UPDATE SKIP LOCKED, lease 120 s) and runs the Graph Inbox
 #              delta / Gmail history; fetched copies go to the mail bucket and the registry.
 #   inventory: mailbox directory sync per API connection.
-#   health:    leader-elected (GET_LOCK('eg:mailbox:health')): coverage, connection health and
-#              api_mode_unhealthy alerts (outbox), pruning and the Redis counter flush.
+#   remediate: (step API-2 R5, ADR-0101/0102) claims due api_remediation_actions (FOR UPDATE SKIP
+#              LOCKED, lease API_MODE_REMEDIATION_LEASE_SECONDS, ≤ 2 in flight per connection across
+#              replicas) and moves / tags / restores messages through Graph (Mail.ReadWrite) and
+#              Gmail (gmail.modify); writes mailbox-located quarantine entries and completes
+#              releases (restore to the Inbox). Shares the per-connection budgets and Retry-After
+#              pauses with feeds.
+#   health:    leader-elected (GET_LOCK('eg:mailbox:health')): coverage, connection health incl. the
+#              remediation.* checks and api_mode_unhealthy alerts (outbox), mailbox entry expiry,
+#              pruning (remediation actions after API_MODE_REMEDIATION_RETENTION_DAYS) and the Redis
+#              counter flush.
 # Every replica runs every role (claims and leases make that safe; health waits for the lock). The
 # writer-only MySQL (ADR-0014), Redis (budgets mbx:rb:*, throttle pauses mbx:throttle:*, counters
 # mbx:cnt:*), RabbitMQ, S3 (mail bucket: PutObject of fetched copies, ranged GetObject of journal
@@ -32,7 +41,8 @@ spec:
       serviceAccountName: mailbox-worker
       automountServiceAccountToken: false
       # Longer than one sync lease's useful part (the feed run aborts at 110 s) plus the stop grace;
-      # an interrupted run is replayed idempotently by the next claim.
+      # an interrupted run is replayed idempotently by the next claim (a remediation action left
+      # in_progress is re-claimed after its lease and re-reads the provider state first, R5.4).
       terminationGracePeriodSeconds: 150
       securityContext:
         runAsNonRoot: true
@@ -53,7 +63,7 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: MAILBOX_WORKER_HTTP_PORT, value: '3087' }
-            - { name: MAILBOX_WORKER_ROLES, value: 'copies,feeds,inventory,health' }
+            - { name: MAILBOX_WORKER_ROLES, value: 'copies,feeds,inventory,health,remediate' }
             - { name: INGEST_HEADER_MAX_BYTES, value: '65536' }
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }

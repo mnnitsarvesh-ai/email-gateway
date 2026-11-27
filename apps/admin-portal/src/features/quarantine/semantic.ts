@@ -20,6 +20,8 @@ export const RELEASE_STATUS_TONE: Readonly<Record<string, Tone>> = {
   refused: 'danger',
   stale: 'neutral',
   message_busy: 'warning',
+  restored: 'success',
+  restore_failed: 'danger',
 };
 
 export const BULK_STATUS_TONE: Readonly<Record<string, Tone>> = {

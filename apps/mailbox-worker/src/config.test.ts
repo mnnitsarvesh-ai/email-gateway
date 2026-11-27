@@ -21,7 +21,13 @@ describe('mailbox-worker configuration (D16)', () => {
   it('applies the design defaults', () => {
     const cfg = loadWorkerConfig(base);
     expect(cfg.MAILBOX_WORKER_HTTP_PORT).toBe(3087);
-    expect(cfg.MAILBOX_WORKER_ROLES).toEqual(['copies', 'feeds', 'inventory', 'health']);
+    expect(cfg.MAILBOX_WORKER_ROLES).toEqual([
+      'copies',
+      'feeds',
+      'inventory',
+      'health',
+      'remediate',
+    ]);
     expect(cfg.API_MODE_GRAPH_URL).toBe('https://graph.microsoft.com');
     expect(cfg.API_MODE_FEED_TICK_MS).toBe(5000);
     expect(cfg.API_MODE_FEED_BATCH).toBe(50);
@@ -44,7 +50,11 @@ describe('mailbox-worker configuration (D16)', () => {
   it('parses roles and refuses unknown or repeated ones', () => {
     const cfg = loadWorkerConfig({ ...base, MAILBOX_WORKER_ROLES: 'copies, health' });
     expect(cfg.MAILBOX_WORKER_ROLES).toEqual(['copies', 'health']);
-    fails({ ...base, MAILBOX_WORKER_ROLES: 'copies,remediate' }, 'MAILBOX_WORKER_ROLES');
+    expect(
+      loadWorkerConfig({ ...base, MAILBOX_WORKER_ROLES: 'copies,remediate' }).MAILBOX_WORKER_ROLES,
+    ).toEqual(['copies', 'remediate']);
+    fails({ ...base, MAILBOX_WORKER_ROLES: 'copies,purge' }, 'MAILBOX_WORKER_ROLES');
+    fails({ ...base, MAILBOX_WORKER_ROLES: ' , ' }, 'MAILBOX_WORKER_ROLES');
     fails({ ...base, MAILBOX_WORKER_ROLES: 'copies,copies' }, 'MAILBOX_WORKER_ROLES');
   });
 
@@ -80,6 +90,67 @@ describe('mailbox-worker configuration (D16)', () => {
     const { RABBITMQ_MAILBOX_URL: _u, ...noBroker } = base;
     fails(noBroker, 'RABBITMQ_MAILBOX_URL');
     expect(() => loadWorkerConfig({ ...noBroker, MAILBOX_WORKER_ROLES: 'feeds' })).not.toThrow();
+    // The remediate role calls providers (decrypts grants) like feeds and inventory.
+    fails({ ...noKey, MAILBOX_WORKER_ROLES: 'remediate' }, 'PROVIDER_CREDENTIAL_ENCRYPTION_KEY');
+  });
+
+  it('applies the step API-2 remediation defaults (R17) and the quarantine bounds', () => {
+    const cfg = loadWorkerConfig(base);
+    expect(hasRole(cfg, 'remediate')).toBe(true);
+    expect(cfg).toMatchObject({
+      API_MODE_REMEDIATION_TICK_MS: 2000,
+      API_MODE_REMEDIATION_BATCH: 50,
+      API_MODE_REMEDIATION_LEASE_SECONDS: 120,
+      API_MODE_REMEDIATION_CONCURRENCY: 8,
+      API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: 2,
+      API_MODE_REMEDIATION_MAX_ATTEMPTS: 8,
+      API_MODE_REMEDIATION_LOCATE_ATTEMPTS: 6,
+      API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS: 3600,
+      API_MODE_QUARANTINE_FOLDER_NAME: 'Email Gateway Quarantine',
+      API_MODE_QUARANTINE_FOLDER_HIDDEN: true,
+      API_MODE_GMAIL_QUARANTINE_LABEL: 'Email Gateway/Quarantine',
+      API_MODE_TAG_NAME: 'Email Gateway: Suspicious',
+      API_MODE_HARD_DELETE_ENABLED: false,
+      API_MODE_REMEDIATION_FAILURE_WARN_PERCENT: 10,
+      API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT: 50,
+      API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES: 15,
+      API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: 60,
+      API_MODE_REMEDIATION_RETENTION_DAYS: 400,
+      QUARANTINE_MAX_HOLD_DAYS: 60,
+      QUARANTINE_MAX_REVIEW_DAYS: 13,
+    });
+    const custom = loadWorkerConfig({
+      ...base,
+      API_MODE_HARD_DELETE_ENABLED: 'true',
+      API_MODE_QUARANTINE_FOLDER_NAME: '  Threats  ',
+      API_MODE_TAG_NAME: '',
+    });
+    expect(custom.API_MODE_HARD_DELETE_ENABLED).toBe(true);
+    expect(custom.API_MODE_QUARANTINE_FOLDER_NAME).toBe('Threats');
+    expect(custom.API_MODE_TAG_NAME).toBe('Email Gateway: Suspicious');
+  });
+
+  it('bounds the remediation keys', () => {
+    fails({ ...base, API_MODE_REMEDIATION_BATCH: '0' }, 'API_MODE_REMEDIATION_BATCH');
+    fails(
+      { ...base, API_MODE_REMEDIATION_LEASE_SECONDS: '5' },
+      'API_MODE_REMEDIATION_LEASE_SECONDS',
+    );
+    fails(
+      { ...base, API_MODE_REMEDIATION_RETENTION_DAYS: '7' },
+      'API_MODE_REMEDIATION_RETENTION_DAYS',
+    );
+    fails(
+      { ...base, API_MODE_QUARANTINE_FOLDER_NAME: 'a\u0001b' },
+      'API_MODE_QUARANTINE_FOLDER_NAME',
+    );
+    fails(
+      { ...base, API_MODE_GMAIL_QUARANTINE_LABEL: 'x'.repeat(226) },
+      'API_MODE_GMAIL_QUARANTINE_LABEL',
+    );
+    fails({ ...base, API_MODE_HARD_DELETE_ENABLED: 'yes' }, 'API_MODE_HARD_DELETE_ENABLED');
+    fails({ ...base, QUARANTINE_MAX_HOLD_DAYS: '90' }, 'QUARANTINE_MAX_HOLD_DAYS');
+    fails({ ...base, QUARANTINE_MAX_REVIEW_DAYS: '14' }, 'QUARANTINE_MAX_REVIEW_DAYS');
   });
 
   it('needs the notification secret with a notification URL', () => {
@@ -110,6 +181,26 @@ describe('mailbox-worker configuration (D16)', () => {
     fails(
       { ...base, API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES: '4230' },
       'API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES',
+    );
+    fails(
+      {
+        ...base,
+        API_MODE_REMEDIATION_FAILURE_WARN_PERCENT: '40',
+        API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT: '30',
+      },
+      'API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT',
+    );
+    fails(
+      { ...base, API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: '10' },
+      'API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES',
+    );
+    fails(
+      {
+        ...base,
+        API_MODE_REMEDIATION_CONCURRENCY: '2',
+        API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: '4',
+      },
+      'API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION',
     );
   });
 

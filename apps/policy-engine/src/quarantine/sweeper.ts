@@ -47,6 +47,13 @@ const DIGEST_RETENTION_MS = 90 * DAY_MS;
 const TERMINAL_STATES = ['released', 'rejected', 'deleted', 'expired', 'superseded'] as const;
 const EXPIRABLE = ['held', 'pending_approval'] as const;
 const LIVE_RECIPIENT = ['pending', 'deferred', 'delivered'];
+/**
+ * Step API-2 R11.2 (ADR-0102): entry expiry, adoption, object purges and disposal handle
+ * gateway-held entries only. Mailbox-located entries (`location = mailbox`, an API-mode copy's
+ * registry message) are expired by the mailbox-worker without a lifecycle edge, a recipient
+ * change or an object purge (their EML follows the copy's message retention).
+ */
+const GATEWAY = 'gateway' as const;
 
 /** The subset of `AdvisoryLocks` the sweeper needs (GET_LOCK on a dedicated connection). */
 export interface LeaderLock {
@@ -113,7 +120,11 @@ interface LockedEntry {
   expiresAt: Date;
   approvalRequestId: bigint | null;
   rowVersion: number;
+  location: 'gateway' | 'mailbox';
 }
+
+/** Whether a locked entry is gateway-held (R11.2: the only entries this sweeper changes). */
+const isGateway = (e: Pick<LockedEntry, 'location'>): boolean => e.location === GATEWAY;
 
 /**
  * The quarantine sweeper (step 5.3 Q19, Q8, Q17, Q20): while this process holds
@@ -138,6 +149,12 @@ interface LockedEntry {
  *
  * and refreshes the `quarantine_entries{state}` and `quarantine_pending_approvals` gauges.
  * A failing step is logged and retried next pass; the other steps still run.
+ *
+ * Step API-2 R11 (ADR-0102): steps 1, 3 and 4 and the disposal select `location = gateway`
+ * entries only; mailbox-located entries are expired by the mailbox-worker. Step 2 applies to both
+ * locations (a release request only returns its entry to `held`; a policy review expires gateway
+ * entries only). Step 6 (entry row retention) and the gauges are location-agnostic: deleting a
+ * terminal entry row applies no lifecycle edge, recipient change or object purge.
  */
 export class QuarantineSweeper {
   readonly lockName: string;
@@ -313,6 +330,7 @@ export class QuarantineSweeper {
               expiresAt: true,
               approvalRequestId: true,
               rowVersion: true,
+              location: true,
             },
             orderBy: { id: 'asc' },
           });
@@ -342,6 +360,10 @@ export class QuarantineSweeper {
     targets: LockedEntry[],
     now: Date,
   ): Promise<{ expired: number; messageExpired: boolean; requests: number }> {
+    // R11.2: never a mailbox-located entry (no recipient change, lifecycle edge or purge).
+    if (targets.some((e) => !isGateway(e))) {
+      quarantineWrongRead(this.options.sink, 'entries', 'expiry of a mailbox entry');
+    }
     if (targets.length === 0) return { expired: 0, messageExpired: false, requests: 0 };
     const requests = await this.options.store.cancelPendingRequests(
       tx,
@@ -397,7 +419,9 @@ export class QuarantineSweeper {
     if (
       snapshot !== null &&
       (snapshot.state === 'quarantined' || snapshot.state === 'held_for_review') &&
-      !locked.entries.some((e) => (NON_TERMINAL_STATES as readonly string[]).includes(e.status))
+      !locked.entries.some(
+        (e) => isGateway(e) && (NON_TERMINAL_STATES as readonly string[]).includes(e.status),
+      )
     ) {
       const live = await tx.emailRecipient.count({
         where: {
@@ -494,7 +518,12 @@ export class QuarantineSweeper {
   private async expiryStep(now: Date, report: QuarantineSweepReport): Promise<void> {
     for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
       const due = await this.options.prisma.quarantineMessage.findMany({
-        where: { ...this.orgFilter, status: { in: [...EXPIRABLE] }, expiresAt: { lte: now } },
+        where: {
+          ...this.orgFilter,
+          location: GATEWAY,
+          status: { in: [...EXPIRABLE] },
+          expiresAt: { lte: now },
+        },
         orderBy: { expiresAt: 'asc' },
         take: this.options.batchSize,
         select: {
@@ -503,11 +532,13 @@ export class QuarantineSweeper {
           organizationId: true,
           status: true,
           expiresAt: true,
+          location: true,
         },
       });
       if (
         due.some(
           (e) =>
+            e.location !== GATEWAY ||
             !(EXPIRABLE as readonly string[]).includes(e.status) ||
             e.expiresAt.getTime() > now.getTime(),
         )
@@ -520,6 +551,7 @@ export class QuarantineSweeper {
           const locked = await this.lockMessage(tx, key);
           const targets = locked.entries.filter(
             (e) =>
+              isGateway(e) &&
               (EXPIRABLE as readonly string[]).includes(e.status) &&
               e.expiresAt.getTime() <= now.getTime(),
           );
@@ -591,7 +623,10 @@ export class QuarantineSweeper {
       }
       const entry = locked.entries.find((e) => e.id === r.quarantineMessageId)!;
       if (r.kind === 'policy_review') {
-        if (EXPIRABLE.includes(entry.status as (typeof EXPIRABLE)[number]))
+        // R11.3: a review entry expires as in step 1, which applies to gateway entries only
+        // (API-2 never creates mailbox review entries; such a request stays for the
+        // mailbox-worker's expiry).
+        if (isGateway(entry) && EXPIRABLE.includes(entry.status as (typeof EXPIRABLE)[number]))
           reviewEntries.push(entry);
         continue;
       }
@@ -712,7 +747,11 @@ export class QuarantineSweeper {
     now: Date,
   ): Promise<'purged' | 'retained'> {
     // The message lock serializes the purge with releases, rescans and manual quarantine.
-    await this.lockMessage(tx, key);
+    const locked = await this.lockMessage(tx, key);
+    // R11.2: never purge the objects of a message with mailbox-located entries (an API-mode
+    // copy's EML follows the copy's message retention). Such a purge row is never scheduled;
+    // refused before any deletion and retried with back-off (logged).
+    if (locked.entries.some((e) => !isGateway(e))) throw new PurgeKeyError('mailbox_location');
     const decision = await this.schedulePurge(tx, key, now);
     if (decision.purge !== 'now') return 'retained';
     const message = await tx.emailMessage.findFirst({
@@ -723,7 +762,7 @@ export class QuarantineSweeper {
       quarantineWrongRead(this.options.sink, 'message', 'purge message echo');
     }
     const entries = await tx.quarantineMessage.findMany({
-      where: { messageId: key.messageId, messageReceivedAt: key.receivedAt },
+      where: { messageId: key.messageId, messageReceivedAt: key.receivedAt, location: GATEWAY },
       select: { id: true, organizationId: true, emlObjectKey: true },
     });
     if (entries.some((e) => e.organizationId !== key.organizationId)) {
@@ -749,7 +788,12 @@ export class QuarantineSweeper {
     });
     if (updated.count !== 1) quarantineWrongRead(this.options.sink, 'purges', 'purge CAS');
     await tx.quarantineMessage.updateMany({
-      where: { messageId: key.messageId, messageReceivedAt: key.receivedAt, objectPurgedAt: null },
+      where: {
+        messageId: key.messageId,
+        messageReceivedAt: key.receivedAt,
+        location: GATEWAY,
+        objectPurgedAt: null,
+      },
       data: { objectPurgedAt: now },
     });
     if (entries.length > 0) {
@@ -792,7 +836,7 @@ export class QuarantineSweeper {
         AND NOT EXISTS (
           SELECT 1 FROM quarantine_messages q
           WHERE q.message_id = m.id AND q.message_received_at = m.received_at
-            AND q.lifecycle_round = m.lifecycle_round)
+            AND q.location = 'gateway' AND q.lifecycle_round = m.lifecycle_round)
         AND (
           EXISTS (
             SELECT 1 FROM email_recipients r
@@ -808,6 +852,7 @@ export class QuarantineSweeper {
             AND NOT EXISTS (
               SELECT 1 FROM quarantine_messages q
               WHERE q.message_id = m.id AND q.message_received_at = m.received_at
+                AND q.location = 'gateway'
                 AND q.status IN (${Prisma.join([...NON_TERMINAL_STATES])}))))
       ORDER BY m.status_changed_at
       LIMIT ${this.options.batchSize}`;
@@ -850,6 +895,7 @@ export class QuarantineSweeper {
       where: {
         messageId: key.messageId,
         messageReceivedAt: key.receivedAt,
+        location: GATEWAY,
         lifecycleRound: snapshot.round,
       },
     });
@@ -990,7 +1036,11 @@ export class QuarantineSweeper {
     entries: readonly LockedEntry[],
     now: Date,
   ): Promise<number | 'closed'> {
-    if (entries.some((e) => (NON_TERMINAL_STATES as readonly string[]).includes(e.status))) {
+    if (
+      entries.some(
+        (e) => isGateway(e) && (NON_TERMINAL_STATES as readonly string[]).includes(e.status),
+      )
+    ) {
       return 0;
     }
     const live = await tx.emailRecipient.count({

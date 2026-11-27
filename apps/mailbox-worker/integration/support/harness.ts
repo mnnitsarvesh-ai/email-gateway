@@ -128,7 +128,11 @@ export class Fixtures {
   });
   readonly bucket = requireEnv('S3_BUCKET_MAIL');
 
-  constructor() {
+  /**
+   * @param prefix slug prefix of the synthetic organizations and plan (`it-apimode` for the
+   *   API-1 suites, `it-apirem` for the step API-2 remediation suites).
+   */
+  constructor(readonly prefix = 'it-apimode') {
     this.redis.on('error', () => undefined);
   }
   readonly suffix = randomUUID().slice(0, 8);
@@ -148,7 +152,7 @@ export class Fixtures {
     if (this.planId === undefined) {
       const plan = await this.prisma.organizationPlan.create({
         data: {
-          code: `it-apimode-${this.suffix}`,
+          code: `${this.prefix}-${this.suffix}`,
           name: 'mailbox-worker integration',
           defaultLimits: {},
           defaultFeatures: { api_mode_protection: true },
@@ -158,7 +162,7 @@ export class Fixtures {
     }
     const org = await this.prisma.organization.create({
       data: {
-        slug: `it-apimode-${this.suffix}-${label}`,
+        slug: `${this.prefix}-${this.suffix}-${label}`,
         name: `IT API mode ${label}`,
         planId: this.planId,
         dataRegion: 'ap-south-1',
@@ -506,6 +510,20 @@ export class Fixtures {
       if (ids.length > 0) {
         const where = { organizationId: { in: ids } };
         const inIds = Prisma.join(ids);
+        // Step API-2: quarantine entries (mailbox-located), their actions, release logs and
+        // approval requests, then remediation actions (RESTRICT on mailboxes and connections)
+        // and policies (RESTRICT on domains).
+        await this.prisma.messageOutbox.deleteMany({ where });
+        await this.prisma.quarantineApprovalRequest.deleteMany({ where });
+        await this.prisma.quarantineReleaseLog.deleteMany({ where });
+        await this.prisma.quarantineAction.deleteMany({ where });
+        await this.prisma.quarantineMessage.deleteMany({ where });
+        await this.prisma.quarantineSettings.deleteMany({ where });
+        await this.prisma.apiRemediationAction.deleteMany({ where });
+        await this.prisma.apiRemediationPolicy.deleteMany({ where });
+        await this.prisma.user.deleteMany({ where });
+        await this.prisma
+          .$executeRaw`DELETE FROM message_risk_scores WHERE organization_id IN (${inIds})`;
         await this.prisma
           .$executeRaw`DELETE FROM api_message_copies WHERE organization_id IN (${inIds})`;
         await this.prisma.apiCopyDedupeKey.deleteMany({ where });

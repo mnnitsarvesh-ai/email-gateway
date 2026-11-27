@@ -32,6 +32,7 @@ import {
 } from '@/features/messages/controls';
 import { BulkActionBar, BulkResultNotice } from './bulk-actions';
 import { entryHref } from './links';
+import { LOCATIONS, LOCATION_LABEL, LocationBadge } from './location';
 import type { BulkResult, EntrySummary } from './types';
 import { useQuarantineCatalog } from './use-catalog';
 
@@ -81,6 +82,8 @@ export const ENTRIES_URL_SHAPE = {
   hasAttachments: opt(['true', 'false'] as const),
   hasHardBlock: opt(['true', 'false'] as const),
   messageId: text(36),
+  /** Step API-2 R10.5: held by the gateway or in the recipient's mailbox. */
+  location: opt(LOCATIONS),
 };
 
 type EntriesState = {
@@ -146,6 +149,12 @@ const COLUMNS: DataTableColumn<EntrySummary>[] = [
     header: 'State',
     meta: { label: 'State' },
     cell: ({ row }) => <QuarantineStateBadge state={row.original.state} />,
+  },
+  {
+    id: 'location',
+    header: 'Location',
+    meta: { label: 'Location' },
+    cell: ({ row }) => <LocationBadge location={row.original.location} />,
   },
   {
     id: 'reason',
@@ -269,6 +278,12 @@ export function EntriesTab() {
           value={state.state}
           options={optionsOf(ENTRY_STATES)}
           onChange={(v) => setState({ state: v as EntriesState['state'] })}
+        />
+        <FilterSelect
+          label="Location"
+          value={state.location}
+          options={LOCATIONS.map((value) => ({ value, label: LOCATION_LABEL[value] }))}
+          onChange={(v) => setState({ location: v as EntriesState['location'] })}
         />
         <FilterSelect
           label="Reason"
@@ -431,6 +446,7 @@ export function EntriesTab() {
             />
             <div className="flex flex-wrap items-center gap-2">
               <QuarantineStateBadge state={row.state} />
+              <LocationBadge location={row.location} />
               <span className="text-xs">{humanize(row.reason)}</span>
               <DateTime value={row.quarantinedAt} className="text-xs text-muted-foreground" />
             </div>

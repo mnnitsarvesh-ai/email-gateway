@@ -25,6 +25,7 @@ import { ENTRY_REASONS, ENTRY_STATES } from './entries-tab';
 import { EntryMetadata, EntryStateNotices, ReleaseOutcomeNotice } from './entry-parts';
 import { preferencesBody, requestReleaseBody, selfReleaseBody } from './forms';
 import { selfEntryHref } from './links';
+import { CONTAINER_TEXT, LocationBadge, mailboxLocation } from './location';
 import { PreviewSection } from './preview-panel';
 import { ReasonConfirm, explainQuarantineError } from './reason-confirm';
 import type { EntryAction, ReleaseOutcome, SelfEntryDetailBody } from './types';
@@ -100,6 +101,12 @@ const COLUMNS: DataTableColumn<SelfEntry>[] = [
     cell: ({ row }) => <QuarantineStateBadge state={row.original.state} />,
   },
   {
+    id: 'location',
+    header: 'Location',
+    meta: { label: 'Location' },
+    cell: ({ row }) => <LocationBadge location={row.original.location} />,
+  },
+  {
     id: 'expires',
     header: 'Expires',
     meta: { label: 'Expires', className: 'whitespace-nowrap' },
@@ -165,6 +172,7 @@ export function SelfTab() {
             </Link>
             <div className="flex flex-wrap items-center gap-2">
               <QuarantineStateBadge state={row.state} />
+              <LocationBadge location={row.location} />
               <span className="text-xs">{humanize(row.reason)}</span>
             </div>
           </div>
@@ -299,6 +307,7 @@ function SelfEntryView({
     onSuccess: (data) => setOutcome(data),
   });
   const maxChars = catalog.data?.limits.reasonMaxChars;
+  const mailbox = mailboxLocation(entry.location);
   return (
     <div className="grid gap-4">
       <PageHeader
@@ -309,8 +318,8 @@ function SelfEntryView({
           <>
             {allowed.has('release') ? (
               <Button size="sm" onClick={() => setDialog('release')}>
-                <SendIcon aria-hidden />
-                Release to my inbox
+                {mailbox ? <InboxIcon aria-hidden /> : <SendIcon aria-hidden />}
+                {mailbox ? 'Restore to my inbox' : 'Release to my inbox'}
               </Button>
             ) : null}
             {allowed.has('request_release') ? (
@@ -323,7 +332,9 @@ function SelfEntryView({
         }
       />
       <div role="status" aria-live="polite">
-        {outcome ? <ReleaseOutcomeNotice outcome={outcome} self /> : null}
+        {outcome ? (
+          <ReleaseOutcomeNotice outcome={outcome} self mailbox={mailbox !== null} />
+        ) : null}
       </div>
       <EntryStateNotices entry={entry} self />
       <EntryMetadata entry={entry} self />
@@ -331,14 +342,23 @@ function SelfEntryView({
       <ReasonConfirm
         open={dialog === 'release'}
         onOpenChange={(open) => !open && setDialog(null)}
-        title="Release this message to your inbox?"
-        description={
-          <p>
-            The platform checks the message again before delivering it. Only release mail you
-            expected.
-          </p>
+        title={
+          mailbox ? 'Restore this message to your inbox?' : 'Release this message to your inbox?'
         }
-        confirmLabel="Release"
+        description={
+          mailbox ? (
+            <p>
+              The message is moved from your mailbox ({CONTAINER_TEXT[mailbox.container]}) back to
+              your Inbox. Only restore mail you expected.
+            </p>
+          ) : (
+            <p>
+              The platform checks the message again before delivering it. Only release mail you
+              expected.
+            </p>
+          )
+        }
+        confirmLabel={mailbox ? 'Restore to my inbox' : 'Release'}
         reasonLabel="Why do you trust this message?"
         maxChars={maxChars}
         pending={release.isPending}

@@ -49,6 +49,8 @@ export const USER_KEYS = [
   // feeds) and a read-only user (no write control).
   'zetaAdmin',
   'zetaReadOnly',
+  // Step API-2: a zeta security analyst with MFA (approves a mailbox entry's restore).
+  'zetaApprover',
   'platformAdmin',
 ] as const;
 export type UserKey = (typeof USER_KEYS)[number];
@@ -200,6 +202,15 @@ export interface E2eState {
     m365Name: string;
     googleName: string;
     mailboxes: string[];
+    /** Step API-2 (seed/api-mode.ts seedRemediation). */
+    remediation: {
+      quarantinedDetectionId: string;
+      entryId: string;
+      failedActionId: string;
+      failedDetectionId: string;
+      taggedDetectionId: string;
+      remediableDetectionId: string;
+    };
   };
   archive: {
     custodian: string;

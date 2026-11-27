@@ -71,7 +71,10 @@
  * - Step API-1 (docs/plan/steps/35-api-mode-protection.md D15): the read sweep covers 197 enabled
  *   reads (the 9 API-mode reads, asserted by name; the sweep organization has an API-mode
  *   connection with a mailbox and a copy, so the lists answer rows); the 5 API-mode writes are
- *   not applicable until API-3, so the write sweep is unchanged (168).
+ *   not applicable until API-3, so the write sweep is unchanged (168). Step API-2
+ *   (docs/plan/steps/36-api-mode-remediation.md R16): 200 enabled reads with the 3 remediation
+ *   reads (policy, history list and detail; asserted by name); its 6 writes are deferred to
+ *   API-3 as well (the write sweep stays 168).
  *
  * Synthetic `it-*` organizations only.
  */
@@ -119,7 +122,10 @@ import { deleteAtoRows } from './support/ato';
 import { createFixtures, type FixtureOrganization, type Fixtures } from './support/fixtures';
 import { bearer, uniqueIp } from './support/http';
 
-/** Step API-1 (design 35 D15): the nine enabled API-mode read tools. */
+/**
+ * Step API-1 (design 35 D15): the nine enabled API-mode read tools; step API-2 (design 36 R16):
+ * the three remediation reads (policy, history list and detail).
+ */
 const API_MODE_READS = [
   'protection_mode_get_organization',
   'api_mode_overview',
@@ -130,6 +136,9 @@ const API_MODE_READS = [
   'api_mode_get_mailbox',
   'api_mode_list_detections',
   'api_mode_get_detection',
+  'api_mode_remediation_get_policy',
+  'api_mode_remediation_list',
+  'api_mode_remediation_detail',
 ];
 
 /** Turns per conversation (keeps each replayed segment small). */
@@ -210,6 +219,11 @@ async function seedApiMode(organization: FixtureOrganization): Promise<void> {
       status: 'active',
       externalTenantId: '5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b',
       activeTenantKey: `microsoft_365:${randomUUID()}`,
+      // Not due for the live integration-worker `health` role during the suite: this synthetic
+      // connection has no grants, so a health run would turn it `failing` and queue
+      // `integration.connection.health_changed.v1` + an alert under the organization, which the
+      // write sweep's outbox snapshot would then (wrongly) attribute to a tool.
+      nextHealthCheckAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },
     select: { id: true },
   });
@@ -279,10 +293,12 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
     // reads + 79 writes with the native `report_generate` and `report_send_email` (design 31 D1).
     // Step AI-4 (design 32 D1): 329 = 186 reads + 143 writes; step AI-5 (design 33 D1): 356 =
     // 188 reads + 168 writes (every planned tool of the program); step API-1 (design 35 D15):
-    // 365 = 197 reads (the 9 API-mode reads) + 168 writes (its 5 writes are deferred to API-3).
-    expect(ENABLED_READS).toHaveLength(197);
+    // 365 = 197 reads (the 9 API-mode reads) + 168 writes (its 5 writes are deferred to API-3);
+    // step API-2 (design 36 R16): 368 = 200 reads (+ the 3 remediation reads) + 168 writes (its
+    // 6 writes are deferred to API-3 too).
+    expect(ENABLED_READS).toHaveLength(200);
     expect(ENABLED_WRITES).toHaveLength(168);
-    expect(ENABLED_TOOLS).toHaveLength(365);
+    expect(ENABLED_TOOLS).toHaveLength(368);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -364,6 +380,8 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       'api_mode_list_mailboxes',
       'api_mode_list_detections',
       'protection_mode_get_organization',
+      'api_mode_remediation_get_policy',
+      'api_mode_remediation_list',
     ]) {
       expect(swept.find((r) => r.tool === name)?.status, name).toBe('succeeded');
     }

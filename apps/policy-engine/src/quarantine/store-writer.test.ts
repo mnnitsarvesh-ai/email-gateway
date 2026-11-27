@@ -321,6 +321,7 @@ describe('QuarantineStoreWriter.supersedeEarlierRounds (Q5)', () => {
     lifecycleRound: 0,
     status: 'held',
     rowVersion: 3,
+    location: 'gateway',
     ...over,
   });
 
@@ -370,6 +371,23 @@ describe('QuarantineStoreWriter.supersedeEarlierRounds (Q5)', () => {
       writer.supersedeEarlierRounds(foreign.tx as never, KEY, 1, NOW),
     ).rejects.toBeInstanceOf(InconsistentQuarantineReadError);
     expect(sink).toHaveBeenCalledWith('entry_update');
+    expect(sink).toHaveBeenCalledWith('entries');
+  });
+
+  it('selects gateway-held entries only (API-2 R11): a mailbox entry is never superseded', async () => {
+    const { tx, writes } = fakeTx({ entries: [] });
+    const writer = new QuarantineStoreWriter(() => undefined);
+    expect(await writer.supersedeEarlierRounds(tx as never, KEY, 1, NOW)).toBe(0);
+    const sql = (tx.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray])[0].join('?');
+    expect(sql).toContain("location = 'gateway'");
+    expect(writes.some(([k]) => k === 'entry.update')).toBe(false);
+    // A mailbox row returned despite the predicate is a wrong read: nothing is superseded.
+    const sink = vi.fn();
+    const leaked = fakeTx({ entries: [entry({ location: 'mailbox' })] });
+    await expect(
+      new QuarantineStoreWriter(sink).supersedeEarlierRounds(leaked.tx as never, KEY, 1, NOW),
+    ).rejects.toBeInstanceOf(InconsistentQuarantineReadError);
+    expect(leaked.writes.some(([k]) => k === 'entry.update')).toBe(false);
     expect(sink).toHaveBeenCalledWith('entries');
   });
 });

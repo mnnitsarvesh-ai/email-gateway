@@ -936,12 +936,25 @@ enum QuarantineActionType {
   object_purged
   object_retained
   self_release
+  /// Step API-2 (R9.1, ADR-0102): the mailbox-worker created a mailbox-located entry after a
+  /// quarantine-folder, Junk or soft-delete action succeeded (actor system).
+  mailbox_remediated
+  /// Step API-2 (R10.3): the restore-to-Inbox of a mailbox entry succeeded (entry released).
+  mailbox_restored
+  /// Step API-2 (R10.3): the restore failed permanently (entry back to `held`).
+  mailbox_restore_failed
+  /// Step API-2 (R10.4): an operator deleted a mailbox entry (soft delete queued when the
+  /// message is not already in the deleted items).
+  mailbox_deleted
 }
 
 /// Status of one entry's release attempt (step 5.3 Q13). Append-only. `pending` = queued for the
 /// executor; the executor ends it in `dispatched`, `approval_required`, `rescan_required`,
 /// `refused`, `stale` or `message_busy`. The 1.1 values `delivered`, `failed` and
 /// `blocked_by_revalidation` stay unused (delivery outcomes are tracked by the delivery tables).
+/// Step API-2 (R10.3, ADR-0102) appended `restored` / `restore_failed`: the outcome of a mailbox
+/// entry's release, which is a provider restore to the Inbox executed by the mailbox-worker
+/// (`pending` → `restored` | `restore_failed` | `approval_required` | `stale`).
 enum QuarantineReleaseStatus {
   pending
   delivered
@@ -953,6 +966,8 @@ enum QuarantineReleaseStatus {
   refused
   stale
   message_busy
+  restored
+  restore_failed
 }
 
 /// Step 5.3 Q3: `quarantine` (QUARANTINE disposition, manual quarantine) or `review`
@@ -963,11 +978,32 @@ enum QuarantineEntryKind {
 }
 
 /// Step 5.3 Q3/Q8: who created the entry: the policy evaluation, a manual quarantine or the
-/// sweeper's adoption of a message held before 5.3.
+/// sweeper's adoption of a message held before 5.3. Append-only: step API-2 (R9.1, ADR-0102)
+/// appended `api_remediation` = a mailbox-located entry written by the mailbox-worker after an
+/// API-mode remediation moved the message out of the Inbox.
 enum QuarantineOrigin {
   policy
   manual
   adopted
+  api_remediation
+}
+
+/// Where a quarantined message physically is (step API-2 R9, ADR-0102): `gateway` = held by the
+/// gateway (every entry before API-2; release = delivery by the policy-engine executor);
+/// `mailbox` = an API-mode copy moved inside the recipient's Microsoft 365 / Google Workspace
+/// mailbox (release = restore to the Inbox by the mailbox-worker). Append-only.
+enum QuarantineLocation {
+  gateway
+  mailbox
+}
+
+/// Mailbox container of a `location = mailbox` entry (step API-2 R3): the gateway's hidden
+/// quarantine folder (Graph) / hidden label (Gmail), the Junk folder / `SPAM` label, or the
+/// recoverable deleted items (Graph Recoverable Items Deletions / Gmail Trash). Append-only.
+enum QuarantineMailboxContainer {
+  quarantine_folder
+  junk
+  deleted_items
 }
 
 /// Step 5.3 Q6 `primaryEngineFor`: the engine (or the tenant policy) behind the decisive cause.
@@ -1753,6 +1789,7 @@ model Organization {
   aiChatProviderKey        AiChatProviderKey?
   aiChatReportJobs         AiChatReportJob[]
   apiModeConnections       ApiModeConnection[]
+  apiRemediationPolicies   ApiRemediationPolicy[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -2208,6 +2245,7 @@ model Domain {
   deliveryRoutes           DeliveryRoute[]
   recipients               DomainRecipientAddress[]
   providerConnectionDomain ProviderConnectionDomain?
+  apiRemediationPolicies   ApiRemediationPolicy[]
 
   @@unique([organizationId, liveName])
   @@index([name])
@@ -4855,83 +4893,107 @@ model BounceEvent {
 /// `email_messages.subject` at response time only. The bytes stay in S3 (`eml_object_key`).
 /// `message_id`, `recipient_id`, `scan_id`, `policy_version_id` and `approval_request_id` have
 /// no FK (partitioned targets; the approval request FK would be a cycle).
+/// Step API-2 (R9–R11, ADR-0102): `location` tells a gateway-held entry from a mailbox-located
+/// one. Mailbox entries (`origin = api_remediation`) are written, restored ("released") and
+/// expired by the mailbox-worker, never by the policy-engine (its sweeper, disposal and release
+/// executor select `location = gateway` only); the api changes their state for user actions as
+/// for gateway entries. For them `message_id` is the API-mode copy's registry message,
+/// `lifecycle_round` holds the copy's remediation generation and `eml_object_key` the copy's EML;
+/// the `api_*` columns link the copy, mailbox and remediation action (no FKs). Still content-free.
 model QuarantineMessage {
-  id                      BigInt                  @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId                String                  @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId          BigInt                  @map("organization_id") @db.UnsignedBigInt
-  messageId               BigInt                  @map("message_id") @db.UnsignedBigInt
-  messageReceivedAt       DateTime                @map("message_received_at") @db.DateTime(3)
-  /// email_messages.lifecycle_round of the evaluation that created the entry.
-  lifecycleRound          Int                     @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
+  id                      BigInt                      @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String                      @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt                      @map("organization_id") @db.UnsignedBigInt
+  messageId               BigInt                      @map("message_id") @db.UnsignedBigInt
+  messageReceivedAt       DateTime                    @map("message_received_at") @db.DateTime(3)
+  /// email_messages.lifecycle_round of the evaluation that created the entry. For location =
+  /// mailbox: the copy's remediation generation (`api_message_copies.remediation_generation`
+  /// when the remediation succeeded), so the unique key below holds one entry per copy, recipient
+  /// and generation (step API-2 R9.2).
+  lifecycleRound          Int                         @default(0) @map("lifecycle_round") @db.UnsignedSmallInt
   /// email_scans.id of the round; NULL for a parse-failure evaluation or an adoption without one.
-  scanId                  BigInt?                 @map("scan_id") @db.UnsignedBigInt
+  scanId                  BigInt?                     @map("scan_id") @db.UnsignedBigInt
   /// policy_execution_logs.evaluation_seq (= the round) of the deciding evaluation.
-  evaluationSeq           Int?                    @map("evaluation_seq") @db.UnsignedSmallInt
-  recipientId             BigInt                  @map("recipient_id") @db.UnsignedBigInt
+  evaluationSeq           Int?                        @map("evaluation_seq") @db.UnsignedSmallInt
+  recipientId             BigInt                      @map("recipient_id") @db.UnsignedBigInt
   /// email_recipients.rcpt_seq.
-  rcptSeq                 Int                     @default(0) @map("rcpt_seq") @db.UnsignedSmallInt
+  rcptSeq                 Int                         @default(0) @map("rcpt_seq") @db.UnsignedSmallInt
   /// Lower-cased.
-  recipientAddress        String                  @map("recipient_address") @db.VarChar(320)
+  recipientAddress        String                      @map("recipient_address") @db.VarChar(320)
   /// The organization's active user whose email equals the recipient (informational; self-service
   /// scopes by address, Q15).
-  userId                  BigInt?                 @map("user_id") @db.UnsignedBigInt
+  userId                  BigInt?                     @map("user_id") @db.UnsignedBigInt
   direction               MessageDirection
   kind                    QuarantineEntryKind
   origin                  QuarantineOrigin
   reason                  QuarantineReason
   /// policy_versions.id of the decisive tenant rule's version (no FK).
-  policyVersionId         BigInt?                 @map("policy_version_id") @db.UnsignedBigInt
+  policyVersionId         BigInt?                     @map("policy_version_id") @db.UnsignedBigInt
   /// The entry state (Q3).
-  status                  QuarantineStatus        @default(held)
-  envelopeFrom            String                  @map("envelope_from") @db.VarChar(320)
-  headerFrom              String?                 @map("header_from") @db.VarChar(320)
+  status                  QuarantineStatus            @default(held)
+  envelopeFrom            String                      @map("envelope_from") @db.VarChar(320)
+  headerFrom              String?                     @map("header_from") @db.VarChar(320)
   /// RETIRED (step 5.3 §2.0): never written; kept only so no data is dropped.
-  subject                 String?                 @db.VarChar(998)
-  hasAttachments          Boolean                 @default(false) @map("has_attachments")
-  attachmentCount         Int                     @default(0) @map("attachment_count") @db.UnsignedSmallInt
-  sizeBytes               Int                     @default(0) @map("size_bytes") @db.UnsignedInt
+  subject                 String?                     @db.VarChar(998)
+  hasAttachments          Boolean                     @default(false) @map("has_attachments")
+  attachmentCount         Int                         @default(0) @map("attachment_count") @db.UnsignedSmallInt
+  sizeBytes               Int                         @default(0) @map("size_bytes") @db.UnsignedInt
   /// Max over the round's risk revisions (5.1).
-  riskScore               Int?                    @map("risk_score") @db.UnsignedSmallInt
-  riskLevel               RiskLevel?              @map("risk_level")
-  recommendedAction       RiskAction?             @map("recommended_action")
-  riskVerdict             MessageVerdict?         @map("risk_verdict")
-  hasHardBlock            Boolean                 @default(false) @map("has_hard_block")
+  riskScore               Int?                        @map("risk_score") @db.UnsignedSmallInt
+  riskLevel               RiskLevel?                  @map("risk_level")
+  recommendedAction       RiskAction?                 @map("recommended_action")
+  riskVerdict             MessageVerdict?             @map("risk_verdict")
+  hasHardBlock            Boolean                     @default(false) @map("has_hard_block")
   /// JSON array (≤ 9) of hard-block ids (`hb.*`).
-  hardBlocks              Json?                   @map("hard_blocks")
+  hardBlocks              Json?                       @map("hard_blocks")
   /// JSON array (≤ 32) of reason codes.
-  reasonCodes             Json?                   @map("reason_codes")
+  reasonCodes             Json?                       @map("reason_codes")
   /// JSON array (≤ 16) of floor reasons.
-  floorReasons            Json?                   @map("floor_reasons")
-  primaryEngine           QuarantinePrimaryEngine @default(none) @map("primary_engine")
-  decisionSource          PolicyDecisionSource?   @map("decision_source")
-  decisivePolicyPublicId  String?                 @map("decisive_policy_public_id") @db.Char(36)
-  decisivePolicyVersionNo Int?                    @map("decisive_policy_version_no") @db.UnsignedInt
-  decisiveRuleId          String?                 @map("decisive_rule_id") @db.VarChar(48)
+  floorReasons            Json?                       @map("floor_reasons")
+  primaryEngine           QuarantinePrimaryEngine     @default(none) @map("primary_engine")
+  decisionSource          PolicyDecisionSource?       @map("decision_source")
+  decisivePolicyPublicId  String?                     @map("decisive_policy_public_id") @db.Char(36)
+  decisivePolicyVersionNo Int?                        @map("decisive_policy_version_no") @db.UnsignedInt
+  decisiveRuleId          String?                     @map("decisive_rule_id") @db.VarChar(48)
   /// JSON array (≤ 24) of the evaluation's explanation lines `{ code, params }`.
   explanation             Json?
   /// The rendered policy explanation (≤ 2048; content-free by construction, 5.2 P10).
-  explanationText         String?                 @map("explanation_text") @db.VarChar(2048)
+  explanationText         String?                     @map("explanation_text") @db.VarChar(2048)
   /// The ORIGINAL EML (`email_messages.eml_object_key`).
-  emlObjectKey            String                  @map("eml_object_key") @db.VarChar(512)
-  quarantinedAt           DateTime                @map("quarantined_at") @db.DateTime(3)
+  emlObjectKey            String                      @map("eml_object_key") @db.VarChar(512)
+  quarantinedAt           DateTime                    @map("quarantined_at") @db.DateTime(3)
   /// Fixed at creation (`computeExpiry`); a settings change applies to new entries.
-  expiresAt               DateTime                @map("expires_at") @db.DateTime(3)
-  stateChangedAt          DateTime                @map("state_changed_at") @db.DateTime(3)
-  releasedAt              DateTime?               @map("released_at") @db.DateTime(3)
+  expiresAt               DateTime                    @map("expires_at") @db.DateTime(3)
+  stateChangedAt          DateTime                    @map("state_changed_at") @db.DateTime(3)
+  releasedAt              DateTime?                   @map("released_at") @db.DateTime(3)
   /// Last operator decision (release, reject, delete, approval) on the entry.
-  decidedAt               DateTime?               @map("decided_at") @db.DateTime(3)
-  decidedByUserId         BigInt?                 @map("decided_by_user_id") @db.UnsignedBigInt
-  decidedByType           ActorType?              @map("decided_by_type")
+  decidedAt               DateTime?                   @map("decided_at") @db.DateTime(3)
+  decidedByUserId         BigInt?                     @map("decided_by_user_id") @db.UnsignedBigInt
+  decidedByType           ActorType?                  @map("decided_by_type")
   /// Code of the terminal cause (e.g. `expired`, `superseded`, `rejected`); never free text.
-  terminalReason          String?                 @map("terminal_reason") @db.VarChar(64)
+  terminalReason          String?                     @map("terminal_reason") @db.VarChar(64)
   /// quarantine_approval_requests.id of the entry's current pending request (no FK: cycle).
-  approvalRequestId       BigInt?                 @map("approval_request_id") @db.UnsignedBigInt
+  approvalRequestId       BigInt?                     @map("approval_request_id") @db.UnsignedBigInt
   /// Set by the purge sweeper when the message's objects were deleted (Q17).
-  objectPurgedAt          DateTime?               @map("object_purged_at") @db.DateTime(3)
+  objectPurgedAt          DateTime?                   @map("object_purged_at") @db.DateTime(3)
   /// Compare-and-set counter of every state change.
-  rowVersion              Int                     @default(1) @map("row_version") @db.UnsignedInt
-  createdAt               DateTime                @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt               DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+  rowVersion              Int                         @default(1) @map("row_version") @db.UnsignedInt
+  createdAt               DateTime                    @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime                    @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-2 (R9, ADR-0102): `gateway` for every entry the gateway holds (all rows before
+  /// API-2); `mailbox` for an entry whose message sits in the recipient's mailbox.
+  location                QuarantineLocation          @default(gateway)
+  /// location = mailbox only: the mailbox container the message was moved to (R3).
+  mailboxContainer        QuarantineMailboxContainer? @map("mailbox_container")
+  /// location = mailbox only: api_message_copies.id / received_at of the remediated copy (no FK:
+  /// partitioned target).
+  apiCopyId               BigInt?                     @map("api_copy_id") @db.UnsignedBigInt
+  apiCopyReceivedAt       DateTime?                   @map("api_copy_received_at") @db.DateTime(3)
+  /// location = mailbox only: api_mailboxes.id (no FK; the organization purge orders deletes).
+  apiMailboxId            BigInt?                     @map("api_mailbox_id") @db.UnsignedBigInt
+  /// location = mailbox only: api_remediation_actions.id of the action that created the entry
+  /// (no FK; the action row points back through `quarantine_entry_id`).
+  apiRemediationActionId  BigInt?                     @map("api_remediation_action_id") @db.UnsignedBigInt
 
   organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   user          User?        @relation("QuarantineEntryUser", fields: [userId], references: [id], onDelete: SetNull)
@@ -4954,6 +5016,10 @@ model QuarantineMessage {
   @@index([status, stateChangedAt])
   /// Step 7.2 §3.1: the explorer's `quarantineStatus` driver, keyed by the message's time.
   @@index([organizationId, status, messageReceivedAt, messageId], map: "quarantine_messages_org_status_received_message_idx")
+  /// Step API-2: the quarantine list's `location` filter.
+  @@index([organizationId, location, quarantinedAt, id])
+  /// Step API-2: entry of a remediated copy (detections view, restore delegation).
+  @@index([apiCopyId, apiCopyReceivedAt])
   @@map("quarantine_messages")
 }
 
@@ -8790,11 +8856,17 @@ model ApiModeConnection {
   rowVersion           Int                    @default(1) @map("row_version") @db.UnsignedInt
   createdAt            DateTime               @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt            DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-2 (R5.1, API2-16): per-connection emergency stop set through the api settings
+  /// route. Policy-triggered remediations wait while it is set; admin, release and end-user
+  /// actions (restores) still run.
+  remediationPaused    Boolean                @default(false) @map("remediation_paused")
+  remediationPausedAt  DateTime?              @map("remediation_paused_at") @db.DateTime(3)
 
-  organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  providerConnection ProviderConnection @relation(fields: [providerConnectionId], references: [id], onDelete: Restrict)
+  organization       Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  providerConnection ProviderConnection     @relation(fields: [providerConnectionId], references: [id], onDelete: Restrict)
   mailboxes          ApiMailbox[]
   counters           ApiModeCounter[]
+  remediationActions ApiRemediationAction[]
 
   @@index([organizationId])
   @@index([healthStatus])
@@ -8840,9 +8912,17 @@ model ApiMailbox {
   deletedAt             DateTime?               @map("deleted_at") @db.DateTime(3)
   createdAt             DateTime                @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt             DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-2 (R3): cached provider id of the gateway's quarantine container in this mailbox
+  /// (Graph folder id / Gmail label id; opaque, never returned by the api). Cleared and
+  /// re-ensured once when the provider answers 404.
+  quarantineContainerId String?                 @map("quarantine_container_id") @db.VarChar(256)
+  /// Step API-2 (R3): cached Gmail label id of the tag label (Graph categories need none).
+  tagContainerId        String?                 @map("tag_container_id") @db.VarChar(256)
+  containersCheckedAt   DateTime?               @map("containers_checked_at") @db.DateTime(3)
 
-  apiConnection ApiModeConnection   @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
-  addresses     ApiMailboxAddress[]
+  apiConnection      ApiModeConnection      @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
+  addresses          ApiMailboxAddress[]
+  remediationActions ApiRemediationAction[]
 
   @@unique([apiConnectionId, providerUserId])
   @@index([organizationId, status])
@@ -8879,35 +8959,48 @@ model ApiMailboxAddress {
 /// not end with it (one row per message and mailbox). Written by the mailbox-worker; API-2 acts on
 /// these rows. No foreign keys.
 model ApiMessageCopy {
-  id                  BigInt                  @default(autoincrement()) @db.UnsignedBigInt
-  receivedAt          DateTime                @map("received_at") @db.DateTime(3)
-  publicId            String                  @map("public_id") @db.Char(36)
-  organizationId      BigInt                  @map("organization_id") @db.UnsignedBigInt
+  id                    BigInt                    @default(autoincrement()) @db.UnsignedBigInt
+  receivedAt            DateTime                  @map("received_at") @db.DateTime(3)
+  publicId              String                    @map("public_id") @db.Char(36)
+  organizationId        BigInt                    @map("organization_id") @db.UnsignedBigInt
   /// api_mode_connections.id (no FK: partitioned).
-  apiConnectionId     BigInt                  @map("api_connection_id") @db.UnsignedBigInt
+  apiConnectionId       BigInt                    @map("api_connection_id") @db.UnsignedBigInt
   /// api_mailboxes.id (no FK: partitioned).
-  mailboxId           BigInt                  @map("mailbox_id") @db.UnsignedBigInt
+  mailboxId             BigInt                    @map("mailbox_id") @db.UnsignedBigInt
   /// email_messages.id of the scanned copy (registry id).
-  messageId           BigInt                  @map("message_id") @db.UnsignedBigInt
-  source              ApiCopySource
-  seenJournal         Boolean                 @default(false) @map("seen_journal")
-  seenApi             Boolean                 @default(false) @map("seen_api")
-  direction           ApiCopyDirection        @default(inbound)
-  messageIdHash       String?                 @map("message_id_hash") @db.Char(64)
-  providerMessageId   String?                 @map("provider_message_id") @db.VarChar(256)
-  providerDeliveredAt DateTime?               @map("provider_delivered_at") @db.DateTime(3)
-  deliveredBasis      ApiCopyDeliveredBasis?  @map("delivered_basis")
-  status              ApiCopyStatus
-  verdict             MessageVerdict?
-  riskScore           Int?                    @map("risk_score") @db.UnsignedSmallInt
-  verdictAt           DateTime?               @map("verdict_at") @db.DateTime(3)
-  lagMs               Int?                    @map("lag_ms") @db.UnsignedInt
-  verdictAuthority    ApiCopyVerdictAuthority @default(copy) @map("verdict_authority")
+  messageId             BigInt                    @map("message_id") @db.UnsignedBigInt
+  source                ApiCopySource
+  seenJournal           Boolean                   @default(false) @map("seen_journal")
+  seenApi               Boolean                   @default(false) @map("seen_api")
+  direction             ApiCopyDirection          @default(inbound)
+  messageIdHash         String?                   @map("message_id_hash") @db.Char(64)
+  providerMessageId     String?                   @map("provider_message_id") @db.VarChar(256)
+  providerDeliveredAt   DateTime?                 @map("provider_delivered_at") @db.DateTime(3)
+  deliveredBasis        ApiCopyDeliveredBasis?    @map("delivered_basis")
+  status                ApiCopyStatus
+  verdict               MessageVerdict?
+  riskScore             Int?                      @map("risk_score") @db.UnsignedSmallInt
+  verdictAt             DateTime?                 @map("verdict_at") @db.DateTime(3)
+  lagMs                 Int?                      @map("lag_ms") @db.UnsignedInt
+  verdictAuthority      ApiCopyVerdictAuthority   @default(copy) @map("verdict_authority")
   /// The gateway message of a hybrid domain whose verdict is authoritative (no FK).
-  inlineMessageId     BigInt?                 @map("inline_message_id") @db.UnsignedBigInt
-  inlineReceivedAt    DateTime?               @map("inline_received_at") @db.DateTime(3)
-  createdAt           DateTime                @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt           DateTime                @updatedAt @map("updated_at") @db.DateTime(3)
+  inlineMessageId       BigInt?                   @map("inline_message_id") @db.UnsignedBigInt
+  inlineReceivedAt      DateTime?                 @map("inline_received_at") @db.DateTime(3)
+  createdAt             DateTime                  @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt             DateTime                  @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-2 (R4, R5.2, R10.3): remediation state of the copy in its mailbox, written by the
+  /// mailbox-worker in the transaction that inserts or completes the action (`pending` /
+  /// `simulated` / `skipped` at decision time, `remediated` / `failed` / `restored` on
+  /// completion). Never claims a mailbox state that did not happen (R-I1).
+  remediationState      ApiCopyRemediationState   @default(none) @map("remediation_state")
+  /// The remediation currently in effect or last attempted (NULL = none).
+  remediationAction     ApiCopyRemediationAction? @map("remediation_action")
+  /// Number of completed reversals (restores) of the copy; part of the action key (R5.5) and the
+  /// `lifecycle_round` of its mailbox quarantine entries (R9.2).
+  remediationGeneration Int                       @default(0) @map("remediation_generation") @db.UnsignedSmallInt
+  /// api_remediation_actions.id of the latest action (no FK: partitioned table).
+  lastActionId          BigInt?                   @map("last_action_id") @db.UnsignedBigInt
+  remediationUpdatedAt  DateTime?                 @map("remediation_updated_at") @db.DateTime(3)
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt, mailboxId])
@@ -8916,6 +9009,8 @@ model ApiMessageCopy {
   @@index([organizationId, mailboxId, receivedAt])
   @@index([organizationId, messageIdHash])
   @@index([organizationId, verdict, receivedAt])
+  /// Step API-2: detections filter `remediationState`.
+  @@index([organizationId, remediationState, receivedAt])
   @@map("api_message_copies")
 }
 
@@ -8944,35 +9039,252 @@ model ApiCopyDedupeKey {
 /// the mailbox-worker's counter flush (`(api_connection_id, hour)`); pruned after 400 days by the
 /// health role. Lag buckets back the overview percentiles.
 model ApiModeCounter {
-  id               BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId   BigInt   @map("organization_id") @db.UnsignedBigInt
-  apiConnectionId  BigInt   @map("api_connection_id") @db.UnsignedBigInt
+  id                      BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId          BigInt   @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId         BigInt   @map("api_connection_id") @db.UnsignedBigInt
   /// UTC hour start.
-  hour             DateTime @db.DateTime(0)
-  journalCopies    Int      @default(0) @map("journal_copies") @db.UnsignedInt
-  feedCopies       Int      @default(0) @map("feed_copies") @db.UnsignedInt
-  duplicates       Int      @default(0) @db.UnsignedInt
-  skippedInternal  Int      @default(0) @map("skipped_internal") @db.UnsignedInt
-  tooLarge         Int      @default(0) @map("too_large") @db.UnsignedInt
-  providerRequests Int      @default(0) @map("provider_requests") @db.UnsignedInt
-  throttled429     Int      @default(0) @map("throttled_429") @db.UnsignedInt
-  throttled503     Int      @default(0) @map("throttled_503") @db.UnsignedInt
-  providerErrors   Int      @default(0) @map("provider_errors") @db.UnsignedInt
-  cursorResets     Int      @default(0) @map("cursor_resets") @db.UnsignedInt
-  lagCount         Int      @default(0) @map("lag_count") @db.UnsignedInt
-  lagLe60s         Int      @default(0) @map("lag_le_60s") @db.UnsignedInt
-  lagLe300s        Int      @default(0) @map("lag_le_300s") @db.UnsignedInt
-  lagLe900s        Int      @default(0) @map("lag_le_900s") @db.UnsignedInt
-  lagLe3600s       Int      @default(0) @map("lag_le_3600s") @db.UnsignedInt
-  lagGt3600s       Int      @default(0) @map("lag_gt_3600s") @db.UnsignedInt
-  lagMaxMs         Int      @default(0) @map("lag_max_ms") @db.UnsignedInt
-  fetchBytes       BigInt   @default(0) @map("fetch_bytes") @db.UnsignedBigInt
-  lagSumMs         BigInt   @default(0) @map("lag_sum_ms") @db.UnsignedBigInt
-  updatedAt        DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+  hour                    DateTime @db.DateTime(0)
+  journalCopies           Int      @default(0) @map("journal_copies") @db.UnsignedInt
+  feedCopies              Int      @default(0) @map("feed_copies") @db.UnsignedInt
+  duplicates              Int      @default(0) @db.UnsignedInt
+  skippedInternal         Int      @default(0) @map("skipped_internal") @db.UnsignedInt
+  tooLarge                Int      @default(0) @map("too_large") @db.UnsignedInt
+  providerRequests        Int      @default(0) @map("provider_requests") @db.UnsignedInt
+  throttled429            Int      @default(0) @map("throttled_429") @db.UnsignedInt
+  throttled503            Int      @default(0) @map("throttled_503") @db.UnsignedInt
+  providerErrors          Int      @default(0) @map("provider_errors") @db.UnsignedInt
+  cursorResets            Int      @default(0) @map("cursor_resets") @db.UnsignedInt
+  lagCount                Int      @default(0) @map("lag_count") @db.UnsignedInt
+  lagLe60s                Int      @default(0) @map("lag_le_60s") @db.UnsignedInt
+  lagLe300s               Int      @default(0) @map("lag_le_300s") @db.UnsignedInt
+  lagLe900s               Int      @default(0) @map("lag_le_900s") @db.UnsignedInt
+  lagLe3600s              Int      @default(0) @map("lag_le_3600s") @db.UnsignedInt
+  lagGt3600s              Int      @default(0) @map("lag_gt_3600s") @db.UnsignedInt
+  lagMaxMs                Int      @default(0) @map("lag_max_ms") @db.UnsignedInt
+  fetchBytes              BigInt   @default(0) @map("fetch_bytes") @db.UnsignedBigInt
+  lagSumMs                BigInt   @default(0) @map("lag_sum_ms") @db.UnsignedBigInt
+  updatedAt               DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-2 (R14): terminal remediation outcomes of the hour. `remediation_*` count
+  /// remediations, `restores_*` reversals (restore_inbox, remove_tag); `remediation_throttled`
+  /// counts 429/503 pauses (no attempt counted); latency = completed_at − verdict_at of
+  /// policy-triggered actions (count, sum and max in milliseconds).
+  remediationSucceeded    Int      @default(0) @map("remediation_succeeded") @db.UnsignedInt
+  remediationFailed       Int      @default(0) @map("remediation_failed") @db.UnsignedInt
+  remediationSkipped      Int      @default(0) @map("remediation_skipped") @db.UnsignedInt
+  remediationSimulated    Int      @default(0) @map("remediation_simulated") @db.UnsignedInt
+  restoresSucceeded       Int      @default(0) @map("restores_succeeded") @db.UnsignedInt
+  restoresFailed          Int      @default(0) @map("restores_failed") @db.UnsignedInt
+  remediationThrottled    Int      @default(0) @map("remediation_throttled") @db.UnsignedInt
+  remediationLatencyCount Int      @default(0) @map("remediation_latency_count") @db.UnsignedInt
+  remediationLatencyMaxMs Int      @default(0) @map("remediation_latency_max_ms") @db.UnsignedInt
+  remediationLatencySumMs BigInt   @default(0) @map("remediation_latency_sum_ms") @db.UnsignedBigInt
 
   apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Cascade)
 
   @@unique([apiConnectionId, hour])
   @@index([organizationId, hour])
   @@map("api_mode_counters")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step API-2: API-mode remediation (docs/plan/steps/36-api-mode-remediation.md §3; ADR-0101,
+// ADR-0102). Two tables, not partitioned: the remediation policy per organization / domain and
+// one row per mailbox action (remediation or reversal). Ids, enums, codes, counts, timings and
+// opaque provider message ids only (R-I6): never subjects, bodies, addresses beyond the mailbox
+// reference or provider response bodies. Decisions are written by the mailbox-worker `copies`
+// role, executed by its `remediate` role; the api writes policies and manual/restore/retry rows.
+// Purged with the organization (actions before mailboxes and connections, policies before
+// domains, §3.4); terminal actions pruned after API_MODE_REMEDIATION_RETENTION_DAYS (400).
+// ---------------------------------------------------------------------------------------------
+
+/// Mode of a remediation policy (R2.1): `detect_only` records what would have happened
+/// (`simulated` actions, no provider call); `enforce` acts in the mailbox. Append-only.
+enum ApiRemediationPolicyMode {
+  detect_only
+  enforce
+}
+
+/// A mailbox action (R3). `restore_inbox` and `remove_tag` are reversals of the others;
+/// `hard_delete` is irreversible, needs API_MODE_HARD_DELETE_ENABLED and an explicit tenant rule,
+/// and falls back to Trash on Gmail. Append-only.
+enum ApiRemediationActionKind {
+  move_quarantine
+  move_junk
+  tag
+  soft_delete
+  hard_delete
+  restore_inbox
+  remove_tag
+}
+
+/// Who asked for an action (R1, R10, R12): the remediation policy, an operator (manual
+/// remediation, restore, retry, entry delete), a quarantine release or approval, an end-user
+/// self-release, or the platform. Append-only.
+enum ApiRemediationTrigger {
+  policy
+  admin
+  release
+  end_user
+  system
+}
+
+/// Action state (R5.2): `pending → in_progress → succeeded | failed | pending (retry)`;
+/// `cancelled` when the action became moot; `skipped` and `simulated` are terminal at insert.
+/// Append-only.
+enum ApiRemediationStatus {
+  pending
+  in_progress
+  succeeded
+  failed
+  skipped
+  simulated
+  cancelled
+}
+
+/// Remediation state of an API-mode copy (`api_message_copies.remediation_state`, R4, R10.3).
+/// Append-only.
+enum ApiCopyRemediationState {
+  none
+  pending
+  simulated
+  remediated
+  restored
+  failed
+  skipped
+}
+
+/// The remediation in effect on a copy (`api_message_copies.remediation_action`; reversals are
+/// not listed). Append-only.
+enum ApiCopyRemediationAction {
+  move_quarantine
+  move_junk
+  tag
+  soft_delete
+  hard_delete
+}
+
+/// Remediation policy of an organization (`domain_id` NULL) or a per-domain override (step API-2
+/// §3.1, R2, ADR-0101). No organization row = the platform default P1 policy. `document` =
+/// `api-remediation-policy/1` (ordered first-match rules over verdict, risk level, score and hard
+/// blocks → mailbox action), validated by the api with the strict zod schema of
+/// `@email-gateway/mailbox-api`; `document_sha256` = SHA-256 hex of its canonical JSON (decision
+/// provenance). Written by the api only (CAS on `row_version`); read by the mailbox-worker per
+/// decision. Content-free: verdicts, levels, scores, rule ids and actions only.
+/// `updated_by_user_id` has no FK (the trail survives the user).
+model ApiRemediationPolicy {
+  id              BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId        String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId  BigInt                   @map("organization_id") @db.UnsignedBigInt
+  /// NULL = the organization policy; otherwise the overridden domain of the organization.
+  domainId        BigInt?                  @map("domain_id") @db.UnsignedBigInt
+  /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (COALESCE(domain_id, 0)) STORED`. With
+  /// the unique key below: one organization row (scope 0) and one row per domain (MySQL treats
+  /// NULLs as distinct, so a plain domain_id would not dedupe organization rows). Never write it.
+  scopeKey        BigInt?                  @map("scope_key") @db.UnsignedBigInt
+  mode            ApiRemediationPolicyMode
+  /// `api-remediation-policy/1` (R2.1).
+  document        Json
+  documentSha256  String                   @map("document_sha256") @db.Char(64)
+  /// Optimistic concurrency (CAS) of the api.
+  rowVersion      Int                      @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId BigInt?                  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt       DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt       DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// ON UPDATE RESTRICT (not Prisma's default CASCADE): MySQL refuses a cascading foreign key on
+  /// the base column of a STORED generated column (`scope_key`). Primary keys never change.
+  domain       Domain?      @relation(fields: [domainId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([organizationId, scopeKey])
+  @@index([domainId])
+  @@map("api_remediation_policies")
+}
+
+/// One mailbox action of an API-mode copy: a remediation or its reversal (step API-2 §3.1, R1,
+/// R4, R5, R10, R12, ADR-0101). Not partitioned (actions exist only for non-clean copies; FKs
+/// and a global unique key are needed). `action_key` = hex SHA-256 of
+/// `api-remediation/1\0<copyPublicId>\0<action>\0<generation>`: every writer uses `INSERT IGNORE`
+/// on it, so one row exists per (copy, action, generation) (R-I4). Writers: the mailbox-worker
+/// `copies` role (policy decisions in the copy_scanned ledger transaction), the api (manual
+/// remediation, restore, retry, quarantine release / delete of a mailbox entry) and the
+/// `remediate` role (claim with a lease, execution, completion; CAS on `row_version`).
+/// Content-free (R-I6): ids, enums, codes, counts, timings, opaque provider message ids
+/// (`provider_refs`) and the operator's typed reason. `organization_id`, `copy_id`, `message_id`,
+/// the action/entry/release-log links and `requested_by_user_id` have no FK (partitioned targets,
+/// purge order §3.4, trail survives the user). Terminal rows are pruned after
+/// API_MODE_REMEDIATION_RETENTION_DAYS (400) by the mailbox-worker health leader once their
+/// quarantine entry (if any) is terminal.
+model ApiRemediationAction {
+  id                 BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId           String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId     BigInt                   @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId    BigInt                   @map("api_connection_id") @db.UnsignedBigInt
+  mailboxId          BigInt                   @map("mailbox_id") @db.UnsignedBigInt
+  /// api_message_copies.id / received_at (no FK: partitioned).
+  copyId             BigInt                   @map("copy_id") @db.UnsignedBigInt
+  copyReceivedAt     DateTime                 @map("copy_received_at") @db.DateTime(3)
+  /// email_messages.id of the copy's registry message (no FK: partitioned).
+  messageId          BigInt                   @map("message_id") @db.UnsignedBigInt
+  /// What was decided or requested (a Google `hard_delete` keeps `hard_delete`; what happened is
+  /// in `reason_code` and `provider_refs.container`).
+  action             ApiRemediationActionKind
+  /// The copy's `remediation_generation` at insert (R5.5).
+  generation         Int                      @default(0) @db.UnsignedSmallInt
+  actionKey          String                   @unique @map("action_key") @db.Char(64)
+  trigger            ApiRemediationTrigger
+  status             ApiRemediationStatus
+  /// Skip, failure or no-op code (contracts §37), e.g. `inline_authority`, `already_in_target`,
+  /// `message_not_found`; never free text.
+  reasonCode         String?                  @map("reason_code") @db.VarChar(64)
+  /// `api-remediation-decision/1` (R2.4) for trigger = policy; `{ requestedAction, reason }`
+  /// otherwise.
+  decision           Json?
+  /// Reversals: the remediation being undone (no FK).
+  reversesActionId   BigInt?                  @map("reverses_action_id") @db.UnsignedBigInt
+  /// Set on a remediation when its reversal succeeded (no FK).
+  reversedByActionId BigInt?                  @map("reversed_by_action_id") @db.UnsignedBigInt
+  /// quarantine_messages.id of the mailbox entry created or released by this action (no FK).
+  quarantineEntryId  BigInt?                  @map("quarantine_entry_id") @db.UnsignedBigInt
+  /// quarantine_release_logs.id of a release-triggered restore (no FK).
+  releaseLogId       BigInt?                  @map("release_log_id") @db.UnsignedBigInt
+  /// `system` for policy decisions.
+  requestedByType    ActorType                @map("requested_by_type")
+  requestedByUserId  BigInt?                  @map("requested_by_user_id") @db.UnsignedBigInt
+  /// Operator-typed reason (untrusted text, ≤ 512); never message content.
+  requestReason      String?                  @map("request_reason") @db.VarChar(512)
+  /// Counted provider attempts (throttle pauses are not counted).
+  attempts           Int                      @default(0) @db.UnsignedSmallInt
+  /// Locate-by-Message-ID attempts without a match (R5.3).
+  locateAttempts     Int                      @default(0) @map("locate_attempts") @db.UnsignedSmallInt
+  /// Due time while `pending`.
+  nextAttemptAt      DateTime?                @map("next_attempt_at") @db.DateTime(3)
+  /// Claim lease of the `remediate` role.
+  leaseUntil         DateTime?                @map("lease_until") @db.DateTime(3)
+  /// Classified `ProviderCallError` code only.
+  lastErrorCode      String?                  @map("last_error_code") @db.VarChar(64)
+  lastHttpStatus     Int?                     @map("last_http_status") @db.UnsignedSmallInt
+  /// `{ before: string[] (≤ 5), after: string[] (≤ 5), container?: 'quarantine_folder' | 'junk' |
+  /// 'deleted_items' | 'inbox' }`: opaque provider message ids only; never returned by the api.
+  providerRefs       Json?                    @map("provider_refs")
+  /// The copy's verdict time (latency of policy actions).
+  verdictAt          DateTime?                @map("verdict_at") @db.DateTime(3)
+  startedAt          DateTime?                @map("started_at") @db.DateTime(3)
+  completedAt        DateTime?                @map("completed_at") @db.DateTime(3)
+  /// Compare-and-set counter of every state change.
+  rowVersion         Int                      @default(1) @map("row_version") @db.UnsignedInt
+  createdAt          DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt          DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+
+  apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
+  mailbox       ApiMailbox        @relation(fields: [mailboxId], references: [id], onDelete: Restrict)
+
+  @@index([status, nextAttemptAt])
+  @@index([apiConnectionId, status])
+  @@index([organizationId, createdAt, id])
+  @@index([organizationId, copyId, copyReceivedAt])
+  @@index([organizationId, mailboxId, createdAt])
+  @@index([organizationId, status, createdAt])
+  @@index([quarantineEntryId])
+  @@map("api_remediation_actions")
 }

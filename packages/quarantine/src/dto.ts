@@ -15,6 +15,7 @@ import {
   QUARANTINE_RELEASE_STATUSES,
   QUARANTINE_RISK_LEVELS,
   QUARANTINE_STATES,
+  MAILBOX_CONTAINERS,
 } from './vocabulary';
 
 /**
@@ -72,6 +73,29 @@ export const quarantineEntrySummarySchema = z.strictObject({
   rowVersion: z.number().int().min(1),
 });
 export type QuarantineEntrySummary = z.infer<typeof quarantineEntrySummarySchema>;
+
+/**
+ * Step API-2 (R10.5, ADR-0102): where the entry's message is. `gateway` for every entry the
+ * gateway holds; `mailbox` for an API-mode copy moved inside the recipient's mailbox (release =
+ * restore to the Inbox). `connectionId` is omitted on the self-service routes. Exported for the
+ * api to extend the entry DTOs (`quarantineEntrySummarySchema.extend({ location })`).
+ */
+export const quarantineEntryLocationSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('gateway') }),
+  z.strictObject({
+    kind: z.literal('mailbox'),
+    container: z.enum(MAILBOX_CONTAINERS),
+    mailboxAddress: address,
+    provider: z.enum(['microsoft_365', 'google_workspace']),
+    connectionId: uuid.optional(),
+    detectionId: uuid,
+    remediationId: uuid.nullable(),
+    remediationStatus: z
+      .enum(['pending', 'in_progress', 'succeeded', 'failed', 'skipped', 'simulated', 'cancelled'])
+      .nullable(),
+  }),
+]);
+export type QuarantineEntryLocation = z.infer<typeof quarantineEntryLocationSchema>;
 
 const actorRefSchema = z.strictObject({
   type: z.enum(QUARANTINE_ACTOR_TYPES),

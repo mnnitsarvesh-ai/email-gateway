@@ -6,8 +6,8 @@ API mode is for domains whose MX records stay with Microsoft 365. The gateway re
 
 What the gateway does and does not do:
 
-- It **never** changes your MX records, mail flow or tenant configuration; it never delivers, forwards, delays, quarantines or bounces a message from the API side. A domain cannot switch to `api` while its MX still points to the gateway (choose `hybrid` or move the MX first).
-- **Mailbox access** is a separate consent (permission profile `m365.mailbox_remediation`: Microsoft Graph application permissions `Mail.ReadWrite` and `User.Read.All`), apart from the mail-flow and account takeover grants. Granting, verifying and revoking it needs the console rights `integration:manage` and `remediation:write`. In this release the gateway only **reads** (users, Inbox changes, the content of new messages it has no copy of); removing threats from mailboxes comes with step API-2.
+- It **never** changes your MX records, mail flow or tenant configuration; it never delivers, forwards, delays or bounces a message from the API side. After delivery it can **remediate** detected threats inside the mailbox (step API-2, see [What remediation does in your tenant](#what-remediation-does-in-your-tenant)). A domain cannot switch to `api` while its MX still points to the gateway (choose `hybrid` or move the MX first).
+- **Mailbox access** is a separate consent (permission profile `m365.mailbox_remediation`: Microsoft Graph application permissions `Mail.ReadWrite` and `User.Read.All`), apart from the mail-flow and account takeover grants. Granting, verifying and revoking it needs the console rights `integration:manage` and `remediation:write`. The gateway reads users, Inbox changes and the content of new messages it has no copy of, and (step API-2) uses the same `Mail.ReadWrite` permission to remediate threats; no further consent is needed.
 - Change feeds are **off by default** and never backfill existing mail. Credentials live only in the encrypted credential store; tokens stay in memory.
 
 Placeholders in this template:
@@ -20,6 +20,25 @@ Placeholders in this template:
 | `<application-client-id>` and other `<…>`      | Values you fill in yourself (your application, enterprise application object ID, mailbox group DN) |
 
 Related: [journal intake from Microsoft 365](journal-intake-microsoft-365.md), [Microsoft 365 connection](microsoft-365.md), [API mode for Google Workspace](api-mode-google-workspace.md).
+
+## What remediation does in your tenant
+
+From step API-2 the gateway acts on the verdict of each mailbox copy according to your **remediation policy** (Mailbox protection → Remediation; default P1: high-confidence malware and phishing go to the quarantine folder, other malware/phishing and suspicious or BEC mail is tagged, spam and bulk are left to Microsoft's own filtering; **Detect only** records what would have happened without touching mailboxes and is the recommended start). Every action uses Microsoft Graph with the **same** `m365.mailbox_remediation` consent (`Mail.ReadWrite`); there is **no new consent** and nothing changes in your mail flow or tenant settings.
+
+| Action            | What happens in the mailbox                                                                                                                                                                                              | Undo                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| Quarantine folder | The gateway creates (once per mailbox) a **hidden** folder `Email Gateway Quarantine` under the mailbox root and moves the message there. The user does not see the folder in Outlook.                                   | "Restore to inbox" on the quarantine page (approvals and end-user self-service apply) |
+| Junk              | Moved to the user's **Junk Email** folder.                                                                                                                                                                               | Restore to inbox                                                                      |
+| Tag               | Adds the Outlook **category** `Email Gateway: Suspicious`; the message stays in the Inbox. Existing categories are kept.                                                                                                 | Restore removes the category                                                          |
+| Soft delete       | Moved to **Recoverable Items → Deletions** (not browsable by the user; recoverable through "Recover deleted items" and by the gateway).                                                                                  | Restore to inbox                                                                      |
+| Hard delete       | `permanentDelete`: irreversible. **Off by default**: it needs the platform setting `API_MODE_HARD_DELETE_ENABLED` **and** an explicit rule in your policy; it is never in a default or preset and never a manual action. | Not possible                                                                          |
+
+Notes:
+
+- Message ids change when Microsoft Graph moves a message; the gateway keeps the new id and finds the message again by its Internet Message-ID when needed (also for journal copies, which have no mailbox id). Drafts and copies in Sent Items are never touched.
+- A restore always goes back to the **Inbox**. Moved messages appear on the quarantine pages as "in mailbox quarantine folder" / "Junk" / "deleted items"; when such an entry expires, the message stays where it is.
+- Hybrid domains: copies of messages the gateway already delivered inline are never remediated automatically.
+- Remediation shares the connection's Graph request budget and pauses when Microsoft Graph throttles (`429`/`503` with `Retry-After`). An administrator can **pause remediation** per connection (restores continue). Revoking the mailbox access stops remediation; pending actions fail with `mailbox_access_revoked`.
 
 ## The example guide
 

@@ -101,6 +101,29 @@ describe('Redis stores (D10.6, §5 Redis)', () => {
     });
   });
 
+  it('reads the step API-2 remediation counter fields (sums and the latency maximum)', () => {
+    expect(
+      deltaOf([
+        'remediation_succeeded',
+        '4',
+        'restores_failed',
+        '1',
+        'remediation_latency_sum_ms',
+        '9000',
+        'remediation_latency_max_ms',
+        '6000',
+        'remediation_throttled',
+        '2',
+      ]),
+    ).toEqual({
+      remediation_succeeded: 4,
+      restores_failed: 1,
+      remediation_latency_sum_ms: 9000,
+      remediation_latency_max_ms: 6000,
+      remediation_throttled: 2,
+    });
+  });
+
   it('adds only positive finite deltas', async () => {
     const redis = fakeRedis();
     const store = new CounterStore(

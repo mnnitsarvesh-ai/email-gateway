@@ -187,8 +187,37 @@ export interface SimMailMessage {
   labelIds?: string[];
   /** Graph delta sequence / Gmail history id of the change that added the message. */
   seq: number;
-  /** Graph: sequence of the change that removed the message from the Inbox (`@removed`). */
+  /**
+   * Sequence of the change that removed the message (under this id) from the mailbox: Graph
+   * `@removed` in the Inbox delta when it was in the Inbox; the id then answers `404`.
+   */
   removedSeq?: number;
+  /** Step API-2: Graph folder id (absent = the Inbox). */
+  folderId?: string;
+  /** Step API-2: Graph categories. */
+  categories?: string[];
+  /** Step API-2: Graph move — the id the message got (the old id answers `404`). */
+  movedToId?: string;
+  /** Step API-2: permanently deleted (Graph `permanentDelete`, Gmail `messages.delete`). */
+  deleted?: boolean;
+}
+
+/** Step API-2: a Graph mail folder of a simulated mailbox (well-known or created). */
+export interface SimMailFolder {
+  id: string;
+  displayName: string;
+  parentFolderId: string | null;
+  /** Well-known name (`inbox`, `junkemail`, …), null for created folders. */
+  wellKnownName: string | null;
+  isHidden: boolean;
+}
+
+/** Step API-2: a Gmail user label of a simulated mailbox. */
+export interface SimGmailLabel {
+  id: string;
+  name: string;
+  labelListVisibility: 'labelShow' | 'labelShowIfUnread' | 'labelHide';
+  messageListVisibility: 'show' | 'hide';
 }
 
 /** Change state of one simulated mailbox. */
@@ -201,6 +230,12 @@ export interface SimMailbox {
    */
   cursorFloor: number;
   messages: SimMailMessage[];
+  /** Step API-2: Graph folders (well-known created on first use, plus created folders). */
+  folders?: SimMailFolder[];
+  /** Step API-2: Gmail user labels. */
+  labels?: SimGmailLabel[];
+  /** Step API-2: counter for created folder / label ids. */
+  createdCount?: number;
 }
 
 /** A Graph change-notification subscription (step API-1 D13). */

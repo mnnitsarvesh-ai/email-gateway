@@ -29,7 +29,9 @@ import { QuarantineBulkService } from './quarantine-bulk.service';
 import { QuarantineContext } from './quarantine-context';
 import { QuarantineDispositionService } from './quarantine-disposition.service';
 import { QuarantineDownloadService } from './quarantine-download.service';
+import type { QuarantineMailboxRepository } from '../repositories/quarantine-mailbox.repository';
 import { QuarantineEntryOps } from './quarantine-entry-ops';
+import { QuarantineMailboxOps } from './quarantine-mailbox-ops';
 import { QuarantineMetrics } from './quarantine-metrics';
 import type { QuarantineObjectStore } from './quarantine-object-store';
 import type { Precheck, QuarantinePrecheckService } from './quarantine-precheck.service';
@@ -137,7 +139,9 @@ function setup() {
   const objects = world.objects() as unknown as QuarantineObjectStore;
   const lifecycle = world.lifecycle() as unknown as LifecycleGateway;
   const context = new QuarantineContext(config, reads, writes, metricsService);
-  const ops = new QuarantineEntryOps(writes, lifecycle);
+  const mailboxRepository = world.mailboxRepository() as unknown as QuarantineMailboxRepository;
+  const mailbox = new QuarantineMailboxOps(mailboxRepository, world.actionWriter());
+  const ops = new QuarantineEntryOps(writes, lifecycle, mailbox);
   let nextPrecheck: Precheck = releasePrecheck('approval_required', ['no_scan_round']);
   const precheck = {
     run: vi.fn(() => Promise.resolve(nextPrecheck)),
@@ -150,6 +154,7 @@ function setup() {
     context,
     precheck,
     metrics,
+    mailbox,
   );
   const disposition = new QuarantineDispositionService(
     config,
@@ -161,6 +166,7 @@ function setup() {
     lifecycle,
     { insertEmailEvent: () => Promise.resolve() } as unknown as MessageLifecycleRepository,
     metrics,
+    mailbox,
   );
   const approvals = new QuarantineApprovalsService(
     writer,
@@ -171,6 +177,7 @@ function setup() {
     precheck,
     disposition,
     metrics,
+    mailbox,
   );
   const kv = new InMemoryKeyValueStore();
   const bulk = new QuarantineBulkService(
@@ -196,11 +203,20 @@ function setup() {
     reauth as unknown as ReauthenticationService,
     metrics,
   );
-  const queries = new QuarantineQueryService(config, reads, writes, context, writer, metrics);
+  const queries = new QuarantineQueryService(
+    config,
+    reads,
+    writes,
+    context,
+    writer,
+    metrics,
+    mailboxRepository,
+  );
   const settings = new QuarantineSettingsService(reads, writes, context, writer, metrics);
   world.identities.set(10n, { email: 'operator@acme.example', verified: true });
   return {
     world,
+    precheck,
     reads,
     runner,
     writer,
@@ -1005,6 +1021,316 @@ describe('QuarantineWriter (§6)', () => {
     expect(t.runner.run).toHaveBeenCalledWith(expect.any(Function), {
       timeoutMs: 120_000,
       maxWaitMs: 10_000,
+    });
+  });
+});
+
+describe('mailbox-located entries (step API-2 R10, ADR-0102)', () => {
+  const decide = (approvalId: string, principal: Principal, key = 'mdec') => ({
+    principal,
+    scope,
+    approvalId,
+    key,
+    body: { reason: 'decided' },
+    client,
+  });
+  const releaseEvents = () =>
+    t.world.outbox.filter((o) => o.eventType === EventTypes.QuarantineReleaseRequested);
+
+  it('release: decideMailboxRestore (no policy pre-check), release log, restore_inbox row, no outbox event', async () => {
+    const entry = t.world.addMailboxEntry();
+    const res = await t.release.release(input(entry.publicId, { reason: 'false positive' }));
+    expect(res).toMatchObject({
+      statusCode: 202,
+      body: { outcome: 'queued', entryId: entry.publicId, state: 'releasing', rowVersion: 2 },
+    });
+    expect(t.precheck.run).not.toHaveBeenCalled();
+    expect(releaseEvents()).toHaveLength(0);
+    expect(t.world.transitions).toHaveLength(0);
+    expect(t.world.releases[0]).toMatchObject({ mode: 'operator', status: 'pending' });
+    expect(t.world.releases[0]!.revalidation).toMatchObject({
+      source: 'api_mailbox_precheck',
+      outcome: 'release',
+      copyStatus: 'scanned',
+    });
+    const copy = t.world.copies[0]!;
+    expect(t.world.remediationActions).toHaveLength(1);
+    expect(t.world.remediationActions[0]).toMatchObject({
+      action: 'restore_inbox',
+      trigger: 'release',
+      generation: 0,
+      copyId: copy.copyId,
+      copyPublicId: copy.copyPublicId,
+      apiConnectionId: copy.apiConnectionId,
+      mailboxId: copy.mailboxId,
+      reversesActionId: entry.apiRemediationActionId,
+      quarantineEntryId: entry.id,
+      releaseLogId: 1n,
+      requestedByType: 'user',
+      requestedByUserId: 10n,
+      requestReason: 'false positive',
+    });
+    // The copy itself is left alone until the worker completes the restore (R10.3).
+    expect(t.world.copyUpdates).toHaveLength(0);
+    expect(t.world.auditActions()).toEqual(['quarantine.release_requested']);
+    // A replay changes nothing.
+    const again = await t.release.release(input(entry.publicId, { reason: 'false positive' }));
+    expect(again).toMatchObject({ replayed: true, body: res.body });
+    expect(t.world.remediationActions).toHaveLength(1);
+  });
+
+  it('hard block or scan failure: approval_required from stored facts; refused when the tenant disallows hard blocks', async () => {
+    const hard = t.world.addMailboxEntry({ hasHardBlock: true, hardBlocks: ['hb.known_phishing'] });
+    const res = await t.release.release(input(hard.publicId, { reason: 'check' }));
+    expect(res.body).toMatchObject({
+      outcome: 'approval_requested',
+      approvalReasons: ['hard_block'],
+    });
+    expect(t.world.remediationActions).toHaveLength(0);
+    const failed = t.world.addMailboxEntry({ copyStatus: 'scan_failed' });
+    const res2 = await t.release.release(input(failed.publicId, { reason: 'check' }, 'k2'));
+    expect(res2.body).toMatchObject({ approvalReasons: ['scan_failed'] });
+    t.world.settings.set(ORG, { settings: { release: { allowHardBlocks: false } }, rowVersion: 1 });
+    const refused = t.world.addMailboxEntry({ hasHardBlock: true });
+    expect(
+      await failure(t.release.release(input(refused.publicId, { reason: 'x' }, 'k3'))),
+    ).toMatchObject({ status: 409, code: 'quarantine_hard_block_release_disabled' });
+    expect(t.precheck.run).not.toHaveBeenCalled();
+  });
+
+  it('approval flow: a second user approves, the restore is queued (trigger release), no outbox event', async () => {
+    const entry = t.world.addMailboxEntry({ hasHardBlock: true, address: 'alice@acme.example' });
+    await t.release.release(input(entry.publicId, { reason: 'check' }));
+    const approval = t.world.approvals.at(-1)!;
+    expect(approval).toMatchObject({ kind: 'release_approval', approvalReasons: ['hard_block'] });
+    // SoD unchanged: the requester may not approve.
+    expect((await failure(t.approvals.approve(decide(approval.publicId, user(10n))))).code).toBe(
+      'quarantine_approval_forbidden',
+    );
+    t.world.identities.set(40n, { email: 'carol@acme.example', verified: true });
+    const ok = await t.approvals.approve(decide(approval.publicId, user(40n), 'a2'));
+    expect(ok.body).toMatchObject({ status: 'approved', entryState: 'releasing' });
+    expect(t.world.releases.at(-1)).toMatchObject({ mode: 'approved' });
+    expect(t.world.remediationActions).toEqual([
+      expect.objectContaining({
+        action: 'restore_inbox',
+        trigger: 'release',
+        quarantineEntryId: entry.id,
+      }),
+    ]);
+    expect(releaseEvents()).toHaveLength(0);
+    expect(t.precheck.run).not.toHaveBeenCalled();
+  });
+
+  it('request-release (operator and self) uses the stored-fact reasons; no action row until approved', async () => {
+    const entry = t.world.addMailboxEntry({ hasHardBlock: true });
+    const res = await t.release.requestRelease(input(entry.publicId, { reason: 'please' }));
+    expect(res.body).toMatchObject({
+      outcome: 'approval_requested',
+      approvalReasons: ['hard_block'],
+    });
+    expect(t.world.approvals.at(-1)).toMatchObject({ kind: 'release_request' });
+    expect(t.world.remediationActions).toHaveLength(0);
+    const mailbox = user(20n, ['quarantine:self']);
+    t.world.identities.set(20n, { email: 'alice@acme.example', verified: true });
+    t.world.settings.set(ORG, { settings: { endUser: { requestRelease: true } }, rowVersion: 1 });
+    const own = t.world.addMailboxEntry({ address: 'alice@acme.example' });
+    const self = await t.release.selfRequestRelease(
+      input(own.publicId, { reason: 'mine' }, 'sr', mailbox),
+    );
+    expect(self.body).toMatchObject({ outcome: 'approval_requested', approvalReasons: [] });
+    expect(t.precheck.run).not.toHaveBeenCalled();
+  });
+
+  it('self-release: end-user bounds apply; allowed → restore_inbox with trigger end_user', async () => {
+    const mailbox = user(20n, ['quarantine:self']);
+    t.world.identities.set(20n, { email: 'alice@acme.example', verified: true });
+    const own = t.world.addMailboxEntry({
+      address: 'alice@acme.example',
+      reason: 'spam',
+      riskLevel: 'low',
+    });
+    // Off by default.
+    expect(
+      await failure(t.release.selfRelease(input(own.publicId, { reason: 'x' }, 'a', mailbox))),
+    ).toMatchObject({ status: 403, code: 'quarantine_self_release_not_allowed' });
+    t.world.settings.set(ORG, { settings: { endUser: { selfRelease: true } }, rowVersion: 1 });
+    // A hard-blocked entry stays out of reach (approval reasons are never self-released).
+    const hard = t.world.addMailboxEntry({
+      address: 'alice@acme.example',
+      reason: 'spam',
+      riskLevel: 'low',
+      hasHardBlock: true,
+    });
+    expect(
+      await failure(t.release.selfRelease(input(hard.publicId, { reason: 'x' }, 'b', mailbox))),
+    ).toMatchObject({ status: 403, code: 'quarantine_self_release_not_allowed' });
+    const ok = await t.release.selfRelease(input(own.publicId, { reason: 'x' }, 'c', mailbox));
+    expect(ok.body).toMatchObject({ outcome: 'queued' });
+    expect(t.world.releases.at(-1)!.mode).toBe('self');
+    expect(t.world.remediationActions).toEqual([
+      expect.objectContaining({
+        action: 'restore_inbox',
+        trigger: 'end_user',
+        requestedByUserId: 20n,
+      }),
+    ]);
+  });
+
+  it('a failed restore is re-armed by the next release (same key), never duplicated', async () => {
+    const entry = t.world.addMailboxEntry();
+    await t.release.release(input(entry.publicId, { reason: 'one' }));
+    // The worker failed it: entry back to held, the row failed.
+    t.world.remediationActions[0]!.status = 'failed';
+    Object.assign(t.world.entries[0]!, { state: 'held' });
+    await t.release.release(input(entry.publicId, { reason: 'two' }, 'k2'));
+    expect(t.world.remediationActions).toHaveLength(1);
+    expect(t.world.remediationActions[0]).toMatchObject({
+      status: 'pending',
+      requestReason: 'two',
+    });
+    // A restore still running for the entry is a state conflict.
+    t.world.remediationActions[0]!.status = 'in_progress';
+    Object.assign(t.world.entries[0]!, { state: 'held' });
+    expect(
+      await failure(t.release.release(input(entry.publicId, { reason: 'three' }, 'k3'))),
+    ).toMatchObject({
+      code: 'quarantine_state_conflict',
+      details: { cause: 'restore_in_progress' },
+    });
+  });
+
+  it('a copy past its retention cannot be released (409, nothing written)', async () => {
+    const entry = t.world.addMailboxEntry();
+    t.world.copies = [];
+    expect(await failure(t.release.release(input(entry.publicId, { reason: 'x' })))).toMatchObject({
+      status: 409,
+      code: 'quarantine_state_conflict',
+      details: { cause: 'copy_missing' },
+    });
+    expect(t.world.entries[0]!.state).toBe('held');
+  });
+
+  it('reject: entry rejected without lifecycle edge, recipient change, purge or mailbox action', async () => {
+    const entry = t.world.addMailboxEntry();
+    const res = await t.disposition.reject(input(entry.publicId, { reason: 'confirmed' }));
+    expect(res.body).toEqual({
+      entryId: entry.publicId,
+      state: 'rejected',
+      rowVersion: 2,
+      messageTransition: null,
+      purge: null,
+    });
+    expect(t.world.transitions).toHaveLength(0);
+    expect(t.world.purges).toHaveLength(0);
+    expect(t.world.messageOf(entry).recipients[0]!.status).toBe('quarantined');
+    expect(t.world.remediationActions).toHaveLength(0);
+    expect(t.world.actions.at(-1)).toMatchObject({ action: 'reject', result: 'rejected' });
+  });
+
+  it('delete: entry deleted, mailbox_deleted action, soft_delete queued unless already in deleted items; no purge', async () => {
+    const entry = t.world.addMailboxEntry();
+    const res = await t.disposition.delete(input(entry.publicId, { reason: 'cleanup' }));
+    expect(res.body).toMatchObject({ state: 'deleted', messageTransition: null, purge: null });
+    expect(t.world.purges).toHaveLength(0);
+    expect(t.world.transitions).toHaveLength(0);
+    expect(t.world.actions.at(-1)).toMatchObject({
+      action: 'mailbox_deleted',
+      result: 'soft_delete_queued',
+    });
+    expect(t.world.remediationActions).toEqual([
+      expect.objectContaining({
+        action: 'soft_delete',
+        trigger: 'admin',
+        quarantineEntryId: entry.id,
+      }),
+    ]);
+    expect(t.world.copyUpdates).toEqual([
+      expect.objectContaining({ remediationAction: 'soft_delete' }),
+    ]);
+    expect(t.world.audits.at(-1)!.metadata).toMatchObject({
+      location: 'mailbox',
+      mailboxAction: 'soft_delete_queued',
+    });
+    const trashed = t.world.addMailboxEntry({ mailboxContainer: 'deleted_items' });
+    await t.disposition.delete(input(trashed.publicId, { reason: 'cleanup' }, 'k2'));
+    expect(t.world.actions.at(-1)).toMatchObject({ result: 'soft_delete_not_needed' });
+    expect(t.world.remediationActions).toHaveLength(1);
+  });
+
+  it('bulk applies the same per entry (gateway and mailbox mixed)', async () => {
+    t.setPrecheck(releasePrecheck('release'));
+    const gateway = t.world.addEntry();
+    const mailbox = t.world.addMailboxEntry();
+    const res = await t.bulk.bulk(
+      user(10n),
+      scope,
+      'bulk-key',
+      { action: 'release', ids: [gateway.publicId, mailbox.publicId], reason: 'batch' },
+      client,
+    );
+    expect(res.body.results.map((r) => r.status)).toEqual(['queued', 'queued']);
+    expect(releaseEvents()).toHaveLength(1);
+    expect(t.world.remediationActions).toEqual([
+      expect.objectContaining({ action: 'restore_inbox', quarantineEntryId: mailbox.id }),
+    ]);
+  });
+
+  it('search: location filter and the location block (masked like the recipient)', async () => {
+    t.world.addEntry();
+    const m = t.world.addMailboxEntry({ address: 'alice@acme.example' });
+    const window = {
+      from: new Date(Date.now() - 86_400_000).toISOString(),
+      to: new Date(Date.now() + 86_400_000).toISOString(),
+    };
+    const page = await t.queries.search(
+      user(10n),
+      scope,
+      { ...window, location: 'mailbox' },
+      client,
+    );
+    expect(page.items.map((i) => i.id)).toEqual([m.publicId]);
+    expect(page.items[0]!.location).toEqual({
+      kind: 'mailbox',
+      container: 'quarantine_folder',
+      mailboxAddress: 'alice@acme.example',
+      provider: 'microsoft_365',
+      connectionId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      detectionId: t.world.copies[0]!.copyPublicId,
+      remediationId: null,
+      remediationStatus: null,
+    });
+    const all = await t.queries.search(user(10n), scope, window, client);
+    expect(all.items.map((i) => i.location.kind).sort()).toEqual(['gateway', 'mailbox']);
+    // A quarantine:read-only caller sees the mailbox address masked like the recipient.
+    const reader = await t.queries.search(user(11n, ['quarantine:read']), scope, window, client);
+    const block = reader.items.find((i) => i.location.kind === 'mailbox')!.location;
+    expect(block).toMatchObject({ kind: 'mailbox' });
+    expect((block as { mailboxAddress: string }).mailboxAddress).not.toBe('alice@acme.example');
+  });
+
+  it('detail and self detail carry the location block (self: no connection id)', async () => {
+    const mailbox = user(20n, ['quarantine:self']);
+    t.world.identities.set(20n, { email: 'alice@acme.example', verified: true });
+    const m = t.world.addMailboxEntry({ address: 'alice@acme.example' });
+    await t.release.release(input(m.publicId, { reason: 'x' }));
+    const detail = await t.queries.detail(user(10n), scope, m.publicId, client);
+    expect(detail.location).toMatchObject({
+      kind: 'mailbox',
+      remediationId: t.world.remediationActions[0]!.publicId,
+      remediationStatus: 'pending',
+    });
+    const self = await t.queries.selfDetail(
+      mailbox,
+      scopeFromPrincipal(mailbox),
+      m.publicId,
+      client,
+    );
+    expect(self.location).toMatchObject({ kind: 'mailbox' });
+    expect(self.location).not.toHaveProperty('connectionId');
+    const gateway = t.world.addEntry();
+    expect((await t.queries.detail(user(10n), scope, gateway.publicId, client)).location).toEqual({
+      kind: 'gateway',
     });
   });
 });

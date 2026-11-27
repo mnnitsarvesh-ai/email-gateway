@@ -381,7 +381,12 @@ export const NOT_APPLICABLE_REASONS = {
  * Step API-1 D15 (docs/plan/steps/35-api-mode-protection.md): the five API-mode writes (protection
  * mode of the organization and of a domain, change-feed settings, inventory sync, mailbox
  * resync) are `not_applicable` until step API-3 adds their confirmed write tools (API-3 removes
- * the entries and adds the specs). The API-mode reads are ordinary enabled read tools.
+ * the entries and adds the specs). The API-mode reads are ordinary enabled read tools. Step API-2
+ * R16 (docs/plan/steps/36-api-mode-remediation.md) adds its six remediation writes (organization
+ * and domain policy, domain policy removal, retry, remediate, restore) with the same reason; its
+ * three reads (policy, history list and detail) are enabled read tools. The existing quarantine
+ * write tools (release, approve, reject, delete, bulk, …) also act on mailbox-located entries:
+ * the same operations with the same confirmation and risk (no registry change).
  */
 export const API_MODE_DEFERRED_WRITES: ReadonlySet<string> = new Set([
   'ProtectionModeController_putOrganization_v1',
@@ -389,6 +394,13 @@ export const API_MODE_DEFERRED_WRITES: ReadonlySet<string> = new Set([
   'ApiModeController_updateSettings_v1',
   'ApiModeController_inventorySync_v1',
   'ApiModeController_resyncMailbox_v1',
+  // Step API-2 R16.
+  'ApiModeRemediationController_putPolicy_v1',
+  'ApiModeRemediationController_putDomainPolicy_v1',
+  'ApiModeRemediationController_deleteDomainPolicy_v1',
+  'ApiModeRemediationController_retry_v1',
+  'ApiModeRemediationController_remediate_v1',
+  'ApiModeRemediationController_restore_v1',
 ]);
 
 /** Tags whose operations are never tools (D3 consistency rule). */
@@ -693,6 +705,11 @@ export const CONTROLLER_HINTS: Readonly<
   ApiKeysController: { portalRoute: '/integrations/api-keys', resourceType: 'api_key' },
   // Step API-1: API-mode coverage, connections, mailboxes and detections.
   ApiModeController: { portalRoute: '/api-mode', resourceType: 'api_mode' },
+  // Step API-2: the remediation policy and history (tabs of the API-mode page).
+  ApiModeRemediationController: {
+    portalRoute: '/api-mode',
+    resourceType: 'api_remediation',
+  },
   ArchiveAdminController: { portalRoute: '/archive', resourceType: 'archive' },
   ArchiveMessagesController: {
     portalRoute: '/archive/{messageId}',
@@ -1300,6 +1317,23 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   },
   ApiModeController_getDetection_v1: {
     untrustedFields: ['mailboxAddress', 'headerFrom', 'subject'],
+  },
+  // Step API-2 R16: the remediation reads. Rule ids and operator reasons are tenant-typed text;
+  // mailbox addresses come from the customer's directory; domain names are tenant-authored.
+  ApiModeRemediationController_getPolicy_v1: {
+    untrustedFields: [
+      'organization.document.rules[].id',
+      'domains[].domainName',
+      'domains[].document.rules[].id',
+    ],
+  },
+  ApiModeRemediationController_list_v1: {
+    display: columns('createdAt', 'action', 'trigger', 'status', 'attempts', 'completedAt'),
+    untrustedFields: ['data[].mailbox.address'],
+  },
+  ApiModeRemediationController_detail_v1: {
+    // `decision` is a union (the R2.4 record or `{ requestedAction, reason }`): marked as a whole.
+    untrustedFields: ['mailbox.address', 'requestReason', 'decision'],
   },
 
   // --- own organization (bind {id}) ---

@@ -228,8 +228,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // read of step AI-5 (docs/plan/steps/33-ai-chat-compliance-integrations.md D8): 428; plus the
     // 11 hardening operations of step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md
     // §4.1, contracts §35.6): 439; plus the 16 operations of step API-1
-    // (docs/plan/steps/35-api-mode-protection.md D12): 455, all under /api/v1.
-    expect(count).toBe(455);
+    // (docs/plan/steps/35-api-mode-protection.md D12): 455; plus the 9 remediation operations of
+    // step API-2 (docs/plan/steps/36-api-mode-remediation.md R13): 464, all under /api/v1.
+    expect(count).toBe(464);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -945,8 +946,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // provider-connection mutations; step 8.5: 8 transactional identity-provider and mailbox
     // state mutations; step 8.6: 4 transactional journaling mutations (settings, source create,
     // update and address rotation); step API-1: 5 transactional protection-mode and API-mode
-    // mutations (organization and domain mode, settings, inventory sync, mailbox resync).
-    expect(keyed).toHaveLength(100);
+    // mutations (organization and domain mode, settings, inventory sync, mailbox resync); step
+    // API-2: 6 transactional remediation mutations (policy, domain policy put and delete, retry,
+    // remediate, restore).
+    expect(keyed).toHaveLength(106);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1318,11 +1321,20 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
   });
 
   it('documents the 16 step API-1 operations with their ids, permissions, keys, tags and no secret-shaped examples (D12)', () => {
-    const ops = operations(doc).filter(
-      (o) => o.tags.includes('api-mode') || o.tags.includes('provider-notifications'),
-    );
     const raw = (method: string, path: string) =>
       (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    // Step API-2's remediation operations are checked by their own test below.
+    const isApi2 = (key: string) => {
+      const [method, path] = key.split(' ') as [string, string];
+      return String(raw(method.toLowerCase(), path).operationId).startsWith(
+        'ApiModeRemediationController_',
+      );
+    };
+    const ops = operations(doc).filter(
+      (o) =>
+        (o.tags.includes('api-mode') || o.tags.includes('provider-notifications')) &&
+        !isApi2(o.key),
+    );
     expect(ops.map((o) => o.key).sort()).toEqual(
       [
         'GET /api/v1/organizations/{id}/protection-mode',
@@ -1418,6 +1430,85 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     );
     expect(views).not.toMatch(/feedCursor|subscriptionId|clientStateHash|clientState"|deltaLink/);
     expect(all).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+  });
+
+  it('documents the 9 step API-2 remediation operations with their ids, permissions, keys, classes, cursor, errors and no provider ids or secret-shaped examples (R13)', () => {
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    const ops = operations(doc).filter((o) => {
+      const [method, path] = o.key.split(' ') as [string, string];
+      return String(raw(method.toLowerCase(), path).operationId).startsWith(
+        'ApiModeRemediationController_',
+      );
+    });
+    const expected: Array<[string, string, string, 'read' | 'write']> = [
+      ['GET', '/api/v1/api-mode/remediation-policy', 'getPolicy', 'read'],
+      ['PUT', '/api/v1/api-mode/remediation-policy', 'putPolicy', 'write'],
+      ['PUT', '/api/v1/api-mode/remediation-policy/domains/{domainId}', 'putDomainPolicy', 'write'],
+      [
+        'DELETE',
+        '/api/v1/api-mode/remediation-policy/domains/{domainId}',
+        'deleteDomainPolicy',
+        'write',
+      ],
+      ['GET', '/api/v1/api-mode/remediations', 'list', 'read'],
+      ['GET', '/api/v1/api-mode/remediations/{remediationId}', 'detail', 'read'],
+      ['POST', '/api/v1/api-mode/remediations/{remediationId}/retry', 'retry', 'write'],
+      ['POST', '/api/v1/api-mode/detections/{detectionId}/remediate', 'remediate', 'write'],
+      ['POST', '/api/v1/api-mode/detections/{detectionId}/restore', 'restore', 'write'],
+    ];
+    expect(ops.map((o) => o.key).sort()).toEqual(expected.map(([m, p]) => `${m} ${p}`).sort());
+    for (const [method, path, name, kind] of expected) {
+      const op = raw(method.toLowerCase(), path);
+      // The operation ids the registry and the portal client rely on (R13, R16).
+      expect(op.operationId, path).toBe(`ApiModeRemediationController_${name}_v1`);
+      expect(op.tags, path).toEqual(['api-mode']);
+      expect(op['x-eg-permissions'], path).toEqual({
+        mode: 'all',
+        permissions: [kind === 'read' ? 'remediation:read' : 'remediation:write'],
+      });
+      if (kind === 'write') {
+        expect(op['x-eg-idempotency'], path).toBe('required');
+        expect(op['x-eg-rate-class'], path).toBe('sensitive');
+      } else {
+        expect(op['x-eg-idempotency'], path).toBeUndefined();
+      }
+    }
+    expect(raw('get', '/api/v1/api-mode/remediations')['x-eg-cursor']).toBe('v1');
+    const all = JSON.stringify(ops.map((o) => doc.paths[o.key.split(' ')[1]!]));
+    for (const code of [
+      'api_mode_hard_delete_disabled',
+      'api_mode_hard_delete_not_manual',
+      'api_mode_remediation_in_progress',
+      'api_mode_remediation_already_applied',
+      'api_mode_nothing_to_restore',
+      'api_mode_restore_not_possible',
+      'api_mode_remediation_not_retryable',
+      'api_mode_remediation_policy_conflict',
+      'api_mode_remediation_not_found',
+      'api_mode_detection_not_remediable',
+      'quarantine_permission_required',
+      'domain_not_found',
+    ]) {
+      expect(all, code).toContain(code);
+    }
+    // Views never document provider message ids (only the container and counts).
+    const detail = JSON.stringify(raw('get', '/api/v1/api-mode/remediations/{remediationId}'));
+    expect(detail).toContain('providerRefs');
+    expect(detail).not.toMatch(/providerMessageId|internetMessageId|AAMk/);
+    expect(all).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    // The API-1 views gained the remediation fields (R13) and the quarantine entries the location.
+    expect(JSON.stringify(raw('get', '/api/v1/api-mode/overview'))).toContain(
+      'oldestPendingAgeSeconds',
+    );
+    expect(JSON.stringify(raw('get', '/api/v1/api-mode/detections'))).toContain('remediationState');
+    expect(
+      JSON.stringify(raw('put', '/api/v1/api-mode/connections/{connectionId}/settings')),
+    ).toContain('remediationPaused');
+    expect(JSON.stringify(raw('get', '/api/v1/quarantine/entries'))).toContain('mailboxAddress');
+    expect(JSON.stringify(raw('get', '/api/v1/quarantine/entries/{entryId}'))).toContain(
+      'detectionId',
+    );
   });
 
   it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {

@@ -8,7 +8,9 @@ import { QuarantineEntriesController } from './controllers/quarantine-entries.co
 import { QuarantineSelfController } from './controllers/quarantine-self.controller';
 import { QuarantineToolsController } from './controllers/quarantine-tools.controller';
 import { QuarantineRateLimitGuard } from './quarantine-rate-limit';
+import { RemediationActionWriter } from '../api-mode/repositories/remediation-action-writer';
 import { QuarantineFactsRepository } from './repositories/quarantine-facts.repository';
+import { QuarantineMailboxRepository } from './repositories/quarantine-mailbox.repository';
 import { QuarantineReadRepository } from './repositories/quarantine-read.repository';
 import { QuarantineWriteRepository } from './repositories/quarantine-write.repository';
 import { QuarantineApprovalsService } from './services/quarantine-approvals.service';
@@ -17,6 +19,7 @@ import { QuarantineContext } from './services/quarantine-context';
 import { QuarantineDispositionService } from './services/quarantine-disposition.service';
 import { QuarantineDownloadService } from './services/quarantine-download.service';
 import { QuarantineEntryOps } from './services/quarantine-entry-ops';
+import { QuarantineMailboxOps } from './services/quarantine-mailbox-ops';
 import { QuarantineMetrics } from './services/quarantine-metrics';
 import { QuarantineObjectStore } from './services/quarantine-object-store';
 import { QuarantinePrecheckService } from './services/quarantine-precheck.service';
@@ -34,7 +37,9 @@ import { QuarantineWriter } from './services/quarantine-writer';
  * actions and settings. The release executor, the sweeper and the notifications run in the
  * policy-engine (`quarantine` role) and the notification-worker; this module writes the requests
  * (release logs, approval requests, outbox events) and every user-facing decision. The
- * controllers with static paths are listed before the `entries/{entryId}` ones.
+ * controllers with static paths are listed before the `entries/{entryId}` ones. Step API-2 R10
+ * (ADR-0102): mailbox-located entries (API-mode copies held in the recipient's mailbox) branch
+ * on `location`: release = a `restore_inbox` action row for the mailbox-worker.
  */
 @Module({
   imports: [IdempotencyModule, MessagesModule, PoliciesModule, AuthModule],
@@ -63,9 +68,15 @@ import { QuarantineWriter } from './services/quarantine-writer';
     QuarantineApprovalsService,
     QuarantineBulkService,
     QuarantineSettingsService,
+    // Step API-2 R10 (ADR-0102): the mailbox-located branch and the action rows it queues.
+    QuarantineMailboxRepository,
+    QuarantineMailboxOps,
+    RemediationActionWriter,
   ],
   // Step 6.2 N3: the notification preference center checks `digest.allowOptOut` of the same
-  // effective settings before writing `quarantine_user_preferences.digest_opt_out`.
-  exports: [QuarantineContext],
+  // effective settings before writing `quarantine_user_preferences.digest_opt_out`. Step API-2
+  // R12: the API-mode restore releases a mailbox-located entry through the release service (in
+  // its own transaction, audited refusals via the writer) and queues action rows with the writer.
+  exports: [QuarantineContext, QuarantineReleaseService, QuarantineWriter, RemediationActionWriter],
 })
 export class QuarantineModule {}

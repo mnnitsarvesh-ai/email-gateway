@@ -10,7 +10,11 @@
  * pushed to active subscriptions), `DELETE /admin/mailboxes/{user}/messages/{id}`,
  * `POST /admin/mailboxes/{user}/expire-cursors`, `GET /admin/subscriptions`,
  * `POST /admin/subscriptions/{id}/lifecycle`, `GET /admin/notifications`, `family` on
- * `/admin/inject` and filters on `/admin/calls`. Tokens: any non-empty bearer token
+ * `/admin/inject` and filters on `/admin/calls`. Step API-2 (R7) adds
+ * `GET /admin/mailboxes/{user}/messages/{id}` (location: folder, labels, categories, current id
+ * after Graph moves) and the injection families `graph_messages`, `graph_folders`,
+ * `gmail_messages` and `gmail_labels` (scripted 429/503 with `Retry-After` for the remediation
+ * endpoints). Tokens: any non-empty bearer token
  * (tokens come from 8.2's provider-fake in the stack); permissions per directory via the admin API.
  */
 import { readFileSync } from 'node:fs';
@@ -21,6 +25,7 @@ import {
   deliverMessage,
   expireCursors,
   LIFECYCLE_EVENTS,
+  messageLocation,
   pushLifecycle,
   removeMessage,
   SimMailboxNotFoundError,
@@ -90,14 +95,29 @@ export async function startSimulators(options: {
 
 /**
  * Simulator and path prefix of an API family for scripted failures (step API-1 D13): `graph`,
- * `gmail`, `google_directory` (Admin SDK Directory), `google_reports`, `o365`.
+ * `gmail`, `google_directory` (Admin SDK Directory), `google_reports`, `o365`; step API-2 (R7)
+ * adds the remediation endpoint families `graph_messages` (locate, state, move, categories,
+ * permanent delete), `graph_folders` (mail folders and child folders), `gmail_messages` (search,
+ * modify, trash, untrash, delete) and `gmail_labels`.
  */
-const FAMILY_TARGETS: Readonly<Record<string, { simulator: string; path: string }>> = {
+export const FAMILY_TARGETS: Readonly<
+  Record<string, { simulator: string; path: string | RegExp }>
+> = {
   graph: { simulator: 'graph', path: '/' },
   o365: { simulator: 'o365', path: '/' },
   gmail: { simulator: 'gmail', path: '/' },
   google_directory: { simulator: 'google-admin', path: '/admin/directory/' },
   google_reports: { simulator: 'google-admin', path: '/admin/reports/' },
+  graph_messages: {
+    simulator: 'graph',
+    path: /^\/v1\.0\/users\/[^/]+\/messages(?:\/[^/]+(?:\/(?:move|permanentDelete))?)?$/,
+  },
+  graph_folders: { simulator: 'graph', path: /^\/v1\.0\/users\/[^/]+\/mailFolders\/[^/()]+/ },
+  gmail_messages: {
+    simulator: 'gmail',
+    path: /^\/gmail\/v1\/users\/[^/]+\/messages(?:\/[^/]+(?:\/(?:modify|trash|untrash))?)?$/,
+  },
+  gmail_labels: { simulator: 'gmail', path: /^\/gmail\/v1\/users\/[^/]+\/labels$/ },
 };
 
 /** Step API-1 admin routes: mailboxes, subscriptions and notifications (D13). */
@@ -126,6 +146,7 @@ async function mailAdmin(
           ? { labelIds: body.labelIds.filter((l): l is string => typeof l === 'string') }
           : {}),
         ...(body.isDraft === true ? { isDraft: true } : {}),
+        ...(typeof body.folder === 'string' ? { folder: body.folder } : {}),
       });
       return json(201, result);
     } catch (error) {
@@ -133,6 +154,14 @@ async function mailAdmin(
         return json(404, { error: 'mailbox not found' });
       throw error;
     }
+  }
+  if ((match = /^\/admin\/mailboxes\/([^/]+)\/messages\/([^/]+)$/.exec(p)) && m === 'GET') {
+    const location = messageLocation(
+      script,
+      decodeURIComponent(match[1] as string),
+      decodeURIComponent(match[2] as string),
+    );
+    return location ? json(200, location) : json(404, { error: 'message not found' });
   }
   if ((match = /^\/admin\/mailboxes\/([^/]+)\/messages\/([^/]+)$/.exec(p)) && m === 'DELETE') {
     const removed = removeMessage(

@@ -27,6 +27,13 @@ import {
   setOrganizationMode,
 } from './protection-modes';
 import { MAILBOX_PROFILE, providerConnectionsOf } from './provider-connections';
+import {
+  addMailboxEntry,
+  registerMailboxHooks,
+  releaseMailboxEntry,
+  runQuarantineExecutor,
+  updateMailboxEntry,
+} from './quarantine';
 
 export { DEV_MOCK_MARKER } from '../types';
 
@@ -35,8 +42,13 @@ export { DEV_MOCK_MARKER } from '../types';
  * domain protection modes (entitlement, MX conflict, inherit, unchanged = no change), and the 11
  * `/api-mode` operations over the 8.2 connections of the provider-connections fixture (grant
  * status from there), with mailboxes, detections, health checks, counters and the setup guide.
+ * Step API-2 (WP6, R12, R13): the 9 remediation operations — policy with CAS, presets and
+ * domain overrides; the history with a worker that completes a queued action about 8 seconds
+ * later; manual remediate, restore (delegated to the quarantine fixture's release for mailbox
+ * entries) and retry — plus the remediation fields of detections, connections and the overview
+ * and the mailbox-located quarantine entries of remediated detections.
  * Synthetic only (`*.example.test`), per organization, deterministic, cursor pagination; never a
- * cursor, subscription id or client state in a view.
+ * cursor, subscription id, provider message id or client state in a view.
  */
 
 export const API_MODE_OPERATIONS: readonly OperationId[] = [
@@ -56,11 +68,38 @@ export const API_MODE_OPERATIONS: readonly OperationId[] = [
   'ApiModeController_getDetection_v1',
 ];
 
+/** Step API-2 (R13): the 9 remediation operations. */
+export const API_MODE_REMEDIATION_OPERATIONS: readonly OperationId[] = [
+  'ApiModeRemediationController_getPolicy_v1',
+  'ApiModeRemediationController_putPolicy_v1',
+  'ApiModeRemediationController_putDomainPolicy_v1',
+  'ApiModeRemediationController_deleteDomainPolicy_v1',
+  'ApiModeRemediationController_list_v1',
+  'ApiModeRemediationController_detail_v1',
+  'ApiModeRemediationController_retry_v1',
+  'ApiModeRemediationController_remediate_v1',
+  'ApiModeRemediationController_restore_v1',
+];
+
 type ConnectionView = SuccessBody<'ApiModeController_getConnection_v1'>;
 type ConnectionRow = SuccessBody<'ApiModeController_listConnections_v1'>['data'][number];
 type Mailbox = SuccessBody<'ApiModeController_getMailbox_v1'>;
 type Detection = SuccessBody<'ApiModeController_getDetection_v1'>;
 type Health = ConnectionRow['health']['status'];
+type PolicyView = SuccessBody<'ApiModeRemediationController_getPolicy_v1'>;
+type PolicyDocument = PolicyView['organization']['document'];
+type PolicyMode = PolicyView['organization']['mode'];
+type Action = SuccessBody<'ApiModeRemediationController_detail_v1'>;
+type ActionRow = SuccessBody<'ApiModeRemediationController_list_v1'>['data'][number];
+type Summary = SuccessBody<'ApiModeController_overview_v1'>['remediation'];
+
+interface PolicyRow {
+  id: string;
+  mode: PolicyMode;
+  document: PolicyDocument;
+  rowVersion: number;
+  updatedAt: string;
+}
 
 interface ApiConnectionState {
   apiConnectionId: string;
@@ -73,6 +112,8 @@ interface ApiConnectionState {
   health: Health;
   healthChangedAt: string | null;
   throttledUntil: string | null;
+  remediationPaused: boolean;
+  remediationPausedAt: string | null;
   rowVersion: number;
 }
 
@@ -80,6 +121,11 @@ interface OrgApiState {
   connections: Map<string, ApiConnectionState>;
   mailboxes: Mailbox[];
   detections: Detection[];
+  /** Step API-2: the organization policy row (null = the platform default P1). */
+  policy: PolicyRow | null;
+  domainPolicies: Map<string, PolicyRow & { domainName: string }>;
+  /** Remediation actions, newest first. */
+  actions: Action[];
 }
 
 interface ApiModeFixtureState {
@@ -88,6 +134,45 @@ interface ApiModeFixtureState {
 }
 
 const store = globalThis as typeof globalThis & { __egDevFixtureApiMode?: ApiModeFixtureState };
+
+// ---- step API-2 policy documents (R2.3; the same rule ids as the platform default) ------------
+
+const P1: PolicyDocument = {
+  v: 1,
+  rules: [
+    {
+      id: 'p1-high-confidence-malware-phishing-hb',
+      when: { verdicts: ['malware', 'phishing'], hardBlock: true },
+      action: 'move_quarantine',
+    },
+    {
+      id: 'p1-high-confidence-malware-phishing',
+      when: { verdicts: ['malware', 'phishing'], minLevel: 'critical' },
+      action: 'move_quarantine',
+    },
+    { id: 'p1-other-malware-phishing', when: { verdicts: ['malware', 'phishing'] }, action: 'tag' },
+    { id: 'p1-suspicious', when: { verdicts: ['suspicious', 'bec'] }, action: 'tag' },
+  ],
+};
+const STRICT: PolicyDocument = {
+  v: 1,
+  rules: [
+    ...P1.rules,
+    { id: 'strict-spam-junk', when: { verdicts: ['spam'] }, action: 'move_junk' },
+  ],
+};
+const PRESETS: PolicyView['presets'] = {
+  p1: { mode: 'enforce', document: P1 },
+  detectOnlyStart: { mode: 'detect_only', document: P1 },
+  strict: { mode: 'enforce', document: STRICT },
+};
+/** `API_MODE_HARD_DELETE_ENABLED` of the fixture platform (off, as the platform default). */
+const HARD_DELETE_AVAILABLE = false;
+const WORKER_DELAY_MS = 8_000;
+const sha = (seed: string) =>
+  Array.from({ length: 8 }, (_, i) => stableUuid(`${seed}:${i}`).replace(/-/g, '').slice(0, 8))
+    .join('')
+    .slice(0, 64);
 const state: ApiModeFixtureState = (store.__egDevFixtureApiMode ??= {
   orgs: new Map(),
   idempotency: new Map(),
@@ -121,7 +206,14 @@ function apiDomains(organizationId: string) {
 function seedOrg(organizationId: string): OrgApiState {
   const random = new SeededRandom(`${organizationId}:api-mode`);
   const connections = providerConnectionsOf(organizationId);
-  const org: OrgApiState = { connections: new Map(), mailboxes: [], detections: [] };
+  const org: OrgApiState = {
+    connections: new Map(),
+    mailboxes: [],
+    detections: [],
+    policy: null,
+    domainPolicies: new Map(),
+    actions: [],
+  };
   connections.forEach((c, index) => {
     const grant = c.grants.find((g) => g.profile === MAILBOX_PROFILE[c.provider]);
     const active = grant?.status === 'active';
@@ -136,6 +228,8 @@ function seedOrg(organizationId: string): OrgApiState {
       health: active ? 'degraded' : 'unknown',
       healthChangedAt: active ? isoAgo(DAY) : null,
       throttledUntil: null,
+      remediationPaused: false,
+      remediationPausedAt: null,
       rowVersion: 3,
     });
   });
@@ -195,8 +289,13 @@ function seedOrg(organizationId: string): OrgApiState {
         direction: 'inbound',
         deliveredBasis: source === 'graph' ? 'graph_received' : 'received_header',
         reasonCodes: verdict === 'clean' ? [] : ['url.reputation_malicious', 'auth.dmarc_fail'],
+        remediationState: 'none',
+        remediationAction: null,
+        remediationId: null,
+        quarantineEntryId: null,
       };
     });
+    seedRemediations(organizationId, org, first);
     for (const mailbox of org.mailboxes)
       mailbox.recentDetections = org.detections
         .filter((d) => d.mailboxId === mailbox.id)
@@ -226,9 +325,13 @@ function orgState(organizationId: string): OrgApiState {
         health: 'unknown',
         healthChangedAt: null,
         throttledUntil: null,
+        remediationPaused: false,
+        remediationPausedAt: null,
         rowVersion: 1,
       });
   }
+  runWorker(org);
+  runQuarantineExecutor();
   return org;
 }
 
@@ -283,6 +386,8 @@ function rowOf(organizationId: string, connectionId: string): ConnectionRow | nu
     health: { status: s.health, changedAt: s.healthChangedAt },
     throttledUntil: s.throttledUntil,
     lastErrorCode: null,
+    remediationPaused: s.remediationPaused,
+    remediationPausedAt: s.remediationPausedAt,
     grant: grant
       ? { profile: grant.profile, status: grant.status, authMethod: grant.authMethod }
       : null,
@@ -395,6 +500,7 @@ function detailOf(organizationId: string, row: ConnectionRow): ConnectionView {
       lagCount: 50,
       lagP95Seconds: 300,
     })),
+    remediation: summaryOf(organizationId, row.id),
   };
 }
 
@@ -480,6 +586,474 @@ function guideMarkdown(guide: SuccessBody<'ApiModeController_setupGuide_v1'>): s
 
 function isPlatform(permissions: readonly string[]): boolean {
   return permissions.includes('platform:organizations');
+}
+
+// ---- step API-2: remediation (R2, R5, R9, R12, R13) -------------------------------------------
+
+const ENTRY_ACTIONS = new Set(['move_quarantine', 'move_junk', 'soft_delete']);
+const CONTAINER_OF: Record<string, 'quarantine_folder' | 'junk' | 'deleted_items'> = {
+  move_quarantine: 'quarantine_folder',
+  move_junk: 'junk',
+  soft_delete: 'deleted_items',
+};
+const REASON_OF_VERDICT: Record<
+  string,
+  'malware' | 'phishing' | 'spam' | 'bulk' | 'bec' | 'dlp' | 'suspicious' | 'policy'
+> = {
+  malware: 'malware',
+  phishing: 'phishing',
+  spam: 'spam',
+  bulk: 'bulk',
+  bec: 'bec',
+  dlp_violation: 'dlp',
+  suspicious: 'suspicious',
+};
+
+function listView(action: Action): ActionRow {
+  return {
+    id: action.id,
+    action: action.action,
+    trigger: action.trigger,
+    status: action.status,
+    reasonCode: action.reasonCode,
+    attempts: action.attempts,
+    lastErrorCode: action.lastErrorCode,
+    generation: action.generation,
+    mailbox: action.mailbox,
+    connectionId: action.connectionId,
+    detectionId: action.detectionId,
+    quarantineEntryId: action.quarantineEntryId,
+    createdAt: action.createdAt,
+    nextAttemptAt: action.nextAttemptAt,
+    completedAt: action.completedAt,
+    latencyMs: action.latencyMs,
+  };
+}
+
+function newAction(
+  detection: Detection,
+  input: {
+    seed: string;
+    action: Action['action'];
+    trigger: Action['trigger'];
+    status: Action['status'];
+    at: string;
+    reason?: string | null;
+    userId?: string | null;
+    ruleId?: string | null;
+  },
+): Action {
+  const completed = input.status === 'succeeded' || input.status === 'failed';
+  const completedAt = completed ? new Date(Date.parse(input.at) + 4_000).toISOString() : null;
+  return {
+    id: stableUuid(`remediation:${input.seed}`),
+    action: input.action,
+    trigger: input.trigger,
+    status: input.status,
+    reasonCode: input.status === 'failed' ? 'provider_unavailable' : null,
+    attempts: input.status === 'failed' ? 8 : completed ? 1 : 0,
+    lastErrorCode: input.status === 'failed' ? 'provider_unavailable' : null,
+    generation: 0,
+    mailbox: { id: detection.mailboxId, address: detection.mailboxAddress },
+    connectionId: detection.connectionId,
+    detectionId: detection.id,
+    quarantineEntryId: null,
+    createdAt: input.at,
+    nextAttemptAt: input.status === 'pending' ? input.at : null,
+    completedAt,
+    latencyMs: completedAt ? 4_000 : null,
+    decision:
+      input.trigger === 'policy'
+        ? {
+            v: 1,
+            policy: {
+              scope: 'platform_default',
+              publicId: null,
+              rowVersion: null,
+              sha256: sha('p1'),
+            },
+            mode: 'enforce',
+            ruleId: input.ruleId ?? null,
+            inputs: {
+              verdict: detection.verdict,
+              riskScore: detection.riskScore,
+              level: (detection.riskScore ?? 0) >= 900 ? 'critical' : 'high',
+              hardBlocks: detection.verdict === 'malware' ? ['hb.malware_attachment'] : [],
+              verdictAuthority: detection.verdictAuthority,
+            },
+            policyOutcome: null,
+            notes: [],
+          }
+        : { requestedAction: input.action, reason: input.reason ?? null },
+    requestedBy:
+      input.trigger === 'policy' || input.trigger === 'system'
+        ? { type: 'system', userId: null }
+        : { type: 'user', userId: input.userId ?? null },
+    requestReason: input.reason ?? null,
+    locateAttempts: completed ? 1 : 0,
+    lastHttpStatus: input.status === 'failed' ? 503 : null,
+    providerRefs: completed
+      ? {
+          container: input.status === 'failed' ? null : (CONTAINER_OF[input.action] ?? null),
+          before: input.status === 'failed' ? 0 : 1,
+          after: input.status === 'succeeded' && input.action !== 'tag' ? 1 : 0,
+        }
+      : null,
+    reverses: null,
+    reversedBy: null,
+    releaseId: null,
+    verdictAt: detection.verdictAt,
+    startedAt: completed ? new Date(Date.parse(input.at) + 1_000).toISOString() : null,
+    updatedAt: completedAt ?? input.at,
+  };
+}
+
+/** The mailbox entry a succeeded entry-creating action leaves (R9.1). */
+function createEntryFor(detection: Detection, action: Action): void {
+  if (!ENTRY_ACTIONS.has(action.action)) return;
+  const at = action.completedAt ?? new Date().toISOString();
+  const entryId = addMailboxEntry({
+    key: `${detection.id}:${action.generation}`,
+    messageId: stableUuid(`copy-message:${detection.id}`),
+    generation: action.generation,
+    recipient: detection.mailboxAddress,
+    reason: REASON_OF_VERDICT[detection.verdict ?? ''] ?? 'policy',
+    riskScore: detection.riskScore,
+    hardBlocks: detection.verdict === 'malware' ? ['hb.malware_attachment'] : [],
+    receivedAt: detection.receivedAt,
+    quarantinedAt: at,
+    ruleId:
+      action.decision && 'ruleId' in action.decision && action.decision.ruleId
+        ? action.decision.ruleId
+        : 'manual',
+    location: {
+      container: CONTAINER_OF[action.action]!,
+      mailboxAddress: detection.mailboxAddress,
+      provider: 'microsoft_365',
+      connectionId: detection.connectionId,
+      detectionId: detection.id,
+      remediationId: action.id,
+      remediationStatus: 'succeeded',
+    },
+  });
+  action.quarantineEntryId = entryId;
+  detection.quarantineEntryId = entryId;
+}
+
+function applyToDetection(detection: Detection, action: Action): void {
+  detection.remediationId = action.id;
+  if (action.action === 'restore_inbox' || action.action === 'remove_tag') {
+    detection.remediationState =
+      action.status === 'succeeded'
+        ? 'restored'
+        : action.status === 'pending'
+          ? 'pending'
+          : 'remediated';
+    return;
+  }
+  detection.remediationAction = action.action;
+  detection.remediationState =
+    action.status === 'succeeded'
+      ? 'remediated'
+      : action.status === 'failed'
+        ? 'failed'
+        : action.status === 'skipped'
+          ? 'skipped'
+          : action.status === 'simulated'
+            ? 'simulated'
+            : 'pending';
+}
+
+/** P1 outcomes of the seeded copies (R2.3) with one failure and one inline-authority skip. */
+function seedRemediations(organizationId: string, org: OrgApiState, first: { id: string }): void {
+  void first;
+  org.detections.forEach((detection, i) => {
+    if (detection.status !== 'scanned' || !detection.verdict) return;
+    const verdict = detection.verdict;
+    if (verdict === 'clean' || verdict === 'unknown' || verdict === 'spam' || verdict === 'bulk')
+      return;
+    const at = detection.verdictAt ?? detection.receivedAt;
+    const seed = `${organizationId}:policy:${i}`;
+    let action: Action;
+    if (detection.verdictAuthority === 'inline') {
+      action = newAction(detection, {
+        seed,
+        action: 'move_quarantine',
+        trigger: 'policy',
+        status: 'skipped',
+        at,
+        ruleId: 'p1-high-confidence-malware-phishing',
+      });
+      action.reasonCode = 'inline_authority';
+    } else if (verdict === 'malware') {
+      action = newAction(detection, {
+        seed,
+        action: 'move_quarantine',
+        trigger: 'policy',
+        status: 'succeeded',
+        at,
+        ruleId: 'p1-high-confidence-malware-phishing-hb',
+      });
+    } else if (verdict === 'phishing') {
+      action = newAction(detection, {
+        seed,
+        action: 'move_quarantine',
+        trigger: 'policy',
+        status: i === 4 ? 'failed' : 'succeeded',
+        at,
+        ruleId: 'p1-high-confidence-malware-phishing',
+      });
+    } else {
+      action = newAction(detection, {
+        seed,
+        action: 'tag',
+        trigger: 'policy',
+        status: 'succeeded',
+        at,
+        ruleId: 'p1-suspicious',
+      });
+    }
+    org.actions.push(action);
+    if (action.status === 'succeeded') createEntryFor(detection, action);
+    applyToDetection(detection, action);
+  });
+  org.actions.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** The remediate role: a queued action completes about 8 seconds after it was requested. */
+function runWorker(org: OrgApiState, now = Date.now()): void {
+  for (const action of org.actions) {
+    if (
+      action.status !== 'pending' ||
+      now - Date.parse(action.nextAttemptAt ?? action.createdAt) < WORKER_DELAY_MS
+    )
+      continue;
+    // Release restores complete with the quarantine release (fixture executor, `restored`).
+    if (action.action === 'restore_inbox' && action.releaseId) continue;
+    action.status = 'succeeded';
+    action.attempts += 1;
+    action.locateAttempts = Math.max(action.locateAttempts, 1);
+    action.completedAt = new Date(now).toISOString();
+    action.updatedAt = action.completedAt;
+    action.startedAt = new Date(now - 1_000).toISOString();
+    action.nextAttemptAt = null;
+    action.latencyMs = now - Date.parse(action.createdAt);
+    action.providerRefs = {
+      container:
+        action.action === 'restore_inbox' ? 'inbox' : (CONTAINER_OF[action.action] ?? null),
+      before: 1,
+      after: action.action === 'tag' || action.action === 'remove_tag' ? 0 : 1,
+    };
+    const detection = org.detections.find((d) => d.id === action.detectionId);
+    if (!detection) continue;
+    if (action.action === 'remove_tag' || action.action === 'restore_inbox') {
+      const reversed = org.actions.find((a) => a.id === action.reverses);
+      if (reversed) reversed.reversedBy = action.id;
+    } else {
+      createEntryFor(detection, action);
+    }
+    applyToDetection(detection, action);
+  }
+}
+
+registerMailboxHooks({
+  seed: (organizationId) => void orgState(organizationId),
+  queued: (entryId, releaseId, trigger) => {
+    for (const org of state.orgs.values()) {
+      const detection = org.detections.find((d) => d.quarantineEntryId === entryId);
+      if (!detection) continue;
+      const remediation = org.actions.find((a) => a.id === detection.remediationId);
+      const action = newAction(detection, {
+        seed: `${releaseId}:restore`,
+        action: 'restore_inbox',
+        trigger,
+        status: 'pending',
+        at: new Date().toISOString(),
+      });
+      action.reverses = remediation?.id ?? null;
+      action.releaseId = releaseId;
+      action.quarantineEntryId = entryId;
+      org.actions.unshift(action);
+      updateMailboxEntry(entryId, { remediationId: action.id, remediationStatus: 'pending' });
+      return;
+    }
+  },
+  restored: (entryId) => {
+    for (const org of state.orgs.values()) {
+      const action = org.actions.find(
+        (a) =>
+          a.action === 'restore_inbox' && a.quarantineEntryId === entryId && a.status === 'pending',
+      );
+      if (!action) continue;
+      const now = Date.now();
+      action.status = 'succeeded';
+      action.attempts = 1;
+      action.completedAt = new Date(now).toISOString();
+      action.updatedAt = action.completedAt;
+      action.nextAttemptAt = null;
+      action.latencyMs = now - Date.parse(action.createdAt);
+      action.providerRefs = { container: 'inbox', before: 1, after: 1 };
+      const reversed = org.actions.find((a) => a.id === action.reverses);
+      if (reversed) reversed.reversedBy = action.id;
+      updateMailboxEntry(entryId, { remediationStatus: 'succeeded' });
+      const detection = org.detections.find((d) => d.id === action.detectionId);
+      if (detection) {
+        detection.remediationId = action.id;
+        detection.remediationState = 'restored';
+      }
+      return;
+    }
+  },
+});
+
+/** The overview and connection `remediation` block from the fixture actions (R13). */
+function summaryOf(organizationId: string, connectionId: string | null): Summary {
+  const org = orgState(organizationId);
+  const now = Date.now();
+  const actions = org.actions.filter((a) => !connectionId || a.connectionId === connectionId);
+  const within = (a: Action, ms: number) => Date.parse(a.completedAt ?? a.createdAt) >= now - ms;
+  const reversal = (a: Action) => a.action === 'restore_inbox' || a.action === 'remove_tag';
+  const count = (ms: number, status: Action['status'], reversals = false) =>
+    actions.filter((a) => a.status === status && reversal(a) === reversals && within(a, ms)).length;
+  const pending = actions.filter((a) => a.status === 'pending');
+  const oldest = pending.reduce<number | null>(
+    (min, a) => (min === null ? Date.parse(a.createdAt) : Math.min(min, Date.parse(a.createdAt))),
+    null,
+  );
+  const latencies = actions
+    .filter((a) => a.trigger === 'policy' && a.latencyMs !== null && within(a, DAY))
+    .map((a) => a.latencyMs!);
+  const connections = [...org.connections.entries()].filter(
+    ([id]) => !connectionId || id === connectionId,
+  );
+  return {
+    policyMode: org.policy?.mode ?? 'enforce',
+    policySource: org.policy ? 'organization' : 'platform_default',
+    paused: connections.some(([, c]) => c.remediationPaused),
+    succeeded1h: count(HOUR, 'succeeded'),
+    failed1h: count(HOUR, 'failed'),
+    succeeded24h: count(DAY, 'succeeded'),
+    failed24h: count(DAY, 'failed'),
+    skipped24h: count(DAY, 'skipped'),
+    simulated24h: count(DAY, 'simulated'),
+    restores24h: count(DAY, 'succeeded', true),
+    throttled24h: connectionId === null || connectionId === connections[0]?.[0] ? 1 : 0,
+    backlog: {
+      pending: pending.length,
+      capped: false,
+      oldestPendingAgeSeconds: oldest === null ? null : Math.floor((now - oldest) / 1000),
+    },
+    latencyAvgSeconds24h:
+      latencies.length === 0
+        ? null
+        : Math.round(latencies.reduce((sum, ms) => sum + ms, 0) / latencies.length / 100) / 10,
+    latencyMaxSeconds24h: latencies.length === 0 ? null : Math.max(...latencies) / 1000,
+  };
+}
+
+const RULE_VERDICTS = new Set([
+  'spam',
+  'bulk',
+  'phishing',
+  'malware',
+  'bec',
+  'dlp_violation',
+  'suspicious',
+]);
+const RULE_LEVELS = ['low', 'medium', 'high', 'critical'];
+const RULE_ACTIONS = new Set([
+  'move_quarantine',
+  'move_junk',
+  'tag',
+  'soft_delete',
+  'hard_delete',
+  'none',
+]);
+
+/** The strict `api-remediation-policy/1` checks of the api (paths as `document.…`). */
+function policyIssues(document: unknown): string[] {
+  const issues: string[] = [];
+  const doc = document as { v?: unknown; rules?: unknown } | null;
+  if (!doc || typeof doc !== 'object' || doc.v !== 1) return ['document.v: must be 1'];
+  const allowed = new Set(['v', 'rules', 'remediateScanFailures']);
+  for (const key of Object.keys(doc))
+    if (!allowed.has(key)) issues.push(`document.${key}: unrecognized key`);
+  if (!Array.isArray(doc.rules) || doc.rules.length < 1 || doc.rules.length > 16)
+    return [...issues, 'document.rules: 1 to 16 rules'];
+  const ids = new Set<string>();
+  doc.rules.forEach((raw: unknown, i: number) => {
+    const rule = raw as { id?: unknown; when?: Record<string, unknown>; action?: unknown };
+    const path = `document.rules.${i}`;
+    if (typeof rule.id !== 'string' || !/^[a-z0-9_-]{1,48}$/.test(rule.id))
+      issues.push(`${path}.id: 1-48 characters a-z, 0-9, - and _`);
+    else if (ids.has(rule.id)) issues.push(`${path}.id: duplicate_rule_id`);
+    else ids.add(rule.id);
+    const when = rule.when ?? {};
+    const verdicts = when.verdicts;
+    if (
+      !Array.isArray(verdicts) ||
+      verdicts.length === 0 ||
+      verdicts.some((v) => !RULE_VERDICTS.has(String(v)))
+    )
+      issues.push(`${path}.when.verdicts: 1-9 remediable verdicts`);
+    if ('policyDispositions' in when)
+      issues.push(`${path}.when.policyDispositions: unsupported_until_policy_evaluation`);
+    const level = (value: unknown) =>
+      value === undefined ? null : typeof value === 'string' ? RULE_LEVELS.indexOf(value) : -1;
+    const min = level(when.minLevel);
+    const max = level(when.maxLevel);
+    if (min === -1 || max === -1) issues.push(`${path}.when: invalid level`);
+    else if (min !== null && max !== null && max < min)
+      issues.push(`${path}.when.maxLevel: below minLevel`);
+    if (
+      when.minScore !== undefined &&
+      !(
+        Number.isInteger(when.minScore) &&
+        (when.minScore as number) >= 0 &&
+        (when.minScore as number) <= 1000
+      )
+    )
+      issues.push(`${path}.when.minScore: integer 0-1000`);
+    if (!RULE_ACTIONS.has(String(rule.action))) issues.push(`${path}.action: invalid`);
+  });
+  return issues;
+}
+
+/** Shared body checks of the two policy PUTs: reason, mode, document, hard delete. */
+function policyBodyError(body: Record<string, unknown>): FixtureResponse | null {
+  const invalid = reasonInvalid(body.reason);
+  if (invalid) return invalid;
+  if (body.mode !== 'detect_only' && body.mode !== 'enforce')
+    return apiError(400, 'validation_failed', ['mode: detect_only or enforce']);
+  if (body.expectedRowVersion !== null && typeof body.expectedRowVersion !== 'number')
+    return apiError(400, 'validation_failed', ['expectedRowVersion: a number or null']);
+  const issues = policyIssues(body.document);
+  if (issues.length > 0) return apiError(400, 'validation_failed', issues);
+  const hardDelete = (body.document as PolicyDocument).rules
+    .filter((r) => r.action === 'hard_delete')
+    .map((r) => r.id);
+  if (hardDelete.length > 0 && !HARD_DELETE_AVAILABLE)
+    return apiError(
+      422,
+      'api_mode_hard_delete_disabled',
+      'Hard delete is turned off on this platform',
+      { ruleIds: hardDelete.join(',') },
+    );
+  return null;
+}
+
+const policyConflict = (current: number | null) =>
+  apiError(409, 'api_mode_remediation_policy_conflict', 'expectedRowVersion is not current', {
+    currentRowVersion: current,
+  });
+
+const remediationNotFound = () =>
+  apiError(404, 'api_mode_remediation_not_found', 'Remediation not found');
+const detectionNotFound = () =>
+  apiError(404, 'api_mode_detection_not_found', 'Detection not found');
+
+function userOf(request: FixtureRequest): string {
+  return stableUuid(`user:${request.token ?? 'unknown'}`);
 }
 
 export const fixtures: FixtureHandlers = {
@@ -602,6 +1176,7 @@ export const fixtures: FixtureHandlers = {
       lag: lagOf(0),
       throttling: { events1h: 0, events24h: 2 },
       copiesToday: org.detections.filter((d) => Date.parse(d.receivedAt) > Date.now() - DAY).length,
+      remediation: summaryOf(p.organizationId, null),
       connections: rows.map((r, i) => ({
         id: r.id,
         displayName: r.displayName,
@@ -620,6 +1195,7 @@ export const fixtures: FixtureHandlers = {
         throttling: { events1h: 0, events24h: i === 0 ? 2 : 0 },
         copiesToday: i === 0 ? org.detections.length : 0,
         throttledUntil: r.throttledUntil,
+        remediation: summaryOf(p.organizationId, r.id),
       })),
     });
   }),
@@ -692,6 +1268,13 @@ export const fixtures: FixtureHandlers = {
           );
         if (body.feedsEnabled && !s.feedsEnabled) s.feedsEnabledAt = new Date().toISOString();
         if (!body.feedsEnabled) s.feedsEnabledAt = null;
+        if (
+          typeof body.remediationPaused === 'boolean' &&
+          body.remediationPaused !== s.remediationPaused
+        ) {
+          s.remediationPaused = body.remediationPaused;
+          s.remediationPausedAt = body.remediationPaused ? new Date().toISOString() : null;
+        }
         s.feedsEnabled = body.feedsEnabled;
         s.feedMode = mode;
         s.rowVersion += 1;
@@ -795,7 +1378,9 @@ export const fixtures: FixtureHandlers = {
             (!q.get('status') || d.status === q.get('status')) &&
             (!q.get('source') || d.source === q.get('source')) &&
             (!q.get('mailboxId') || d.mailboxId === q.get('mailboxId')) &&
-            (!q.get('connectionId') || d.connectionId === q.get('connectionId'))
+            (!q.get('connectionId') || d.connectionId === q.get('connectionId')) &&
+            (!q.get('remediationState') ||
+              (q.get('remediationState') ?? '').split(',').includes(d.remediationState))
           );
         })
         .map(({ direction: _d, deliveredBasis: _b, reasonCodes: _r, ...row }) => row);
@@ -810,4 +1395,304 @@ export const fixtures: FixtureHandlers = {
       ? ok('ApiModeController_getDetection_v1', detection)
       : apiError(404, 'api_mode_detection_not_found', 'Detection not found');
   }),
+  // ---- step API-2 (R13) ------------------------------------------------------------------------
+  ApiModeRemediationController_getPolicy_v1: guarded(
+    'ApiModeRemediationController_getPolicy_v1',
+    (_request, p) => {
+      const org = orgState(p.organizationId);
+      return ok('ApiModeRemediationController_getPolicy_v1', {
+        organization: org.policy
+          ? {
+              source: 'organization',
+              id: org.policy.id,
+              mode: org.policy.mode,
+              document: org.policy.document,
+              sha256: sha(`${org.policy.id}:${org.policy.rowVersion}`),
+              rowVersion: org.policy.rowVersion,
+              updatedAt: org.policy.updatedAt,
+            }
+          : {
+              source: 'platform_default',
+              id: null,
+              mode: 'enforce',
+              document: P1,
+              sha256: sha('p1'),
+              rowVersion: null,
+              updatedAt: null,
+            },
+        domains: [...org.domainPolicies.entries()].map(([domainId, row]) => ({
+          id: row.id,
+          domainId,
+          domainName: row.domainName,
+          mode: row.mode,
+          document: row.document,
+          sha256: sha(`${row.id}:${row.rowVersion}`),
+          rowVersion: row.rowVersion,
+          updatedAt: row.updatedAt,
+        })),
+        presets: PRESETS,
+        hardDeleteAvailable: HARD_DELETE_AVAILABLE,
+      });
+    },
+  ),
+  ApiModeRemediationController_putPolicy_v1: guarded(
+    'ApiModeRemediationController_putPolicy_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const org = orgState(p.organizationId);
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const invalid = policyBodyError(body);
+        if (invalid) return invalid;
+        const current = org.policy?.rowVersion ?? null;
+        if (body.expectedRowVersion !== current) return policyConflict(current);
+        const created = org.policy === null;
+        org.policy = {
+          id: org.policy?.id ?? stableUuid(`${p.organizationId}:remediation-policy`),
+          mode: body.mode as PolicyMode,
+          document: body.document as PolicyDocument,
+          rowVersion: (current ?? 0) + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        return ok('ApiModeRemediationController_putPolicy_v1', {
+          scope: 'organization',
+          id: org.policy.id,
+          domainId: null,
+          mode: org.policy.mode,
+          document: org.policy.document,
+          sha256: sha(`${org.policy.id}:${org.policy.rowVersion}`),
+          rowVersion: org.policy.rowVersion,
+          updatedAt: org.policy.updatedAt,
+          created,
+        });
+      }),
+  ),
+  ApiModeRemediationController_putDomainPolicy_v1: guarded(
+    'ApiModeRemediationController_putDomainPolicy_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const domain = findDomain(p.organizationId, request.params.domainId);
+        if (!domain) return apiError(404, 'domain_not_found', 'Domain not found');
+        const org = orgState(p.organizationId);
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const invalid = policyBodyError(body);
+        if (invalid) return invalid;
+        const existing = org.domainPolicies.get(domain.domain.id);
+        const current = existing?.rowVersion ?? null;
+        if (body.expectedRowVersion !== current) return policyConflict(current);
+        const row = {
+          id: existing?.id ?? stableUuid(`${domain.domain.id}:remediation-policy`),
+          domainName: domain.domain.name,
+          mode: body.mode as PolicyMode,
+          document: body.document as PolicyDocument,
+          rowVersion: (current ?? 0) + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        org.domainPolicies.set(domain.domain.id, row);
+        return ok('ApiModeRemediationController_putDomainPolicy_v1', {
+          scope: 'domain',
+          id: row.id,
+          domainId: domain.domain.id,
+          mode: row.mode,
+          document: row.document,
+          sha256: sha(`${row.id}:${row.rowVersion}`),
+          rowVersion: row.rowVersion,
+          updatedAt: row.updatedAt,
+          created: existing === undefined,
+        });
+      }),
+  ),
+  ApiModeRemediationController_deleteDomainPolicy_v1: guarded(
+    'ApiModeRemediationController_deleteDomainPolicy_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const domain = findDomain(p.organizationId, request.params.domainId);
+        if (!domain) return apiError(404, 'domain_not_found', 'Domain not found');
+        orgState(p.organizationId).domainPolicies.delete(domain.domain.id);
+        return { status: 204 };
+      }),
+  ),
+  ApiModeRemediationController_list_v1: guarded(
+    'ApiModeRemediationController_list_v1',
+    (request, p) => {
+      const q = request.query;
+      const from = q.get('from') ? Date.parse(q.get('from')!) : Date.now() - 7 * DAY;
+      const to = q.get('to') ? Date.parse(q.get('to')!) : Date.now() + HOUR;
+      if (to - from > 31 * DAY)
+        return apiError(400, 'validation_failed', ['to: range longer than 31 days']);
+      const inList = (name: string, value: string | null) =>
+        !q.get(name) || (q.get(name) ?? '').split(',').includes(value ?? '');
+      const rows = orgState(p.organizationId)
+        .actions.filter((a) => {
+          const at = Date.parse(a.createdAt);
+          return (
+            at >= from &&
+            at < to &&
+            inList('status', a.status) &&
+            inList('action', a.action) &&
+            inList('trigger', a.trigger) &&
+            inList('mailboxId', a.mailbox.id) &&
+            inList('connectionId', a.connectionId) &&
+            inList('detectionId', a.detectionId)
+          );
+        })
+        .map(listView);
+      return { status: 200, body: paginate(rows, q) };
+    },
+  ),
+  ApiModeRemediationController_detail_v1: guarded(
+    'ApiModeRemediationController_detail_v1',
+    (request, p) => {
+      const action = orgState(p.organizationId).actions.find(
+        (a) => a.id === request.params.remediationId,
+      );
+      return action ? ok('ApiModeRemediationController_detail_v1', action) : remediationNotFound();
+    },
+  ),
+  ApiModeRemediationController_retry_v1: guarded(
+    'ApiModeRemediationController_retry_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const org = orgState(p.organizationId);
+        const action = org.actions.find((a) => a.id === request.params.remediationId);
+        if (!action) return remediationNotFound();
+        if (action.status !== 'failed')
+          return apiError(409, 'api_mode_remediation_not_retryable', 'Only failed actions', {
+            cause: action.status,
+          });
+        if (action.action === 'restore_inbox' && action.quarantineEntryId)
+          return apiError(409, 'api_mode_remediation_not_retryable', 'Release the entry again', {
+            cause: 'use_quarantine_release',
+          });
+        if (org.actions.some((a) => a.detectionId === action.detectionId && a.status === 'pending'))
+          return apiError(409, 'api_mode_remediation_in_progress', 'An action is pending');
+        const now = new Date().toISOString();
+        Object.assign(action, {
+          status: 'pending',
+          attempts: 0,
+          locateAttempts: 0,
+          lastErrorCode: null,
+          lastHttpStatus: null,
+          reasonCode: null,
+          nextAttemptAt: now,
+          completedAt: null,
+          latencyMs: null,
+          updatedAt: now,
+        } satisfies Partial<Action>);
+        const detection = org.detections.find((d) => d.id === action.detectionId);
+        if (detection) applyToDetection(detection, action);
+        return ok('ApiModeRemediationController_retry_v1', listView(action), 202);
+      }),
+  ),
+  ApiModeRemediationController_remediate_v1: guarded(
+    'ApiModeRemediationController_remediate_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const org = orgState(p.organizationId);
+        const detection = org.detections.find((d) => d.id === request.params.detectionId);
+        if (!detection) return detectionNotFound();
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const invalid = reasonInvalid(body.reason);
+        if (invalid) return invalid;
+        if (body.action === 'hard_delete')
+          return apiError(422, 'api_mode_hard_delete_not_manual', 'Hard delete is never manual');
+        if (!['move_quarantine', 'move_junk', 'tag', 'soft_delete'].includes(String(body.action)))
+          return apiError(400, 'validation_failed', ['action: a manual mailbox action']);
+        if (detection.status !== 'scanned' && detection.status !== 'scan_failed')
+          return apiError(409, 'api_mode_detection_not_remediable', 'Not scanned', {
+            status: detection.status,
+          });
+        if (rowOf(p.organizationId, detection.connectionId)?.grant?.status !== 'active')
+          return apiError(409, 'api_mode_mailbox_access_required', 'Mailbox access required');
+        if (org.actions.some((a) => a.detectionId === detection.id && a.status === 'pending'))
+          return apiError(409, 'api_mode_remediation_in_progress', 'An action is pending');
+        if (
+          detection.remediationState === 'remediated' &&
+          detection.remediationAction === body.action
+        )
+          return apiError(409, 'api_mode_remediation_already_applied', 'Already applied', {
+            action: String(body.action),
+          });
+        const action = newAction(detection, {
+          seed: `${detection.id}:admin:${Date.now()}`,
+          action: body.action as Action['action'],
+          trigger: 'admin',
+          status: 'pending',
+          at: new Date().toISOString(),
+          reason: String(body.reason).trim(),
+          userId: userOf(request),
+        });
+        org.actions.unshift(action);
+        applyToDetection(detection, action);
+        return ok(
+          'ApiModeRemediationController_remediate_v1',
+          { detectionId: detection.id, remediation: listView(action) },
+          202,
+        );
+      }),
+  ),
+  ApiModeRemediationController_restore_v1: guarded(
+    'ApiModeRemediationController_restore_v1',
+    (request, p) =>
+      keyed(request, () => {
+        const org = orgState(p.organizationId);
+        const detection = org.detections.find((d) => d.id === request.params.detectionId);
+        if (!detection) return detectionNotFound();
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const invalid = reasonInvalid(body.reason);
+        if (invalid) return invalid;
+        if (detection.remediationState !== 'remediated')
+          return apiError(409, 'api_mode_nothing_to_restore', 'Nothing to restore', {
+            remediationState: detection.remediationState,
+          });
+        if (detection.remediationAction === 'hard_delete')
+          return apiError(409, 'api_mode_restore_not_possible', 'Cannot be restored', {
+            cause: 'hard_delete',
+          });
+        const reason = String(body.reason).trim();
+        if (detection.remediationAction === 'tag') {
+          const action = newAction(detection, {
+            seed: `${detection.id}:remove-tag:${Date.now()}`,
+            action: 'remove_tag',
+            trigger: 'admin',
+            status: 'pending',
+            at: new Date().toISOString(),
+            reason,
+            userId: userOf(request),
+          });
+          action.reverses = detection.remediationId;
+          org.actions.unshift(action);
+          applyToDetection(detection, action);
+          return ok(
+            'ApiModeRemediationController_restore_v1',
+            {
+              detectionId: detection.id,
+              via: 'mailbox_action',
+              remediation: listView(action),
+              release: null,
+            },
+            202,
+          );
+        }
+        if (!p.permissions.includes('quarantine:release'))
+          return apiError(403, 'quarantine_permission_required', 'quarantine:release required');
+        if (!detection.quarantineEntryId)
+          return apiError(409, 'api_mode_restore_not_possible', 'Cannot be restored', {
+            cause: 'entry_missing',
+          });
+        const released = releaseMailboxEntry(detection.quarantineEntryId, request, reason);
+        if (released.status >= 300) return released;
+        return ok(
+          'ApiModeRemediationController_restore_v1',
+          {
+            detectionId: detection.id,
+            via: 'quarantine_release',
+            remediation: null,
+            release: released.body as NonNullable<
+              SuccessBody<'ApiModeRemediationController_restore_v1'>['release']
+            >,
+          },
+          202,
+        );
+      }),
+  ),
 };

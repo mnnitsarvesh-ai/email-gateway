@@ -425,6 +425,31 @@ data:
   API_MODE_DEDUPE_WINDOW_HOURS: '168'
   API_MODE_HYBRID_LINK_WINDOW_HOURS: '72'
   API_MODE_COUNTER_FLUSH_SECONDS: '30'
+  # Step API-2 remediation (docs/plan/steps/36-api-mode-remediation.md R17, ADR-0101/0102): the
+  # mailbox-worker remediate role (claim loop, attempts, back-off), the gateway's container names
+  # in customer mailboxes (platform-wide, never per tenant), the health thresholds and the action
+  # retention. Nothing secret. The mailbox-worker also reads QUARANTINE_MAX_HOLD_DAYS /
+  # QUARANTINE_MAX_REVIEW_DAYS above (expiry of mailbox-located quarantine entries).
+  API_MODE_REMEDIATION_TICK_MS: '2000'
+  API_MODE_REMEDIATION_BATCH: '50'
+  API_MODE_REMEDIATION_LEASE_SECONDS: '120'
+  API_MODE_REMEDIATION_CONCURRENCY: '8'
+  API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: '2'
+  API_MODE_REMEDIATION_MAX_ATTEMPTS: '8'
+  API_MODE_REMEDIATION_LOCATE_ATTEMPTS: '6'
+  API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS: '3600'
+  API_MODE_QUARANTINE_FOLDER_NAME: 'Email Gateway Quarantine'
+  API_MODE_QUARANTINE_FOLDER_HIDDEN: 'true'
+  API_MODE_GMAIL_QUARANTINE_LABEL: 'Email Gateway/Quarantine'
+  API_MODE_TAG_NAME: 'Email Gateway: Suspicious'
+  # mailbox-worker and api: hard_delete in tenant rules (irreversible on Microsoft 365, Trash on
+  # Google). Off; enable per overlay only with the product owner's approval (R-I2).
+  API_MODE_HARD_DELETE_ENABLED: 'false'
+  API_MODE_REMEDIATION_FAILURE_WARN_PERCENT: '10'
+  API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT: '50'
+  API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES: '15'
+  API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: '60'
+  API_MODE_REMEDIATION_RETENTION_DAYS: '400'
   # api: Graph notification requests per client IP per minute on the public callback routes.
   API_MODE_NOTIFICATION_RATE_PER_MINUTE: '1200'
   # Client ids of the operator's mailbox-access app / service account (profiles

@@ -373,8 +373,9 @@ export async function mailboxByAddress(
 }
 
 /**
- * Removes every step API-1 row of the organizations (the api purge's order: copies, dedupe keys,
- * addresses, mailboxes, counters, connections) and the mailbox-worker's Redis keys of their
+ * Removes every step API-1 row of the organizations (the api purge's order: since step API-2 the
+ * remediation actions and policies first, then copies, dedupe keys, addresses, mailboxes, counters,
+ * connections) and the mailbox-worker's Redis keys of their
  * API-mode connections (budgets, throttle pauses, counter hashes).
  */
 export async function purgeApiModeRows(
@@ -391,6 +392,10 @@ export async function purgeApiModeRows(
     where,
     select: { id: true, publicId: true },
   });
+  // Step API-2 (§3.4): remediation actions reference mailboxes and connections (RESTRICT) and
+  // policies reference domains (RESTRICT); the remediation decided on the suite's copies goes first.
+  await prisma.apiRemediationAction.deleteMany({ where });
+  await prisma.apiRemediationPolicy.deleteMany({ where });
   await prisma.apiMessageCopy.deleteMany({ where });
   await prisma.apiCopyDedupeKey.deleteMany({ where });
   await prisma.apiMailboxAddress.deleteMany({ where });

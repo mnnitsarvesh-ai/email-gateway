@@ -59,6 +59,7 @@ import {
 import {
   ZETA,
   ZETA_DETECTIONS,
+  ZETA_REMEDIATION_COPIES,
   ZETA_DOMAINS,
   ZETA_GOOGLE_NAME,
   ZETA_M365_NAME,
@@ -766,6 +767,14 @@ export async function seed(): Promise<SeedSummary> {
         org: 'zeta',
         name: 'Zeta Read-only',
       },
+      // Step API-2: a zeta security analyst with MFA (approves the restore of a mailbox entry
+      // that zetaAdmin requested: separation of duties).
+      zetaApprover: {
+        email: `approver@${ZETA_DOMAINS.api}`,
+        roles: ['security_analyst'],
+        org: 'zeta',
+        name: 'Zeta Approver',
+      },
       platformAdmin: {
         email: 'platform-admin@e2e-portal.test',
         roles: ['platform_admin'],
@@ -797,6 +806,16 @@ export async function seed(): Promise<SeedSummary> {
       data: { mfaEnabled: true, mfaSecretCiphertext: sealMfaSecret(approverSecret, approverId) },
     });
     users.alphaApprover.totpSecret = approverSecret;
+    const zetaApproverSecret = base32Encode(randomBytes(20));
+    const zetaApproverId = userIds.get(spec.zetaApprover.email)!;
+    await p.user.update({
+      where: { id: zetaApproverId },
+      data: {
+        mfaEnabled: true,
+        mfaSecretCiphertext: sealMfaSecret(zetaApproverSecret, zetaApproverId),
+      },
+    });
+    users.zetaApprover.totpSecret = zetaApproverSecret;
     const auditorSecret = base32Encode(randomBytes(20));
     const auditorId = userIds.get(spec.alphaAuditorMfa.email)!;
     await p.user.update({
@@ -1262,8 +1281,8 @@ export async function seed(): Promise<SeedSummary> {
         deltaRetention === 2 &&
         deltaHolds === 1 &&
         zetaMailboxes === ZETA_MAILBOXES.length &&
-        zetaCopies === ZETA_DETECTIONS &&
-        zetaUsers === 2
+        zetaCopies === ZETA_DETECTIONS + ZETA_REMEDIATION_COPIES &&
+        zetaUsers === 3
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);
 

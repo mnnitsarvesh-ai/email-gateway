@@ -27,6 +27,9 @@ const STATUS_TEXT: Record<string, string> = {
   refused: 'Refused (self-release no longer allowed or a hard block).',
   stale: 'Superseded by a later decision.',
   message_busy: 'The message was busy; the entry returned to held.',
+  // Step API-2 (mailbox entries: a release restores the message to the Inbox).
+  restored: 'Restored: the message was moved back to the Inbox.',
+  restore_failed: 'The restore to the Inbox failed; the entry returned to held.',
 };
 
 /** Release status (`/quarantine/releases/[releaseId]`, linked from release e-mails). */
@@ -72,7 +75,7 @@ function ReleaseStatusContent({ releaseId }: { releaseId: string }) {
       <PageHeader
         title="Release status"
         breadcrumbs={breadcrumbs}
-        description="Releases are executed by the release executor (policy engine), which re-validates the message against the current policy before delivery."
+        description="Releases of gateway entries are executed by the release executor (policy engine), which re-validates the message against the current policy before delivery. Releases of mailbox entries (API mode) restore the message to the Inbox through the provider API."
       />
       <div role="status" aria-live="polite" className="flex flex-wrap items-center gap-2 text-sm">
         <EnumBadge value={r.status} tones={RELEASE_STATUS_TONE} />

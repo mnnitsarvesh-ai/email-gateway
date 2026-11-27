@@ -47,6 +47,7 @@ import { QuarantineWriteRepository } from '../repositories/quarantine-write.repo
 import { QuarantineObjectStore } from './quarantine-object-store';
 import { QuarantineContext } from './quarantine-context';
 import { type LockedEntry, QuarantineEntryOps, actorOf } from './quarantine-entry-ops';
+import { isMailboxEntry, QuarantineMailboxOps } from './quarantine-mailbox-ops';
 import { QuarantineMetrics } from './quarantine-metrics';
 import type { MutationInput } from './quarantine-release.service';
 import { QuarantineWriter } from './quarantine-writer';
@@ -89,7 +90,11 @@ const levelOf = (levels: readonly string[]): QuarantineRiskLevel | null => {
  * under the message lock with CAS on the entry. Reject and delete discard the recipient and
  * apply E17/E18 when the message has no other live entry and no recipient still pending,
  * deferred or delivered; delete is refused under an active legal hold or archive retention
- * (`409`, audited `quarantine.delete_refused`) and schedules the object purge per Q17.
+ * (`409`, audited `quarantine.delete_refused`) and schedules the object purge per Q17. Step
+ * API-2 R10.4 (ADR-0102): a mailbox-located entry's message stays in the recipient's mailbox and
+ * its EML follows the message retention, so reject only ends the entry (no recipient, lifecycle
+ * or object change) and delete ends it with `mailbox_deleted`, queues a `soft_delete` mailbox
+ * action unless the message already sits in the deleted items, and schedules no purge.
  */
 @Injectable()
 export class QuarantineDispositionService {
@@ -104,6 +109,7 @@ export class QuarantineDispositionService {
     private readonly lifecycle: LifecycleGateway,
     private readonly messages: MessageLifecycleRepository,
     private readonly metrics: QuarantineMetrics,
+    private readonly mailbox: QuarantineMailboxOps,
   ) {}
 
   async reject(input: MutationInput<RejectBody>): Promise<IdempotentResult<EntryStateResponse>> {
@@ -279,6 +285,16 @@ export class QuarantineDispositionService {
         keyHash: r.keyHash,
       },
     );
+    if (isMailboxEntry(locked.entry)) {
+      // R10.4: no lifecycle edge, no recipient or object change; the message stays in place.
+      return {
+        entryId: moved.publicId,
+        state: 'rejected',
+        rowVersion: moved.rowVersion,
+        messageTransition: null,
+        purge: null,
+      };
+    }
     await this.ops.discardRecipient(tx, scope, locked);
     const edge = await this.ops.finishMessage(
       tx,
@@ -310,6 +326,9 @@ export class QuarantineDispositionService {
       throw stateConflict(entry.state);
     }
     const wasLive = !isTerminalState(entry.state);
+    if (isMailboxEntry(entry)) {
+      return this.deleteMailboxEntry(tx, input, locked, keyHash, now, wasLive);
+    }
     // The recipient as it will be after the delete (Q17: facts "after the action").
     const disposal = await this.disposal(tx, scope, locked, now, { discardsRecipient: wasLive });
     if (!disposal.deleteAllowed && disposal.refusal !== null) {
@@ -370,6 +389,69 @@ export class QuarantineDispositionService {
       rowVersion: moved.rowVersion,
       messageTransition: edge,
       purge,
+    };
+  }
+
+  /**
+   * R10.4: a mailbox-located entry → `deleted` (`quarantine_actions` `mailbox_deleted`), the
+   * message soft-deleted in the mailbox by the mailbox-worker unless it already sits in the
+   * deleted items; no recipient, lifecycle or object change and no purge request (the EML follows
+   * the message retention; legal holds and archive retention therefore never refuse it).
+   */
+  private async deleteMailboxEntry(
+    tx: Tx,
+    input: MutationInput<DeleteBody>,
+    locked: LockedEntry,
+    keyHash: string,
+    now: Date,
+    wasLive: boolean,
+  ): Promise<EntryStateResponse> {
+    const { scope, principal, body } = input;
+    const { entry } = locked;
+    const actor = actorOf(principal);
+    if (wasLive) await this.writes.cancelPendingApprovals(tx, scope, entry.id, now);
+    const moved = await this.ops.move(tx, scope, entry, 'deleted', 'delete', now, {
+      decidedAt: now,
+      decidedByUserId: actor.actorUserId,
+      decidedByType: actor.actorType,
+      terminalReason: 'delete',
+    });
+    const mailboxAction = await this.mailbox.queueSoftDelete(tx, {
+      scope,
+      principal,
+      entry,
+      reason: body.reason,
+      now,
+    });
+    await this.ops.action(tx, scope, principal, moved, 'mailbox_deleted', {
+      reason: body.reason,
+      result: `soft_delete_${mailboxAction}`,
+      details: { container: entry.mailboxContainer },
+      keyHash,
+    });
+    await this.writer.record(tx, {
+      principal,
+      scope,
+      client: input.client,
+      action: QUARANTINE_AUDIT.deleted,
+      resourceType: QUARANTINE_RESOURCE.entry,
+      resourceId: entry.publicId,
+      metadata: {
+        entryId: entry.publicId,
+        fromState: entry.state,
+        location: 'mailbox',
+        mailboxAction: `soft_delete_${mailboxAction}`,
+        messageTransition: null,
+        purge: null,
+        idempotencyKeyHash: keyHash,
+      },
+    });
+    return {
+      entryId: moved.publicId,
+      state: 'deleted',
+      rowVersion: moved.rowVersion,
+      messageTransition: null,
+      purge: null,
     };
   }
 

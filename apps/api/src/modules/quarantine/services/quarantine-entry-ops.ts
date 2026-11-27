@@ -33,6 +33,7 @@ import {
   type EntryUpdate,
   QuarantineWriteRepository,
 } from '../repositories/quarantine-write.repository';
+import { isMailboxEntry, QuarantineMailboxOps } from './quarantine-mailbox-ops';
 
 type Tx = Prisma.TransactionClient;
 
@@ -80,6 +81,7 @@ export class QuarantineEntryOps {
   constructor(
     private readonly writes: QuarantineWriteRepository,
     private readonly lifecycle: LifecycleGateway,
+    private readonly mailbox: QuarantineMailboxOps,
   ) {}
 
   correlationId(): string {
@@ -223,7 +225,10 @@ export class QuarantineEntryOps {
   /**
    * Queues a release for the executor (Q13.1, Q14): the entry → `releasing`, its action row
    * (`release_queued`, `self_release` or `approve_release`), a `pending` release log with the
-   * pre-check, and `mail.quarantine.release_requested.v1` in the outbox.
+   * pre-check, and `mail.quarantine.release_requested.v1` in the outbox. Step API-2 R10.2
+   * (ADR-0102): a mailbox-located entry gets the `restore_inbox` action row for the
+   * mailbox-worker instead of the outbox event (a release of such an entry is a restore to the
+   * Inbox, never a delivery).
    */
   async queueRelease(
     tx: Tx,
@@ -256,7 +261,7 @@ export class QuarantineEntryOps {
     });
     const releaseId = uuidv7(now.getTime());
     const actor = actorOf(principal);
-    await this.writes.insertReleaseLog(tx, {
+    const releaseLogId = await this.writes.insertReleaseLog(tx, {
       organizationId: scope.organizationId,
       quarantineMessageId: moved.id,
       actionId,
@@ -268,6 +273,18 @@ export class QuarantineEntryOps {
       releasedTo: moved.recipientAddress,
       precheck: input.precheck,
     });
+    if (isMailboxEntry(moved)) {
+      await this.mailbox.queueRestore(tx, {
+        scope,
+        principal,
+        entry: moved,
+        mode: input.mode,
+        releaseLogId,
+        reason: input.reason,
+        now,
+      });
+      return { releaseId, entry: moved };
+    }
     const payload = quarantineReleaseRequestedV1.parse({
       releaseId,
       messageId: input.locked.ref.id.toString(),

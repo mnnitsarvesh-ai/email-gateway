@@ -75,6 +75,17 @@ export interface EntryRow {
   approvalRequestId: bigint | null;
   objectPurgedAt: Date | null;
   rowVersion: number;
+  /**
+   * Step API-2 (R9, R10, ADR-0102): where the message is. `mailbox` entries are API-mode copies
+   * moved inside the recipient's mailbox (release = restore to the Inbox by the mailbox-worker);
+   * for them `lifecycleRound` is the copy's remediation generation.
+   */
+  location: 'gateway' | 'mailbox';
+  mailboxContainer: 'quarantine_folder' | 'junk' | 'deleted_items' | null;
+  apiCopyId: bigint | null;
+  apiCopyReceivedAt: Date | null;
+  apiMailboxId: bigint | null;
+  apiRemediationActionId: bigint | null;
 }
 
 /** A `quarantine_approval_requests` row with the public ids of its references. */
@@ -236,6 +247,99 @@ export function entrySummary(row: EntryRow, refs: EntryRefs): QuarantineEntrySum
     sizeBytes: row.sizeBytes,
     approvalRequestId: refs.approvalPublicId,
     rowVersion: row.rowVersion,
+  };
+}
+
+/** Step API-2 R10.5: the location block of an entry view. */
+export type EntryLocationView =
+  | { kind: 'gateway' }
+  | {
+      kind: 'mailbox';
+      container: 'quarantine_folder' | 'junk' | 'deleted_items';
+      mailboxAddress: string;
+      provider: 'microsoft_365' | 'google_workspace' | null;
+      connectionId?: string;
+      detectionId: string | null;
+      remediationId: string | null;
+      remediationStatus:
+        | 'pending'
+        | 'in_progress'
+        | 'succeeded'
+        | 'failed'
+        | 'skipped'
+        | 'simulated'
+        | 'cancelled'
+        | null;
+    };
+
+export type EntrySummaryView = QuarantineEntrySummary & { location: EntryLocationView };
+export type EntryDetailView = QuarantineEntryDetail & { location: EntryLocationView };
+
+/** The replica facts of the location blocks (see QuarantineMailboxRepository.locationFacts). */
+export interface LocationFacts {
+  mailboxes: ReadonlyMap<bigint, { address: string; provider: string; connectionPublicId: string }>;
+  copies: ReadonlyMap<string, string>;
+  actions: ReadonlyMap<bigint, { publicId: string; status: string }>;
+}
+
+const PROVIDERS = new Set(['microsoft_365', 'google_workspace']);
+const ACTION_STATUSES = new Set([
+  'pending',
+  'in_progress',
+  'succeeded',
+  'failed',
+  'skipped',
+  'simulated',
+  'cancelled',
+]);
+
+/**
+ * R10.5: `{ kind: 'gateway' }`, or the mailbox block: container, mailbox address (masked like the
+ * recipient when the caller sees recipients masked), provider, connection (operator routes only),
+ * detection and the latest remediation action of the entry. Provider and detection are null once
+ * the API-mode rows are past their retention; the address then falls back to the recipient.
+ */
+export function entryLocation(
+  row: Pick<
+    EntryRow,
+    | 'id'
+    | 'location'
+    | 'mailboxContainer'
+    | 'apiCopyId'
+    | 'apiCopyReceivedAt'
+    | 'apiMailboxId'
+    | 'recipientAddress'
+  >,
+  facts: LocationFacts,
+  o: { self: boolean; maskRecipient: boolean },
+): EntryLocationView {
+  if (row.location !== 'mailbox') return { kind: 'gateway' };
+  const mailbox = row.apiMailboxId === null ? undefined : facts.mailboxes.get(row.apiMailboxId);
+  const address = mailbox?.address ?? row.recipientAddress;
+  const detectionId =
+    row.apiCopyId === null || row.apiCopyReceivedAt === null
+      ? null
+      : (facts.copies.get(`${row.apiCopyId.toString()}:${row.apiCopyReceivedAt.getTime()}`) ??
+        null);
+  const action = facts.actions.get(row.id);
+  return {
+    kind: 'mailbox',
+    container: row.mailboxContainer ?? 'quarantine_folder',
+    mailboxAddress: o.maskRecipient ? maskAddress(address) : address,
+    provider:
+      mailbox !== undefined && PROVIDERS.has(mailbox.provider)
+        ? (mailbox.provider as 'microsoft_365' | 'google_workspace')
+        : null,
+    ...(!o.self && mailbox !== undefined && { connectionId: mailbox.connectionPublicId }),
+    detectionId,
+    remediationId: action?.publicId ?? null,
+    remediationStatus:
+      action !== undefined && ACTION_STATUSES.has(action.status)
+        ? (action.status as Exclude<
+            Extract<EntryLocationView, { kind: 'mailbox' }>['remediationStatus'],
+            null
+          >)
+        : null,
   };
 }
 

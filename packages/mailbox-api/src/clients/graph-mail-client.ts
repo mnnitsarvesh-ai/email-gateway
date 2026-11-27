@@ -1,7 +1,10 @@
 /**
- * Microsoft Graph mail client of API mode (design D9, D10.3, D10.4; family `graph`). Reads only:
- * users, the Inbox delta (no message content in the delta), the MIME content of one message;
- * the only writes are change-notification subscriptions (create, renew, delete). Tokens come from
+ * Microsoft Graph mail client of API mode (design D9, D10.3, D10.4; family `graph`). API-1 reads:
+ * users, the Inbox delta (no message content in the delta), the MIME content of one message, and
+ * writes change-notification subscriptions (create, renew, delete). Step API-2 (note 36 R3, R5.3,
+ * R6.2) adds the remediation calls: locate by Internet Message-ID, the message's folder and
+ * categories, well-known folder ids, the hidden quarantine folder (ensure), move (returns the new
+ * id), categories and permanent delete. Tokens come from
  * the `TokenSource` of the connection's active `m365.mailbox_remediation` grant (the worker
  * adapts 8.2's `ProviderTokenService.getAccessToken(grant, signal, { resource: 'graph' })`).
  *
@@ -14,6 +17,7 @@ import { cursorExpired, isGraphCursorExpired, MailboxApiError, toMailboxApiError
 import {
   enc,
   guardedCall,
+  hasControlCharacter,
   normalizedStream,
   type MailboxClientContext,
   type MailboxContentStream,
@@ -54,6 +58,49 @@ const deltaPageSchema = z.object({
   '@odata.deltaLink': LINK.optional(),
 });
 
+const GRAPH_ID = z.string().min(1).max(512);
+const CATEGORY = z.string().max(255);
+
+const messageRefSchema = z.object({
+  id: GRAPH_ID,
+  parentFolderId: GRAPH_ID.nullable().optional(),
+  isDraft: z.boolean().nullable().optional(),
+});
+const messageListSchema = z.object({ value: z.array(messageRefSchema).max(1000) });
+const messageStateSchema = z.object({
+  id: GRAPH_ID,
+  parentFolderId: GRAPH_ID.nullable().optional(),
+  categories: z.array(CATEGORY).max(250).nullable().optional(),
+});
+const folderSchema = z.object({
+  id: GRAPH_ID,
+  displayName: z.string().max(1024).nullable().optional(),
+  isHidden: z.boolean().nullable().optional(),
+});
+const folderListSchema = z.object({ value: z.array(folderSchema).max(1000) });
+
+/** Graph's well-known folder names the remediation uses (R6.2). */
+export const GRAPH_REMEDIATION_WELL_KNOWN_FOLDERS = [
+  'inbox',
+  'junkemail',
+  'sentitems',
+  'recoverableitemsdeletions',
+  'msgfolderroot',
+] as const;
+export type GraphRemediationWellKnownFolder = (typeof GRAPH_REMEDIATION_WELL_KNOWN_FOLDERS)[number];
+
+/** Matches the locate step asks for (R5.3). */
+export const GRAPH_LOCATE_TOP = 10;
+/** RFC 5322 line limit: longer ids are refused before any call. */
+const MESSAGE_ID_MAX = 998;
+
+/** OData string literal: single quotes doubled (OData ABNF `SQUOTE-in-string`). */
+export function odataStringLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+const badRequest = () => new MailboxApiError('bad_request', { retryable: false });
+
 const subscriptionSchema = z.object({
   id: z.string().min(1).max(128),
   expirationDateTime: z.string().max(64),
@@ -91,6 +138,20 @@ export interface GraphDeltaPage {
   /** Exactly one of `nextLink` / `deltaLink` is set. Both are opaque cursors (never logged). */
   nextLink: string | null;
   deltaLink: string | null;
+}
+
+/** A located message (R5.3). */
+export interface GraphMessageRef {
+  id: string;
+  parentFolderId: string | null;
+  isDraft: boolean;
+}
+
+/** A message's folder and categories (the state read before acting, R5.4). */
+export interface GraphMessageState {
+  id: string;
+  parentFolderId: string | null;
+  categories: string[];
 }
 
 export interface CreateGraphSubscriptionInput {
@@ -316,6 +377,233 @@ export class GraphMailClient {
         if (toMailboxApiError(error).code === 'not_found') return 'not_found' as const;
         throw error;
       }
+    });
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Step API-2 remediation (note 36 R3, R5.3, R5.4, R6.2). Path templates never carry ids.
+  // -------------------------------------------------------------------------------------------
+
+  /**
+   * Locate step: `GET /v1.0/users/{u}/messages?$filter=internetMessageId eq '<id>'&$select=id,
+   * parentFolderId,isDraft&$top=10` (every folder of the mailbox). The id keeps (or gets) its
+   * angle brackets as Graph stores it; quotes are escaped per OData. A missing, over-long or
+   * control-character id fails `bad_request` without a call.
+   */
+  findMessagesByInternetMessageId(
+    userId: string,
+    internetMessageId: string,
+    signal: AbortSignal,
+  ): Promise<GraphMessageRef[]> {
+    const trimmed = internetMessageId.trim();
+    const bracketed = trimmed.startsWith('<') ? trimmed : `<${trimmed}>`;
+    if (
+      trimmed.length === 0 ||
+      bracketed.length > MESSAGE_ID_MAX ||
+      hasControlCharacter(bracketed)
+    ) {
+      return Promise.reject(badRequest());
+    }
+    return guardedCall(this.context, 'graph', signal, async () => {
+      const filter = `internetMessageId eq ${odataStringLiteral(bracketed)}`;
+      const response = await this.context.http.request({
+        family: 'graph',
+        method: 'GET',
+        url:
+          `/v1.0/users/${enc(userId)}/messages?$filter=${enc(filter)}` +
+          `&$select=id,parentFolderId,isDraft&$top=${GRAPH_LOCATE_TOP}`,
+        pathTemplate: '/v1.0/users/{id}/messages',
+        token: this.token,
+        signal,
+        schema: messageListSchema,
+      });
+      return response.data.value.map((m) => ({
+        id: m.id,
+        parentFolderId: m.parentFolderId ?? null,
+        isDraft: m.isDraft === true,
+      }));
+    });
+  }
+
+  /** `GET …/messages/{id}?$select=id,parentFolderId,categories` (the state before acting). */
+  getMessageState(
+    userId: string,
+    messageId: string,
+    signal: AbortSignal,
+  ): Promise<GraphMessageState> {
+    return guardedCall(this.context, 'graph', signal, async () => {
+      const response = await this.context.http.request({
+        family: 'graph',
+        method: 'GET',
+        url: `/v1.0/users/${enc(userId)}/messages/${enc(messageId)}?$select=id,parentFolderId,categories`,
+        pathTemplate: '/v1.0/users/{id}/messages/{mid}',
+        token: this.token,
+        signal,
+        schema: messageStateSchema,
+      });
+      return {
+        id: response.data.id,
+        parentFolderId: response.data.parentFolderId ?? null,
+        categories: response.data.categories ?? [],
+      };
+    });
+  }
+
+  /** `GET …/mailFolders/{wellKnownName}?$select=id`: the folder id of a well-known folder. */
+  wellKnownFolderId(
+    userId: string,
+    name: GraphRemediationWellKnownFolder,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (!(GRAPH_REMEDIATION_WELL_KNOWN_FOLDERS as readonly string[]).includes(name)) {
+      return Promise.reject(badRequest());
+    }
+    return guardedCall(this.context, 'graph', signal, async () => {
+      const response = await this.context.http.request({
+        family: 'graph',
+        method: 'GET',
+        url: `/v1.0/users/${enc(userId)}/mailFolders/${name}?$select=id`,
+        pathTemplate: '/v1.0/users/{id}/mailFolders/{wellKnown}',
+        token: this.token,
+        signal,
+        schema: folderSchema,
+      });
+      return response.data.id;
+    });
+  }
+
+  /**
+   * Ensures a child folder of a well-known folder (R3 `move_quarantine`): looks it up first with
+   * `includeHiddenFolders=true&$filter=displayName eq '<name>'` (a hidden folder is reused), then
+   * creates it (`isHidden` as asked). A `409` (created concurrently) looks it up once more.
+   */
+  async ensureChildFolder(
+    userId: string,
+    parentWellKnown: GraphRemediationWellKnownFolder,
+    displayName: string,
+    hidden: boolean,
+    signal: AbortSignal,
+  ): Promise<{ id: string; created: boolean }> {
+    if (
+      !(GRAPH_REMEDIATION_WELL_KNOWN_FOLDERS as readonly string[]).includes(parentWellKnown) ||
+      displayName.trim().length === 0 ||
+      displayName.length > 255 ||
+      hasControlCharacter(displayName)
+    ) {
+      throw badRequest();
+    }
+    const base = `/v1.0/users/${enc(userId)}/mailFolders/${parentWellKnown}/childFolders`;
+    const pathTemplate = '/v1.0/users/{id}/mailFolders/{wellKnown}/childFolders';
+    const lookup = () =>
+      guardedCall(this.context, 'graph', signal, async () => {
+        const filter = `displayName eq ${odataStringLiteral(displayName)}`;
+        const response = await this.context.http.request({
+          family: 'graph',
+          method: 'GET',
+          url: `${base}?includeHiddenFolders=true&$filter=${enc(filter)}&$select=id,displayName,isHidden`,
+          pathTemplate,
+          token: this.token,
+          signal,
+          schema: folderListSchema,
+        });
+        const wanted = displayName.toLowerCase();
+        return (
+          response.data.value.find((f) => (f.displayName ?? '').toLowerCase() === wanted)?.id ??
+          null
+        );
+      });
+    const existing = await lookup();
+    if (existing !== null) return { id: existing, created: false };
+    try {
+      const created = await guardedCall(this.context, 'graph', signal, async () => {
+        const response = await this.context.http.request({
+          family: 'graph',
+          method: 'POST',
+          url: base,
+          pathTemplate,
+          token: this.token,
+          signal,
+          schema: folderSchema,
+          body: { displayName, isHidden: hidden },
+        });
+        return response.data.id;
+      });
+      return { id: created, created: true };
+    } catch (error) {
+      if (!(error instanceof MailboxApiError) || error.code !== 'conflict') throw error;
+      const raced = await lookup();
+      if (raced === null) throw error;
+      return { id: raced, created: false };
+    }
+  }
+
+  /**
+   * `POST …/messages/{id}/move { destinationId }` (a folder id or a well-known name). Graph
+   * returns the moved message with a **new id** (ids are folder-scoped without immutable ids).
+   */
+  moveMessage(
+    userId: string,
+    messageId: string,
+    destinationId: string,
+    signal: AbortSignal,
+  ): Promise<{ id: string; parentFolderId: string | null }> {
+    return guardedCall(this.context, 'graph', signal, async () => {
+      const response = await this.context.http.request({
+        family: 'graph',
+        method: 'POST',
+        url: `/v1.0/users/${enc(userId)}/messages/${enc(messageId)}/move`,
+        pathTemplate: '/v1.0/users/{id}/messages/{mid}/move',
+        token: this.token,
+        signal,
+        schema: messageRefSchema,
+        body: { destinationId },
+      });
+      return { id: response.data.id, parentFolderId: response.data.parentFolderId ?? null };
+    });
+  }
+
+  /** `PATCH …/messages/{id} { categories }` (the whole list; the caller computes it). */
+  setCategories(
+    userId: string,
+    messageId: string,
+    categories: readonly string[],
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    if (
+      categories.length > 250 ||
+      categories.some((c) => c.length > 255 || hasControlCharacter(c))
+    ) {
+      return Promise.reject(badRequest());
+    }
+    return guardedCall(this.context, 'graph', signal, async () => {
+      const response = await this.context.http.request({
+        family: 'graph',
+        method: 'PATCH',
+        url: `/v1.0/users/${enc(userId)}/messages/${enc(messageId)}`,
+        pathTemplate: '/v1.0/users/{id}/messages/{mid}',
+        token: this.token,
+        signal,
+        schema: messageStateSchema,
+        body: { categories: [...categories] },
+      });
+      return response.data.categories ?? [];
+    });
+  }
+
+  /**
+   * `POST …/messages/{id}/permanentDelete` (`204`): irreversible. Only for an explicit tenant
+   * rule with `API_MODE_HARD_DELETE_ENABLED` (R-I2); never manual.
+   */
+  permanentDelete(userId: string, messageId: string, signal: AbortSignal): Promise<void> {
+    return guardedCall(this.context, 'graph', signal, async () => {
+      await this.context.http.request({
+        family: 'graph',
+        method: 'POST',
+        url: `/v1.0/users/${enc(userId)}/messages/${enc(messageId)}/permanentDelete`,
+        pathTemplate: '/v1.0/users/{id}/messages/{mid}/permanentDelete',
+        token: this.token,
+        signal,
+      });
     });
   }
 }

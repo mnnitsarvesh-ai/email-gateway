@@ -7,14 +7,23 @@ import { RouteGate } from '@/lib/auth/route-gate';
 import { GatedTabs, type TabDefinition } from '@/features/reports/gated-tabs';
 import { CoverageTab } from './coverage-tab';
 import { DetectionsTab } from './detections-tab';
+import { HistoryTab } from './history-tab';
 import { MailboxesTab } from './mailboxes-tab';
 import { MODE_LABEL } from './model';
+import { RemediationTab } from './remediation-tab';
 import { SetupTab } from './setup-tab';
 
 export const API_MODE_TABS: readonly TabDefinition[] = [
   { id: 'coverage', label: 'Coverage', ops: ['ApiModeController_overview_v1'] },
   { id: 'mailboxes', label: 'Mailboxes', ops: ['ApiModeController_listMailboxes_v1'] },
   { id: 'detections', label: 'Detections', ops: ['ApiModeController_listDetections_v1'] },
+  // Step API-2 R15.
+  {
+    id: 'remediation',
+    label: 'Remediation',
+    ops: ['ApiModeRemediationController_getPolicy_v1'],
+  },
+  { id: 'history', label: 'History', ops: ['ApiModeRemediationController_list_v1'] },
   { id: 'setup', label: 'Setup', ops: ['ApiModeController_getConnection_v1'] },
 ];
 
@@ -50,8 +59,9 @@ function StatusNotice() {
 }
 
 /**
- * `/api-mode` "Mailbox protection" (step API-1 D14): coverage and health, mailboxes, detections
- * and per-connection setup. Read-only users see every tab without the write controls.
+ * `/api-mode` "Mailbox protection" (step API-1 D14, step API-2 R15): coverage and health,
+ * mailboxes, detections with their mailbox actions, the remediation policy, the history of mailbox
+ * actions and per-connection setup. Read-only users see every tab without the write controls.
  */
 export function ApiModePage() {
   return (
@@ -73,6 +83,10 @@ export function ApiModePage() {
               <MailboxesTab />
             ) : tab === 'detections' ? (
               <DetectionsTab />
+            ) : tab === 'remediation' ? (
+              <RemediationTab />
+            ) : tab === 'history' ? (
+              <HistoryTab />
             ) : (
               <SetupTab />
             )

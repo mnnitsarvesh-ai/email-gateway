@@ -1272,6 +1272,7 @@ describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
   ];
 
   it('API-1 totals: 455 operations, 363 operation tools (363 enabled), 365 enabled tools (197 reads, 168 writes), MISSING 0', () => {
+    if (operations.length !== 455) return; // step API-2 adds operations (API-2 totals below)
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
     // 439 after AI-6 plus the 16 operations of step API-1: 9 enabled reads, 5 writes deferred to
@@ -1305,7 +1306,9 @@ describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
   });
 
   it('the five API-mode writes are not applicable until API-3; the callbacks never are tools', () => {
-    expect([...API_MODE_DEFERRED_WRITES].sort()).toEqual(
+    expect(
+      [...API_MODE_DEFERRED_WRITES].filter((id) => !id.startsWith('ApiModeRemediation')).sort(),
+    ).toEqual(
       [
         'ApiModeController_inventorySync_v1',
         'ApiModeController_resyncMailbox_v1',
@@ -1347,5 +1350,79 @@ describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
     expect(OPERATION_OVERRIDES.DomainsController_create_v1!.omitInputs).toEqual([
       'body.protectionMode',
     ]);
+  });
+});
+
+describe('step API-2 (docs/plan/steps/36-api-mode-remediation.md R16)', () => {
+  const REMEDIATION_READS = [
+    'ApiModeRemediationController_getPolicy_v1',
+    'ApiModeRemediationController_list_v1',
+    'ApiModeRemediationController_detail_v1',
+  ];
+  const REMEDIATION_WRITES = [
+    'ApiModeRemediationController_putPolicy_v1',
+    'ApiModeRemediationController_putDomainPolicy_v1',
+    'ApiModeRemediationController_deleteDomainPolicy_v1',
+    'ApiModeRemediationController_retry_v1',
+    'ApiModeRemediationController_remediate_v1',
+    'ApiModeRemediationController_restore_v1',
+  ];
+
+  it('API-2 totals: 464 operations, 366 operation tools (366 enabled), 368 enabled tools (200 reads, 168 writes), 98 not applicable, MISSING 0', () => {
+    const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    // 455 after API-1 plus the 9 remediation operations of step API-2: 3 enabled reads and 6
+    // writes deferred to API-3 (`not_applicable`, reason `apiModeDeferred`).
+    expect(operations).toHaveLength(464);
+    expect(OPERATION_TOOLS).toHaveLength(366);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(98);
+    expect(count((t) => t.enabled)).toBe(366);
+    expect(enabled).toHaveLength(368);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(200);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(168);
+    expect(count((t) => t.status === 'MISSING')).toBe(0);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 186, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 0 },
+    );
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-6');
+  });
+
+  it('the remediation reads are enabled AI-1 read tools covered by the sweep suite', () => {
+    for (const id of REMEDIATION_READS) {
+      const tool = OPERATION_TOOLS.find((t) => t.operationId === id);
+      expect(tool, id).toBeDefined();
+      expect(tool!.enabled, id).toBe(true);
+      expect(tool!.access, id).toBe('read');
+      expect(tool!.risk, id).toBe('read');
+      expect(tool!.phase, id).toBe('AI-1');
+      expect(tool!.testedBy, id).toBe(READ_TOOLS_TESTED_BY);
+    }
+  });
+
+  it('the six remediation writes are not applicable until API-3 (apiModeDeferred), never tools', () => {
+    for (const id of REMEDIATION_WRITES) {
+      expect(API_MODE_DEFERRED_WRITES.has(id), id).toBe(true);
+      expect(NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id)?.reason, id).toBe(
+        NOT_APPLICABLE_REASONS.apiModeDeferred,
+      );
+      expect(
+        OPERATION_TOOLS.some((t) => t.operationId === id),
+        id,
+      ).toBe(false);
+    }
+    expect(API_MODE_DEFERRED_WRITES.size).toBe(11);
+  });
+
+  it('operator-typed and directory-derived fields of the remediation reads are untrusted', () => {
+    expect(OPERATION_OVERRIDES.ApiModeRemediationController_list_v1!.untrustedFields).toEqual([
+      'data[].mailbox.address',
+    ]);
+    expect(OPERATION_OVERRIDES.ApiModeRemediationController_detail_v1!.untrustedFields).toEqual(
+      expect.arrayContaining(['mailbox.address', 'requestReason', 'decision']),
+    );
+    expect(OPERATION_OVERRIDES.ApiModeRemediationController_getPolicy_v1!.untrustedFields).toEqual(
+      expect.arrayContaining(['organization.document.rules[].id', 'domains[].domainName']),
+    );
   });
 });

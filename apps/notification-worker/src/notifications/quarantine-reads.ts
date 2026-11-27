@@ -24,6 +24,10 @@ export interface DigestEntryRow {
   reason: string;
   expiresAt: Date;
   subject: string | null;
+  /** Step API-2 R10.5: `gateway` (held by the gateway) or `mailbox` (in the user's mailbox). */
+  location: 'gateway' | 'mailbox';
+  /** location = mailbox only: the mailbox container the message sits in. */
+  mailboxContainer: 'quarantine_folder' | 'junk' | 'deleted_items' | null;
 }
 
 /**
@@ -163,6 +167,8 @@ export class QuarantineNotificationReads {
         envelopeFrom: true,
         reason: true,
         expiresAt: true,
+        location: true,
+        mailboxContainer: true,
       },
     });
     const entries: DigestEntryRow[] = [];
@@ -192,6 +198,8 @@ export class QuarantineNotificationReads {
         reason: r.reason,
         expiresAt: r.expiresAt,
         subject: message?.subject ?? null,
+        location: r.location,
+        mailboxContainer: r.mailboxContainer,
       });
     }
     return { entries, total };

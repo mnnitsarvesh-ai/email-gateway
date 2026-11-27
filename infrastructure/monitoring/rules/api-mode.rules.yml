@@ -7,6 +7,11 @@
 # organization, connection, mailbox or address (the API-mode page and the api_mode_unhealthy
 # customer alert name those). API mode never delivers, delays or bounces mail: every alert is
 # about detection coverage and latency. Every alert links its section of docs/runbooks/api-mode.md.
+# Step API-2 (docs/plan/steps/36-api-mode-remediation.md R14, ADR-0101) adds the remediation
+# series: api_mode_remediations_total{provider,action,result}, the leader gauges
+# api_mode_remediation_backlog{provider} and api_mode_remediation_oldest_pending_seconds{provider},
+# api_mode_remediation_latency_seconds{provider} and api_mode_remediation_attempts_total{provider,
+# outcome}; remediation alerts are about threats left in mailboxes after delivery.
 # Validate with `promtool check rules` and `promtool test rules tests/api-mode.rules.test.yml`.
 groups:
   - name: api-mode
@@ -81,3 +86,53 @@ groups:
             per-mailbox copies stay pending (the mailbox-worker copies role is down, slow or
             failing).
           runbook_url: docs/runbooks/api-mode.md#apimodecopyqueuebacklog
+      - alert: ApiModeRemediationFailing
+        expr: >-
+          (
+            sum by (provider) (rate(api_mode_remediations_total{result="failed"}[15m]))
+            /
+            (
+              sum by (provider) (rate(api_mode_remediations_total{result="failed"}[15m]))
+              + sum by (provider) (rate(api_mode_remediations_total{result=~"succeeded|already_in_target"}[15m]))
+            )
+          ) > 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode remediations are failing ({{ $labels.provider }})
+          description: >-
+            More than 20 % of the {{ $labels.provider }} remediation actions completed in the last
+            15 minutes failed (revoked mailbox access, provider refusals, messages not found or
+            retries exhausted): detected threats stay in mailboxes. See the failed rows on the
+            API-mode History tab and the remediation.failures_1h connection check.
+          runbook_url: docs/runbooks/api-mode.md#apimoderemediationfailing
+      - alert: ApiModeRemediationBacklog
+        expr: >-
+          max by (provider) (api_mode_remediation_backlog) > 500
+          or max by (provider) (api_mode_remediation_oldest_pending_seconds) > 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode remediation backlog ({{ $labels.provider }})
+          description: >-
+            {{ $labels.provider }} remediation actions are queuing (more than 500 pending, or the
+            oldest pending for more than an hour) for 15 minutes: throttling, a paused connection
+            or too few remediate replicas.
+          runbook_url: docs/runbooks/api-mode.md#apimoderemediationbacklog
+      - alert: ApiModeRemediationStalled
+        expr: >-
+          max by (provider) (api_mode_remediation_backlog) > 0
+          unless on (provider)
+          (sum by (provider) (increase(api_mode_remediations_total{result=~"succeeded|already_in_target"}[30m])) > 0)
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: API-mode remediation is stalled ({{ $labels.provider }})
+          description: >-
+            {{ $labels.provider }} remediation actions are pending and none has succeeded for 30
+            minutes: the remediate role is down, cannot reach the provider or the database, or
+            every connection is throttled.
+          runbook_url: docs/runbooks/api-mode.md#apimoderemediationstalled

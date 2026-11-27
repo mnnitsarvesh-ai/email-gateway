@@ -57,6 +57,24 @@ export const CONNECTION_STATUSES = [
   'active',
   'disabled',
 ] as const;
+/** `api_message_copies.remediation_state` (step API-2 §3.2). */
+export const COPY_REMEDIATION_STATES = [
+  'none',
+  'pending',
+  'simulated',
+  'remediated',
+  'restored',
+  'failed',
+  'skipped',
+] as const;
+/** `api_message_copies.remediation_action`. */
+export const COPY_REMEDIATION_ACTIONS = [
+  'move_quarantine',
+  'move_junk',
+  'tag',
+  'soft_delete',
+  'hard_delete',
+] as const;
 export const WIZARD_STEPS = [
   'domains',
   'connection',
@@ -188,6 +206,38 @@ const journalSourceRef = z.object({
   verified: z.boolean(),
 });
 
+/**
+ * Step API-2 R13: the remediation block of the overview and the connection views — the policy
+ * in effect for the organization, the pause switch, terminal outcomes from the hourly counters
+ * and a bounded live count of the pending actions with the oldest one's age.
+ */
+export const RemediationSummarySchema = z.object({
+  policyMode: z.enum(['detect_only', 'enforce']).describe('The organization policy’s mode'),
+  policySource: z
+    .enum(['platform_default', 'organization'])
+    .describe('`platform_default`: no organization policy row (P1 applies)'),
+  paused: z.boolean().describe('Remediation is paused (overview: on at least one connection)'),
+  succeeded1h: z.number().int(),
+  failed1h: z.number().int(),
+  succeeded24h: z.number().int(),
+  failed24h: z.number().int(),
+  skipped24h: z.number().int(),
+  simulated24h: z.number().int(),
+  restores24h: z.number().int().describe('Succeeded reversals (restore to Inbox, tag removal)'),
+  throttled24h: z.number().int(),
+  backlog: z.object({
+    pending: z.number().int().describe('Pending actions (counted up to 10 000)'),
+    capped: z.boolean().describe('The count stopped at its cap'),
+    oldestPendingAgeSeconds: z.number().int().nullable(),
+  }),
+  latencyAvgSeconds24h: z
+    .number()
+    .nullable()
+    .describe('Mean verdict-to-action time of the policy actions of the last day'),
+  latencyMaxSeconds24h: z.number().nullable(),
+});
+export type RemediationSummaryView = z.infer<typeof RemediationSummarySchema>;
+
 export const ApiModeConnectionSchema = z.object({
   id: PublicIdSchema.describe('The 8.2 provider connection public id'),
   apiConnectionId: PublicIdSchema.nullable().describe('The API-mode row (null until first used)'),
@@ -205,6 +255,10 @@ export const ApiModeConnectionSchema = z.object({
   health: z.object({ status: z.enum(HEALTH_STATUSES), changedAt: nullableInstant }),
   throttledUntil: nullableInstant,
   lastErrorCode: z.string().nullable(),
+  remediationPaused: z
+    .boolean()
+    .describe('Policy remediation is paused (admin, release and end-user actions still run)'),
+  remediationPausedAt: nullableInstant,
   grant: grantSchema,
   journalSources: z.array(journalSourceRef).describe('Provider journal intake sources bound to it'),
   rowVersion: z
@@ -257,6 +311,7 @@ export const ApiModeConnectionDetailSchema = ApiModeConnectionSchema.extend({
     .array(HealthCheckSchema)
     .describe('`api-mode-health/1` checks of the last evaluation'),
   counters: z.array(ConnectionCountersSchema).describe('The last 7 UTC days, newest first'),
+  remediation: RemediationSummarySchema,
 });
 export type ApiModeConnectionDetailView = z.infer<typeof ApiModeConnectionDetailSchema>;
 
@@ -276,6 +331,7 @@ export const ApiModeOverviewSchema = z.object({
   lag: lagSchema,
   throttling: throttlingSchema,
   copiesToday: z.number().int().describe('Journal and feed copies recorded since 00:00 UTC'),
+  remediation: RemediationSummarySchema.describe('Step API-2: summed over the connections'),
   connections: z.array(
     z.object({
       id: PublicIdSchema,
@@ -292,6 +348,7 @@ export const ApiModeOverviewSchema = z.object({
       throttling: throttlingSchema,
       copiesToday: z.number().int(),
       throttledUntil: nullableInstant,
+      remediation: RemediationSummarySchema,
     }),
   ),
 });
@@ -303,6 +360,13 @@ export const UpdateSettingsBodySchema = z.strictObject({
     .enum(FEED_MODES)
     .optional()
     .describe('`poll` (default) or `notify` (Microsoft 365 with a platform notification URL)'),
+  remediationPaused: z
+    .boolean()
+    .optional()
+    .describe(
+      'Step API-2: pause (true) or resume (false) policy remediation of the connection; ' +
+        'omitted = unchanged',
+    ),
   expectedRowVersion: z.number().int().min(1).max(4_294_967_295),
 });
 export type UpdateSettingsBody = z.output<typeof UpdateSettingsBodySchema>;
@@ -373,6 +437,7 @@ export const DetectionListQuerySchema = defineListQuery({
     mailboxId: { type: 'publicId', maxValues: 1 },
     connectionId: { type: 'publicId', maxValues: 1 },
     minRiskScore: { type: 'int', min: 0, max: 1000, maxValues: 1 },
+    remediationState: { type: 'enum', values: COPY_REMEDIATION_STATES, maxValues: 7 },
   },
   sorts: ['-receivedAt'],
   defaultSort: '-receivedAt',
@@ -389,6 +454,8 @@ export const DETECTION_LIST_PARAMETERS: Record<string, string> = {
   mailboxId: 'A mailbox public id',
   connectionId: 'The 8.2 provider connection public id',
   minRiskScore: 'Lowest risk score (0-1000)',
+  remediationState:
+    '`none`, `pending`, `simulated`, `remediated`, `restored`, `failed`, `skipped`; comma list',
   from: 'Start of the receipt window (default `to` − 7 days; at most 31 days)',
   to: 'End of the receipt window (exclusive; default now)',
   sort: '`-receivedAt` (newest first)',
@@ -418,6 +485,15 @@ export const DetectionSchema = z.object({
     .string()
     .nullable()
     .describe('The header From address, local part masked (ADR-0062)'),
+  remediationState: z.enum(COPY_REMEDIATION_STATES).describe('Step API-2 remediation state'),
+  remediationAction: z
+    .enum(COPY_REMEDIATION_ACTIONS)
+    .nullable()
+    .describe('The mailbox action in effect or last attempted'),
+  remediationId: PublicIdSchema.nullable().describe('The last remediation action of the copy'),
+  quarantineEntryId: PublicIdSchema.nullable().describe(
+    'The mailbox-located quarantine entry of the copy (latest), if any',
+  ),
 });
 export type DetectionView = z.infer<typeof DetectionSchema>;
 
@@ -547,6 +623,8 @@ const connection = {
   health: { status: 'healthy' as const, changedAt: T },
   throttledUntil: null,
   lastErrorCode: null,
+  remediationPaused: false,
+  remediationPausedAt: null,
   grant: {
     profile: 'm365.mailbox_remediation',
     status: 'active' as const,
@@ -584,6 +662,27 @@ const detection = {
   subject: null,
   subjectMasked: true,
   headerFrom: 'b***@fabrikam.example',
+  remediationState: 'remediated' as const,
+  remediationAction: 'move_quarantine' as const,
+  remediationId: '0192f3a0-8888-7000-8000-000000000008',
+  quarantineEntryId: '0192f3a0-aaaa-7000-8000-00000000000a',
+};
+
+const remediationSummary = {
+  policyMode: 'enforce' as const,
+  policySource: 'platform_default' as const,
+  paused: false,
+  succeeded1h: 2,
+  failed1h: 0,
+  succeeded24h: 14,
+  failed24h: 1,
+  skipped24h: 3,
+  simulated24h: 0,
+  restores24h: 1,
+  throttled24h: 0,
+  backlog: { pending: 0, capped: false, oldestPendingAgeSeconds: null },
+  latencyAvgSeconds24h: 6.5,
+  latencyMaxSeconds24h: 41,
 };
 
 const mailbox = {
@@ -635,6 +734,7 @@ export const API_MODE_EXAMPLES = {
     lag,
     throttling: { events1h: 0, events24h: 3 },
     copiesToday: 412,
+    remediation: remediationSummary,
     connections: [
       {
         id: CONNECTION,
@@ -651,6 +751,7 @@ export const API_MODE_EXAMPLES = {
         throttling: { events1h: 0, events24h: 3 },
         copiesToday: 412,
         throttledUntil: null,
+        remediation: remediationSummary,
       },
     ],
   },
@@ -688,8 +789,14 @@ export const API_MODE_EXAMPLES = {
         lagP95Seconds: 300,
       },
     ],
+    remediation: remediationSummary,
   },
-  settingsUpdate: { feedsEnabled: true, feedMode: 'poll', expectedRowVersion: 1 },
+  settingsUpdate: {
+    feedsEnabled: true,
+    feedMode: 'poll',
+    remediationPaused: false,
+    expectedRowVersion: 1,
+  },
   inventorySync: { connectionId: CONNECTION, inventoryRequestedAt: T, nextInventoryAt: T },
   mailbox,
   mailboxPage: { data: [mailbox], nextCursor: null },

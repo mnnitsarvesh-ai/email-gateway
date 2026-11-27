@@ -10,7 +10,14 @@
 import { randomBytes } from 'node:crypto';
 import type { GsCustomer, GsUser } from './google-types';
 import type { SimNotification, SimScript } from './script';
-import type { MsDirectory, MsSubscription, MsUser, SimMailbox, SimMailMessage } from './types';
+import type {
+  MsDirectory,
+  MsSubscription,
+  MsUser,
+  SimMailbox,
+  SimMailFolder,
+  SimMailMessage,
+} from './types';
 
 /** Graph's maximum lifetime of an Outlook message subscription (minutes). */
 export const GRAPH_SUBSCRIPTION_MAX_MINUTES = 4230;
@@ -31,6 +38,169 @@ export function mailboxOf(
 ): SimMailbox {
   const mailboxes = (owner.mailboxes ??= {});
   return (mailboxes[userId] ??= { seq: 0, cursorFloor: 0, messages: [] });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step API-2 (R7): Graph folders and message location state
+// ---------------------------------------------------------------------------------------------
+
+/** Graph well-known folders of a simulated mailbox: name → display name. */
+export const GRAPH_WELL_KNOWN_FOLDERS: Readonly<Record<string, string>> = Object.freeze({
+  msgfolderroot: 'Top of Information Store',
+  inbox: 'Inbox',
+  junkemail: 'Junk Email',
+  sentitems: 'Sent Items',
+  deleteditems: 'Deleted Items',
+  drafts: 'Drafts',
+  archive: 'Archive',
+  recoverableitemsdeletions: 'Deletions',
+});
+/** Well-known folders that are not children of `msgfolderroot` (Recoverable Items). */
+const RECOVERABLE_ROOT = 'recoverableitemsroot';
+
+const folderIdOf = (userId: string, key: string): string =>
+  `AAMkEXAMPLEfld${Buffer.from(`${userId}:${key}`, 'utf8').toString('base64url')}`;
+
+/** The folders of a Graph mailbox, with the well-known ones created on first use. */
+export function graphFolders(mailbox: SimMailbox, userId: string): SimMailFolder[] {
+  if (!mailbox.folders) {
+    const root = folderIdOf(userId, 'msgfolderroot');
+    mailbox.folders = Object.entries(GRAPH_WELL_KNOWN_FOLDERS).map(([name, displayName]) => ({
+      id: folderIdOf(userId, name),
+      displayName,
+      parentFolderId:
+        name === 'msgfolderroot'
+          ? null
+          : name === 'recoverableitemsdeletions'
+            ? folderIdOf(userId, RECOVERABLE_ROOT)
+            : root,
+      wellKnownName: name,
+      isHidden: name === 'recoverableitemsdeletions',
+    }));
+  }
+  return mailbox.folders;
+}
+
+/** A Graph folder by well-known name (case-insensitive) or id. */
+export function graphFolder(
+  mailbox: SimMailbox,
+  userId: string,
+  key: string,
+): SimMailFolder | undefined {
+  const lowered = key.toLowerCase();
+  return graphFolders(mailbox, userId).find(
+    (f) => f.id === key || (f.wellKnownName !== null && f.wellKnownName === lowered),
+  );
+}
+
+/** The folder id of a Graph message (absent = the Inbox). */
+export function graphFolderIdOf(
+  mailbox: SimMailbox,
+  userId: string,
+  message: SimMailMessage,
+): string {
+  return message.folderId ?? (graphFolder(mailbox, userId, 'inbox') as SimMailFolder).id;
+}
+
+/** True when the Graph message is in the Inbox (moves into the Inbox clear `folderId`). */
+export function inGraphInbox(message: SimMailMessage): boolean {
+  return message.folderId === undefined;
+}
+
+/** A message that exists under this id (not moved away, not deleted). */
+export function liveMessage(mailbox: SimMailbox, messageId: string): SimMailMessage | undefined {
+  return mailbox.messages.find(
+    (m) => m.id === messageId && m.removedSeq === undefined && m.deleted !== true,
+  );
+}
+
+/** Where a message is (admin API `GET /admin/mailboxes/{user}/messages/{id}`, tests). */
+export interface SimMessageLocation {
+  provider: 'microsoft' | 'google';
+  userId: string;
+  /** The id asked for. */
+  messageId: string;
+  /** The id the message has now (after Graph moves), or null when it was deleted. */
+  currentId: string | null;
+  state: 'present' | 'deleted';
+  /** Graph: the folder (`wellKnownName` null for created folders). */
+  folder: {
+    id: string;
+    displayName: string;
+    wellKnownName: string | null;
+    isHidden: boolean;
+  } | null;
+  /** Gmail: the labels (system ids and user label ids). */
+  labelIds: string[];
+  /** Gmail: names of the user labels on the message. */
+  labelNames: string[];
+  /** Graph: categories. */
+  categories: string[];
+}
+
+/**
+ * The location of a message, following Graph moves from an old id to the current one. Null for
+ * an unknown mailbox or id.
+ */
+export function messageLocation(
+  script: SimScript,
+  user: string,
+  messageId: string,
+): SimMessageLocation | null {
+  const owner = findMailboxOwner(script, user);
+  if (!owner) return null;
+  const mailbox =
+    owner.provider === 'microsoft'
+      ? mailboxOf(owner.directory, owner.user.id)
+      : mailboxOf(owner.customer, owner.user.id);
+  let message = mailbox.messages.find((m) => m.id === messageId);
+  if (!message) return null;
+  for (let hops = 0; message.movedToId !== undefined && hops < 1000; hops += 1) {
+    const next = mailbox.messages.find((m) => m.id === message!.movedToId);
+    if (!next) break;
+    message = next;
+  }
+  // Deleted (Graph permanentDelete, Gmail delete) or removed through the admin API.
+  const gone =
+    message.deleted === true ||
+    (message.removedSeq !== undefined && message.movedToId === undefined);
+  const base = {
+    provider: owner.provider,
+    userId: owner.user.id,
+    messageId,
+    currentId: gone ? null : message.id,
+    state: gone ? ('deleted' as const) : ('present' as const),
+  };
+  if (owner.provider === 'microsoft') {
+    const folder = graphFolder(
+      mailbox,
+      owner.user.id,
+      graphFolderIdOf(mailbox, owner.user.id, message),
+    );
+    return {
+      ...base,
+      folder: folder
+        ? {
+            id: folder.id,
+            displayName: folder.displayName,
+            wellKnownName: folder.wellKnownName,
+            isHidden: folder.isHidden,
+          }
+        : null,
+      labelIds: [],
+      labelNames: [],
+      categories: [...(message.categories ?? [])],
+    };
+  }
+  const labelIds = [...(message.labelIds ?? [])];
+  const names = new Map((mailbox.labels ?? []).map((l) => [l.id, l.name]));
+  return {
+    ...base,
+    folder: null,
+    labelIds,
+    labelNames: labelIds.filter((id) => names.has(id)).map((id) => names.get(id) as string),
+    categories: [],
+  };
 }
 
 /** Finds a user of any simulated directory by id, primary address, UPN, `mail` or alias. */
@@ -310,6 +480,11 @@ export interface DeliverMessageInput {
   labelIds?: string[];
   /** Graph drafts are listed by the delta with `isDraft: true`. */
   isDraft?: boolean;
+  /**
+   * Step API-2: Graph well-known folder to deliver into (default the Inbox), e.g. `sentitems`
+   * for the locate tests (Gmail: use `labelIds`).
+   */
+  folder?: string;
 }
 
 export interface DeliverMessageResult {
@@ -369,9 +544,14 @@ export async function deliverMessage(
       : {}),
     ...(input.isDraft ? { isDraft: true } : {}),
   };
+  if (owner.provider === 'microsoft' && input.folder !== undefined && input.folder !== 'inbox') {
+    const folder = graphFolder(mailbox, owner.user.id, input.folder);
+    if (!folder) throw new SimMailboxNotFoundError();
+    message.folderId = folder.id;
+  }
   mailbox.messages.push(message);
   const notifications: SimNotification[] = [];
-  if (owner.provider === 'microsoft' && !input.isDraft) {
+  if (owner.provider === 'microsoft' && !input.isDraft && inGraphInbox(message)) {
     for (const subscription of activeSubscriptions(script, owner.directory, owner.user.id)) {
       notifications.push(await pushChange(script, owner.directory, subscription, messageId));
     }

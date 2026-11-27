@@ -171,10 +171,13 @@ export function buildPipeline(
 }
 
 /**
- * Per-run fixtures in `it-pe-<suffix>-*` organizations on the real writer and MinIO, and
- * cleanup of every row and object the engine can write for them.
+ * Per-run fixtures in `it-pe-<suffix>-*` organizations (or `<prefix>-<suffix>-*`, e.g. the
+ * step API-2 suite's `it-apirem`) on the real writer and MinIO, and cleanup of every row and
+ * object the engine can write for them.
  */
 export class Fixtures {
+  constructor(readonly prefix = 'it-pe') {}
+
   readonly prisma: PrismaClient = new PrismaClient({ datasourceUrl: requireEnv('DATABASE_URL') });
   readonly s3 = new S3Service(s3ConfigSchema.parse(process.env));
   readonly suffix = randomUUID().slice(0, 8);
@@ -184,7 +187,7 @@ export class Fixtures {
   private planId: bigint | undefined;
 
   consumer(label: string): string {
-    const name = `it-pe-${this.suffix}.${label}`;
+    const name = `${this.prefix}-${this.suffix}.${label}`;
     this.consumers.add(name);
     return name;
   }
@@ -193,7 +196,7 @@ export class Fixtures {
     if (this.planId === undefined) {
       const plan = await this.prisma.organizationPlan.create({
         data: {
-          code: `it-pe-${this.suffix}`,
+          code: `${this.prefix}-${this.suffix}`,
           name: 'policy-engine integration',
           defaultLimits: {},
           defaultFeatures: {},
@@ -203,7 +206,7 @@ export class Fixtures {
     }
     const org = await this.prisma.organization.create({
       data: {
-        slug: `it-pe-${this.suffix}-${label}`,
+        slug: `${this.prefix}-${this.suffix}-${label}`,
         name: `Policy ${label}`,
         planId: this.planId,
         dataRegion: 'ap-south-1',

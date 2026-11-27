@@ -4,6 +4,24 @@ import type { ApiFamily, IdpMetricsSink } from '@email-gateway/idp-adapters';
 /** `api_mode_lag_seconds` buckets (D11.5). */
 export const LAG_SECONDS_BUCKETS = [60, 300, 900, 3600, 14_400];
 
+/** `api_mode_remediation_latency_seconds` buckets (step API-2 R14). */
+export const REMEDIATION_LATENCY_BUCKETS = [5, 30, 60, 300, 900, 3600];
+
+/** `result` values of `api_mode_remediations_total` (R14). */
+export const REMEDIATION_RESULTS = [
+  'succeeded',
+  'failed',
+  'skipped',
+  'simulated',
+  'cancelled',
+  'already_in_target',
+] as const;
+export type RemediationResult = (typeof REMEDIATION_RESULTS)[number];
+
+/** `outcome` values of `api_mode_remediation_attempts_total` (R14). */
+export const REMEDIATION_ATTEMPT_OUTCOMES = ['ok', 'throttled', 'retry', 'error'] as const;
+export type RemediationAttemptOutcome = (typeof REMEDIATION_ATTEMPT_OUTCOMES)[number];
+
 /** `result` values of `api_mode_copies_total`. */
 export const COPY_RESULTS = [
   'recorded',
@@ -46,6 +64,11 @@ export class MailboxMetrics implements IdpMetricsSink {
   readonly alerts: Counter<'result'>;
   readonly leader: Gauge<'job'>;
   readonly budgetWaits: Counter<'family'>;
+  readonly remediations: Counter<'provider' | 'action' | 'result'>;
+  readonly remediationLatency: Histogram<'provider'>;
+  readonly remediationBacklog: Gauge<'provider'>;
+  readonly remediationOldestPending: Gauge<'provider'>;
+  readonly remediationAttempts: Counter<'provider' | 'outcome'>;
 
   constructor(metrics: MetricsService) {
     this.copies = metrics.counter(
@@ -124,6 +147,32 @@ export class MailboxMetrics implements IdpMetricsSink {
       'Provider requests that waited for the per-connection rate budget, by API family',
       ['family'],
     );
+    this.remediations = metrics.counter(
+      'api_mode_remediations_total',
+      'API-mode remediation actions by provider, action (move_quarantine, move_junk, tag, soft_delete, hard_delete, restore_inbox, remove_tag) and result (succeeded, failed, skipped, simulated, cancelled, already_in_target)',
+      ['provider', 'action', 'result'],
+    );
+    this.remediationLatency = metrics.histogram(
+      'api_mode_remediation_latency_seconds',
+      'Time from the copy verdict to a completed policy remediation, by provider',
+      ['provider'],
+      REMEDIATION_LATENCY_BUCKETS,
+    );
+    this.remediationBacklog = metrics.gauge(
+      'api_mode_remediation_backlog',
+      'Pending or in-progress API-mode remediation actions by provider (health leader)',
+      ['provider'],
+    );
+    this.remediationOldestPending = metrics.gauge(
+      'api_mode_remediation_oldest_pending_seconds',
+      'Age of the oldest pending or in-progress API-mode remediation action by provider (health leader; 0 when none)',
+      ['provider'],
+    );
+    this.remediationAttempts = metrics.counter(
+      'api_mode_remediation_attempts_total',
+      'Executions of API-mode remediation actions by provider and outcome (ok, throttled, retry, error)',
+      ['provider', 'outcome'],
+    );
   }
 
   // ------------------------------------------------------------------ IdpMetricsSink
@@ -153,5 +202,17 @@ export class MailboxMetrics implements IdpMetricsSink {
 
   copy(source: string, result: CopyResult, count = 1): void {
     if (count > 0) this.copies.inc({ source: label(source), result }, count);
+  }
+
+  /** One remediation action outcome (no organization label). */
+  remediation(provider: string, action: string, result: RemediationResult, count = 1): void {
+    if (count > 0) {
+      this.remediations.inc({ provider: label(provider), action: label(action), result }, count);
+    }
+  }
+
+  /** One execution attempt of a remediation action. */
+  remediationAttempt(provider: string, outcome: RemediationAttemptOutcome): void {
+    this.remediationAttempts.inc({ provider: label(provider), outcome });
   }
 }

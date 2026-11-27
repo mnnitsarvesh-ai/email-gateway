@@ -101,7 +101,8 @@ describe('evaluateApiModeHealth (D11.3)', () => {
   it('a healthy connection passes every check in order and validates as api-mode-health/1', () => {
     const result = evaluateApiModeHealth(healthy(), HEALTH_CFG);
     expect(result.status).toBe('healthy');
-    expect(result.checks.map((c) => c.code)).toEqual([...API_MODE_HEALTH_CHECK_CODES]);
+    // Without the step API-2 `remediation` input the four remediation checks are not evaluated.
+    expect(result.checks.map((c) => c.code)).toEqual(API_MODE_HEALTH_CHECK_CODES.slice(0, 9));
     expect(result.checks.every((c) => c.status === 'pass')).toBe(true);
     expect(result.failingChecks).toEqual([]);
     expect(apiModeHealthDocumentSchema.parse(result.document)).toEqual(result.document);

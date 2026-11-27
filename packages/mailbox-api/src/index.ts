@@ -24,3 +24,9 @@ export * from './classify';
 export * from './notifications';
 export * from './coverage';
 export * from './health';
+// Step API-2 (note 36 R2, R3, R5.6, R6; ADR-0101): remediation policy, keys and provider plans.
+export * from './remediation/vocabulary';
+export * from './remediation/policy';
+export * from './remediation/keys';
+export * from './remediation/provider-actions';
+export * from './remediation/errors';

@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService, uuidv7 } from '@email-gateway/common';
 import {
   type ApiCopyDeliveredBasis,
+  type ApiCopyRemediationAction,
+  type ApiCopyRemediationState,
   type ApiCopyDirection,
   type ApiCopySource,
   type ApiCopyStatus,
@@ -63,6 +65,9 @@ export interface ApiConnectionRow {
   healthChangedAt: Date | null;
   throttledUntil: Date | null;
   lastErrorCode: string | null;
+  /** Step API-2 R5.1, R13: policy remediation paused on this connection. */
+  remediationPaused: boolean;
+  remediationPausedAt: Date | null;
   rowVersion: number;
 }
 
@@ -102,6 +107,31 @@ export interface ApiConnectionUpdate {
   feedsEnabled?: boolean;
   feedMode?: ApiModeFeedMode;
   feedsEnabledAt?: Date | null;
+  remediationPaused?: boolean;
+  remediationPausedAt?: Date | null;
+}
+
+/** Step API-2 R14: the remediation fields of an hourly counter row. */
+export interface RemediationCounterRow {
+  apiConnectionId: bigint;
+  hour: Date;
+  remediationSucceeded: number;
+  remediationFailed: number;
+  remediationSkipped: number;
+  remediationSimulated: number;
+  restoresSucceeded: number;
+  restoresFailed: number;
+  remediationThrottled: number;
+  remediationLatencyCount: number;
+  remediationLatencySumMs: bigint;
+  remediationLatencyMaxMs: number;
+}
+
+/** Step API-2 R13: the bounded live backlog of one API-mode connection. */
+export interface RemediationBacklog {
+  pending: number;
+  capped: boolean;
+  oldestCreatedAt: Date | null;
 }
 
 /** An hourly counter row (`api_mode_counters`). */
@@ -184,6 +214,13 @@ export interface CopyRow {
   lagMs: number | null;
   subject: string | null;
   headerFrom: string | null;
+  /** Step API-2 §3.2 / R13. */
+  remediationState: ApiCopyRemediationState;
+  remediationAction: ApiCopyRemediationAction | null;
+  /** Public id of `last_action_id`. */
+  remediationId: string | null;
+  /** Public id of the copy's latest mailbox-located quarantine entry. */
+  quarantineEntryId: string | null;
 }
 
 export interface CopyFilter {
@@ -193,6 +230,7 @@ export interface CopyFilter {
   mailboxPublicId?: string;
   connectionPublicId?: string;
   minRiskScore?: number;
+  remediationState?: ApiCopyRemediationState[];
 }
 
 /** The mailbox a Graph subscription id selects (public callback; no tenant input). */
@@ -219,6 +257,8 @@ const apiConnectionSelect = {
   healthChangedAt: true,
   throttledUntil: true,
   lastErrorCode: true,
+  remediationPaused: true,
+  remediationPausedAt: true,
   rowVersion: true,
 } satisfies Prisma.ApiModeConnectionSelect;
 
@@ -682,6 +722,83 @@ export class ApiModeRepository {
     });
   }
 
+  // ---- remediation summary (step API-2 R13) ------------------------------------------------
+
+  /** The remediation fields of the hourly counters from `from` (replica). */
+  async remediationCounters(
+    scope: TenantScope,
+    apiConnectionIds: readonly bigint[],
+    from: Date,
+  ): Promise<RemediationCounterRow[]> {
+    if (apiConnectionIds.length === 0) return [];
+    return this.reader.client.apiModeCounter.findMany({
+      where: tenantWhere(scope, {
+        apiConnectionId: { in: [...apiConnectionIds] },
+        hour: { gte: isoHour(from) },
+      }),
+      select: {
+        apiConnectionId: true,
+        hour: true,
+        remediationSucceeded: true,
+        remediationFailed: true,
+        remediationSkipped: true,
+        remediationSimulated: true,
+        restoresSucceeded: true,
+        restoresFailed: true,
+        remediationThrottled: true,
+        remediationLatencyCount: true,
+        remediationLatencySumMs: true,
+        remediationLatencyMaxMs: true,
+      },
+      orderBy: [{ hour: 'asc' }, { apiConnectionId: 'asc' }],
+    });
+  }
+
+  /**
+   * The pending actions of each connection, counted up to `cap` (a bounded subquery on the
+   * index `(api_connection_id, status)`), and the oldest one's creation time (replica).
+   */
+  async remediationBacklog(
+    scope: TenantScope,
+    apiConnectionIds: readonly bigint[],
+    cap: number,
+  ): Promise<Map<bigint, RemediationBacklog>> {
+    const out = new Map<bigint, RemediationBacklog>();
+    const db = this.reader.client;
+    for (const id of apiConnectionIds) {
+      const [count, oldest] = await Promise.all([
+        db.$queryRaw<Array<{ n: bigint | number }>>`
+          SELECT COUNT(*) AS n FROM (
+            SELECT 1 FROM api_remediation_actions
+            WHERE api_connection_id = ${id} AND status = 'pending'
+              AND organization_id = ${scope.organizationId}
+            LIMIT ${cap + 1}) t`,
+        db.$queryRaw<Array<{ createdAt: Date }>>`
+          SELECT created_at AS createdAt FROM api_remediation_actions
+          WHERE api_connection_id = ${id} AND status = 'pending'
+            AND organization_id = ${scope.organizationId}
+          ORDER BY created_at ASC LIMIT 1`,
+      ]);
+      const n = Number(count[0]?.n ?? 0);
+      out.set(id, {
+        pending: Math.min(n, cap),
+        capped: n > cap,
+        oldestCreatedAt: oldest[0]?.createdAt ?? null,
+      });
+    }
+    return out;
+  }
+
+  /** The organization's remediation policy row (mode only), or null = the platform default. */
+  async organizationRemediationMode(
+    scope: TenantScope,
+  ): Promise<{ mode: 'detect_only' | 'enforce' } | null> {
+    return this.reader.client.apiRemediationPolicy.findFirst({
+      where: tenantWhere(scope, { domainId: null }),
+      select: { mode: true },
+    });
+  }
+
   // ---- mailboxes (D12 #10-#12) ---------------------------------------------------------------
 
   private async domainNames(client: Client, ids: readonly (bigint | null)[]): Promise<DomainNames> {
@@ -865,7 +982,13 @@ export class ApiModeRepository {
              c.verdict, c.risk_score AS riskScore, c.verdict_authority AS verdictAuthority,
              c.provider_delivered_at AS providerDeliveredAt, c.delivered_basis AS deliveredBasis,
              c.verdict_at AS verdictAt, c.lag_ms AS lagMs,
-             m.subject, m.header_from AS headerFrom
+             m.subject, m.header_from AS headerFrom,
+             c.remediation_state AS remediationState, c.remediation_action AS remediationAction,
+             la.public_id AS remediationId,
+             (SELECT q.public_id FROM quarantine_messages q
+               WHERE q.api_copy_id = c.id AND q.api_copy_received_at = c.received_at
+                 AND q.organization_id = c.organization_id
+               ORDER BY q.id DESC LIMIT 1) AS quarantineEntryId
       FROM api_message_copies c
       JOIN api_mailboxes mb ON mb.id = c.mailbox_id AND mb.organization_id = c.organization_id
       JOIN api_mode_connections ac
@@ -875,6 +998,8 @@ export class ApiModeRepository {
       LEFT JOIN email_messages m
         ON m.id = c.message_id AND m.received_at = c.received_at
        AND m.organization_id = c.organization_id
+      LEFT JOIN api_remediation_actions la
+        ON la.id = c.last_action_id AND la.organization_id = c.organization_id
       WHERE c.organization_id = ${scope.organizationId} AND ${where}
       ORDER BY c.received_at DESC, c.id DESC
       LIMIT ${limit}`;
@@ -904,6 +1029,10 @@ export class ApiModeRepository {
       lagMs: r.lagMs === null ? null : Number(r.lagMs),
       subject: (r.subject as string | null) ?? null,
       headerFrom: (r.headerFrom as string | null) ?? null,
+      remediationState: (r.remediationState as ApiCopyRemediationState | null) ?? 'none',
+      remediationAction: (r.remediationAction as ApiCopyRemediationAction | null) ?? null,
+      remediationId: (r.remediationId as string | null) ?? null,
+      quarantineEntryId: (r.quarantineEntryId as string | null) ?? null,
     }));
   }
 
@@ -929,6 +1058,9 @@ export class ApiModeRepository {
     }
     if (filter.minRiskScore !== undefined) {
       terms.push(Prisma.sql`c.risk_score >= ${filter.minRiskScore}`);
+    }
+    if (filter.remediationState) {
+      terms.push(Prisma.sql`c.remediation_state IN (${Prisma.join(filter.remediationState)})`);
     }
     if (page.before !== undefined) {
       terms.push(

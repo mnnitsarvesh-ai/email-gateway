@@ -178,3 +178,106 @@ tests:
                 per-mailbox copies stay pending (the mailbox-worker copies role is down, slow or
                 failing).
               runbook_url: docs/runbooks/api-mode.md#apimodecopyqueuebacklog
+  # Step API-2 (note 36 R14): remediation alerts.
+  - name: remediation failure share above 20 %
+    interval: 1m
+    input_series:
+      # 3 failed and 7 succeeded per minute on Graph: 30 % failed.
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="microsoft_365",action="move_quarantine",result="failed"}
+        values: 0+3x60
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="microsoft_365",action="move_quarantine",result="succeeded"}
+        values: 0+7x60
+      # Gmail: 1 failed and 9 succeeded per minute (10 %): quiet.
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="google_workspace",action="tag",result="failed"}
+        values: 0+1x60
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="google_workspace",action="tag",result="already_in_target"}
+        values: 0+9x60
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiModeRemediationFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ApiModeRemediationFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: microsoft_365
+            exp_annotations:
+              summary: API-mode remediations are failing (microsoft_365)
+              description: >-
+                More than 20 % of the microsoft_365 remediation actions completed in the last 15
+                minutes failed (revoked mailbox access, provider refusals, messages not found or
+                retries exhausted): detected threats stay in mailboxes. See the failed rows on the
+                API-mode History tab and the remediation.failures_1h connection check.
+              runbook_url: docs/runbooks/api-mode.md#apimoderemediationfailing
+  - name: remediation backlog by size or age (leader gauges)
+    interval: 1m
+    input_series:
+      - series: api_mode_remediation_backlog{job="mailbox-worker",instance="a",provider="microsoft_365"}
+        values: 800x40
+      - series: api_mode_remediation_backlog{job="mailbox-worker",instance="b",provider="microsoft_365"}
+        values: '0x40'
+      - series: api_mode_remediation_oldest_pending_seconds{job="mailbox-worker",instance="a",provider="microsoft_365"}
+        values: 120x40
+      # Gmail: few rows, but the oldest is two hours old.
+      - series: api_mode_remediation_backlog{job="mailbox-worker",instance="a",provider="google_workspace"}
+        values: 3x40
+      - series: api_mode_remediation_oldest_pending_seconds{job="mailbox-worker",instance="a",provider="google_workspace"}
+        values: 7200x40
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiModeRemediationBacklog
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ApiModeRemediationBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: microsoft_365
+            exp_annotations:
+              summary: API-mode remediation backlog (microsoft_365)
+              description: >-
+                microsoft_365 remediation actions are queuing (more than 500 pending, or the oldest
+                pending for more than an hour) for 15 minutes: throttling, a paused connection or
+                too few remediate replicas.
+              runbook_url: docs/runbooks/api-mode.md#apimoderemediationbacklog
+          - exp_labels:
+              severity: warning
+              provider: google_workspace
+            exp_annotations:
+              summary: API-mode remediation backlog (google_workspace)
+              description: >-
+                google_workspace remediation actions are queuing (more than 500 pending, or the
+                oldest pending for more than an hour) for 15 minutes: throttling, a paused
+                connection or too few remediate replicas.
+              runbook_url: docs/runbooks/api-mode.md#apimoderemediationbacklog
+  - name: remediation stalled (pending, nothing succeeded for 30 minutes)
+    interval: 1m
+    input_series:
+      - series: api_mode_remediation_backlog{job="mailbox-worker",instance="a",provider="microsoft_365"}
+        values: 12x120
+      # Successes stop after 20 minutes.
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="microsoft_365",action="move_quarantine",result="succeeded"}
+        values: 0+5x20 100x100
+      # Gmail keeps succeeding with a backlog: quiet.
+      - series: api_mode_remediation_backlog{job="mailbox-worker",instance="a",provider="google_workspace"}
+        values: 4x120
+      - series: api_mode_remediations_total{job="mailbox-worker",instance="a",provider="google_workspace",action="tag",result="succeeded"}
+        values: 0+2x120
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: ApiModeRemediationStalled
+        exp_alerts: []
+      - eval_time: 85m
+        alertname: ApiModeRemediationStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: microsoft_365
+            exp_annotations:
+              summary: API-mode remediation is stalled (microsoft_365)
+              description: >-
+                microsoft_365 remediation actions are pending and none has succeeded for 30
+                minutes: the remediate role is down, cannot reach the provider or the database, or
+                every connection is throttled.
+              runbook_url: docs/runbooks/api-mode.md#apimoderemediationstalled

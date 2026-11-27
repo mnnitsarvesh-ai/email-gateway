@@ -21,6 +21,11 @@ export const API_MODE_HEALTH_CHECK_CODES = [
   'throttling.1h',
   'feeds.errors',
   'domains.api_mode_mx',
+  // Step API-2 (note 36 R14): remediation checks, evaluated only with the `remediation` input.
+  'remediation.failures_1h',
+  'remediation.backlog',
+  'remediation.access',
+  'remediation.paused',
 ] as const;
 export type ApiModeHealthCheckCode = (typeof API_MODE_HEALTH_CHECK_CODES)[number];
 
@@ -84,6 +89,101 @@ export interface ApiModeHealthInput {
   throttleEventsLastHour: number;
   /** Effective-`api` domains whose latest MX observation points to the gateway. */
   apiModeDomainsWithGatewayMx: number;
+  /**
+   * Step API-2 (R14): remediation facts of the connection. Optional so API-1 callers compile
+   * unchanged; without it the four `remediation.*` checks are not evaluated (not in the result).
+   */
+  remediation?: ApiModeRemediationHealthInput;
+}
+
+/** Remediation facts of one connection for the R14 checks (counts, ages and flags only). */
+export interface ApiModeRemediationHealthInput {
+  /** Remediations (not reversals) that succeeded / failed in the last hour. */
+  succeeded1h: number;
+  failed1h: number;
+  /** Age of the oldest `pending` policy/admin/release action (throttle-delayed included). */
+  oldestPendingAgeSeconds: number | null;
+  /** The effective policy is `enforce` for a domain of the connection but no grant is active. */
+  enforceWithoutGrant: boolean;
+  /** `api_mode_connections.remediation_paused`. */
+  paused: boolean;
+  thresholds: {
+    /** `API_MODE_REMEDIATION_FAILURE_WARN_PERCENT` (10). */
+    failureWarnPercent: number;
+    /** `API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT` (50). */
+    failureFailPercent: number;
+    /** `API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES` (15). */
+    backlogWarnMinutes: number;
+    /** `API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES` (60). */
+    backlogFailMinutes: number;
+  };
+}
+
+/** The failure-rate check needs at least this many attempts in the hour (R14). */
+export const REMEDIATION_FAILURE_MIN_ATTEMPTS = 5;
+
+/** R14: the four remediation checks, in code order. */
+export function evaluateRemediationHealth(
+  input: ApiModeRemediationHealthInput,
+): ApiModeHealthCheck[] {
+  const checks: ApiModeHealthCheck[] = [];
+  const t = input.thresholds;
+  const succeeded = Math.max(0, input.succeeded1h);
+  const failed = Math.max(0, input.failed1h);
+  const attempts = succeeded + failed;
+  if (attempts < REMEDIATION_FAILURE_MIN_ATTEMPTS) {
+    checks.push(
+      check(
+        'remediation.failures_1h',
+        'pass',
+        `${attempts} remediation attempt(s) in the last hour (${REMEDIATION_FAILURE_MIN_ATTEMPTS} needed to rate)`,
+      ),
+    );
+  } else {
+    const percent = (failed / attempts) * 100;
+    const status: ApiModeCheckStatus =
+      percent > t.failureFailPercent ? 'fail' : percent > t.failureWarnPercent ? 'warn' : 'pass';
+    checks.push(
+      check(
+        'remediation.failures_1h',
+        status,
+        `${pct(percent)} of ${attempts} remediations failed in the last hour (${failed} failed)`,
+      ),
+    );
+  }
+
+  const age = input.oldestPendingAgeSeconds;
+  if (age === null) {
+    checks.push(check('remediation.backlog', 'pass', 'no pending remediation'));
+  } else {
+    const minutes = Math.max(0, age) / 60;
+    const status: ApiModeCheckStatus =
+      minutes > t.backlogFailMinutes ? 'fail' : minutes > t.backlogWarnMinutes ? 'warn' : 'pass';
+    checks.push(
+      check(
+        'remediation.backlog',
+        status,
+        `oldest pending remediation ${Math.floor(Math.max(0, age))} s old`,
+      ),
+    );
+  }
+
+  checks.push(
+    input.enforceWithoutGrant
+      ? check(
+          'remediation.access',
+          'warn',
+          'remediation not possible: policy enforces but no active mailbox access grant',
+        )
+      : check('remediation.access', 'pass', 'mailbox access available where remediation enforces'),
+  );
+
+  checks.push(
+    input.paused
+      ? check('remediation.paused', 'warn', 'remediation paused for this connection')
+      : check('remediation.paused', 'pass', 'remediation not paused'),
+  );
+  return checks;
 }
 
 export interface ApiModeHealthConfig {
@@ -254,6 +354,8 @@ export function evaluateApiModeHealth(
         )
       : check('domains.api_mode_mx', 'pass', 'no API-mode domain points its MX to the gateway'),
   );
+
+  if (input.remediation) checks.push(...evaluateRemediationHealth(input.remediation));
 
   const status: ApiModeHealthStatus = checks.some((c) => c.status === 'fail')
     ? 'failing'

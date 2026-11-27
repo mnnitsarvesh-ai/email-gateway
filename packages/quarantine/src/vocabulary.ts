@@ -39,8 +39,11 @@ export const isTerminalState = (state: QuarantineState): boolean =>
 export const QUARANTINE_ENTRY_KINDS = ['quarantine', 'review'] as const;
 export type QuarantineEntryKind = (typeof QUARANTINE_ENTRY_KINDS)[number];
 
-/** `QuarantineOrigin`. */
-export const QUARANTINE_ORIGINS = ['policy', 'manual', 'adopted'] as const;
+/**
+ * `QuarantineOrigin`. Step API-2 (R9.1, ADR-0102) appended `api_remediation`: a mailbox-located
+ * entry written by the mailbox-worker after an API-mode remediation moved the message.
+ */
+export const QUARANTINE_ORIGINS = ['policy', 'manual', 'adopted', 'api_remediation'] as const;
 export type QuarantineOrigin = (typeof QUARANTINE_ORIGINS)[number];
 
 /** `QuarantineReason` (1.1 values + `manual`). */
@@ -75,7 +78,11 @@ export type QuarantinePrimaryEngine = (typeof QUARANTINE_PRIMARY_ENGINES)[number
 export const QUARANTINE_RELEASE_MODES = ['operator', 'self', 'approved'] as const;
 export type QuarantineReleaseMode = (typeof QUARANTINE_RELEASE_MODES)[number];
 
-/** `QuarantineReleaseStatus` (`delivered`, `failed`, `blocked_by_revalidation` stay unused). */
+/**
+ * `QuarantineReleaseStatus` (`delivered`, `failed`, `blocked_by_revalidation` stay unused). Step
+ * API-2 (R10.3) appended `restored` / `restore_failed`: the outcome of a mailbox entry's release
+ * (a provider restore to the Inbox by the mailbox-worker).
+ */
 export const QUARANTINE_RELEASE_STATUSES = [
   'pending',
   'delivered',
@@ -87,8 +94,26 @@ export const QUARANTINE_RELEASE_STATUSES = [
   'refused',
   'stale',
   'message_busy',
+  'restored',
+  'restore_failed',
 ] as const;
 export type QuarantineReleaseStatus = (typeof QUARANTINE_RELEASE_STATUSES)[number];
+
+/**
+ * `QuarantineLocation` (step API-2 R9, ADR-0102): `gateway` = held by the gateway (every entry
+ * before API-2; release = delivery); `mailbox` = an API-mode copy moved inside the recipient's
+ * Microsoft 365 / Google Workspace mailbox (release = restore to the Inbox).
+ */
+export const QUARANTINE_LOCATIONS = ['gateway', 'mailbox'] as const;
+export type QuarantineLocation = (typeof QUARANTINE_LOCATIONS)[number];
+
+/**
+ * `QuarantineMailboxContainer` (step API-2 R3): where a `location = mailbox` entry's message sits
+ * (the gateway's hidden quarantine folder / label, Junk / `SPAM`, Recoverable Items Deletions /
+ * Trash).
+ */
+export const MAILBOX_CONTAINERS = ['quarantine_folder', 'junk', 'deleted_items'] as const;
+export type MailboxContainer = (typeof MAILBOX_CONTAINERS)[number];
 
 /** `QuarantineApprovalKind`. */
 export const QUARANTINE_APPROVAL_KINDS = [

@@ -23,6 +23,7 @@
     "@email-gateway/mailbox-api": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
     "@email-gateway/provider-integrations": "workspace:*",
+    "@email-gateway/quarantine": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",

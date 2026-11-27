@@ -55,6 +55,8 @@ export {
   decideRelease,
   computeStaleness,
   releaseLifecycleFor,
+  selfReleaseCause,
+  orderedApprovalReasons,
   RESCAN_SOURCE_STATES,
   QUARANTINE_RELEASE_MAX_VERDICT_AGE_HOURS,
   QUARANTINE_RELEASE_SIGNATURE_MAX_LAG_HOURS,
@@ -65,10 +67,18 @@ export {
   type ReleaseSummary,
   type ReleaseLifecycle,
   type ReleaseRefusalCode,
+  type SelfReleaseRefusalCause,
   type Staleness,
   type StalenessFacts,
   type StalenessBounds,
 } from './release';
+export {
+  API_COPY_STATUSES,
+  decideMailboxRestore,
+  mailboxRestoreApprovalReasons,
+  type ApiCopyStatus,
+  type DecideMailboxRestoreInput,
+} from './mailbox-restore';
 export {
   checkApprover,
   isAccountableRequester,
@@ -159,12 +169,14 @@ export {
   quarantineEntryDetailSchema,
   quarantineReleaseViewSchema,
   quarantineApprovalViewSchema,
+  quarantineEntryLocationSchema,
   releaseRevalidationSummarySchema,
   pageSchema,
   type QuarantineEntrySummary,
   type QuarantineEntryDetail,
   type QuarantineReleaseView,
   type QuarantineApprovalView,
+  type QuarantineEntryLocation,
   type Page,
 } from './dto';
 export {

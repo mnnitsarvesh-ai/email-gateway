@@ -944,7 +944,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step API-1 protection-mode and API-mode routes: exact permissions, keys, classes, cursors; the callbacks are public (D12)', () => {
+  it('the step API-1 protection-mode and API-mode routes (+ step API-2 remediation routes): exact permissions, keys, classes, cursors; the callbacks are public (D12, R13)', () => {
     type Flags = { any?: boolean; cls?: string; cursor?: boolean };
     const READ = 'remediation:read';
     const WRITE = 'remediation:write';
@@ -972,6 +972,20 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'post /api/v1/api-mode/mailboxes/:mailboxId/resync': [[WRITE], { cls: 'sensitive' }],
       'get /api/v1/api-mode/detections': [[READ], { cursor: true }],
       'get /api/v1/api-mode/detections/:detectionId': [[READ]],
+      // Step API-2 R13 (docs/plan/steps/36-api-mode-remediation.md): the remediation routes. The
+      // restore additionally checks `quarantine:release` in the service when it delegates.
+      'get /api/v1/api-mode/remediation-policy': [[READ]],
+      'put /api/v1/api-mode/remediation-policy': [[WRITE], { cls: 'sensitive' }],
+      'put /api/v1/api-mode/remediation-policy/domains/:domainId': [[WRITE], { cls: 'sensitive' }],
+      'delete /api/v1/api-mode/remediation-policy/domains/:domainId': [
+        [WRITE],
+        { cls: 'sensitive' },
+      ],
+      'get /api/v1/api-mode/remediations': [[READ], { cursor: true }],
+      'get /api/v1/api-mode/remediations/:remediationId': [[READ]],
+      'post /api/v1/api-mode/remediations/:remediationId/retry': [[WRITE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/detections/:detectionId/remediate': [[WRITE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/detections/:detectionId/restore': [[WRITE], { cls: 'sensitive' }],
     };
     const apiMode = routes.filter(
       (r) => /^\/api\/v1\/api-mode(\/|$)/.test(r.path) || /\/protection-mode$/.test(r.path),

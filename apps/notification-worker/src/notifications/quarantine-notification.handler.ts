@@ -165,6 +165,8 @@ export class QuarantineNotificationHandler {
               subject: e.subject,
               reason: e.reason,
               expiresAt: e.expiresAt.toISOString(),
+              location: e.location,
+              mailboxContainer: e.mailboxContainer,
             })),
           }),
         };

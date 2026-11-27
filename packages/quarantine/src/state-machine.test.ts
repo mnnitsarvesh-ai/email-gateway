@@ -64,7 +64,13 @@ describe('vocabularies mirror the Prisma enums of the 5.3 migration', () => {
       'superseded',
     ]);
     expect(QUARANTINE_REASONS.at(-1)).toBe('manual');
-    expect(QUARANTINE_ACTION_TYPES).toHaveLength(23);
+    expect(QUARANTINE_ACTION_TYPES).toHaveLength(27);
+    expect(QUARANTINE_ACTION_TYPES.slice(23)).toEqual([
+      'mailbox_remediated',
+      'mailbox_restored',
+      'mailbox_restore_failed',
+      'mailbox_deleted',
+    ]);
     expect(isTerminalState('held')).toBe(false);
     expect(isTerminalState('superseded')).toBe(true);
   });

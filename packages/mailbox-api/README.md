@@ -8,8 +8,13 @@ client-state hash. The library has **no database, no Prisma, no Nest**; it depen
 `@email-gateway/idp-adapters` (8.5 HTTPS client, budgets, errors, simulators) and
 `@email-gateway/provider-integrations` (the `*.mailbox_remediation` profiles).
 
-API-1 only **reads** mailboxes: the only `POST`/`PATCH`/`DELETE` calls are Graph change-notification
-subscriptions. There is no client method that changes mailbox content.
+API-1 only **read** mailboxes (the only writes were Graph change-notification subscriptions).
+Step API-2 ([design note 36](../../docs/plan/steps/36-api-mode-remediation.md) R2, R3, R5, R6, R14;
+ADR-0101/0102) adds the **remediation** calls (move to the gateway's hidden quarantine folder or
+label, Junk, tag, recoverable delete, hard delete where allowed, restore) and the pure remediation
+policy, plan and key helpers below. The library still never decides _when_ to act on its own: the
+mailbox-worker's `copies` role decides with `decideRemediation`, its `remediate` role executes with
+these clients.
 
 ## Clients
 
@@ -49,6 +54,32 @@ grant's delegated administrator for the Directory). Map token-service failures t
 |                                                          | `messageRaw(mailbox, id, maxBytes, signal)` → `MailboxContentStream`                                                                                          | `GET …/messages/{id}?format=raw`, streamed through `GmailRawExtractor` (decoded bytes ≤ `maxBytes`)                                                                                                                                                                         |
 | `GoogleDirectoryClient(context, token)`                  | `listUsers(pageToken \| undefined, signal)` → `{ users[{ id, primaryEmail, aliases, suspended, archived }], nextPageToken }`                                  | `GET /admin/directory/v1/users?customer=my_customer&projection=basic&maxResults=500`                                                                                                                                                                                        |
 
+### Remediation calls (step API-2, R6.2/R6.3)
+
+Same call discipline (gate, budget of the family, `401` retry, classified errors, `Retry-After`
+pause ≤ 600 s, redaction). Path templates never contain an id (`/v1.0/users/{id}/messages/{mid}/move`,
+`/gmail/v1/users/{userId}/messages/{id}/modify`, …). Inputs that would change a provider query
+(empty, over-long or control-character ids and names, whitespace in a Gmail `rfc822msgid`) fail
+`bad_request` before any call.
+
+| Class             | Method                                                                                                   | Provider call                                                                                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GraphMailClient` | `findMessagesByInternetMessageId(user, internetMessageId, signal)` → `[{ id, parentFolderId, isDraft }]` | `GET /v1.0/users/{u}/messages?$filter=internetMessageId eq '<id>'&$select=id,parentFolderId,isDraft&$top=10` (angle brackets added when missing, `'` doubled per OData)           |
+|                   | `getMessageState(user, id, signal)` → `{ id, parentFolderId, categories }`                               | `GET …/messages/{id}?$select=id,parentFolderId,categories`                                                                                                                        |
+|                   | `wellKnownFolderId(user, name, signal)`                                                                  | `GET …/mailFolders/{inbox\|junkemail\|sentitems\|recoverableitemsdeletions\|msgfolderroot}?$select=id`                                                                            |
+|                   | `ensureChildFolder(user, parentWellKnown, displayName, hidden, signal)` → `{ id, created }`              | `GET …/mailFolders/{parent}/childFolders?includeHiddenFolders=true&$filter=displayName eq '<name>'`, else `POST …/childFolders { displayName, isHidden }` (`409` → look up again) |
+|                   | `moveMessage(user, id, destinationId, signal)` → `{ id, parentFolderId }`                                | `POST …/messages/{id}/move { destinationId }` — the answer carries a **new id** (store it; the old id answers `404`)                                                              |
+|                   | `setCategories(user, id, categories, signal)`                                                            | `PATCH …/messages/{id} { categories }` (whole list; compute it with `graphCategoriesWith`)                                                                                        |
+|                   | `permanentDelete(user, id, signal)`                                                                      | `POST …/messages/{id}/permanentDelete` (`204`; irreversible)                                                                                                                      |
+| `GmailClient`     | `findMessagesByRfc822Id(mailbox, messageId, signal)` → `[{ id, threadId }]`                              | `GET …/messages?q=rfc822msgid:<id without brackets>&includeSpamTrash=true&maxResults=10`                                                                                          |
+|                   | `messageLabels(mailbox, id, signal)` → `{ id, threadId, labelIds }`                                      | `GET …/messages/{id}?format=minimal`                                                                                                                                              |
+|                   | `listLabels(mailbox, signal)` / `ensureLabel(mailbox, name, hidden, signal)` → `{ id, created }`         | `GET …/labels`; create `POST …/labels { name, labelListVisibility: labelHide\|labelShow, messageListVisibility: hide\|show }` (name match case-insensitive; `409` → list again)   |
+|                   | `modifyLabels(mailbox, id, add, remove, signal)`, `trash(…)`, `untrash(…)` → `{ id, labelIds }`          | `POST …/messages/{id}/modify { addLabelIds, removeLabelIds }`, `POST …/trash`, `POST …/untrash`                                                                                   |
+
+There is deliberately **no Gmail `delete`**: `messages.delete` needs the full
+`https://mail.google.com/` scope, which the `google.mailbox_remediation` grant (`gmail.modify`)
+does not request; the simulator proves the refusal (`403 insufficientPermissions`).
+
 `MailboxContentStream = { contentLength: number | undefined, body: AsyncIterable<Uint8Array> }`;
 iteration failures are `MailboxApiError`s; breaking out of the loop cancels the transfer.
 
@@ -82,6 +113,104 @@ addresses (4 MiB is ample); MIME and raw bodies use their own per-call `maxBytes
 | `MailboxApiError`, `toMailboxApiError`, `MAILBOX_API_ERROR_CODES`, `isGraphCursorExpired`                                             | The one error type (8.5 codes + `cursor_expired`, `throttle_paused`)                                                                                                                                                                                                                                                  |
 | `M365_MAILBOX_REMEDIATION_PROFILE`, `GOOGLE_MAILBOX_REMEDIATION_PROFILE`, `MAILBOX_PROFILE_KEYS`, `MAILBOX_TOKEN_RESOURCES`           | Re-exported profiles and the token resource per family                                                                                                                                                                                                                                                                |
 
+## Remediation (step API-2)
+
+### Policy document `api-remediation-policy/1` (R2.1)
+
+`remediationPolicySchema` (strict everywhere, unknown keys refused): `{ v: 1, rules: [1..16] of
+{ id (1..48, [a-z0-9_-], unique), when: { verdicts (1..9, unique; clean/unknown refused), minLevel?,
+maxLevel? (≥ minLevel; low|medium|high|critical), hardBlock?, minScore? (0..1000) }, action:
+move_quarantine|move_junk|tag|soft_delete|hard_delete|none }, remediateScanFailures?: false }`.
+`when.policyDispositions` is **reserved** for the later policy-evaluation step and refused with the
+custom issue `unsupported_until_policy_evaluation` (message and `params.code`). The mode
+(`detect_only`/`enforce`) is a column of `api_remediation_policies`, not part of the document.
+`parseRemediationPolicy`, `hardDeleteRuleIds` (the api refuses them while
+`API_MODE_HARD_DELETE_ENABLED` is off), `canonicalJson` / `canonicalPolicySha256` (sorted keys; the
+`document_sha256` column and the decision provenance).
+
+`DEFAULT_REMEDIATION_POLICY` = P1 in `enforce` (frozen): `p1-high-confidence-malware-phishing-hb`
+(malware/phishing + any hard block → `move_quarantine`), `p1-high-confidence-malware-phishing`
+(malware/phishing, level critical → `move_quarantine`), `p1-other-malware-phishing` (→ `tag`),
+`p1-suspicious` (suspicious/BEC → `tag`); spam, bulk and DLP → nothing. `REMEDIATION_PRESETS`:
+`p1`, `detectOnlyStart` (P1 rules, mode `detect_only`), `strict` (P1 + `strict-spam-junk`: spam →
+`move_junk`). No default or preset contains `hard_delete`.
+
+### Decision order (R2.2)
+
+`decideRemediation(input, { mode, document }, { hardDeleteEnabled })` → `{ outcome: 'none' }` |
+`{ outcome: 'skip', reason, ruleId, action }` | `{ outcome: 'act', action, ruleId, simulated, notes }`:
+
+1. copy not `scanned`, or verdict `clean`/`unknown`/null → `none`;
+2. first matching rule (verdict listed and every present bound holds: a null level fails
+   `minLevel`/`maxLevel`, no hard block fails `hardBlock: true`, a null score fails `minScore`); no
+   match or action `none` → `none`;
+3. verdict authority `inline` (hybrid) → skip `inline_authority`;
+4. domain effective mode not `api`/`hybrid`, or mailbox `disabled`/`deleted` → skip `out_of_scope`;
+5. `hard_delete` without the platform setting → skip `hard_delete_disabled`;
+6. mode `detect_only` → `act` with `simulated: true` (no provider call);
+7. connection paused → skip `remediation_paused`;
+8. no active mailbox grant → skip `no_mailbox_access`;
+9. `act`. A Google `hard_delete` carries the note `hard_delete_falls_back_to_trash`.
+
+`resolveEffectivePolicy({ organization, domains }, domainId)` → `{ scope: platform_default |
+organization | domain, policy, publicId, rowVersion }` (domain row → organization row → P1);
+`buildDecisionRecord(effective, input, decision)` → `api-remediation-decision/1` (`{ v, policy: {
+scope, publicId, rowVersion, sha256 }, mode, ruleId, inputs: { verdict, riskScore, level,
+hardBlocks ≤ 9, verdictAuthority }, policyOutcome: null, notes }`, schema
+`remediationDecisionRecordSchema`). `remediationActionKey(copyPublicId, action, generation)` = hex
+SHA-256 of `api-remediation/1\0<copyPublicId>\0<action>\0<generation>` (the unique `action_key`).
+
+### Provider mappings (R3) and helpers
+
+`REMEDIATION_PROVIDER_ACTIONS` is the R3 table as data (Graph steps, Gmail steps, reversal,
+quarantine container):
+
+| Action            | Graph (`Mail.ReadWrite`)                         | Gmail (`gmail.modify`)                                            | Reversal        | Entry container     |
+| ----------------- | ------------------------------------------------ | ----------------------------------------------------------------- | --------------- | ------------------- |
+| `move_quarantine` | ensure hidden folder under `msgfolderroot`, move | ensure hidden label, modify +label −`INBOX`                       | `restore_inbox` | `quarantine_folder` |
+| `move_junk`       | move to `junkemail`                              | modify +`SPAM` −`INBOX`                                           | `restore_inbox` | `junk`              |
+| `tag`             | add the tag category (no-op when present)        | ensure tag label, modify +label                                   | `remove_tag`    | —                   |
+| `soft_delete`     | move to `recoverableitemsdeletions`              | `trash`                                                           | `restore_inbox` | `deleted_items`     |
+| `hard_delete`     | `permanentDelete`                                | **falls back to `trash`** (`hard_delete_unsupported_provider`)    | —               | —                   |
+| `restore_inbox`   | move to `inbox`, then remove the tag category    | `untrash` when trashed, modify +`INBOX` −`SPAM` −quarantine label | —               | releases the entry  |
+| `remove_tag`      | remove the tag category                          | modify −tag label                                                 | —               | —                   |
+
+Helpers: `isReversible`, `reversalOf`, `isReversal`, `containerOf`, `createsQuarantineEntry`,
+`executedContainerOf(action, provider)` (`provider_refs.container`), `executionResultCode`,
+`graphTargetReached` / `gmailTargetReached` (the "already in target" check over the state read
+before acting), `graphCategoriesWith`, `gmailModifyFor` (only the label changes that still differ),
+`graphLocateCandidates` / `gmailLocateCandidates` (drop drafts and Sent Items / sent-only matches,
+at most 5), `verdictToQuarantineReason` and `hardBlockToPrimaryEngine` (R9.1 mappings of a mailbox
+entry), `mailboxEntryExplanation(ruleId)` (content-free). `classifyRemediationError(error)` maps a
+`MailboxApiError` onto `throttled` (429, Google rate-limit 403, quota, 503 **with** `Retry-After`,
+paused gate, budget: wait, no attempt counted), `retryable` (other 5xx, timeouts: back-off),
+`forbidden` (401 after the token retry, 403 → `provider_forbidden`), `not_found` (404 → re-ensure
+the container once or run the locate step), `rejected` (400 and other non-retryable answers →
+`provider_rejected`) and `access_revoked` (no token → `mailbox_access_revoked`).
+
+Vocabularies (string unions mirroring the Prisma enums): `REMEDIATION_ACTIONS`,
+`REVERSAL_ACTIONS`, `REMEDIATION_ACTION_KINDS`, `REMEDIATION_MODES`, `REMEDIATION_TRIGGERS`,
+`REMEDIATION_STATUSES`, `COPY_REMEDIATION_STATES`, `REMEDIATION_MAILBOX_CONTAINERS`,
+`REMEDIATION_SKIP_REASONS`, `REMEDIATION_RESULT_CODES`, `REMEDIATION_FAILURE_CODES`,
+`MESSAGE_VERDICTS`, `RISK_LEVELS`.
+
+**Hard delete** is off by default (`API_MODE_HARD_DELETE_ENABLED=false`), needs an explicit tenant
+rule, is never in a default or preset, never manual and never from the assistant. On Graph it is
+`permanentDelete` (irreversible); on Gmail it runs the Trash plan and records
+`hard_delete_unsupported_provider`.
+
+### Health (R14)
+
+`API_MODE_HEALTH_CHECK_CODES` gains `remediation.failures_1h`, `remediation.backlog`,
+`remediation.access` and `remediation.paused` (13 codes; the document cap stays 16).
+`evaluateApiModeHealth` evaluates them only when the input has the optional `remediation` block
+`{ succeeded1h, failed1h, oldestPendingAgeSeconds, enforceWithoutGrant, paused, thresholds: {
+failureWarnPercent, failureFailPercent, backlogWarnMinutes, backlogFailMinutes } }`: failure rate
+rated from 5 attempts (> warn % → warn, > fail % → fail), oldest pending age (> warn minutes → warn,
+
+> fail minutes → fail), enforce without an active grant → warn, paused → warn
+> (`evaluateRemediationHealth`). Evidence carries counts, percentages and ages only (≤ 512).
+
 Thresholds are configuration of the caller (`API_MODE_*` keys, design D16), never constants here,
 except the fixed ratios of D11.3 (`FEEDS_INTAKE_MIN_RATIO` 0.9, `FEEDS_ERROR_WARN_RATIO` 0.1).
 
@@ -90,7 +219,8 @@ except the fixed ratios of D11.3 (`FEEDS_INTAKE_MIN_RATIO` 0.9, `FEEDS_ERROR_WAR
 `createMailboxTestbed(options?)` starts the in-process simulators of
 `@email-gateway/idp-adapters/testing` (Graph mail delta, `$value`, subscriptions with the
 validation handshake and notification push; Gmail profile, history, metadata and streamed raw;
-Google Directory) on 127.0.0.1 and wires the three clients with `SimTokenSource`s for the two
+Google Directory; step API-2: per-mailbox message location state, Graph folders/move/categories/
+permanent delete, Gmail labels/modify/trash/untrash — assert with `messageLocation(script, user, id)`) on 127.0.0.1 and wires the three clients with `SimTokenSource`s for the two
 `mailbox_remediation` grants, a `RecordingRateBudget` and an `InMemoryThrottleGate` on a
 `TestClock`. Deliver messages with `tb.sims.deliver({ user, eml })` (`syntheticEml(...)`), script
 failures with `tb.sims.script.inject(...)`, expire cursors with `expireCursors(script, user)` and

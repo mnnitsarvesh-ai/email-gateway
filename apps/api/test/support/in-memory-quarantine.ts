@@ -7,6 +7,7 @@
  * the transactional behaviour is covered by integration/quarantine.test.ts on MySQL.
  */
 import { Readable } from 'node:stream';
+import type { TestingModuleBuilder } from '@nestjs/testing';
 import type {
   LifecycleSnapshot,
   MessageRef,
@@ -18,7 +19,22 @@ import type {
   IdempotencyRecord,
   NewIdempotencyRecord,
 } from '../../src/http/idempotency/idempotency.repository';
+import type {
+  QueuedAction,
+  QueueRemediationAction,
+} from '../../src/modules/api-mode/repositories/remediation-action-writer';
 import type { ApprovalRow, EntryRow, ReleaseRow } from '../../src/modules/quarantine/domain/entry';
+import { MessageLifecycleRepository } from '../../src/modules/messages/repositories/message-lifecycle.repository';
+import { LifecycleGateway } from '../../src/modules/messages/services/lifecycle-gateway';
+import { QuarantineFactsRepository } from '../../src/modules/quarantine/repositories/quarantine-facts.repository';
+import {
+  type EntryCopyFacts,
+  type MailboxLocationFacts,
+  QuarantineMailboxRepository,
+} from '../../src/modules/quarantine/repositories/quarantine-mailbox.repository';
+import { QuarantineReadRepository } from '../../src/modules/quarantine/repositories/quarantine-read.repository';
+import { QuarantineWriteRepository } from '../../src/modules/quarantine/repositories/quarantine-write.repository';
+import { QuarantineObjectStore } from '../../src/modules/quarantine/services/quarantine-object-store';
 
 export const ORG = 1n;
 export const OTHER_ORG = 2n;
@@ -81,6 +97,20 @@ export class QuarantineWorld {
   /** `api_keys.created_by_user_id` by API key id (Q14 key-creator rule). */
   apiKeyCreators = new Map<bigint, bigint | null>();
   purges: Array<{ messageId: bigint; status: string }> = [];
+  /** Step API-2: the API-mode copies behind mailbox-located entries. */
+  copies: Array<EntryCopyFacts & { organizationId: bigint }> = [];
+  /** Step API-2: the API-mode mailboxes of mailbox-located entries. */
+  mailboxes = new Map<
+    bigint,
+    { address: string; provider: string; connectionPublicId: string; organizationId: bigint }
+  >();
+  /** Step API-2: the action rows queued through RemediationActionWriter (in order). */
+  remediationActions: Array<
+    QueueRemediationAction & { id: bigint; publicId: string; status: string; actionKey: string }
+  > = [];
+  /** Step API-2: `markCopyPending` calls. */
+  copyUpdates: Array<{ copyId: bigint; remediationAction: string | null; lastActionId: bigint }> =
+    [];
 
   reset(): void {
     this.messages = [];
@@ -97,6 +127,10 @@ export class QuarantineWorld {
     this.transitions = [];
     this.purges = [];
     this.apiKeyCreators.clear();
+    this.copies = [];
+    this.mailboxes.clear();
+    this.remediationActions = [];
+    this.copyUpdates = [];
   }
 
   /** A quarantined message with one held entry for `address`. */
@@ -169,10 +203,171 @@ export class QuarantineWorld {
       approvalRequestId: null,
       objectPurgedAt: null,
       rowVersion: 1,
+      location: 'gateway',
+      mailboxContainer: null,
+      apiCopyId: null,
+      apiCopyReceivedAt: null,
+      apiMailboxId: null,
+      apiRemediationActionId: null,
       ...o,
     };
     this.entries.push(entry);
     return entry;
+  }
+
+  /**
+   * Step API-2 (R9): a mailbox-located entry of an API-mode copy (message state `journaled`, the
+   * copy `scanned`, generation 0) in the mailbox `address` of the M365 connection.
+   */
+  addMailboxEntry(
+    o: Partial<EntryRow> & {
+      organizationId?: bigint;
+      address?: string;
+      copyStatus?: EntryCopyFacts['status'];
+      generation?: number;
+    } = {},
+  ): EntryRow {
+    const n = nextId();
+    const organizationId = o.organizationId ?? ORG;
+    const mailboxId = BigInt(80_000 + n);
+    const copyId = BigInt(60_000 + n);
+    const copyReceivedAt = new Date(Date.now() - 1_800_000);
+    const entry = this.addEntry({
+      reason: 'phishing',
+      origin: 'api_remediation',
+      riskLevel: 'high',
+      riskVerdict: 'phishing',
+      primaryEngine: 'url',
+      messageState: 'journaled',
+      location: 'mailbox',
+      mailboxContainer: 'quarantine_folder',
+      apiCopyId: copyId,
+      apiCopyReceivedAt: copyReceivedAt,
+      apiMailboxId: mailboxId,
+      apiRemediationActionId: BigInt(70_000 + n),
+      ...o,
+    });
+    this.mailboxes.set(mailboxId, {
+      address: entry.recipientAddress,
+      provider: 'microsoft_365',
+      connectionPublicId: uuid(40_000 + n),
+      organizationId,
+    });
+    this.copies.push({
+      organizationId,
+      copyId,
+      copyReceivedAt,
+      copyPublicId: uuid(60_000 + n),
+      status: o.copyStatus ?? 'scanned',
+      remediationGeneration: o.generation ?? 0,
+      apiConnectionId: BigInt(30_000 + n),
+      mailboxId,
+      messageId: entry.messageId,
+    });
+    return entry;
+  }
+
+  /** Step API-2: the fake of QuarantineMailboxRepository. */
+  mailboxRepository() {
+    return {
+      copyOfEntry: (
+        _tx: unknown,
+        scope: TenantScope,
+        entry: { apiCopyId: bigint | null; apiCopyReceivedAt: Date | null },
+      ) => {
+        const c = this.copies.find(
+          (x) => x.organizationId === scope.organizationId && x.copyId === entry.apiCopyId,
+        );
+        if (!c) return Promise.resolve(null);
+        const { organizationId: _org, ...facts } = c;
+        return Promise.resolve({ ...facts });
+      },
+      locationFacts: (
+        scope: TenantScope,
+        rows: ReadonlyArray<{
+          id: bigint;
+          location: string;
+          apiCopyId: bigint | null;
+          apiCopyReceivedAt: Date | null;
+          apiMailboxId: bigint | null;
+          apiRemediationActionId: bigint | null;
+        }>,
+      ): Promise<MailboxLocationFacts> => {
+        const facts: MailboxLocationFacts = {
+          mailboxes: new Map(),
+          copies: new Map(),
+          actions: new Map(),
+        };
+        for (const r of rows.filter((x) => x.location === 'mailbox')) {
+          const m = r.apiMailboxId === null ? undefined : this.mailboxes.get(r.apiMailboxId);
+          if (m && m.organizationId === scope.organizationId) {
+            facts.mailboxes.set(r.apiMailboxId!, {
+              address: m.address,
+              provider: m.provider,
+              connectionPublicId: m.connectionPublicId,
+            });
+          }
+          const c = this.copies.find(
+            (x) => x.copyId === r.apiCopyId && x.organizationId === scope.organizationId,
+          );
+          if (c) facts.copies.set(`${c.copyId}:${c.copyReceivedAt.getTime()}`, c.copyPublicId);
+          const actions = this.remediationActions.filter((a) => a.quarantineEntryId === r.id);
+          const last = actions[actions.length - 1];
+          if (last) facts.actions.set(r.id, { publicId: last.publicId, status: last.status });
+        }
+        return Promise.resolve(facts);
+      },
+    };
+  }
+
+  /** Step API-2: the fake of RemediationActionWriter (keys collapse like the unique index). */
+  actionWriter() {
+    return {
+      queue: (_tx: unknown, row: QueueRemediationAction): Promise<QueuedAction> => {
+        const actionKey = `${row.copyPublicId}:${row.action}:${row.generation}`;
+        const existing = this.remediationActions.find((a) => a.actionKey === actionKey);
+        if (existing) {
+          if (existing.status === 'in_progress') {
+            return Promise.resolve({
+              id: existing.id,
+              publicId: existing.publicId,
+              outcome: 'busy',
+            });
+          }
+          if (existing.status === 'succeeded') {
+            return Promise.resolve({
+              id: existing.id,
+              publicId: existing.publicId,
+              outcome: 'succeeded',
+            });
+          }
+          Object.assign(existing, { ...row, status: 'pending' });
+          return Promise.resolve({
+            id: existing.id,
+            publicId: existing.publicId,
+            outcome: 'rearmed',
+          });
+        }
+        const n = nextId();
+        const created = {
+          ...row,
+          id: BigInt(n),
+          publicId: uuid(70_000 + n),
+          status: 'pending',
+          actionKey,
+        };
+        this.remediationActions.push(created);
+        return Promise.resolve({ id: created.id, publicId: created.publicId, outcome: 'inserted' });
+      },
+      markCopyPending: (
+        _tx: unknown,
+        copy: { copyId: bigint },
+        update: { remediationAction: string | null; lastActionId: bigint },
+      ) => {
+        this.copyUpdates.push({ copyId: copy.copyId, ...update });
+        return Promise.resolve();
+      },
+    };
   }
 
   messageOf(entry: Pick<EntryRow, 'messageId'>): MessageFake {
@@ -514,6 +709,7 @@ export class QuarantineWorld {
           states?: string[];
           recipient?: string;
           messageId?: bigint;
+          location?: string;
           take: number;
         },
       ) =>
@@ -528,6 +724,7 @@ export class QuarantineWorld {
             .filter((e) => f.states === undefined || f.states.includes(e.state))
             .filter((e) => f.recipient === undefined || e.recipientAddress === f.recipient)
             .filter((e) => f.messageId === undefined || e.messageId === f.messageId)
+            .filter((e) => f.location === undefined || e.location === f.location)
             .sort((a, b) => b.quarantinedAt.getTime() - a.quarantinedAt.getTime())
             .slice(0, f.take),
         ),
@@ -711,4 +908,30 @@ export class QuarantineWorld {
   auditActions(): string[] {
     return this.audits.map((a) => a.action);
   }
+}
+
+/**
+ * Step API-2: the quarantine repositories, lifecycle door and object store of a stubbed app
+ * replaced by the world (the API-mode restore delegates to the quarantine release). The caller
+ * keeps its own Idempotency-Key store, transaction runner and audit double.
+ */
+export function overrideQuarantineWorld(
+  builder: TestingModuleBuilder,
+  world: QuarantineWorld,
+): TestingModuleBuilder {
+  return builder
+    .overrideProvider(QuarantineReadRepository)
+    .useValue(world.reader())
+    .overrideProvider(QuarantineWriteRepository)
+    .useValue(world.writer())
+    .overrideProvider(QuarantineFactsRepository)
+    .useValue(world.facts())
+    .overrideProvider(QuarantineObjectStore)
+    .useValue(world.objects())
+    .overrideProvider(LifecycleGateway)
+    .useValue(world.lifecycle())
+    .overrideProvider(QuarantineMailboxRepository)
+    .useValue(world.mailboxRepository())
+    .overrideProvider(MessageLifecycleRepository)
+    .useValue({ insertEmailEvent: () => Promise.resolve() });
 }

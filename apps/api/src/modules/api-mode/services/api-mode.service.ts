@@ -39,6 +39,7 @@ import {
   DETECTIONS_DEFAULT_DAYS,
   DETECTIONS_MAX_DAYS,
   MAILBOX_RECENT_COPIES,
+  REMEDIATION_BACKLOG_COUNT_CAP,
 } from '../api-mode.constants';
 import {
   connectionConflict,
@@ -64,6 +65,7 @@ import {
   type MailboxPage,
   type MailboxResyncView,
   type MailboxView,
+  type RemediationSummaryView,
   UpdateSettingsBodySchema,
 } from '../dto/api-mode.schemas';
 import {
@@ -72,6 +74,8 @@ import {
   type CounterRow,
   ApiModeRepository,
   type MailboxRow,
+  type RemediationBacklog,
+  type RemediationCounterRow,
 } from '../repositories/api-mode.repository';
 import { parseBody, parsePublicId } from './protection-mode.service';
 
@@ -154,6 +158,58 @@ function windowStats(rows: readonly CounterRow[], now: Date) {
   };
 }
 
+/**
+ * Step API-2 R13: the remediation block from the counter rows of the last day (1 h and 24 h
+ * windows) and the live backlog. `policy` is the organization policy (null = platform default).
+ */
+export function remediationSummary(
+  rows: readonly RemediationCounterRow[],
+  backlog: readonly RemediationBacklog[],
+  policy: { mode: 'detect_only' | 'enforce' } | null,
+  paused: boolean,
+  now: Date,
+): RemediationSummaryView {
+  const since = (ms: number) => rows.filter((r) => r.hour.getTime() >= now.getTime() - ms);
+  const total = (list: readonly RemediationCounterRow[], k: keyof RemediationCounterRow) =>
+    list.reduce((n, r) => n + Number(r[k] as number | bigint), 0);
+  const h1 = since(HOUR_MS);
+  const h24 = since(DAY_MS);
+  const latencyCount = total(h24, 'remediationLatencyCount');
+  const latencySum = total(h24, 'remediationLatencySumMs');
+  const latencyMax = h24.reduce((m, r) => Math.max(m, r.remediationLatencyMaxMs), 0);
+  const oldest = backlog
+    .map((b) => b.oldestCreatedAt)
+    .filter((d): d is Date => d !== null)
+    .reduce<Date | null>((min, d) => (min === null || d < min ? d : min), null);
+  return {
+    policyMode: policy?.mode ?? 'enforce',
+    policySource: policy === null ? 'platform_default' : 'organization',
+    paused,
+    succeeded1h: total(h1, 'remediationSucceeded'),
+    failed1h: total(h1, 'remediationFailed'),
+    succeeded24h: total(h24, 'remediationSucceeded'),
+    failed24h: total(h24, 'remediationFailed'),
+    skipped24h: total(h24, 'remediationSkipped'),
+    simulated24h: total(h24, 'remediationSimulated'),
+    restores24h: total(h24, 'restoresSucceeded'),
+    throttled24h: total(h24, 'remediationThrottled'),
+    backlog: {
+      pending: Math.min(
+        backlog.reduce((n, b) => n + b.pending, 0),
+        REMEDIATION_BACKLOG_COUNT_CAP,
+      ),
+      capped:
+        backlog.some((b) => b.capped) ||
+        backlog.reduce((n, b) => n + b.pending, 0) > REMEDIATION_BACKLOG_COUNT_CAP,
+      oldestPendingAgeSeconds:
+        oldest === null ? null : Math.max(0, Math.floor((now.getTime() - oldest.getTime()) / 1000)),
+    },
+    latencyAvgSeconds24h:
+      latencyCount === 0 ? null : Math.round(latencySum / latencyCount / 100) / 10,
+    latencyMaxSeconds24h: latencyCount === 0 ? null : Math.round(latencyMax / 100) / 10,
+  };
+}
+
 /** Coverage of one connection: total only with an `ok` inventory (D11.2). */
 function coverageOf(
   facts: ConnectionFacts,
@@ -226,6 +282,8 @@ export class ApiModeService {
       health: { status: a?.healthStatus ?? 'unknown', changedAt: iso(a?.healthChangedAt ?? null) },
       throttledUntil: iso(a?.throttledUntil ?? null),
       lastErrorCode: a?.lastErrorCode ?? null,
+      remediationPaused: a?.remediationPaused ?? false,
+      remediationPausedAt: iso(a?.remediationPausedAt ?? null),
       grant:
         facts.grant === null
           ? null
@@ -256,9 +314,12 @@ export class ApiModeService {
     ]);
     const apiIds = connections.flatMap((c) => (c.api === null ? [] : [c.api.id]));
     const from = new Date(Math.min(now.getTime() - DAY_MS, utcDay(now).getTime()));
-    const [coverage, counters] = await Promise.all([
+    const [coverage, counters, remCounters, backlog, policy] = await Promise.all([
       this.repository.coverage(scope, apiIds),
       this.repository.counters(scope, apiIds, from),
+      this.repository.remediationCounters(scope, apiIds, new Date(now.getTime() - DAY_MS)),
+      this.repository.remediationBacklog(scope, apiIds, REMEDIATION_BACKLOG_COUNT_CAP),
+      this.repository.organizationRemediationMode(scope),
     ]);
     const byHealth = { unknown: 0, healthy: 0, degraded: 0, failing: 0 };
     const items = connections.map((c) => {
@@ -283,6 +344,13 @@ export class ApiModeService {
         inventoryStatus: c.api?.inventoryStatus ?? ('never' as const),
         ...stats,
         throttledUntil: iso(c.api?.throttledUntil ?? null),
+        remediation: remediationSummary(
+          remCounters.filter((r) => c.api !== null && r.apiConnectionId === c.api.id),
+          c.api === null ? [] : [backlog.get(c.api.id)].filter((b) => b !== undefined),
+          policy,
+          c.api?.remediationPaused ?? false,
+          now,
+        ),
       };
     });
     const covered = items.reduce((n, i) => n + i.coverage.covered, 0);
@@ -303,6 +371,13 @@ export class ApiModeService {
       },
       connectionsByHealth: byHealth,
       ...windowStats(counters, now),
+      remediation: remediationSummary(
+        remCounters,
+        [...backlog.values()],
+        policy,
+        connections.some((c) => c.api?.remediationPaused === true),
+        now,
+      ),
       connections: items,
     };
   }
@@ -325,7 +400,7 @@ export class ApiModeService {
     const now = this.now();
     const domains = await this.repository.apiModeDomains(scope);
     const apiIds = facts.api === null ? [] : [facts.api.id];
-    const [coverage, counters, feeds] = await Promise.all([
+    const [coverage, counters, feeds, remCounters, backlog, policy] = await Promise.all([
       this.repository.coverage(scope, apiIds),
       this.repository.counters(
         scope,
@@ -339,6 +414,9 @@ export class ApiModeService {
             facts.api.id,
             domains.map((d) => d.id),
           ),
+      this.repository.remediationCounters(scope, apiIds, new Date(now.getTime() - DAY_MS)),
+      this.repository.remediationBacklog(scope, apiIds, REMEDIATION_BACKLOG_COUNT_CAP),
+      this.repository.organizationRemediationMode(scope),
     ]);
     const journal = bestJournalSource(facts);
     const input: ApiModeWizardInput = {
@@ -392,6 +470,13 @@ export class ApiModeService {
           lagCount: sum(rows, 'lagCount'),
           lagP95Seconds: p(sumCounters(rows), 0.95),
         })),
+      remediation: remediationSummary(
+        remCounters,
+        [...backlog.values()],
+        policy,
+        facts.api?.remediationPaused ?? false,
+        now,
+      ),
     };
   }
 
@@ -441,9 +526,11 @@ export class ApiModeService {
           throw notificationsUnavailable('platform');
         }
         if (body.feedsEnabled && facts.grant?.status !== 'active') throw mailboxAccessRequired();
+        const remediationPaused = body.remediationPaused ?? api.remediationPaused;
         const changed = [
           ...(body.feedsEnabled !== api.feedsEnabled ? ['feedsEnabled'] : []),
           ...(feedMode !== api.feedMode ? ['feedMode'] : []),
+          ...(remediationPaused !== api.remediationPaused ? ['remediationPaused'] : []),
         ];
         if (changed.length === 0) return { statusCode: 200, body: this.connectionView(facts) };
         const now = this.now();
@@ -453,6 +540,11 @@ export class ApiModeService {
           feedMode,
           ...(enabling && { feedsEnabledAt: now }),
           ...(!body.feedsEnabled && { feedsEnabledAt: null }),
+          // Step API-2 R13: the pause switch of policy remediation (R5.1).
+          ...(remediationPaused !== api.remediationPaused && {
+            remediationPaused,
+            remediationPausedAt: remediationPaused ? now : null,
+          }),
         });
         if (!ok) throw connectionConflict(api.rowVersion);
         let queued = 0;
@@ -480,6 +572,7 @@ export class ApiModeService {
               changedPaths: changed,
               feedsEnabled: body.feedsEnabled,
               feedMode,
+              remediationPaused,
               mailboxesQueued: queued,
               rowVersion: api.rowVersion + 1,
             },
@@ -638,6 +731,10 @@ export class ApiModeService {
       subjectMasked: row.subject !== null && row.subject !== '',
       headerFrom:
         row.headerFrom === null || row.headerFrom === '' ? null : maskAddress(row.headerFrom),
+      remediationState: row.remediationState,
+      remediationAction: row.remediationAction,
+      remediationId: row.remediationId,
+      quarantineEntryId: row.quarantineEntryId,
     };
   }
 
@@ -735,6 +832,7 @@ export class ApiModeService {
           connectionPublicId: String(one(f.connectionId)).toLowerCase(),
         }),
         ...(one(f.minRiskScore) !== undefined && { minRiskScore: Number(one(f.minRiskScore)) }),
+        ...(f.remediationState?.values && { remediationState: [...f.remediationState.values] }),
       },
       range,
       { take: query.limit + 1, ...(before && { before }) },

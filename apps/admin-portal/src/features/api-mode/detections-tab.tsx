@@ -1,7 +1,7 @@
 'use client';
 
 import { ScanSearchIcon } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { z } from 'zod';
 import { DataTable, type DataTableColumn } from '@/components/data-table';
 import { VerdictBadge } from '@/components/domain/badges';
@@ -12,8 +12,18 @@ import { EmptyState } from '@/components/states/empty-state';
 import { useUrlState } from '@/hooks/use-url-state';
 import { useApiQuery, useCursorList } from '@/lib/api/hooks';
 import type { QueryParams } from '@/lib/api/types';
+import { useCan } from '@/lib/auth/me';
 import { humanize } from '@/lib/format';
 import { FilterSelect } from '@/features/domains/kit';
+import {
+  DetectionDrawer,
+  RemediateDialog,
+  RestoreDialog,
+  RestoreResultNotice,
+  canBeRemediated,
+  canBeRestored,
+  type DetectionRef,
+} from './detection-actions';
 import {
   DETECTION_SOURCES,
   DETECTION_STATUSES,
@@ -22,17 +32,33 @@ import {
   formatLagMs,
   type Detection,
 } from './model';
+import {
+  COPY_REMEDIATION_STATES,
+  RemediationStateBadge,
+  STATE_LABEL,
+  actionLabel,
+  type RestoreResult,
+} from './remediation-model';
 
 const URL_SHAPE = {
   verdict: z.enum(DETECTION_VERDICTS).optional().catch(undefined),
   status: z.enum(DETECTION_STATUSES).optional().catch(undefined),
   source: z.enum(DETECTION_SOURCES).optional().catch(undefined),
   connection: z.string().uuid().optional().catch(undefined),
+  remediationState: z.enum(COPY_REMEDIATION_STATES).optional().catch(undefined),
+  /** The detection whose detail drawer is open (link target of entries and history). */
+  detection: z.string().uuid().optional().catch(undefined),
 };
 
 /** The list query (`GET /api-mode/detections`, v1 cursor, ≤ 31 days; D12 #13). */
 export function detectionQuery(
-  filters: { verdict?: string; status?: string; source?: string; connection?: string },
+  filters: {
+    verdict?: string;
+    status?: string;
+    source?: string;
+    connection?: string;
+    remediationState?: string;
+  },
   range: { from: string; to: string },
 ): QueryParams<'ApiModeController_listDetections_v1'> {
   return {
@@ -42,6 +68,7 @@ export function detectionQuery(
     ...(filters.status ? { status: filters.status } : {}),
     ...(filters.source ? { source: filters.source } : {}),
     ...(filters.connection ? { connectionId: filters.connection } : {}),
+    ...(filters.remediationState ? { remediationState: filters.remediationState } : {}),
   };
 }
 
@@ -56,13 +83,25 @@ function SubjectCell({ detection }: { detection: Detection }) {
   return <UntrustedText value={String(detection.subject)} maxLength={80} />;
 }
 
-/** Tab "Detections" (D14): copies with their verdicts, masked subject and sender, lag. */
+/**
+ * Tab "Detections" (D14; step API-2 R15): copies with their verdicts, masked subject and sender,
+ * lag and remediation state; row actions Remediate… and Restore; the detail drawer.
+ */
 export function DetectionsTab() {
   const [filters, setFilters] = useUrlState(URL_SHAPE);
   const [range] = useRangeState();
   const connections = useApiQuery('ApiModeController_listConnections_v1');
+  const canRemediate = useCan('ApiModeRemediationController_remediate_v1');
+  const canRestore = useCan('ApiModeRemediationController_restore_v1');
+  const [remediating, setRemediating] = useState<DetectionRef | null>(null);
+  const [restoring, setRestoring] = useState<DetectionRef | null>(null);
+  const [restored, setRestored] = useState<RestoreResult | null>(null);
   const { from, to } = range;
-  const query = useMemo(() => detectionQuery(filters, { from, to }), [filters, from, to]);
+  const { verdict, status, source, connection, remediationState } = filters;
+  const query = useMemo(
+    () => detectionQuery({ verdict, status, source, connection, remediationState }, { from, to }),
+    [verdict, status, source, connection, remediationState, from, to],
+  );
   const list = useCursorList('ApiModeController_listDetections_v1', query);
 
   const columns = useMemo<DataTableColumn<Detection>[]>(
@@ -146,6 +185,21 @@ export function DetectionsTab() {
         meta: { label: 'Lag' },
         cell: ({ row }) => <span className="tabular-nums">{formatLagMs(row.original.lagMs)}</span>,
       },
+      {
+        id: 'remediation',
+        header: 'Remediation',
+        meta: { label: 'Remediation' },
+        cell: ({ row }) => (
+          <span className="grid justify-items-start gap-0.5">
+            <RemediationStateBadge state={row.original.remediationState} />
+            {row.original.remediationAction ? (
+              <span className="text-xs text-muted-foreground">
+                {actionLabel(row.original.remediationAction)}
+              </span>
+            ) : null}
+          </span>
+        ),
+      },
     ],
     [],
   );
@@ -156,77 +210,134 @@ export function DetectionsTab() {
   }));
 
   return (
-    <DataTable
-      tableId="api-mode-detections"
-      caption="Detections of API-mode copies"
-      columns={columns}
-      list={list}
-      getRowId={(row) => row.id}
-      getRowLabel={(row) => `${row.mailboxAddress} ${row.receivedAt}`}
-      filters={
-        <>
-          <RangePicker />
-          <FilterSelect
-            label="Verdict"
-            value={filters.verdict}
-            onChange={(verdict) =>
-              setFilters({ verdict: verdict as (typeof DETECTION_VERDICTS)[number] | undefined })
-            }
-            options={DETECTION_VERDICTS.map((value) => ({ value, label: humanize(value) }))}
-          />
-          <FilterSelect
-            label="Status"
-            value={filters.status}
-            onChange={(status) =>
-              setFilters({ status: status as (typeof DETECTION_STATUSES)[number] | undefined })
-            }
-            options={DETECTION_STATUSES.map((value) => ({ value, label: humanize(value) }))}
-          />
-          <FilterSelect
-            label="Source"
-            value={filters.source}
-            onChange={(source) =>
-              setFilters({ source: source as (typeof DETECTION_SOURCES)[number] | undefined })
-            }
-            options={DETECTION_SOURCES.map((value) => ({ value, label: SOURCE_LABEL[value] }))}
-          />
-          {connectionOptions.length > 1 ? (
+    <div className="grid gap-4">
+      <div role="status" aria-live="polite">
+        {restored ? <RestoreResultNotice result={restored} /> : null}
+      </div>
+      <DataTable
+        tableId="api-mode-detections"
+        caption="Detections of API-mode copies"
+        columns={columns}
+        list={list}
+        getRowId={(row) => row.id}
+        getRowLabel={(row) => `${row.mailboxAddress} ${row.receivedAt}`}
+        filters={
+          <>
+            <RangePicker />
             <FilterSelect
-              label="Connection"
-              value={filters.connection}
-              onChange={(connection) => setFilters({ connection })}
-              options={connectionOptions}
+              label="Verdict"
+              value={filters.verdict}
+              onChange={(verdict) =>
+                setFilters({ verdict: verdict as (typeof DETECTION_VERDICTS)[number] | undefined })
+              }
+              options={DETECTION_VERDICTS.map((value) => ({ value, label: humanize(value) }))}
             />
-          ) : null}
-        </>
-      }
-      isFiltered={Boolean(
-        filters.verdict || filters.status || filters.source || filters.connection,
-      )}
-      onClearFilters={() =>
-        setFilters({
-          verdict: undefined,
-          status: undefined,
-          source: undefined,
-          connection: undefined,
-        })
-      }
-      emptyState={
-        <EmptyState
-          icon={ScanSearchIcon}
-          title="No detections in this range"
-          description="Copies scanned in detect mode appear here with their verdict; nothing is delivered or bounced by API mode."
-        />
-      }
-      mobileCard={(row) => (
-        <div className="grid gap-1">
-          <UntrustedText value={row.mailboxAddress} mono maxLength={60} />
-          <div className="flex flex-wrap items-center gap-2">
-            <VerdictBadge verdict={row.verdict} />
-            <DateTime value={row.receivedAt} />
+            <FilterSelect
+              label="Status"
+              value={filters.status}
+              onChange={(status) =>
+                setFilters({ status: status as (typeof DETECTION_STATUSES)[number] | undefined })
+              }
+              options={DETECTION_STATUSES.map((value) => ({ value, label: humanize(value) }))}
+            />
+            <FilterSelect
+              label="Source"
+              value={filters.source}
+              onChange={(source) =>
+                setFilters({ source: source as (typeof DETECTION_SOURCES)[number] | undefined })
+              }
+              options={DETECTION_SOURCES.map((value) => ({ value, label: SOURCE_LABEL[value] }))}
+            />
+            <FilterSelect
+              label="Remediation"
+              value={filters.remediationState}
+              onChange={(state) =>
+                setFilters({
+                  remediationState: state as (typeof COPY_REMEDIATION_STATES)[number] | undefined,
+                })
+              }
+              options={COPY_REMEDIATION_STATES.map((value) => ({
+                value,
+                label: STATE_LABEL[value],
+              }))}
+            />
+            {connectionOptions.length > 1 ? (
+              <FilterSelect
+                label="Connection"
+                value={filters.connection}
+                onChange={(connection) => setFilters({ connection })}
+                options={connectionOptions}
+              />
+            ) : null}
+          </>
+        }
+        isFiltered={Boolean(verdict || status || source || connection || remediationState)}
+        onClearFilters={() =>
+          setFilters({
+            verdict: undefined,
+            status: undefined,
+            source: undefined,
+            connection: undefined,
+            remediationState: undefined,
+          })
+        }
+        rowActions={(row) => [
+          { label: 'Details', onSelect: () => setFilters({ detection: row.id }) },
+          ...(canRemediate
+            ? [
+                {
+                  label: 'Remediate…',
+                  onSelect: () => setRemediating(row),
+                  disabled: !canBeRemediated(row),
+                },
+              ]
+            : []),
+          ...(canRestore
+            ? [
+                {
+                  label: row.remediationAction === 'tag' ? 'Remove tag' : 'Restore',
+                  onSelect: () => setRestoring(row),
+                  disabled: !canBeRestored(row),
+                },
+              ]
+            : []),
+        ]}
+        emptyState={
+          <EmptyState
+            icon={ScanSearchIcon}
+            title="No detections in this range"
+            description="Copies scanned in detect mode appear here with their verdict; nothing is delivered or bounced by API mode."
+          />
+        }
+        mobileCard={(row) => (
+          <div className="grid gap-1">
+            <UntrustedText value={row.mailboxAddress} mono maxLength={60} />
+            <div className="flex flex-wrap items-center gap-2">
+              <VerdictBadge verdict={row.verdict} />
+              <RemediationStateBadge state={row.remediationState} />
+              <DateTime value={row.receivedAt} />
+            </div>
           </div>
-        </div>
-      )}
-    />
+        )}
+      />
+      <DetectionDrawer
+        detectionId={filters.detection}
+        onClose={() => setFilters({ detection: undefined })}
+        onRemediate={setRemediating}
+        onRestore={setRestoring}
+      />
+      <RemediateDialog
+        detection={remediating}
+        onOpenChange={(open) => !open && setRemediating(null)}
+      />
+      <RestoreDialog
+        detection={restoring}
+        onOpenChange={(open) => !open && setRestoring(null)}
+        onResult={(result) => {
+          setRestored(result);
+          setRestoring(null);
+        }}
+      />
+    </div>
   );
 }

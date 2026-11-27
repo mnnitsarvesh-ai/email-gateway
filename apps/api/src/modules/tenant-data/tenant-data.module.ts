@@ -35,7 +35,8 @@ import { RiskTenantDataRepository } from './risk-tenant-data.repository';
  * JournalIntakeTenantDataRepository its journal intake counters, intake messages and sources
  * (before the provider connections, which the sources reference); step API-1:
  * ApiModeTenantDataRepository its API-mode copies, dedupe keys, mailboxes with their addresses,
- * counters and connections (before the provider connections, which they reference); step AI-1:
+ * counters and connections (before the provider connections, which they reference; step API-2:
+ * first its remediation actions and policies, so it also runs before the domain purge); step AI-1:
  * AssistantTenantDataRepository its AI assistant tool executions, messages, turns,
  * conversations, daily usage and settings (step AI-2: and its action confirmations, first).
  */

@@ -263,12 +263,19 @@ export class DisposalFactsReader {
           (a) => a.type === 'ARCHIVE' && a.status === 'requested',
         ),
     );
+    // Step API-2 R11.2: gateway-held entries only (a mailbox-located entry is an API-mode copy's;
+    // its EML follows the copy's message retention and is never disposed of here).
     const entries = await tx.quarantineMessage.findMany({
-      where: { messageId: message.messageId, messageReceivedAt: message.receivedAt },
+      where: {
+        messageId: message.messageId,
+        messageReceivedAt: message.receivedAt,
+        location: 'gateway',
+      },
       select: {
         id: true,
         organizationId: true,
         messageId: true,
+        location: true,
         status: true,
         emlObjectKey: true,
         direction: true,
@@ -278,7 +285,12 @@ export class DisposalFactsReader {
       },
       orderBy: { id: 'asc' },
     });
-    if (entries.some((e) => e.organizationId !== org || e.messageId !== message.messageId)) {
+    if (
+      entries.some(
+        (e) =>
+          e.organizationId !== org || e.messageId !== message.messageId || e.location !== 'gateway',
+      )
+    ) {
       quarantineWrongRead(this.sink, 'entries', 'disposal entry echo');
     }
     const recipients = await tx.emailRecipient.findMany({

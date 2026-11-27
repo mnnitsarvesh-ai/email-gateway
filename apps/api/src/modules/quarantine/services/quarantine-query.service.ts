@@ -23,8 +23,6 @@ import {
   QUARANTINE_SEARCH_DEFAULT_PAGE_SIZE,
   QUARANTINE_STATES,
   type QuarantineApprovalView,
-  type QuarantineEntryDetail,
-  type QuarantineEntrySummary,
   type QuarantineSettings,
   riskLevelRank,
   searchFilterHash,
@@ -37,8 +35,11 @@ import {
   approvalView,
   contentAvailable,
   entryDetail,
-  entrySummary,
+  type EntryDetailView,
+  entryLocation,
   type EntryRow,
+  entrySummary,
+  type EntrySummaryView,
   releaseView,
   seesRecipientInClear,
 } from '../domain/entry';
@@ -70,6 +71,7 @@ import {
   type Keyset,
   QuarantineReadRepository,
 } from '../repositories/quarantine-read.repository';
+import { QuarantineMailboxRepository } from '../repositories/quarantine-mailbox.repository';
 import { QuarantineWriteRepository } from '../repositories/quarantine-write.repository';
 import { QuarantineContext, permissionsOf } from './quarantine-context';
 import { actorOf } from './quarantine-entry-ops';
@@ -112,6 +114,7 @@ export class QuarantineQueryService {
     private readonly context: QuarantineContext,
     private readonly writer: QuarantineWriter,
     private readonly metrics: QuarantineMetrics,
+    private readonly mailbox: QuarantineMailboxRepository,
   ) {}
 
   // ------------------------------------------------------------------ search
@@ -121,7 +124,7 @@ export class QuarantineQueryService {
     scope: TenantScope,
     query: EntrySearchQuery,
     client: ClientContext,
-  ): Promise<Page<QuarantineEntrySummary>> {
+  ): Promise<Page<EntrySummaryView>> {
     const maskRecipient = !seesRecipientInClear(principal.permissions);
     // Step 7.2 (ADR-0062): an exact recipient search by a caller who reads recipients masked
     // would confirm the masked address. Refused before anything is read or audited.
@@ -145,6 +148,7 @@ export class QuarantineQueryService {
       ...(query.recipient !== undefined && { recipient: query.recipient }),
       ...(query.hasAttachments !== undefined && { hasAttachments: query.hasAttachments }),
       ...(query.hasHardBlock !== undefined && { hasHardBlock: query.hasHardBlock }),
+      ...(query.location !== undefined && { location: query.location }),
     };
     let messageId: bigint | undefined;
     if (query.messageId !== undefined) {
@@ -166,7 +170,7 @@ export class QuarantineQueryService {
     scope: TenantScope,
     query: SelfSearchQuery,
     client: ClientContext,
-  ): Promise<Page<QuarantineEntrySummary>> {
+  ): Promise<Page<EntrySummaryView>> {
     const caller = await this.context.selfCaller(principal, scope);
     const settings = await this.context.settings(scope);
     if (!settings.endUser.enabled) return { items: [], nextCursor: null };
@@ -198,7 +202,7 @@ export class QuarantineQueryService {
       maskRecipient: boolean;
       self: boolean;
     },
-  ): Promise<Page<QuarantineEntrySummary>> {
+  ): Promise<Page<EntrySummaryView>> {
     const maxDays = this.config.QUARANTINE_SEARCH_MAX_RANGE_DAYS;
     // Without a range only the entries of one message are searched (the query schema allows it
     // only with `messageId`; checked again here so no other filter can run unbounded).
@@ -229,7 +233,7 @@ export class QuarantineQueryService {
       take: limit + 1,
     });
     const page = rows.slice(0, limit);
-    const items = await this.summaries(scope, page, s.showSubject, s.maskRecipient);
+    const items = await this.summaries(scope, page, s.showSubject, s.maskRecipient, s.self);
     const last = page[page.length - 1];
     const nextCursor =
       rows.length > limit && last !== undefined
@@ -257,8 +261,9 @@ export class QuarantineQueryService {
     rows: readonly EntryRow[],
     showSubject: boolean,
     maskRecipient: boolean,
-  ): Promise<QuarantineEntrySummary[]> {
-    const [messages, approvals, subjects] = await Promise.all([
+    self: boolean,
+  ): Promise<EntrySummaryView[]> {
+    const [messages, approvals, subjects, locations] = await Promise.all([
       this.reads.messagePublicIds(
         scope,
         rows.map((r) => r.messageId),
@@ -273,18 +278,22 @@ export class QuarantineQueryService {
             rows.map((r) => ({ messageId: r.messageId, receivedAt: r.messageReceivedAt })),
           )
         : Promise.resolve(new Map<bigint, string | null>()),
+      this.mailbox.locationFacts(scope, rows),
     ]);
     return rows.flatMap((r) => {
       const messagePublicId = messages.get(r.messageId);
       if (messagePublicId === undefined) return [];
       return [
-        entrySummary(r, {
-          messagePublicId,
-          approvalPublicId:
-            r.approvalRequestId === null ? null : (approvals.get(r.approvalRequestId) ?? null),
-          subject: showSubject ? (subjects.get(r.messageId) ?? null) : null,
-          maskRecipient,
-        }),
+        {
+          ...entrySummary(r, {
+            messagePublicId,
+            approvalPublicId:
+              r.approvalRequestId === null ? null : (approvals.get(r.approvalRequestId) ?? null),
+            subject: showSubject ? (subjects.get(r.messageId) ?? null) : null,
+            maskRecipient,
+          }),
+          location: entryLocation(r, locations, { self, maskRecipient }),
+        },
       ];
     });
   }
@@ -296,7 +305,7 @@ export class QuarantineQueryService {
     scope: TenantScope,
     entryId: string,
     client: ClientContext,
-  ): Promise<QuarantineEntryDetail> {
+  ): Promise<EntryDetailView> {
     const entry = await this.reads.entry(scope, entryId);
     if (entry === null) throw entryNotFound();
     const settings = await this.context.settings(scope);
@@ -312,7 +321,7 @@ export class QuarantineQueryService {
     scope: TenantScope,
     entryId: string,
     client: ClientContext,
-  ): Promise<QuarantineEntryDetail> {
+  ): Promise<EntryDetailView> {
     const caller = await this.context.selfCaller(principal, scope);
     const settings = await this.context.settings(scope);
     const entry = await this.reads.entry(scope, entryId, caller.address);
@@ -349,8 +358,8 @@ export class QuarantineQueryService {
     settings: QuarantineSettings,
     client: ClientContext,
     o: { isSelf: boolean; showSubject: boolean; maskRecipient: boolean },
-  ): Promise<QuarantineEntryDetail> {
-    const [messages, approvals, subjects, releases] = await Promise.all([
+  ): Promise<EntryDetailView> {
+    const [messages, approvals, subjects, releases, locations] = await Promise.all([
       this.reads.messagePublicIds(scope, [entry.messageId]),
       this.reads.approvalPublicIds(
         scope,
@@ -362,6 +371,7 @@ export class QuarantineQueryService {
           ])
         : Promise.resolve(new Map<bigint, string | null>()),
       o.isSelf ? Promise.resolve([]) : this.reads.releasesOfEntry(scope, entry.id),
+      this.mailbox.locationFacts(scope, [entry]),
     ]);
     const messagePublicId = messages.get(entry.messageId);
     if (messagePublicId === undefined) throw entryNotFound();
@@ -378,20 +388,26 @@ export class QuarantineQueryService {
       settings,
       isSelf: o.isSelf,
     });
-    const detail = entryDetail(
-      entry,
-      {
-        messagePublicId,
-        approvalPublicId:
-          entry.approvalRequestId === null
-            ? null
-            : (approvals.get(entry.approvalRequestId) ?? null),
-        subject: subjects.get(entry.messageId) ?? null,
+    const detail: EntryDetailView = {
+      ...entryDetail(
+        entry,
+        {
+          messagePublicId,
+          approvalPublicId:
+            entry.approvalRequestId === null
+              ? null
+              : (approvals.get(entry.approvalRequestId) ?? null),
+          subject: subjects.get(entry.messageId) ?? null,
+          maskRecipient: o.maskRecipient,
+        },
+        releases,
+        allowed,
+      ),
+      location: entryLocation(entry, locations, {
+        self: o.isSelf,
         maskRecipient: o.maskRecipient,
-      },
-      releases,
-      allowed,
-    );
+      }),
+    };
     // The view is recorded (action + audit) in one writer transaction after the replica read.
     await this.writer.run(async (tx) => {
       await this.writes.insertAction(tx, {

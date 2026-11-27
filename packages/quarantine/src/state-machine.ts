@@ -117,6 +117,11 @@ export const QUARANTINE_ACTION_TYPES = [
   'object_purged',
   'object_retained',
   'self_release',
+  // Step API-2 (R9.1, R10.3, R10.4; ADR-0102): mailbox-located entries.
+  'mailbox_remediated',
+  'mailbox_restored',
+  'mailbox_restore_failed',
+  'mailbox_deleted',
 ] as const;
 export type QuarantineActionType = (typeof QUARANTINE_ACTION_TYPES)[number];
 

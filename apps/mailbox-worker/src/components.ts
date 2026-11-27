@@ -12,6 +12,9 @@ import { HEALTH_LOCK, HealthJob } from './health/health-job';
 import { Maintenance } from './health/maintenance';
 import { InventoryRunner } from './inventory/inventory-runner';
 import type { MailboxMetrics } from './metrics/mailbox-metrics';
+import { RemediationDecider } from './remediation/decide';
+import { RemediationRunner } from './remediation/executor';
+import { RemediationPolicyLoader } from './remediation/policy-loader';
 import {
   createMailboxAccessTokens,
   ProviderRuntime,
@@ -51,9 +54,10 @@ export interface ComponentDeps {
 
 /**
  * Every component of the mailbox-worker (design D5), built once per process and started per role
- * (`MAILBOX_WORKER_ROLES`): `copies` (the `email.mailbox` handler; the consumer is started by the
- * module), `feeds` (claim loop), `inventory` (claim loop) and `health` (leader-locked health,
- * maintenance and the counters flush). The provider runtime (credential key, token cache, provider
+ * (`MAILBOX_WORKER_ROLES`): `copies` (the `email.mailbox` handler with the step API-2 remediation
+ * decision; the consumer is started by the module), `feeds` (claim loop), `inventory` (claim
+ * loop), `remediate` (claim loop over `api_remediation_actions`, step API-2 R5) and `health`
+ * (leader-locked health, maintenance incl. mailbox entry expiry, and the counters flush). The provider runtime (credential key, token cache, provider
  * HTTPS) exists only where a provider-calling role runs.
  */
 export class MailboxComponents {
@@ -65,6 +69,9 @@ export class MailboxComponents {
   readonly copies: CopiesHandler;
   readonly feeds: FeedRunner | null;
   readonly inventory: InventoryRunner | null;
+  /** Step API-2 R5: the `remediate` role's claim loop (null without a provider runtime). */
+  readonly remediation: RemediationRunner | null;
+  readonly policies: RemediationPolicyLoader;
   readonly health: HealthJob;
   readonly maintenance: Maintenance;
   readonly healthLeader: LeaderJob;
@@ -90,7 +97,8 @@ export class MailboxComponents {
     this.throttle =
       deps.throttle ??
       new RedisThrottleGate(deps.redis, (event) => this.recordThrottle(event), logger);
-    const callsProviders = hasRole(config, 'feeds') || hasRole(config, 'inventory');
+    const callsProviders =
+      hasRole(config, 'feeds') || hasRole(config, 'inventory') || hasRole(config, 'remediate');
     this.runtime = callsProviders
       ? new ProviderRuntime(config, {
           tokens: deps.tokens ?? createMailboxAccessTokens(config, { prisma, logger, now }),
@@ -102,6 +110,10 @@ export class MailboxComponents {
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
         })
       : null;
+    this.policies = new RemediationPolicyLoader({
+      now,
+      logger: logger.child({ component: 'remediation-policies' }),
+    });
     this.copies = new CopiesHandler({
       prisma,
       headers: deps.headers ?? new S3HeaderReader(deps.s3, deps.mailBucket),
@@ -113,6 +125,10 @@ export class MailboxComponents {
         hybridLinkWindowHours: config.API_MODE_HYBRID_LINK_WINDOW_HOURS,
         headerMaxBytes: config.INGEST_HEADER_MAX_BYTES,
       },
+      decider: new RemediationDecider({
+        policies: this.policies,
+        hardDeleteEnabled: config.API_MODE_HARD_DELETE_ENABLED,
+      }),
       ...orgs,
     });
     this.feeds = this.runtime
@@ -161,6 +177,36 @@ export class MailboxComponents {
           ...orgs,
         })
       : null;
+    this.remediation = this.runtime
+      ? new RemediationRunner({
+          prisma,
+          runtime: this.runtime,
+          throttle: this.throttle,
+          counters: this.counters,
+          metrics,
+          logger: logger.child({ role: 'remediate' }),
+          now,
+          config: {
+            batch: config.API_MODE_REMEDIATION_BATCH,
+            leaseSeconds: config.API_MODE_REMEDIATION_LEASE_SECONDS,
+            concurrency: config.API_MODE_REMEDIATION_CONCURRENCY,
+            perConnection: config.API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION,
+            maxAttempts: config.API_MODE_REMEDIATION_MAX_ATTEMPTS,
+            locateAttempts: config.API_MODE_REMEDIATION_LOCATE_ATTEMPTS,
+            backoffMaxSeconds: config.API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS,
+            hardDeleteEnabled: config.API_MODE_HARD_DELETE_ENABLED,
+            quarantineFolderName: config.API_MODE_QUARANTINE_FOLDER_NAME,
+            quarantineFolderHidden: config.API_MODE_QUARANTINE_FOLDER_HIDDEN,
+            gmailQuarantineLabel: config.API_MODE_GMAIL_QUARANTINE_LABEL,
+            tagName: config.API_MODE_TAG_NAME,
+            bounds: {
+              maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
+              maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
+            },
+          },
+          ...orgs,
+        })
+      : null;
     this.health = new HealthJob({
       prisma,
       metrics,
@@ -178,7 +224,14 @@ export class MailboxComponents {
         safetyPollSeconds: config.API_MODE_FEED_SAFETY_POLL_SECONDS,
         renewBeforeMinutes: config.API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES,
         notificationsAvailable: notificationsAvailable(config),
+        remediation: {
+          failureWarnPercent: config.API_MODE_REMEDIATION_FAILURE_WARN_PERCENT,
+          failureFailPercent: config.API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT,
+          backlogWarnMinutes: config.API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES,
+          backlogFailMinutes: config.API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES,
+        },
       },
+      policies: this.policies,
       ...orgs,
     });
     this.maintenance = new Maintenance({
@@ -186,7 +239,10 @@ export class MailboxComponents {
       runtime: this.runtime,
       logger: logger.child({ role: 'health' }),
       now,
-      config: { dedupeWindowHours: config.API_MODE_DEDUPE_WINDOW_HOURS },
+      config: {
+        dedupeWindowHours: config.API_MODE_DEDUPE_WINDOW_HOURS,
+        remediationRetentionDays: config.API_MODE_REMEDIATION_RETENTION_DAYS,
+      },
       ...orgs,
     });
     const lock = `${deps.lockPrefix ?? ''}${HEALTH_LOCK}`;
@@ -251,6 +307,17 @@ export class MailboxComponents {
       const feeds = this.feeds;
       this.periodics.push(
         new Periodic('feeds', config.API_MODE_FEED_TICK_MS, () => feeds.tick(), deps.logger),
+      );
+    }
+    if (hasRole(config, 'remediate') && this.remediation) {
+      const remediation = this.remediation;
+      this.periodics.push(
+        new Periodic(
+          'remediate',
+          config.API_MODE_REMEDIATION_TICK_MS,
+          () => remediation.tick(),
+          deps.logger,
+        ),
       );
     }
     if (hasRole(config, 'inventory') && this.inventory) {

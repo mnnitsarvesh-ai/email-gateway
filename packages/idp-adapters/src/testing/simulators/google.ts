@@ -454,8 +454,15 @@ export class GmailSimulator extends GoogleBase implements Simulator {
       const kind = (mail[2] as string).startsWith('messages/') ? 'message' : (mail[2] as string);
       const messageKey = mail[3] === undefined ? undefined : decodeURIComponent(mail[3]);
       return respond(
-        gmailMail(request, token, customer, user, kind, messageKey, (status, reason, code) =>
-          this.error(status, reason, code),
+        gmailMail(
+          request,
+          token,
+          customer,
+          user,
+          kind,
+          messageKey,
+          (status, reason, code) => this.error(status, reason, code),
+          mail[4],
         ),
       );
     }

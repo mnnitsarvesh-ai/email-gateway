@@ -143,3 +143,12 @@ export async function* normalizedStream(
 }
 
 export const enc = encodeURIComponent;
+
+/** True when the value contains a C0 control character or DEL (refused in provider queries). */
+export function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}

@@ -31,7 +31,7 @@ import type { ApiError } from '@/lib/api/errors';
 import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
 import type { OperationId } from '@/lib/api/types';
 import { useCan } from '@/lib/auth/me';
-import { formatNumber, humanize } from '@/lib/format';
+import { formatDuration, formatNumber, humanize } from '@/lib/format';
 import { MutationError, Section } from '@/features/domains/kit';
 import { PROVIDER_LABEL } from '@/features/integrations/providers/model';
 import {
@@ -45,6 +45,12 @@ import {
   type Overview,
   type OverviewConnection,
 } from './model';
+import {
+  POLICY_SOURCE_LABEL,
+  PolicyModeBadge,
+  remediationErrorText,
+  type RemediationSummary,
+} from './remediation-model';
 
 export const API_MODE_QUERIES: readonly OperationId[] = [
   'ApiModeController_overview_v1',
@@ -52,6 +58,14 @@ export const API_MODE_QUERIES: readonly OperationId[] = [
   'ApiModeController_getConnection_v1',
   'ApiModeController_listMailboxes_v1',
 ];
+
+function backlogText(backlog: RemediationSummary['backlog']): string {
+  return `${formatNumber(backlog.pending)}${backlog.capped ? '+' : ''} pending`;
+}
+
+function ageText(seconds: number | null): string {
+  return seconds === null ? 'none waiting' : `oldest ${formatDuration(seconds * 1000)}`;
+}
 
 /** Link to the 8.2 connection page's mailbox-access grant card (D14). */
 export function grantHref(connectionId: string): string {
@@ -117,6 +131,60 @@ export function CoverageTiles({ overview }: { overview: Overview }) {
           label="Provider throttling"
           value={`${formatNumber(throttling.events1h)} in 1 h`}
           detail={`${formatNumber(throttling.events24h)} in 24 h · ${formatNumber(overview.copiesToday)} copies scanned today`}
+        />
+      </li>
+    </ul>
+  );
+}
+
+/** The remediation tiles (step API-2 R15): outcomes, restores, backlog, throttling, policy. */
+export function RemediationTiles({ summary }: { summary: RemediationSummary }) {
+  return (
+    <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6" aria-label="Remediation summary">
+      <li>
+        <Tile
+          label="Remediated, last hour"
+          value={`${formatNumber(summary.succeeded1h)} succeeded`}
+          detail={`${formatNumber(summary.failed1h)} failed`}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Remediated, last 24 hours"
+          value={`${formatNumber(summary.succeeded24h)} succeeded`}
+          detail={`${formatNumber(summary.failed24h)} failed · ${formatNumber(summary.skipped24h)} skipped · ${formatNumber(summary.simulated24h)} simulated`}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Restores, last 24 hours"
+          value={formatNumber(summary.restores24h)}
+          detail="Restored to the Inbox or tag removed"
+        />
+      </li>
+      <li>
+        <Tile
+          label="Remediation backlog"
+          value={backlogText(summary.backlog)}
+          detail={ageText(summary.backlog.oldestPendingAgeSeconds)}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Throttled, last 24 hours"
+          value={formatNumber(summary.throttled24h)}
+          detail={
+            summary.latencyAvgSeconds24h === null
+              ? 'No policy action completed today'
+              : `Mean verdict-to-action ${formatDuration(summary.latencyAvgSeconds24h * 1000)}`
+          }
+        />
+      </li>
+      <li>
+        <Tile
+          label="Remediation policy"
+          value={<PolicyModeBadge mode={summary.policyMode} />}
+          detail={`${POLICY_SOURCE_LABEL[summary.policySource] ?? humanize(summary.policySource)}${summary.paused ? ' · paused on a connection' : ''}`}
         />
       </li>
     </ul>
@@ -203,6 +271,69 @@ export function FeedsControl({ connection }: { connection: ApiModeConnection }) 
   );
 }
 
+/**
+ * Per-connection "Pause remediation" (step API-2 R13: `remediationPaused` of the settings route,
+ * CAS on `rowVersion`). Paused connections skip policy actions; admin, release and end-user
+ * actions still run.
+ */
+export function PauseRemediationControl({ connection }: { connection: ApiModeConnection }) {
+  const switchId = useId();
+  const canWrite = useCan('ApiModeController_updateSettings_v1');
+  const update = useApiMutation('ApiModeController_updateSettings_v1', {
+    invalidates: API_MODE_QUERIES,
+    successMessage: null,
+  });
+  if (!canWrite) {
+    return (
+      <span className="text-sm">
+        {connection.remediationPaused ? 'Paused' : 'Active'}
+        {connection.remediationPaused && connection.remediationPausedAt ? (
+          <span className="block text-xs text-muted-foreground">
+            since <DateTime value={connection.remediationPausedAt} />
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+  const text = remediationErrorText(update.error) ?? settingsErrorText(update.error);
+  return (
+    <div className="grid gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <Switch
+          id={switchId}
+          checked={connection.remediationPaused}
+          disabled={update.isPending}
+          onCheckedChange={(checked) =>
+            void update.submit({
+              path: { connectionId: connection.id },
+              body: {
+                feedsEnabled: connection.feedsEnabled,
+                feedMode: connection.feedMode,
+                remediationPaused: checked,
+                expectedRowVersion: connection.rowVersion,
+              },
+            })
+          }
+        />
+        <Label htmlFor={switchId} className="font-normal">
+          Pause remediation for {connection.displayName}
+        </Label>
+      </div>
+      {connection.remediationPaused ? (
+        <p className="text-xs text-muted-foreground">
+          Policy actions are skipped; restores and manual actions still run.
+        </p>
+      ) : null}
+      {update.error ? (
+        <div className="grid gap-1" role="alert">
+          {text ? <p className="text-xs font-medium text-destructive">{text}</p> : null}
+          <MutationError error={update.error} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /** `POST …/inventory-sync` (D11.1): the worker lists the provider's users on its next run. */
 export function InventorySyncButton({ connection }: { connection: ApiModeConnection }) {
   const canWrite = useCan('ApiModeController_inventorySync_v1');
@@ -269,6 +400,7 @@ function ConnectionsTable({
             <TableHead>Feeds</TableHead>
             <TableHead>Inventory</TableHead>
             <TableHead>Lag p95 (1 h)</TableHead>
+            <TableHead>Remediation</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -346,6 +478,18 @@ function ConnectionsTable({
                 <TableCell className="align-top text-sm tabular-nums">
                   {m ? formatLagSeconds(m.lag.p95Seconds1h) : 'No copies'}
                 </TableCell>
+                <TableCell className="min-w-56 align-top">
+                  <div className="grid gap-1">
+                    {m ? (
+                      <span className="text-xs text-muted-foreground">
+                        24 h: {formatNumber(m.remediation.succeeded24h)} succeeded,{' '}
+                        {formatNumber(m.remediation.failed24h)} failed ·{' '}
+                        {backlogText(m.remediation.backlog)}
+                      </span>
+                    ) : null}
+                    <PauseRemediationControl connection={connection} />
+                  </div>
+                </TableCell>
               </TableRow>
             );
           })}
@@ -372,6 +516,7 @@ export function CoverageTab() {
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <CoverageTiles overview={overview.data} />
+      <RemediationTiles summary={overview.data.remediation} />
       <p className="text-xs text-muted-foreground">
         Updated <DateTime value={overview.data.generatedAt} />. Lag is measured from the
         provider&apos;s delivery to the verdict; coverage counts in-scope mailboxes of domains in
@@ -379,7 +524,7 @@ export function CoverageTab() {
       </p>
       <Section
         title="Connections"
-        description="Each Microsoft 365 or Google Workspace connection: health, coverage, mailbox access, change feeds and mailbox inventory."
+        description="Each Microsoft 365 or Google Workspace connection: health, coverage, mailbox access, change feeds, mailbox inventory and remediation."
       >
         <ConnectionsTable connections={connections.data.data} metrics={metrics} />
       </Section>

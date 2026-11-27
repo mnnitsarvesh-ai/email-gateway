@@ -37,7 +37,13 @@ import {
   type InlineLink,
   type MailboxRef,
 } from '../domain/mailboxes';
-import type { CopyResult, MailboxMetrics } from '../metrics/mailbox-metrics';
+import type { CopyResult, MailboxMetrics, RemediationResult } from '../metrics/mailbox-metrics';
+import {
+  loadDecisionCopy,
+  newDecisionMemo,
+  type DecisionMemo,
+  type RemediationDecider,
+} from '../remediation/decide';
 import type { CounterDelta, CounterStore } from '../runtime/redis-stores';
 import { TX_MAX_WAIT_MS, TX_TIMEOUT_MS, big, bigOrNull, type Db } from '../shared/db';
 import { domainOf, errorFields } from '../shared/errors';
@@ -69,6 +75,8 @@ export interface CopiesDeps {
   logger: Logger;
   now: () => Date;
   config: CopiesConfig;
+  /** Step API-2 R4: the remediation decision taken in the copies transaction (null: off). */
+  decider: RemediationDecider | null;
   /** TEST SEAM: only these organizations are handled (others are acked untouched). */
   organizationIds?: readonly bigint[];
 }
@@ -99,6 +107,8 @@ interface Outcome {
   results: Map<CopyResult, number>;
   counters: Map<bigint, CounterDelta>;
   lags: number[];
+  /** Remediation decisions written (`api_mode_remediations_total` after the commit). */
+  remediations: Array<{ provider: string; action: string; result: RemediationResult }>;
 }
 
 const tally = (o: Outcome, result: CopyResult, n = 1) =>
@@ -153,6 +163,7 @@ export class CopiesHandler {
       results: new Map(),
       counters: new Map(),
       lags: [],
+      remediations: [],
     };
     const prepared = await this.prepare(organizationId, payload, outcome);
     const result = await processOnce(this.txPrisma, COPIES_CONSUMER, event.eventId, (tx) =>
@@ -165,6 +176,9 @@ export class CopiesHandler {
     for (const [name, n] of outcome.results) this.deps.metrics?.copy(outcome.source, name, n);
     for (const lag of outcome.lags)
       this.deps.metrics?.lag.observe({ source: outcome.source }, lag / 1000);
+    for (const r of outcome.remediations) {
+      this.deps.metrics?.remediation(r.provider, r.action, r.result);
+    }
     return 'handled';
   };
 
@@ -341,6 +355,7 @@ export class CopiesHandler {
     const verdictAt = new Date(payload.completedAt);
     const status = STATUS_OF_OUTCOME[payload.outcome];
     const hash = copyMessageIdHash(message.organizationId, message.internetMessageId);
+    const memo = newDecisionMemo();
     for (const target of targets) {
       const { mailbox } = target;
       const lag = lagOf(payload.outcome, delivery.at, verdictAt);
@@ -359,12 +374,11 @@ export class CopiesHandler {
         inline: target.inline,
         now,
       };
-      let recorded = true;
-      if (hash === null) {
-        await upsertJournalCopy(tx, write);
-      } else {
-        recorded = await this.dedupeJournal(tx, write, hash);
-      }
+      const copy =
+        hash === null
+          ? await upsertJournalCopy(tx, write)
+          : await this.dedupeJournal(tx, write, hash);
+      const recorded = copy !== null;
       await tx.$executeRaw`
         UPDATE api_mailboxes
         SET journal_last_seen_at = GREATEST(COALESCE(journal_last_seen_at, ${message.receivedAt}),
@@ -378,6 +392,7 @@ export class CopiesHandler {
           ...(lag !== null ? lagDelta(lag) : {}),
         });
         if (lag !== null) outcome.lags.push(lag);
+        await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
       } else {
         tally(outcome, 'duplicate');
         count(outcome, mailbox.apiConnectionId, { duplicates: 1 });
@@ -396,16 +411,16 @@ export class CopiesHandler {
   }
 
   /**
-   * D7 step 6 with a Message-ID: claims (mailbox, hash) for this journal copy. True when the copy
-   * row was written (first sighting or a feed claim still in flight, which is taken over); false
-   * when another copy of the same Message-ID is already recorded for the mailbox (that copy is
-   * marked `seen_journal`, no second row).
+   * D7 step 6 with a Message-ID: claims (mailbox, hash) for this journal copy. The copy key when
+   * the copy row was written (first sighting or a feed claim still in flight, which is taken
+   * over); null when another copy of the same Message-ID is already recorded for the mailbox
+   * (that copy is marked `seen_journal`, no second row).
    */
   private async dedupeJournal(
     tx: Prisma.TransactionClient,
     write: CopyWrite,
     hash: string,
-  ): Promise<boolean> {
+  ): Promise<{ id: bigint; receivedAt: Date } | null> {
     const { message, mailbox, now } = write;
     const inserted = await tx.$executeRaw`
       INSERT IGNORE INTO api_copy_dedupe_keys
@@ -440,7 +455,7 @@ export class CopiesHandler {
           UPDATE api_message_copies SET seen_journal = 1, updated_at = ${now}
           WHERE id = ${copyId} AND received_at = ${claim.copy_received_at}
             AND organization_id = ${message.organizationId}`;
-        return false;
+        return null;
       }
     }
     // First sighting, our own earlier row, or a feed claim in flight (taken over).
@@ -450,7 +465,35 @@ export class CopiesHandler {
       SET claimed_by = 'journal', copy_id = ${copy.id}, copy_received_at = ${copy.receivedAt},
           claim_expires_at = NULL
       WHERE id = ${big(claim.id)}`;
-    return true;
+    return copy;
+  }
+
+  /**
+   * Step API-2 R4: the remediation decision of a recorded or finalized copy, in this transaction
+   * (never for a duplicate). Counters and metrics are applied after the commit.
+   */
+  private async decideRemediation(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    key: { id: bigint; receivedAt: Date },
+    scanId: string | null,
+    now: Date,
+    outcome: Outcome,
+    memo: DecisionMemo,
+  ): Promise<void> {
+    if (!this.deps.decider) return;
+    const copy = await loadDecisionCopy(tx, { ...key, organizationId: message.organizationId });
+    if (!copy) throw new Error('api_message_copies row not visible for the decision');
+    const result = await this.deps.decider.decide(tx, copy, scanId, now, memo);
+    if (result.kind === 'none' || result.kind === 'unchanged' || !result.inserted) return;
+    count(outcome, result.apiConnectionId, result.counters);
+    if (result.kind !== 'pending') {
+      outcome.remediations.push({
+        provider: result.provider,
+        action: result.action,
+        result: result.kind,
+      });
+    }
   }
 
   /** D7 step 7 (+ 5, 8): the pending copy row(s) written at ingest are finalized. */
@@ -482,6 +525,7 @@ export class CopiesHandler {
     const now = this.deps.now();
     const verdictAt = new Date(payload.completedAt);
     const status = STATUS_OF_OUTCOME[payload.outcome];
+    const memo = newDecisionMemo();
     for (const copy of copies) {
       outcome.source = copy.source;
       const inline = await this.feedInlineLink(tx, message, copy.mailboxId);
@@ -500,6 +544,7 @@ export class CopiesHandler {
         outcome.lags.push(lag);
         count(outcome, copy.apiConnectionId, lagDelta(lag));
       }
+      await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
     }
   }
 

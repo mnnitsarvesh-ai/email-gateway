@@ -2540,7 +2540,9 @@ services:
 
   # API-mode protection (step API-1 D5, ADR-0100; docs/deployment/mailbox-worker.md): roles copies
   # (consumes email.mailbox as eg-mailbox), feeds (Graph delta / Gmail history, subscriptions),
-  # inventory and health (leader-locked) in one container. MySQL writer, Redis, the mail bucket,
+  # inventory, health (leader-locked) and remediate (step API-2 R1, ADR-0101: executes
+  # api_remediation_actions through the Graph/Gmail clients, restores released mailbox entries) in
+  # one container. MySQL writer, Redis, the mail bucket,
   # RabbitMQ; provider HTTPS through @email-gateway/mailbox-api. Local values: provider APIs = the
   # TEST-ONLY idp-simulator (profile smtp-test; calls fail and back off while it is not running),
   # tokens through 8.2's token service against provider-fake (container values, like the
@@ -2561,7 +2563,7 @@ services:
     environment:
       <<: *node-env
       MAILBOX_WORKER_HTTP_PORT: 3087
-      MAILBOX_WORKER_ROLES: ${MAILBOX_WORKER_ROLES:-copies,feeds,inventory,health}
+      MAILBOX_WORKER_ROLES: ${MAILBOX_WORKER_ROLES:-copies,feeds,inventory,health,remediate}
       RABBITMQ_MAILBOX_URL: amqp://${RABBITMQ_MAILBOX_USER:-eg-mailbox}:${RABBITMQ_MAILBOX_PASSWORD:?append the API-mode protection keys from .env.example}@rabbitmq:5672/${RABBITMQ_VHOST:-email-gateway}
       INGEST_HEADER_MAX_BYTES: ${INGEST_HEADER_MAX_BYTES:-65536}
       PROVIDER_CREDENTIAL_ENCRYPTION_KEY: ${PROVIDER_CREDENTIAL_ENCRYPTION_KEY:?append the provider integration keys from .env.example}
@@ -2610,6 +2612,28 @@ services:
       API_MODE_DEDUPE_WINDOW_HOURS: ${API_MODE_DEDUPE_WINDOW_HOURS:-168}
       API_MODE_HYBRID_LINK_WINDOW_HOURS: ${API_MODE_HYBRID_LINK_WINDOW_HOURS:-72}
       API_MODE_COUNTER_FLUSH_SECONDS: ${API_MODE_COUNTER_FLUSH_SECONDS:-30}
+      # Step API-2 remediation (docs/plan/steps/36-api-mode-remediation.md R17). Nothing secret.
+      API_MODE_REMEDIATION_TICK_MS: ${API_MODE_REMEDIATION_TICK_MS:-2000}
+      API_MODE_REMEDIATION_BATCH: ${API_MODE_REMEDIATION_BATCH:-50}
+      API_MODE_REMEDIATION_LEASE_SECONDS: ${API_MODE_REMEDIATION_LEASE_SECONDS:-120}
+      API_MODE_REMEDIATION_CONCURRENCY: ${API_MODE_REMEDIATION_CONCURRENCY:-8}
+      API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: ${API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION:-2}
+      API_MODE_REMEDIATION_MAX_ATTEMPTS: ${API_MODE_REMEDIATION_MAX_ATTEMPTS:-8}
+      API_MODE_REMEDIATION_LOCATE_ATTEMPTS: ${API_MODE_REMEDIATION_LOCATE_ATTEMPTS:-6}
+      API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS: ${API_MODE_REMEDIATION_BACKOFF_MAX_SECONDS:-3600}
+      API_MODE_QUARANTINE_FOLDER_NAME: '${API_MODE_QUARANTINE_FOLDER_NAME:-Email Gateway Quarantine}'
+      API_MODE_QUARANTINE_FOLDER_HIDDEN: ${API_MODE_QUARANTINE_FOLDER_HIDDEN:-true}
+      API_MODE_GMAIL_QUARANTINE_LABEL: '${API_MODE_GMAIL_QUARANTINE_LABEL:-Email Gateway/Quarantine}'
+      API_MODE_TAG_NAME: '${API_MODE_TAG_NAME:-Email Gateway: Suspicious}'
+      API_MODE_HARD_DELETE_ENABLED: ${API_MODE_HARD_DELETE_ENABLED:-false}
+      API_MODE_REMEDIATION_FAILURE_WARN_PERCENT: ${API_MODE_REMEDIATION_FAILURE_WARN_PERCENT:-10}
+      API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT: ${API_MODE_REMEDIATION_FAILURE_FAIL_PERCENT:-50}
+      API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES: ${API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES:-15}
+      API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: ${API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES:-60}
+      API_MODE_REMEDIATION_RETENTION_DAYS: ${API_MODE_REMEDIATION_RETENTION_DAYS:-400}
+      # Quarantine platform bounds (same keys and values as the policy-engine): mailbox entries.
+      QUARANTINE_MAX_HOLD_DAYS: ${QUARANTINE_MAX_HOLD_DAYS:-60}
+      QUARANTINE_MAX_REVIEW_DAYS: ${QUARANTINE_MAX_REVIEW_DAYS:-13}
     ports: ['127.0.0.1:${MAILBOX_WORKER_HOST_PORT:-3087}:3087']
     healthcheck:
       <<: *node-healthcheck

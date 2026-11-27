@@ -963,6 +963,9 @@ importers:
       '@email-gateway/provider-integrations':
         specifier: workspace:*
         version: link:../../packages/provider-integrations
+      '@email-gateway/quarantine':
+        specifier: workspace:*
+        version: link:../../packages/quarantine
       '@nestjs/common':
         specifier: ^11.1.6
         version: 11.2.8(reflect-metadata@0.2.2)(rxjs@7.8.2)

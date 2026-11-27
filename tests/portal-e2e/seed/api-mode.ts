@@ -22,9 +22,19 @@
  * `API_MODE_JOURNAL_COVERAGE_DAYS`, so its health role (every minute) evaluates exactly the seeded
  * health: `degraded` with the one warning check `coverage.percent` (75 % < 95 %).
  *
- * The run's cleanup (cleanup.ts) deletes the six API-mode tables before the provider connections.
+ * Step API-2 (docs/plan/steps/36-api-mode-remediation.md §9.5) adds four scanned copies with their
+ * registry message (`mailbox_api`, `journaled`) and recipient row, and the rows the mailbox-worker
+ * leaves after its remediation decisions (no provider is contacted): a hard-blocked malware copy
+ * moved to the quarantine folder with its mailbox-located quarantine entry (its release needs an
+ * approver), a phishing copy whose quarantine-folder move failed (`provider_unavailable`, the
+ * History tab's retry target), a suspicious copy tagged by the policy (the "Remove tag" target)
+ * and a phishing copy without remediation (the "Remediate…" target). No policy row: the platform
+ * default P1 applies until the spec saves one.
+ *
+ * The run's cleanup (cleanup.ts) deletes the API-mode tables (remediation actions and policies
+ * first) before the provider connections.
  */
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
 
 export const ZETA = { slug: 'e2e-portal-zeta', name: 'E2E Portal Zeta API mode' } as const;
@@ -43,11 +53,27 @@ export const ZETA_MAILBOXES = [
   { address: `dee@${ZETA_DOMAINS.hybrid}`, domain: 'hybrid', coverage: 'covered' },
 ] as const;
 export const ZETA_DETECTIONS = 6;
+/** Step API-2: the copies with a registry message and remediation rows (seedRemediation). */
+export const ZETA_REMEDIATION_COPIES = 4;
+
+export interface ZetaRemediationState {
+  /** The hard-blocked copy moved to the quarantine folder and its mailbox entry. */
+  quarantinedDetectionId: string;
+  entryId: string;
+  /** The failed quarantine-folder move (History retry). */
+  failedActionId: string;
+  failedDetectionId: string;
+  /** The copy tagged by the policy (Remove tag). */
+  taggedDetectionId: string;
+  /** The phishing copy without remediation (Remediate…). */
+  remediableDetectionId: string;
+}
 
 export interface ZetaState {
   domains: Record<keyof typeof ZETA_DOMAINS, string>;
   m365ConnectionId: string;
   googleConnectionId: string;
+  remediation: ZetaRemediationState;
 }
 
 const MIN = 60_000;
@@ -272,6 +298,12 @@ export async function seedApiMode(
       },
     });
   }
+  const remediation = await seedRemediation(p, org, {
+    apiConnectionId: apiConnection.id,
+    domainId: api.id,
+    mailbox: mailboxes[0]!,
+    now,
+  });
   const hour = new Date(Math.floor(now / HOUR) * HOUR);
   await p.apiModeCounter.create({
     data: {
@@ -297,5 +329,261 @@ export async function seedApiMode(
     },
     m365ConnectionId: m365.publicId,
     googleConnectionId: google.publicId,
+    remediation,
+  };
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+
+/** `action_key` of `@email-gateway/mailbox-api` (`remediationActionKey`, R-I4). */
+const actionKey = (copyPublicId: string, action: string, generation: number) =>
+  sha256(`api-remediation/1\0${copyPublicId}\0${action}\0${generation}`);
+
+/**
+ * The step API-2 rows (§9.5): four copies with registry messages, the actions the mailbox-worker
+ * leaves after its decisions and the mailbox-located entry of the quarantine-folder move, with the
+ * columns the mailbox-worker writes (R4, R5, R9.1; apps/api/integration/api-mode-remediation).
+ */
+async function seedRemediation(
+  p: PrismaClient,
+  org: { id: bigint },
+  ctx: {
+    apiConnectionId: bigint;
+    domainId: bigint;
+    mailbox: { id: bigint; address: string };
+    now: number;
+  },
+): Promise<ZetaRemediationState> {
+  const sender = 'billing@fabrikam-e2e.example.test';
+  const copy = async (
+    index: number,
+    verdict: 'malware' | 'phishing' | 'suspicious',
+    remediation: {
+      state: 'none' | 'remediated' | 'failed';
+      action: 'move_quarantine' | 'tag' | null;
+    },
+  ) => {
+    const receivedAt = new Date(ctx.now - (10 + index * 7) * MIN);
+    const identity = await p.messageIdentity.create({
+      data: {
+        organizationId: org.id,
+        ingestKey: `v2:mbx:${sha256(randomUUID())}`,
+        receivedAt,
+      },
+      select: { id: true },
+    });
+    await p.emailMessage.create({
+      data: {
+        id: identity.id,
+        receivedAt,
+        organizationId: org.id,
+        domainId: ctx.domainId,
+        direction: 'inbound',
+        status: 'journaled',
+        statusChangedAt: receivedAt,
+        version: 2,
+        ingestSource: 'mailbox_api',
+        envelopeFrom: sender,
+        headerFrom: sender,
+        subject: `E2E API-mode copy ${index}`,
+        internetMessageId: `<${randomUUID()}@fabrikam-e2e.example.test>`,
+        sizeBytes: 2048,
+        recipientCount: 1,
+        attachmentCount: 0,
+        emlObjectKey: `org/${org.id.toString()}/eml/e2e-api-mode/${identity.id.toString()}.eml`,
+        emlSha256: sha256(`e2e-api-mode-${index}`),
+      },
+    });
+    const recipient = await p.emailRecipient.create({
+      data: {
+        receivedAt,
+        messageId: identity.id,
+        organizationId: org.id,
+        rcptSeq: 0,
+        address: ctx.mailbox.address,
+        status: 'journaled',
+        direction: 'inbound',
+      },
+      select: { id: true },
+    });
+    const publicId = randomUUID();
+    const row = await p.apiMessageCopy.create({
+      data: {
+        publicId,
+        receivedAt,
+        organizationId: org.id,
+        apiConnectionId: ctx.apiConnectionId,
+        mailboxId: ctx.mailbox.id,
+        messageId: identity.id,
+        source: 'journal',
+        seenJournal: true,
+        status: 'scanned',
+        verdict,
+        riskScore: verdict === 'suspicious' ? 610 : 930,
+        verdictAt: new Date(receivedAt.getTime() + 20_000),
+        providerDeliveredAt: new Date(receivedAt.getTime() - 20_000),
+        deliveredBasis: 'received_header',
+        lagMs: 40_000,
+        remediationState: remediation.state,
+        remediationAction: remediation.action,
+      },
+      select: { id: true },
+    });
+    return { id: row.id, publicId, receivedAt, messageId: identity.id, recipientId: recipient.id };
+  };
+  const action = async (
+    c: Awaited<ReturnType<typeof copy>>,
+    kind: 'move_quarantine' | 'tag',
+    status: 'succeeded' | 'failed',
+    ruleId: string,
+    verdict: string,
+  ) => {
+    const verdictAt = new Date(c.receivedAt.getTime() + 20_000);
+    const row = await p.apiRemediationAction.create({
+      data: {
+        publicId: randomUUID(),
+        organizationId: org.id,
+        apiConnectionId: ctx.apiConnectionId,
+        mailboxId: ctx.mailbox.id,
+        copyId: c.id,
+        copyReceivedAt: c.receivedAt,
+        messageId: c.messageId,
+        action: kind,
+        generation: 0,
+        actionKey: actionKey(c.publicId, kind, 0),
+        trigger: 'policy',
+        status,
+        reasonCode: status === 'failed' ? 'provider_unavailable' : null,
+        requestedByType: 'system',
+        attempts: status === 'failed' ? 8 : 1,
+        locateAttempts: 1,
+        lastErrorCode: status === 'failed' ? 'provider_unavailable' : null,
+        lastHttpStatus: status === 'failed' ? 503 : null,
+        decision: {
+          v: 1,
+          policy: {
+            scope: 'platform_default',
+            publicId: null,
+            rowVersion: null,
+            sha256: sha256('p1'),
+          },
+          mode: 'enforce',
+          ruleId,
+          inputs: {
+            verdict,
+            riskScore: verdict === 'suspicious' ? 610 : 930,
+            level: verdict === 'suspicious' ? 'high' : 'critical',
+            hardBlocks: verdict === 'malware' ? ['hb.malware_attachment'] : [],
+            verdictAuthority: 'copy',
+          },
+          policyOutcome: null,
+          notes: [],
+        },
+        providerRefs:
+          status === 'succeeded'
+            ? {
+                before: [`e2e-provider-${randomUUID()}`],
+                after: kind === 'tag' ? [] : [`e2e-provider-${randomUUID()}`],
+                container: kind === 'tag' ? null : 'quarantine_folder',
+              }
+            : { before: [], after: [], container: null },
+        verdictAt,
+        startedAt: new Date(verdictAt.getTime() + 1_000),
+        completedAt: new Date(verdictAt.getTime() + 4_000),
+      },
+      select: { id: true, publicId: true },
+    });
+    await p.apiMessageCopy.updateMany({
+      where: { id: c.id, receivedAt: c.receivedAt },
+      data: { lastActionId: row.id },
+    });
+    return row;
+  };
+
+  const quarantined = await copy(0, 'malware', { state: 'remediated', action: 'move_quarantine' });
+  const moved = await action(
+    quarantined,
+    'move_quarantine',
+    'succeeded',
+    'p1-high-confidence-malware-phishing-hb',
+    'malware',
+  );
+  const quarantinedAt = new Date(quarantined.receivedAt.getTime() + 25_000);
+  const entry = await p.quarantineMessage.create({
+    data: {
+      organizationId: org.id,
+      messageId: quarantined.messageId,
+      messageReceivedAt: quarantined.receivedAt,
+      lifecycleRound: 0,
+      recipientId: quarantined.recipientId,
+      rcptSeq: 0,
+      recipientAddress: ctx.mailbox.address,
+      direction: 'inbound',
+      kind: 'quarantine',
+      origin: 'api_remediation',
+      reason: 'malware',
+      status: 'held',
+      envelopeFrom: sender,
+      headerFrom: sender,
+      hasAttachments: false,
+      attachmentCount: 0,
+      sizeBytes: 2048,
+      riskScore: 930,
+      riskLevel: 'critical',
+      riskVerdict: 'malware',
+      hasHardBlock: true,
+      hardBlocks: ['hb.malware_attachment'],
+      reasonCodes: [],
+      floorReasons: [],
+      primaryEngine: 'attachment',
+      explanationText:
+        'Removed from the mailbox by the API-mode remediation policy (rule p1-high-confidence-malware-phishing-hb)',
+      emlObjectKey: `org/${org.id.toString()}/eml/e2e-api-mode/${quarantined.messageId.toString()}.eml`,
+      quarantinedAt,
+      expiresAt: new Date(quarantinedAt.getTime() + 30 * 24 * HOUR),
+      stateChangedAt: quarantinedAt,
+      location: 'mailbox',
+      mailboxContainer: 'quarantine_folder',
+      apiCopyId: quarantined.id,
+      apiCopyReceivedAt: quarantined.receivedAt,
+      apiMailboxId: ctx.mailbox.id,
+      apiRemediationActionId: moved.id,
+    },
+    select: { id: true, publicId: true },
+  });
+  await p.apiRemediationAction.update({
+    where: { id: moved.id },
+    data: { quarantineEntryId: entry.id },
+  });
+  await p.quarantineAction.create({
+    data: {
+      organizationId: org.id,
+      quarantineMessageId: entry.id,
+      action: 'mailbox_remediated',
+      actorType: 'system',
+      result: 'move_quarantine',
+      details: { actionId: moved.publicId, container: 'quarantine_folder' },
+      createdAt: quarantinedAt,
+    },
+  });
+
+  const failing = await copy(1, 'phishing', { state: 'failed', action: 'move_quarantine' });
+  const failed = await action(
+    failing,
+    'move_quarantine',
+    'failed',
+    'p1-high-confidence-malware-phishing',
+    'phishing',
+  );
+  const tagged = await copy(2, 'suspicious', { state: 'remediated', action: 'tag' });
+  await action(tagged, 'tag', 'succeeded', 'p1-suspicious', 'suspicious');
+  const remediable = await copy(3, 'phishing', { state: 'none', action: null });
+  return {
+    quarantinedDetectionId: quarantined.publicId,
+    entryId: entry.publicId,
+    failedActionId: failed.publicId,
+    failedDetectionId: failing.publicId,
+    taggedDetectionId: tagged.publicId,
+    remediableDetectionId: remediable.publicId,
   };
 }

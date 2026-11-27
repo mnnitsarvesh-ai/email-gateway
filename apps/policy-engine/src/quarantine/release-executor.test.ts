@@ -52,6 +52,7 @@ function setup(options: {
   logStatus?: string;
   approval?: Record<string, unknown> | null;
   mode?: 'operator' | 'approved';
+  location?: 'gateway' | 'mailbox';
 }) {
   const writes: Array<[string, Record<string, unknown>]> = [];
   const entry = {
@@ -70,6 +71,7 @@ function setup(options: {
     status: options.entryStatus ?? 'releasing',
     riskLevel: 'none',
     rowVersion: 2,
+    location: options.location ?? 'gateway',
   };
   const log = {
     id: 40n,
@@ -166,6 +168,17 @@ describe('ReleaseExecutor (Q13.2): outcomes that stop before re-validation', () 
     ]);
     expect(s.casEntry).not.toHaveBeenCalled();
     expect(s.writes.some(([k]) => k === 'outbox')).toBe(false);
+  });
+
+  it('a release naming a mailbox-located entry (API-2 R11.1) → stale, ledger only: no write at all', async () => {
+    const s = setup({ location: 'mailbox', state: 'journaled' });
+    const outcome = await s.executor.execute(event(), s.tx as never);
+    expect(outcome).toMatchObject({ result: 'stale', mode: 'operator', released: 0, copy: null });
+    // The restore flow owns the entry's release logs: they are not even read or marked stale.
+    expect(s.tx.quarantineReleaseLog.findMany).not.toHaveBeenCalled();
+    expect(s.writes).toEqual([]);
+    expect(s.casEntry).not.toHaveBeenCalled();
+    expect(s.releaseFacts.latestScanRound).not.toHaveBeenCalled();
   });
 
   it.each([

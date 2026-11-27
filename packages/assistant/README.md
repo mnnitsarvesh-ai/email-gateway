@@ -177,8 +177,17 @@ and withheld subject of copies, tenant-authored connection and source names, hea
 assistant tool planned for step API-3 (portal only until then)"); the public Graph callbacks (tag
 `provider-notifications`) are in `NOT_APPLICABLE_TAGS` ("provider callback (no user principal)").
 `DomainsController_create_v1` omits `body.protectionMode` (a chat-created domain inherits the organization's mode).
-Totals: **455 operations, 363 operation tools (all enabled) + 2 native = 365 enabled tools (197 reads, 168 writes),
-92 not applicable, `MISSING` 0**.
+Totals after API-1: 455 operations, 363 operation tools (all enabled) + 2 native = 365 enabled tools (197 reads,
+168 writes), 92 not applicable, `MISSING` 0.
+
+Step API-2 (docs/plan/steps/36-api-mode-remediation.md R16) adds the 9 remediation operations: the 3 reads (remediation
+policy, remediation history list and detail) are enabled `read` tools (phase AI-1, read sweep), with `untrustedFields`
+(mailbox addresses, policy rule ids and domain names, the operator-typed request reason and the whole `decision`); the 6
+writes (organization and domain policy, domain policy removal, retry, remediate, restore) join `API_MODE_DEFERRED_WRITES`
+(11 in all, reason `apiModeDeferred`). The existing quarantine write tools also act on mailbox-located entries (same
+operations, confirmation and risk; a release is a restore to the Inbox). Phase `AI-6` and the prompt are unchanged.
+Totals: **464 operations, 366 operation tools (all enabled) + 2 native = 368 enabled tools (200 reads, 168 writes),
+98 not applicable, `MISSING` 0**.
 
 ## Meta tools
 

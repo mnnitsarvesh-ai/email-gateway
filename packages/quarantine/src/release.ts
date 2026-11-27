@@ -58,7 +58,8 @@ const FLOOR_REASON: Readonly<Record<string, ApprovalReason>> = Object.freeze({
   'policy.floor.not_scanned': 'not_scanned',
 });
 
-const ordered = (reasons: Iterable<ApprovalReason>): ApprovalReason[] => {
+/** Approval reasons de-duplicated, in `APPROVAL_REASONS` order. */
+export const orderedApprovalReasons = (reasons: Iterable<ApprovalReason>): ApprovalReason[] => {
   const set = new Set(reasons);
   return APPROVAL_REASONS.filter((r) => set.has(r));
 };
@@ -90,7 +91,7 @@ export function approvalReasonsFor(
     }
   }
   if (result.disposition === 'reject') out.push('policy_reject');
-  return ordered(out);
+  return orderedApprovalReasons(out);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -336,7 +337,7 @@ export function decideRelease(input: DecideReleaseInput): ReleaseDecision {
   else reasons.push(...approvalReasonsFor(input.result!, input.input));
   if (input.entry.kind === 'review') reasons.push('review');
   if (staleness.stale && !rescanPossible) reasons.push('stale_verdict');
-  const all = ordered(reasons);
+  const all = orderedApprovalReasons(reasons);
 
   // Hard blocks not releasable by tenant setting (every mode).
   if (all.includes('hard_block') && !input.settings.release.allowHardBlocks) {
@@ -344,23 +345,13 @@ export function decideRelease(input: DecideReleaseInput): ReleaseDecision {
   }
 
   if (input.mode === 'self') {
-    const eu = input.settings.endUser;
-    const level = maxLevel(input.entry.riskLevel, summary?.level ?? null);
-    const cause = !eu.enabled
-      ? 'end_user_disabled'
-      : !eu.selfRelease
-        ? 'self_release_disabled'
-        : !(eu.selfReleaseReasons as readonly string[]).includes(input.entry.reason)
-          ? 'reason_not_allowed'
-          : level === null
-            ? 'level_unknown'
-            : riskLevelRank(level) > riskLevelRank(eu.selfReleaseMaxLevel)
-              ? 'level_too_high'
-              : staleness.stale
-                ? 'stale'
-                : all.length > 0
-                  ? 'approval_required'
-                  : null;
+    const cause = selfReleaseCause({
+      endUser: input.settings.endUser,
+      reason: input.entry.reason,
+      level: maxLevel(input.entry.riskLevel, summary?.level ?? null),
+      stale: staleness.stale,
+      approvalReasons: all,
+    });
     if (cause !== null) return refuse('quarantine_self_release_not_allowed', cause, all);
     return { outcome: 'release', approvalReasons: [], staleness, summary };
   }
@@ -381,6 +372,41 @@ export function decideRelease(input: DecideReleaseInput): ReleaseDecision {
   return uncovered.length === 0
     ? { outcome: 'release', approvalReasons: [], staleness, summary }
     : { outcome: 'approval_required', approvalReasons: uncovered, staleness, summary };
+}
+
+/** Causes of a refused self-release, in check order (Q15). */
+export type SelfReleaseRefusalCause =
+  | 'end_user_disabled'
+  | 'self_release_disabled'
+  | 'reason_not_allowed'
+  | 'level_unknown'
+  | 'level_too_high'
+  | 'stale'
+  | 'approval_required';
+
+/**
+ * The end-user self-release bounds (Q15), shared by `decideRelease` and `decideMailboxRestore`
+ * (step API-2 R10.1): enabled, self-release on, reason allowed, level known and ≤ the maximum,
+ * not stale, no approval reason. Returns the first failing cause, or null when allowed.
+ */
+export function selfReleaseCause(facts: {
+  endUser: QuarantineSettings['endUser'];
+  reason: QuarantineReason;
+  level: QuarantineRiskLevel | null;
+  stale: boolean;
+  approvalReasons: readonly ApprovalReason[];
+}): SelfReleaseRefusalCause | null {
+  const eu = facts.endUser;
+  if (!eu.enabled) return 'end_user_disabled';
+  if (!eu.selfRelease) return 'self_release_disabled';
+  if (!(eu.selfReleaseReasons as readonly string[]).includes(facts.reason)) {
+    return 'reason_not_allowed';
+  }
+  if (facts.level === null) return 'level_unknown';
+  if (riskLevelRank(facts.level) > riskLevelRank(eu.selfReleaseMaxLevel)) return 'level_too_high';
+  if (facts.stale) return 'stale';
+  if (facts.approvalReasons.length > 0) return 'approval_required';
+  return null;
 }
 
 function maxLevel(
