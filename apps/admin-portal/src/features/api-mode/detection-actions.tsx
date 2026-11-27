@@ -26,7 +26,14 @@ import { CodeList } from '@/features/messages/controls';
 import { approvalHref, entryHref, releaseHref } from '@/features/quarantine/links';
 import { ReasonConfirm } from '@/features/quarantine/reason-confirm';
 import { REMEDIATION_QUERIES } from './history-tab';
-import { SOURCE_LABEL, formatLagMs, type Detection } from './model';
+import { clawbackHref } from './clawback-model';
+import {
+  DIRECTION_LABEL,
+  SOURCE_LABEL,
+  VerdictRevisionBadge,
+  formatLagMs,
+  type Detection,
+} from './model';
 import {
   MANUAL_ACTIONS,
   RemediationStateBadge,
@@ -61,6 +68,11 @@ const explain = (error: ApiError): string[] => {
   const text = remediationErrorText(error);
   return text ? [text] : error.messages;
 };
+
+/** Whether "Claw back similar…" may start a search from the detection (C2.4; the api decides). */
+export function canBeClawedBack(d: Pick<DetectionRef, 'status'>): boolean {
+  return d.status === 'scanned' || d.status === 'scan_failed';
+}
 
 /** Whether a manual remediation may be requested for the detection (R12; the api decides). */
 export function canBeRemediated(d: DetectionRef): boolean {
@@ -238,13 +250,17 @@ export function DetectionDrawer({
   onClose,
   onRemediate,
   onRestore,
+  onClawback,
 }: {
   detectionId: string | undefined;
   onClose: () => void;
   onRemediate: (detection: DetectionRef) => void;
   onRestore: (detection: DetectionRef) => void;
+  onClawback?: (detection: DetectionRef) => void;
 }) {
   const canRemediate = useCan('ApiModeRemediationController_remediate_v1');
+  const canClawback = useCan('ApiModeClawbackController_create_v1');
+  const canClawbacks = useCan('ApiModeClawbackController_list_v1');
   const canRestore = useCan('ApiModeRemediationController_restore_v1');
   const canHistory = useCan('ApiModeRemediationController_list_v1');
   const detail = useApiQuery(
@@ -275,7 +291,19 @@ export function DetectionDrawer({
                     label: 'Mailbox',
                     value: <UntrustedText value={d.mailboxAddress} mono maxLength={80} />,
                   },
-                  { label: 'Verdict', value: <VerdictBadge verdict={d.verdict} /> },
+                  {
+                    label: 'Verdict',
+                    value: (
+                      <span className="flex flex-wrap items-center gap-2">
+                        <VerdictBadge verdict={d.verdict} />
+                        <VerdictRevisionBadge revision={d.verdictRevision} />
+                      </span>
+                    ),
+                  },
+                  {
+                    label: 'Direction',
+                    value: DIRECTION_LABEL[d.direction] ?? humanize(d.direction),
+                  },
                   {
                     label: 'Risk score',
                     value: d.riskScore === null ? '—' : formatNumber(d.riskScore),
@@ -339,6 +367,18 @@ export function DetectionDrawer({
                     Open the quarantine entry
                   </Link>
                 ) : null}
+                {canClawbacks
+                  ? d.clawbacks.map((id, i) => (
+                      <Link
+                        key={id}
+                        href={clawbackHref(id)}
+                        className="text-primary underline-offset-2 hover:underline"
+                      >
+                        Clawback {d.clawbacks.length > 1 ? i + 1 : ''}
+                        <span className="sr-only"> that targeted this copy</span>
+                      </Link>
+                    ))
+                  : null}
               </nav>
               <div className="flex flex-wrap gap-2">
                 {canRemediate ? (
@@ -354,6 +394,16 @@ export function DetectionDrawer({
                     onClick={() => onRestore(d)}
                   >
                     Restore
+                  </Button>
+                ) : null}
+                {canClawback && onClawback ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!canBeClawedBack(d)}
+                    onClick={() => onClawback(d)}
+                  >
+                    Claw back similar…
                   </Button>
                 ) : null}
               </div>

@@ -139,6 +139,24 @@ const overview = (failingChecks: string[] = []): Overview => ({
   throttling: { events1h: 0, events24h: 2 },
   copiesToday: 17,
   remediation: summary(),
+  internal: { copies24h: 3, enabled: true },
+  clawback: {
+    active: 0,
+    reviewRequired: 0,
+    pendingApproval: 0,
+    completed24h: 0,
+    targetsSucceeded24h: 0,
+    targetsFailed24h: 0,
+    oldestActiveAgeSeconds: null,
+  },
+  reports: {
+    pendingTriage: 0,
+    inReview: 0,
+    received24h: 0,
+    resolved24h: 0,
+    oldestPendingAgeSeconds: null,
+    reportMailboxes: 0,
+  },
   connections: [
     {
       id: CONN,
@@ -156,6 +174,16 @@ const overview = (failingChecks: string[] = []): Overview => ({
       copiesToday: 17,
       throttledUntil: null,
       remediation: summary({ succeeded24h: 9 }),
+      internal: { copies24h: 3, enabled: true },
+      clawback: { targetsQueued24h: 0, targetsSucceeded24h: 0, targetsFailed24h: 0 },
+      reports: {
+        pendingTriage: 0,
+        inReview: 0,
+        received24h: 0,
+        resolved24h: 0,
+        oldestPendingAgeSeconds: null,
+        reportMailboxes: 0,
+      },
     },
   ],
 });
@@ -185,12 +213,14 @@ const detection = (over: Partial<Detection> = {}): Detection => ({
   remediationId: ACTION,
   quarantineEntryId: ENTRY,
   direction: 'inbound',
+  verdictRevision: 0,
+  clawbacks: [],
   deliveredBasis: 'received_header',
   reasonCodes: ['url.reputation_malicious'],
   ...over,
 });
 const listRow = (d: Detection) => {
-  const { direction: _d, deliveredBasis: _b, reasonCodes: _r, ...rest } = d;
+  const { deliveredBasis: _b, reasonCodes: _r, ...rest } = d;
   return rest;
 };
 
@@ -238,10 +268,12 @@ const action = (over: Partial<Action> = {}): Action => ({
   verdictAt: T,
   startedAt: T,
   updatedAt: T,
+  clawbackId: null,
   ...over,
 });
 const actionRow = (a: Action) => ({
   id: a.id,
+  clawbackId: a.clawbackId,
   action: a.action,
   trigger: a.trigger,
   status: a.status,

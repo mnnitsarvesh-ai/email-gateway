@@ -76,7 +76,7 @@ describe('seed catalog', () => {
   const sorted = (list: readonly string[]) => [...list].sort();
   const role = (key: string) => SYSTEM_ROLES.find((r) => r.key === key)!.permissions;
 
-  it('contains the 76 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4, 8.2, 8.6, AI-1 and API-1, without duplicates', () => {
+  it('contains the 77 permissions of D7, D8, steps 2.1 D14, 2.2, 2.3, 3.2, 3.3, 4.1, 4.2, 4.4, 4.5, 5.3, 6.1, 6.2, 7.2, 8.1, 8.4, 8.2, 8.6, AI-1, API-1 and API-3, without duplicates', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(sorted(keys)).toEqual(
       sorted([
@@ -156,14 +156,15 @@ describe('seed catalog', () => {
         'assistant:configure',
         'remediation:read',
         'remediation:write',
+        'remediation:purge',
       ]),
     );
-    expect(keys).toHaveLength(76);
+    expect(keys).toHaveLength(77);
     // Step 3.3 placed message:rescan next to the other message permissions (design §3.3); the
     // seed upserts by key, so on an existing database it simply gets the next id.
     expect(keys.indexOf('message:rescan')).toBe(keys.indexOf('message:read_content') + 1);
     // Otherwise appended in catalog order (permission ids follow it on a fresh database).
-    expect(keys.slice(-44)).toEqual([
+    expect(keys.slice(-45)).toEqual([
       'connector:read',
       'connector:manage',
       'domain:routing_manage',
@@ -208,6 +209,7 @@ describe('seed catalog', () => {
       'assistant:configure',
       'remediation:read',
       'remediation:write',
+      'remediation:purge',
     ]);
     // `resource:action`; the resource may contain underscores since step 6.1 (`threat_intel`).
     for (const key of keys) expect(key).toMatch(/^[a-z]+(?:_[a-z]+)*:[a-z_]+$/);
@@ -548,8 +550,9 @@ describe('seed catalog', () => {
     // The migration `ai_assistant` writes the same descriptions and category.
     expect(permissionCategoryOf(def('assistant:use'))).toBe('assistant');
     expect(permissionCategoryOf(def('assistant:configure'))).toBe('assistant');
-    // Appended in catalog order (append-only), before the step API-1 remediation permissions.
-    expect(keys.slice(-4, -2)).toEqual(['assistant:use', 'assistant:configure']);
+    // Appended in catalog order (append-only), before the step API-1 / API-3 remediation
+    // permissions.
+    expect(keys.slice(-5, -3)).toEqual(['assistant:use', 'assistant:configure']);
     // Every system role except mailbox_user may chat; tools stay bounded by its own permissions.
     expect(holders('assistant:use')).toEqual(
       SYSTEM_ROLE_KEYS.filter((k) => k !== 'mailbox_user').sort(),
@@ -586,9 +589,7 @@ describe('seed catalog', () => {
     // The migration `api_mode_protection` writes the same descriptions and category.
     expect(permissionCategoryOf(def('remediation:read'))).toBe('remediation');
     expect(permissionCategoryOf(def('remediation:write'))).toBe('remediation');
-    expect(keys.slice(-2)).toEqual(['remediation:read', 'remediation:write']);
-    // remediation:purge is API-3.
-    expect(keys).not.toContain('remediation:purge');
+    expect(keys.slice(-3, -1)).toEqual(['remediation:read', 'remediation:write']);
     expect(TENANT_READ_PERMISSIONS).toContain('remediation:read');
     expect(TENANT_READ_PERMISSIONS).not.toContain('remediation:write');
     expect(holders('remediation:read')).toEqual(
@@ -621,6 +622,34 @@ describe('seed catalog', () => {
       dedicated: true,
       archive_only: false,
     });
+  });
+
+  it('grants the step API-3 remediation:purge permission (§3.3) and no new feature', () => {
+    const holders = (permission: string) =>
+      SYSTEM_ROLES.filter((r) => (r.permissions as readonly string[]).includes(permission))
+        .map((r) => r.key)
+        .sort();
+    const def = (key: string) => PERMISSIONS.find((p) => p.key === key)!;
+    // The migration `api_mode_clawback_reporting` writes the same description and category.
+    expect(def('remediation:purge').description).toBe(
+      'Search API-mode mailbox copies and purge or claw back messages across mailboxes; ' +
+        "approve another administrator's purge",
+    );
+    expect(permissionCategoryOf(def('remediation:purge'))).toBe('remediation');
+    expect(def('remediation:purge').description.length).toBeLessThanOrEqual(255);
+    // Appended last (append-only).
+    expect(keys.at(-1)).toBe('remediation:purge');
+    // The holders of remediation:write, nobody else.
+    expect(holders('remediation:purge')).toEqual(holders('remediation:write'));
+    expect(holders('remediation:purge')).toEqual(
+      ['organization_admin', 'security_analyst', 'super_admin'].sort(),
+    );
+    expect(TENANT_PERMISSIONS).toContain('remediation:purge');
+    expect(PLATFORM_PERMISSIONS).not.toContain('remediation:purge');
+    expect(TENANT_READ_PERMISSIONS).not.toContain('remediation:purge');
+    expect(ARCHIVE_ACCESS_PERMISSIONS).not.toContain('remediation:purge');
+    // No new feature key: API-3 stays under api_mode_protection.
+    expect(FEATURE_KEYS.at(-1)).toBe('api_mode_protection');
   });
 
   it('grants the step 8.2 integration permissions exactly as D16 says', () => {
@@ -783,6 +812,7 @@ describe('seed catalog', () => {
         'assistant:use',
         'remediation:read',
         'remediation:write',
+        'remediation:purge',
       ],
       quarantine_reviewer: [
         'organization:read',

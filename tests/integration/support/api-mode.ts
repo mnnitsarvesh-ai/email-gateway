@@ -373,8 +373,9 @@ export async function mailboxByAddress(
 }
 
 /**
- * Removes every step API-1 row of the organizations (the api purge's order: since step API-2 the
- * remediation actions and policies first, then copies, dedupe keys, addresses, mailboxes, counters,
+ * Removes every step API-1 row of the organizations (the api purge's order: since step API-3 the
+ * clawback targets, clawbacks and user reports first, then (step API-2) the remediation actions and
+ * policies, the organization settings, then copies, dedupe keys, addresses, mailboxes, counters,
  * connections) and the mailbox-worker's Redis keys of their
  * API-mode connections (budgets, throttle pauses, counter hashes).
  */
@@ -392,10 +393,18 @@ export async function purgeApiModeRows(
     where,
     select: { id: true, publicId: true },
   });
+  // Step API-3 (note 37 §3.4): clawback targets, clawbacks and user reports go before the
+  // remediation actions (reports reference mailboxes and connections, RESTRICT); since API-3 the
+  // live workers may claw back or record reports for the suite's copies.
+  await prisma.apiClawbackTarget.deleteMany({ where });
+  await prisma.apiClawback.deleteMany({ where });
+  await prisma.apiUserReport.deleteMany({ where });
   // Step API-2 (§3.4): remediation actions reference mailboxes and connections (RESTRICT) and
   // policies reference domains (RESTRICT); the remediation decided on the suite's copies goes first.
   await prisma.apiRemediationAction.deleteMany({ where });
   await prisma.apiRemediationPolicy.deleteMany({ where });
+  // Step API-3: the organization settings row (RESTRICT to the organization).
+  await prisma.apiModeOrgSetting.deleteMany({ where });
   await prisma.apiMessageCopy.deleteMany({ where });
   await prisma.apiCopyDedupeKey.deleteMany({ where });
   await prisma.apiMailboxAddress.deleteMany({ where });

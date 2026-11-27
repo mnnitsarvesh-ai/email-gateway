@@ -25,15 +25,17 @@ describe('dispatchNotification (email.notifications, dispatch by event type)', (
     alert: { handle: vi.fn(() => Promise.resolve('sent' as const)) },
     ato: { handle: vi.fn(() => Promise.resolve('sent' as const)) },
     assistantReport: { handle: vi.fn(() => Promise.resolve('sent' as const)) },
+    reportFeedback: { handle: vi.fn(() => Promise.resolve('sent' as const)) },
   });
 
-  it('consumes the five event types of the queue (step AI-R adds the report emails)', () => {
+  it('consumes the six event types of the queue (step API-3 adds the reporter feedback)', () => {
     expect([...NOTIFICATION_EVENT_TYPES]).toEqual([
       'mail.policy.notification_requested.v1',
       'mail.quarantine.notification_requested.v1',
       'notification.alert_requested.v1',
       'ato.notification.requested.v1',
       'assistant.report.email_requested.v1',
+      'mail.report.feedback_requested.v1',
     ]);
   });
 
@@ -43,6 +45,7 @@ describe('dispatchNotification (email.notifications, dispatch by event type)', (
     [EventTypes.NotificationAlertRequested, 'alert'],
     [EventTypes.AtoNotificationRequested, 'ato'],
     [EventTypes.AssistantReportEmailRequested, 'assistantReport'],
+    [EventTypes.ReportFeedbackRequested, 'reportFeedback'],
   ] as const)('%s → the %s handler only', async (type, target) => {
     const h = handlers();
     const e = envelope(type);

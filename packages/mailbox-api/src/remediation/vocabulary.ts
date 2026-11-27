@@ -138,6 +138,8 @@ export const REMEDIATION_SKIP_REASONS = [
   'hard_delete_disabled',
   'remediation_paused',
   'no_mailbox_access',
+  // Step API-3 (note 37 C8.5): an internal copy while the organization's internal mail is off.
+  'internal_mail_disabled',
 ] as const;
 export type RemediationSkipReason = (typeof REMEDIATION_SKIP_REASONS)[number];
 

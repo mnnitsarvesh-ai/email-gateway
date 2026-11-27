@@ -86,6 +86,7 @@ describe('vocabularies (mirror the Prisma enums)', () => {
       'hard_delete_disabled',
       'remediation_paused',
       'no_mailbox_access',
+      'internal_mail_disabled',
     ]);
     expect(REMEDIATION_RESULT_CODES).toEqual([
       'already_in_target',
@@ -496,6 +497,95 @@ describe('decideRemediation (R2.2)', () => {
   });
 });
 
+describe('internal mail step 4b (step API-3 C8.5)', () => {
+  it.each<[string, Parameters<typeof input>[0], string, string | null]>([
+    [
+      'internal, enabled → act',
+      { copy: { direction: 'internal' }, context: { internalMailEnabled: true } },
+      'act',
+      null,
+    ],
+    [
+      'internal, setting absent (default on) → act',
+      { copy: { direction: 'internal' } },
+      'act',
+      null,
+    ],
+    [
+      'internal, disabled → skip',
+      { copy: { direction: 'internal' }, context: { internalMailEnabled: false } },
+      'skip',
+      'internal_mail_disabled',
+    ],
+    [
+      'inbound, disabled → act',
+      { copy: { direction: 'inbound' }, context: { internalMailEnabled: false } },
+      'act',
+      null,
+    ],
+    [
+      'direction absent (inbound), disabled → act',
+      { context: { internalMailEnabled: false } },
+      'act',
+      null,
+    ],
+    [
+      'out_of_scope wins over 4b',
+      {
+        copy: { direction: 'internal' },
+        context: { internalMailEnabled: false, mailboxStatus: 'deleted' },
+      },
+      'skip',
+      'out_of_scope',
+    ],
+    [
+      'inline authority wins over 4b',
+      {
+        copy: { direction: 'internal', verdictAuthority: 'inline' },
+        context: { internalMailEnabled: false },
+      },
+      'skip',
+      'inline_authority',
+    ],
+    [
+      '4b precedes detect-only simulation and pause',
+      {
+        copy: { direction: 'internal' },
+        context: { internalMailEnabled: false, remediationPaused: true },
+      },
+      'skip',
+      'internal_mail_disabled',
+    ],
+  ])('%s', (_name, overrides, outcome, reason) => {
+    const decision = decideRemediation(input(overrides), P1, OFF);
+    expect(decision.outcome).toBe(outcome);
+    if (reason !== null) expect(decision).toMatchObject({ reason });
+  });
+
+  it('a clean internal copy is still none', () => {
+    expect(
+      decideRemediation(
+        input({
+          copy: { direction: 'internal', verdict: 'clean' },
+          context: { internalMailEnabled: false },
+        }),
+        P1,
+        OFF,
+      ),
+    ).toEqual({ outcome: 'none' });
+  });
+
+  it('detect-only does not bypass 4b', () => {
+    expect(
+      decideRemediation(
+        input({ copy: { direction: 'internal' }, context: { internalMailEnabled: false } }),
+        REMEDIATION_PRESETS.detectOnlyStart,
+        OFF,
+      ),
+    ).toMatchObject({ outcome: 'skip', reason: 'internal_mail_disabled' });
+  });
+});
+
 describe('resolveEffectivePolicy (R2.6)', () => {
   const docOf = (id: string): RemediationPolicyDocument => ({
     v: 1,
@@ -601,6 +691,47 @@ describe('canonical hash and decision record (R2.4)', () => {
     );
     expect(skipped.ruleId).toBe('p1-high-confidence-malware-phishing-hb');
     expect(buildDecisionRecord(effective, given, { outcome: 'none' }).ruleId).toBeNull();
+  });
+
+  it('records clawback provenance in notes (step API-3 C3.2)', () => {
+    const effective = resolveEffectivePolicy({ organization: null, domains: [] }, null);
+    const given = input({ context: { provider: 'google_workspace' } });
+    const id = '01936f4e-1c2d-7a3b-8c4d-5e6f7a8b9c0d';
+    const record = buildDecisionRecord(
+      effective,
+      given,
+      decideRemediation(given, effective.policy, OFF),
+      { source: 'clawback', clawbackId: id },
+    );
+    expect(record.notes).toEqual(['source:clawback', `clawback:${id}`]);
+    expect(remediationDecisionRecordSchema.parse(record)).toEqual(record);
+    const hardDelete: RemediationPolicy = {
+      mode: 'enforce',
+      document: {
+        v: 1,
+        rules: [{ id: 'hd', when: { verdicts: ['malware'] }, action: 'hard_delete' }],
+      },
+    };
+    const withNote = buildDecisionRecord(
+      effective,
+      given,
+      decideRemediation(given, hardDelete, ON),
+      { source: 'clawback', clawbackId: '42' },
+    );
+    expect(withNote.notes).toEqual([
+      'hard_delete_falls_back_to_trash',
+      'source:clawback',
+      'clawback:42',
+    ]);
+    expect(buildDecisionRecord(effective, given, { outcome: 'none' }).notes).toEqual([]);
+    expect(() =>
+      buildDecisionRecord(
+        effective,
+        given,
+        { outcome: 'none' },
+        { source: 'clawback', clawbackId: 'a b' },
+      ),
+    ).toThrow(RangeError);
   });
 });
 

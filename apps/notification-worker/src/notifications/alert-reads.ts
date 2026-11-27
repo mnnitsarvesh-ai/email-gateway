@@ -88,6 +88,61 @@ export interface AlertApiModeConnection {
   failingChecks: string[];
 }
 
+/** A clawback of the organization (step API-3 C6): state, counts and approval fields only. */
+export interface AlertClawback {
+  publicId: string;
+  trigger: string;
+  status: string;
+  /** Explicit action of an admin purge (null in policy mode). */
+  action: string | null;
+  mailboxesEligible: number;
+  targetsEligible: number;
+  approvalStatus: string | null;
+  /** Codes (`mailbox_threshold`, `hard_delete`, `auto_cap`) from the stored JSON array. */
+  approvalReasons: string[];
+  approvalExpiresAt: Date | null;
+}
+
+/** The organization's user report counts (step API-3 C13), each capped at `REPORT_COUNT_CAP`. */
+export interface AlertReportCounts {
+  pendingTriage: number;
+  inReview: number;
+  /** Reports received since the start of the alert's window. */
+  receivedInWindow: number;
+  /** Received time of the oldest report waiting for triage (null: none). */
+  oldestPendingAt: string | null;
+}
+
+/** Bounded live counts of the report alert (C13: counters capped at 10 000). */
+export const REPORT_COUNT_CAP = 10_000;
+
+const APPROVAL_REASON_CODES: ReadonlySet<string> = new Set([
+  'mailbox_threshold',
+  'hard_delete',
+  'auto_cap',
+]);
+
+/** The known approval reason codes of a stored `approval_reasons` JSON array (pure). */
+export function approvalReasonCodes(value: unknown): string[] {
+  const parsed: unknown = typeof value === 'string' ? safeJson(value) : value;
+  if (!Array.isArray(parsed)) return [];
+  const out: string[] = [];
+  for (const item of parsed) {
+    if (typeof item === 'string' && APPROVAL_REASON_CODES.has(item) && !out.includes(item)) {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 /** Bound of the stored `api-mode-health/1` checks read for an alert. */
 const MAX_API_MODE_CHECKS = 16;
 const API_MODE_CHECK_CODE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
@@ -343,6 +398,73 @@ export class SecurityAlertReads {
     };
   }
 
+  /**
+   * A clawback of the organization by public id (step API-3 C6): trigger, status, action, the
+   * eligible counts and the approval state — never criteria, signal documents or operator text.
+   */
+  async clawback(tx: Tx, organizationId: bigint, publicId: string): Promise<AlertClawback | null> {
+    const row = await tx.apiClawback.findFirst({
+      where: { publicId, organizationId },
+      select: {
+        publicId: true,
+        organizationId: true,
+        trigger: true,
+        status: true,
+        action: true,
+        mailboxesEligible: true,
+        targetsEligible: true,
+        approvalStatus: true,
+        approvalReasons: true,
+        approvalExpiresAt: true,
+      },
+    });
+    if (row === null) return null;
+    if (row.publicId !== publicId || row.organizationId !== organizationId) {
+      throw new InconsistentNotificationReadError('api_clawback');
+    }
+    return {
+      publicId: row.publicId,
+      trigger: row.trigger,
+      status: row.status,
+      action: row.action,
+      mailboxesEligible: row.mailboxesEligible,
+      targetsEligible: row.targetsEligible,
+      approvalStatus: row.approvalStatus,
+      approvalReasons: approvalReasonCodes(row.approvalReasons),
+      approvalExpiresAt: row.approvalExpiresAt,
+    };
+  }
+
+  /**
+   * The organization's report counts (step API-3 C13): waiting for triage, in review, received
+   * since `since`, and the oldest waiting report's time. Bounded (`REPORT_COUNT_CAP`), index
+   * `(organization_id, status, reported_at, id)` / `(organization_id, reported_at, id)`.
+   */
+  async reportCounts(tx: Tx, organizationId: bigint, since: Date): Promise<AlertReportCounts> {
+    const bounded = (where: Prisma.ApiUserReportWhereInput): Promise<number> =>
+      tx.apiUserReport.count({ where: { organizationId, ...where }, take: REPORT_COUNT_CAP });
+    const pendingTriage = await bounded({ status: 'pending_triage' });
+    const inReview = await bounded({ status: 'in_review' });
+    const receivedInWindow = await bounded({ reportedAt: { gte: since } });
+    const oldest = await tx.apiUserReport.findFirst({
+      where: { organizationId, status: 'pending_triage' },
+      orderBy: [{ reportedAt: 'asc' }, { id: 'asc' }],
+      select: { organizationId: true, status: true, reportedAt: true },
+    });
+    if (
+      oldest !== null &&
+      (oldest.organizationId !== organizationId || oldest.status !== 'pending_triage')
+    ) {
+      throw new InconsistentNotificationReadError('api_user_report');
+    }
+    return {
+      pendingTriage,
+      inReview,
+      receivedInWindow,
+      oldestPendingAt: oldest?.reportedAt.toISOString() ?? null,
+    };
+  }
+
   /** A journal intake source of the organization by public id (step 8.6 D9). */
   intakeSource(
     tx: Tx,
@@ -428,6 +550,7 @@ export function alertScopeKey(
     connectionPublicId?: string;
     intakeSourcePublicId?: string;
     apiModeConnectionPublicId?: string;
+    clawbackPublicId?: string;
   },
 ): string {
   switch (kind) {
@@ -445,5 +568,11 @@ export function alertScopeKey(
     // Step API-1 D11.3: one window per API-mode connection (the mailbox-worker's scope key).
     case 'api_mode_unhealthy':
       return scope.apiModeConnectionPublicId ?? ALERT_SCOPE_NONE;
+    // Step API-3 C6: one window per clawback (the api / mailbox-worker scope key).
+    case 'api_mode_purge_approval':
+      return scope.clawbackPublicId ?? ALERT_SCOPE_NONE;
+    // Step API-3 C13: one window per organization.
+    case 'api_mode_report_received':
+      return ALERT_SCOPE_NONE;
   }
 }

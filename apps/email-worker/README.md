@@ -535,6 +535,32 @@ open, against an in-memory Prisma fake), `src/scanning/sandbox/sandbox-finalizer
 after a pointer change, rescans, revision 1 before and after completion, the error row, redelivery
 and the sweeper).
 
+### Late signals (step API-3 C2.1, ADR-0103)
+
+`src/scanning/late-signal.ts` writes one content-free `mail.threat.late_signal.v1` outbox row
+(`aggregate_type = 'message'`, `aggregate_id` = the decimal message id, uuidv7 event id, the
+transaction's correlation id; payload validated by the strict contract first) for every ingest
+source, in the transaction that stores the late verdict:
+
+- **sandbox revision** (`PrismaSandboxTx.scoreRiskRevision`, the R13 (a) path of a round that is
+  no longer running): when revision 1 is written and, compared with revision 0 of the round
+  (read `FOR SHARE`), its level is higher or its verdict is a threat verdict (`malware`,
+  `phishing`, `suspicious`, `bec`) different from revision 0's. Carries the revision's verdict,
+  level, hard-block ids (≤ 9) and the SHA-256 of the round's sandbox submissions with verdict
+  `malicious`/`suspicious` (≤ 20). A duplicate revision (unique key) writes nothing; revision 1
+  written by the completion itself (sandbox final before completion) is part of the round's own
+  decision and writes nothing.
+- **URL dynamic verdict** (`UrlResultsService.apply`): after an inspection is updated to
+  `malicious` / `suspicious` and the round (`email_scans`, read `FOR SHARE`) is no longer
+  `running`: `kind url_dynamic`, verdict `phishing` (malicious, or the `url.dynamic_phishing`
+  rule) else `suspicious`, level `critical` (malicious, hard block `hb.clawback.url`) else `high`,
+  the inspected URL's identity hash.
+
+Metric `scan_late_signals_total{kind}` (after commit). Consumer: the mailbox-worker `copies`
+role (queue `email.mailbox`, topology v18). Tests: `src/scanning/late-signal.test.ts`,
+`url-results.test.ts`, `risk-scorer.test.ts`, `sandbox-finalizer.test.ts`; integration cases in
+`integration/risk-scoring.test.ts` and `integration/url-results.test.ts`.
+
 ## Message lifecycle (step 3.3 L8.2)
 
 The MIME stage **does not change the message lifecycle state** (the scan stage does, through

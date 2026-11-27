@@ -31,8 +31,14 @@
  * and a phishing copy without remediation (the "Remediate…" target). No policy row: the platform
  * default P1 applies until the spec saves one.
  *
- * The run's cleanup (cleanup.ts) deletes the API-mode tables (remediation actions and policies
- * first) before the provider connections.
+ * Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md §9.5) adds seedClawback: a
+ * searchable campaign (Message-ID hash on its copies), two `ready` clawbacks with frozen targets
+ * (approval and cancel), `dee` as the report mailbox with two pending reports of one original, and
+ * the organization settings row (CAS target).
+ *
+ * The run's cleanup (cleanup.ts) deletes the API-mode tables (clawback targets, clawbacks, user
+ * reports, remediation actions and policies, organization settings first) before the provider
+ * connections.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@email-gateway/database';
@@ -55,6 +61,11 @@ export const ZETA_MAILBOXES = [
 export const ZETA_DETECTIONS = 6;
 /** Step API-2: the copies with a registry message and remediation rows (seedRemediation). */
 export const ZETA_REMEDIATION_COPIES = 4;
+/**
+ * Step API-3: the copies of seedClawback — the search campaign (2 mailboxes), the approval
+ * campaign (2), the cancel campaign (1) and two report copies in the report mailbox.
+ */
+export const ZETA_CLAWBACK_COPIES = 7;
 
 export interface ZetaRemediationState {
   /** The hard-blocked copy moved to the quarantine folder and its mailbox entry. */
@@ -69,11 +80,25 @@ export interface ZetaRemediationState {
   remediableDetectionId: string;
 }
 
+/** Step API-3 (seedClawback). */
+export interface ZetaClawbackState {
+  /** The Internet Message-ID the spec searches for (two copies, below the threshold). */
+  searchMessageId: string;
+  /** A `ready` clawback over two mailboxes (the approval flow after the threshold is lowered). */
+  approvalClawbackId: string;
+  /** A `ready` clawback the spec cancels. */
+  cancelClawbackId: string;
+  /** Two pending reports of one original (a group). */
+  reportIds: [string, string];
+  reportMailbox: string;
+}
+
 export interface ZetaState {
   domains: Record<keyof typeof ZETA_DOMAINS, string>;
   m365ConnectionId: string;
   googleConnectionId: string;
   remediation: ZetaRemediationState;
+  clawback: ZetaClawbackState;
 }
 
 const MIN = 60_000;
@@ -304,6 +329,12 @@ export async function seedApiMode(
     mailbox: mailboxes[0]!,
     now,
   });
+  const clawback = await seedClawback(p, org, {
+    apiConnectionId: apiConnection.id,
+    domainId: api.id,
+    mailboxes,
+    now,
+  });
   const hour = new Date(Math.floor(now / HOUR) * HOUR);
   await p.apiModeCounter.create({
     data: {
@@ -330,6 +361,7 @@ export async function seedApiMode(
     m365ConnectionId: m365.publicId,
     googleConnectionId: google.publicId,
     remediation,
+    clawback,
   };
 }
 
@@ -585,5 +617,266 @@ async function seedRemediation(
     failedDetectionId: failing.publicId,
     taggedDetectionId: tagged.publicId,
     remediableDetectionId: remediable.publicId,
+  };
+}
+
+/** `copyMessageIdHash` of `@email-gateway/mailbox-api` (identifiers.ts; fixed vectors there). */
+export function copyMessageIdHash(organizationId: bigint, messageId: string): string {
+  let value = messageId.trim();
+  if (value.startsWith('<') && value.endsWith('>')) value = value.slice(1, -1).trim();
+  return sha256(`api-copy/1\0${organizationId.toString()}\0${value}`);
+}
+
+/**
+ * The step API-3 rows (docs/plan/steps/37-api-mode-clawback-reporting.md §9.5), with the columns
+ * the api and the mailbox-worker write (C4.1 criteria document, C5.2 targets, C9 report mailbox,
+ * C10 report rows, C14 #18 settings):
+ *
+ * - the search campaign: one registry message with two recipient copies (ana, ben) carrying the
+ *   Message-ID hash, no remediation — the spec searches it by Message-ID and purges it;
+ * - two `ready` admin clawbacks as the `clawback` role leaves them after materialization (frozen
+ *   `matched` targets and counts): one over two mailboxes (the approval flow once the threshold is
+ *   lowered to 1), one over one mailbox (cancel);
+ * - `dee` designated as the report mailbox, two report copies there and two `pending_triage`
+ *   reports of the search campaign's original (one group; assessment from the scan);
+ * - the organization settings row at the defaults (row version 1: the CAS target).
+ *
+ * Nothing here is due for the mailbox-worker: `ready` clawbacks wait for a submit, the reports
+ * are past the `reports` role, and no clawback is queued or running.
+ */
+async function seedClawback(
+  p: PrismaClient,
+  org: { id: bigint },
+  ctx: {
+    apiConnectionId: bigint;
+    domainId: bigint;
+    mailboxes: Array<{ id: bigint; address: string }>;
+    now: number;
+  },
+): Promise<ZetaClawbackState> {
+  const [ana, ben, cy, dee] = ctx.mailboxes as [
+    { id: bigint; address: string },
+    { id: bigint; address: string },
+    { id: bigint; address: string },
+    { id: bigint; address: string },
+  ];
+  const sender = 'invoices@contoso-billing-e2e.example.test';
+  type Copy = {
+    id: bigint;
+    publicId: string;
+    receivedAt: Date;
+    messageId: bigint;
+    mailboxId: bigint;
+  };
+  /** One registry message with one copy per recipient mailbox (a journal copy, C4.2). */
+  const message = async (
+    key: string,
+    minutesAgo: number,
+    recipients: Array<{ id: bigint; address: string }>,
+    subject: string,
+  ): Promise<{ internetMessageId: string; copies: Copy[] }> => {
+    const receivedAt = new Date(ctx.now - minutesAgo * MIN);
+    const internetMessageId = `<${key}.${randomUUID()}@contoso-billing-e2e.example.test>`;
+    const identity = await p.messageIdentity.create({
+      data: { organizationId: org.id, ingestKey: `v2:mbx:${sha256(randomUUID())}`, receivedAt },
+      select: { id: true },
+    });
+    await p.emailMessage.create({
+      data: {
+        id: identity.id,
+        receivedAt,
+        organizationId: org.id,
+        domainId: ctx.domainId,
+        direction: 'inbound',
+        status: 'journaled',
+        statusChangedAt: receivedAt,
+        version: 2,
+        ingestSource: 'mailbox_api',
+        envelopeFrom: sender,
+        headerFrom: sender,
+        subject,
+        internetMessageId,
+        sizeBytes: 3072,
+        recipientCount: recipients.length,
+        attachmentCount: 0,
+        emlObjectKey: `org/${org.id.toString()}/eml/e2e-api-mode/${identity.id.toString()}.eml`,
+        emlSha256: sha256(`e2e-clawback-${key}`),
+      },
+    });
+    const copies: Copy[] = [];
+    for (const [rcptSeq, mailbox] of recipients.entries()) {
+      await p.emailRecipient.create({
+        data: {
+          receivedAt,
+          messageId: identity.id,
+          organizationId: org.id,
+          rcptSeq,
+          address: mailbox.address,
+          status: 'journaled',
+          direction: 'inbound',
+        },
+      });
+      const publicId = randomUUID();
+      const row = await p.apiMessageCopy.create({
+        data: {
+          publicId,
+          receivedAt,
+          organizationId: org.id,
+          apiConnectionId: ctx.apiConnectionId,
+          mailboxId: mailbox.id,
+          messageId: identity.id,
+          source: 'journal',
+          seenJournal: true,
+          direction: 'inbound',
+          messageIdHash: copyMessageIdHash(org.id, internetMessageId),
+          status: 'scanned',
+          verdict: 'phishing',
+          riskScore: 720,
+          verdictAt: new Date(receivedAt.getTime() + 20_000),
+          providerDeliveredAt: new Date(receivedAt.getTime() - 20_000),
+          deliveredBasis: 'received_header',
+          lagMs: 40_000,
+        },
+        select: { id: true },
+      });
+      copies.push({
+        id: row.id,
+        publicId,
+        receivedAt,
+        messageId: identity.id,
+        mailboxId: mailbox.id,
+      });
+    }
+    return { internetMessageId, copies };
+  };
+
+  const search = await message('search', 50, [ana, ben], 'E2E clawback: your invoice is overdue');
+  const approval = await message('approval', 70, [ben, cy], 'E2E clawback: payroll update');
+  const cancel = await message('cancel', 90, [ana], 'E2E clawback: shared document');
+
+  /** A `ready` admin clawback as the `clawback` role leaves it after materialization. */
+  const readyClawback = async (
+    m: { internetMessageId: string; copies: Copy[] },
+    reason: string,
+  ): Promise<string> => {
+    const createdAt = new Date(ctx.now - 20 * MIN);
+    const criteria = {
+      v: 1,
+      window: {
+        from: new Date(ctx.now - 2 * 24 * HOUR).toISOString(),
+        to: new Date(ctx.now - 15 * MIN).toISOString(),
+      },
+      keys: { messageIdHashes: [copyMessageIdHash(org.id, m.internetMessageId)] },
+      directions: ['inbound', 'internal'],
+      includeReportMailboxes: false,
+    };
+    const mailboxes = new Set(m.copies.map((c) => c.mailboxId)).size;
+    const row = await p.apiClawback.create({
+      data: {
+        publicId: randomUUID(),
+        organizationId: org.id,
+        trigger: 'admin',
+        signal: { v: 1, kind: 'admin', refs: {}, facts: null, signalAt: createdAt.toISOString() },
+        criteria,
+        criteriaSha256: sha256(JSON.stringify(criteria)),
+        status: 'ready',
+        targetsTotal: m.copies.length,
+        mailboxesTotal: mailboxes,
+        targetsEligible: m.copies.length,
+        mailboxesEligible: mailboxes,
+        requestedByType: 'user',
+        requestReason: reason,
+        signalAt: createdAt,
+        rowVersion: 3,
+        createdAt,
+      },
+      select: { id: true, publicId: true },
+    });
+    for (const c of m.copies) {
+      await p.apiClawbackTarget.create({
+        data: {
+          clawbackId: row.id,
+          organizationId: org.id,
+          apiConnectionId: ctx.apiConnectionId,
+          mailboxId: c.mailboxId,
+          copyId: c.id,
+          copyReceivedAt: c.receivedAt,
+          messageId: c.messageId,
+          matchKeys: ['message_id'],
+          status: 'matched',
+        },
+      });
+    }
+    return row.publicId;
+  };
+  const approvalClawbackId = await readyClawback(approval, 'E2E payroll phishing (two mailboxes)');
+  const cancelClawbackId = await readyClawback(cancel, 'E2E search to cancel');
+
+  // The report mailbox (C9.1) and two reports of the search campaign's original (C10, C11).
+  const designatedAt = new Date(ctx.now - 3 * 24 * HOUR);
+  await p.apiMailbox.update({
+    where: { id: dee.id },
+    data: { reportMailbox: true, reportMailboxAt: designatedAt },
+  });
+  // One forwarded message per reporter, each a copy in the report mailbox (C9.2).
+  const reportCopies = [
+    (await message('report-0', 30, [dee], 'FW: E2E clawback: your invoice is overdue')).copies[0]!,
+    (await message('report-1', 25, [dee], 'FW: E2E clawback: your invoice is overdue')).copies[0]!,
+  ];
+  const original = search.copies[0]!;
+  const messageIdHash = copyMessageIdHash(org.id, search.internetMessageId);
+  const reportIds: string[] = [];
+  for (const [i, reporter] of [ana, ben].entries()) {
+    const reportCopy = reportCopies[i]!;
+    const reportedAt = new Date(ctx.now - (30 - i * 5) * MIN);
+    const row = await p.apiUserReport.create({
+      data: {
+        publicId: randomUUID(),
+        organizationId: org.id,
+        apiConnectionId: ctx.apiConnectionId,
+        reportMailboxId: dee.id,
+        reportCopyId: reportCopy.id,
+        reportCopyReceivedAt: reportCopy.receivedAt,
+        reportMessageId: reportCopy.messageId,
+        reporterAddress: reporter.address,
+        reporterMailboxId: reporter.id,
+        status: 'pending_triage',
+        identification: 'attachment',
+        original: {
+          v: 1,
+          messageIdHash,
+          sender,
+          subjectKey: 'e2e clawback: your invoice is overdue',
+          date: original.receivedAt.toISOString(),
+          attachmentSha256: [],
+          urlSha256: [],
+          extraOriginals: 0,
+        },
+        originalMessageIdHash: messageIdHash,
+        groupKey: messageIdHash,
+        originalCopyId: original.id,
+        originalCopyReceivedAt: original.receivedAt,
+        originalMessageId: original.messageId,
+        originalReceivedAt: original.receivedAt,
+        scanVerdict: 'phishing',
+        scanRiskScore: 720,
+        scanLevel: 'high',
+        assessment: 'suspicious',
+        ackFeedback: 'queued',
+        reportedAt,
+        rowVersion: 3,
+      },
+      select: { publicId: true },
+    });
+    reportIds.push(row.publicId);
+  }
+  // The organization settings at the defaults (C14 #18; row version 1).
+  await p.apiModeOrgSetting.create({ data: { organizationId: org.id } });
+  return {
+    searchMessageId: search.internetMessageId,
+    approvalClawbackId,
+    cancelClawbackId,
+    reportIds: [reportIds[0]!, reportIds[1]!],
+    reportMailbox: dee.address,
   };
 }

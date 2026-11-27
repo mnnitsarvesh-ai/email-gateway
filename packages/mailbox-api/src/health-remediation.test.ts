@@ -52,7 +52,7 @@ const statusOf = (input: ApiModeRemediationHealthInput, code: string) =>
 
 describe('remediation health checks (R14)', () => {
   it('appends the four codes and evaluates them in order when the block is given', () => {
-    expect(API_MODE_HEALTH_CHECK_CODES.slice(9)).toEqual([
+    expect(API_MODE_HEALTH_CHECK_CODES.slice(9, 13)).toEqual([
       'remediation.failures_1h',
       'remediation.backlog',
       'remediation.access',
@@ -60,7 +60,8 @@ describe('remediation health checks (R14)', () => {
     ]);
     const result = evaluateApiModeHealth(healthy({ remediation: remediation() }), HEALTH_CFG);
     expect(result.status).toBe('healthy');
-    expect(result.checks.map((c) => c.code)).toEqual([...API_MODE_HEALTH_CHECK_CODES]);
+    // Step API-3 appends clawback.stalled and reports.backlog (only with their own blocks).
+    expect(result.checks.map((c) => c.code)).toEqual(API_MODE_HEALTH_CHECK_CODES.slice(0, 13));
     expect(apiModeHealthDocumentSchema.parse(result.document)).toEqual(result.document);
     expect(result.document.checks.length).toBeLessThanOrEqual(16);
   });

@@ -12,6 +12,11 @@
 # api_mode_remediation_backlog{provider} and api_mode_remediation_oldest_pending_seconds{provider},
 # api_mode_remediation_latency_seconds{provider} and api_mode_remediation_attempts_total{provider,
 # outcome}; remediation alerts are about threats left in mailboxes after delivery.
+# Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C13, ADR-0103/0104) adds
+# api_mode_late_signals_total{kind,result}, api_mode_clawbacks_total{trigger,result},
+# api_mode_clawback_targets_total{result}, api_mode_reports_total{result},
+# api_mode_report_triage_seconds and the leader gauges api_mode_clawback_active{status},
+# api_mode_reports_pending and api_mode_reports_oldest_pending_seconds.
 # Validate with `promtool check rules` and `promtool test rules tests/api-mode.rules.test.yml`.
 groups:
   - name: api-mode
@@ -136,3 +141,57 @@ groups:
             minutes: the remediate role is down, cannot reach the provider or the database, or
             every connection is throttled.
           runbook_url: docs/runbooks/api-mode.md#apimoderemediationstalled
+      # Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C13; ADR-0103, ADR-0104).
+      # Gauges come from the health leader (max over replicas); counters are summed. No
+      # organization label anywhere.
+      - alert: ApiModeClawbackStalled
+        expr: >-
+          sum(max by (status) (api_mode_clawback_active{status=~"queued|running"})) > 0
+          unless
+          sum(increase(api_mode_clawback_targets_total{result=~"queued|succeeded|failed|cancelled"}[60m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode clawbacks are not progressing
+          description: >-
+            {{ $value }} clawback(s) are queued or running and no clawback target was queued or
+            completed in the last 60 minutes: the clawback or remediate role is down, the
+            connections are paused or throttled, or the per-connection pending cap is exhausted.
+            See the clawback.stalled connection check.
+          runbook_url: docs/runbooks/api-mode.md#apimodeclawbackstalled
+      - alert: ApiModeClawbackFailures
+        expr: >-
+          (
+            sum(rate(api_mode_clawback_targets_total{result="failed"}[30m]))
+            /
+            (
+              sum(rate(api_mode_clawback_targets_total{result="failed"}[30m]))
+              + sum(rate(api_mode_clawback_targets_total{result="succeeded"}[30m]))
+            )
+          ) > 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: API-mode clawback targets are failing
+          description: >-
+            More than 20 % of the clawback targets completed in the last 30 minutes failed
+            (revoked mailbox access, provider refusals, messages not found or retries exhausted):
+            clawed-back threats stay in mailboxes. See the failed targets on the clawback detail.
+          runbook_url: docs/runbooks/api-mode.md#apimodeclawbackfailures
+      - alert: ApiModeReportsUntriaged
+        expr: >-
+          max(api_mode_reports_pending) > 0
+          and
+          max(api_mode_reports_oldest_pending_seconds) > 86400
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: User-reported messages are waiting for triage
+          description: >-
+            User reports are pending triage and the oldest has waited more than 24 hours: no
+            analyst is triaging the report mailbox queue. See the reports.backlog connection
+            check and the Reports tab.
+          runbook_url: docs/runbooks/api-mode.md#apimodereportsuntriaged

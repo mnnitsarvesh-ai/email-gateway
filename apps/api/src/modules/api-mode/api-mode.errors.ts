@@ -32,6 +32,22 @@ export const API_MODE_ERROR_CODES = {
   remediationNotFound: 'api_mode_remediation_not_found',
   detectionNotRemediable: 'api_mode_detection_not_remediable',
   quarantinePermissionRequired: 'quarantine_permission_required',
+  // Step API-3 C14 (docs/plan/steps/37-api-mode-clawback-reporting.md).
+  clawbackNotFound: 'api_mode_clawback_not_found',
+  reportNotFound: 'api_mode_report_not_found',
+  clawbackCriteriaInvalid: 'api_mode_clawback_criteria_invalid',
+  clawbackStateConflict: 'api_mode_clawback_state_conflict',
+  clawbackNotCancellable: 'api_mode_clawback_not_cancellable',
+  clawbackNotRestorable: 'api_mode_clawback_not_restorable',
+  purgeApprovalForbidden: 'api_mode_purge_approval_forbidden',
+  purgeApprovalNotPending: 'api_mode_purge_approval_not_pending',
+  reportStateConflict: 'api_mode_report_state_conflict',
+  reportNotReopenable: 'api_mode_report_not_reopenable',
+  reportOriginalUnknown: 'api_mode_report_original_unknown',
+  reportMailboxLimit: 'api_mode_report_mailbox_limit',
+  reportAddressOutOfScope: 'api_mode_report_address_out_of_scope',
+  reportMailboxNotEligible: 'api_mode_report_mailbox_not_eligible',
+  settingsConflict: 'api_mode_settings_conflict',
   inconsistentRead: INCONSISTENT_READ,
 } as const;
 
@@ -196,4 +212,130 @@ export const quarantinePermissionRequired = (): CodedHttpException =>
     HttpStatus.FORBIDDEN,
     C.quarantinePermissionRequired,
     'This restore releases a quarantine entry: it also needs the permission quarantine:release',
+  );
+
+// ---- step API-3 (C14) --------------------------------------------------------------------------
+
+export const clawbackNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.clawbackNotFound, 'Clawback not found');
+
+export const reportNotFound = (): CodedHttpException =>
+  err(HttpStatus.NOT_FOUND, C.reportNotFound, 'Report not found');
+
+/** `codes`: the criteria rule codes (never an input value: no hash, address or subject). */
+export const clawbackCriteriaInvalid = (codes: readonly string[]): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.clawbackCriteriaInvalid,
+    'The search criteria are not valid: give at least one key (Message-ID, attachment SHA-256, ' +
+      'URL, sender + subject) and a window within the limits',
+    { codes: codes.slice(0, 16).join(',') },
+  );
+
+export const clawbackStateConflict = (
+  status: string,
+  currentRowVersion: number | null,
+): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.clawbackStateConflict,
+    'The clawback is not in a state that allows this, or expectedRowVersion is not its current ' +
+      'version',
+    { status, ...(currentRowVersion !== null && { currentRowVersion }) },
+  );
+
+export const clawbackNotCancellable = (status: string): CodedHttpException =>
+  err(HttpStatus.CONFLICT, C.clawbackNotCancellable, 'The clawback can no longer be cancelled', {
+    status,
+  });
+
+export const clawbackNotRestorable = (status: string, restoreStatus: string): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.clawbackNotRestorable,
+    'Only a completed or cancelled clawback without a restore can be restored',
+    { status, restoreStatus },
+  );
+
+export const purgeApprovalForbidden = (reason: string): CodedHttpException =>
+  err(
+    HttpStatus.FORBIDDEN,
+    C.purgeApprovalForbidden,
+    'A purge is approved or denied by another user holding remediation:purge (not the requester ' +
+      'or submitter, never an API key)',
+    { reason },
+  );
+
+export const purgeApprovalNotPending = (reason: string): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.purgeApprovalNotPending,
+    'The clawback has no pending approval request (decided, cancelled or expired)',
+    { reason },
+  );
+
+export const reportStateConflict = (
+  status: string,
+  currentRowVersion: number | null,
+): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.reportStateConflict,
+    'The report is not in a state that allows this triage, or expectedRowVersion is not its ' +
+      'current version',
+    { status, ...(currentRowVersion !== null && { currentRowVersion }) },
+  );
+
+export const reportNotReopenable = (): CodedHttpException =>
+  err(HttpStatus.CONFLICT, C.reportNotReopenable, 'A resolved report can be reopened only once');
+
+export const reportOriginalUnknown = (): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.reportOriginalUnknown,
+    'The reported message was not identified (no original Message-ID, sender + subject or ' +
+      'hashes): a clawback needs an identified original',
+  );
+
+export const reportMailboxLimit = (max: number): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.reportMailboxLimit,
+    'The organization already has the most report mailboxes allowed',
+    { max },
+  );
+
+export const reportAddressOutOfScope = (): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.reportAddressOutOfScope,
+    'The address is not a known API-mode mailbox and its domain is not an api or hybrid domain ' +
+      'linked to an API-mode connection of your organization',
+  );
+
+export const reportMailboxNotEligible = (cause: string): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.reportMailboxNotEligible,
+    'Only an active, discovered or disabled mailbox of an api or hybrid domain can be a report ' +
+      'mailbox',
+    { cause },
+  );
+
+export const settingsConflict = (currentRowVersion: number | null): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.settingsConflict,
+    'expectedRowVersion is not the current version of the API-mode settings (null = none exists ' +
+      'yet)',
+    { currentRowVersion },
+  );
+
+/** C14 #6: the platform setting is off (same code as the policy refusal of API-2). */
+export const purgeHardDeleteDisabled = (): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.hardDeleteDisabled,
+    'Hard delete is turned off on this platform (API_MODE_HARD_DELETE_ENABLED): a purge may not ' +
+      'hard-delete',
   );

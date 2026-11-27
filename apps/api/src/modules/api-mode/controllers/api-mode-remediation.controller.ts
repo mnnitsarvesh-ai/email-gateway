@@ -316,9 +316,9 @@ export class ApiModeRemediationController {
     summary: 'List API-mode remediations',
     description:
       'Mailbox actions (remediations and reversals), newest first: action, trigger (`policy`, ' +
-      '`admin`, `release`, `end_user`, `system`), status, reason or failure code, attempts, the ' +
-      'mailbox, connection, detection and quarantine entry, creation and completion times and ' +
-      'the latency. Filters `status`, `action`, `trigger`, `mailboxId`, `connectionId`, ' +
+      '`admin`, `release`, `end_user`, `system`, and step API-3 `clawback` / `purge` with the ' +
+      '`clawbackId`), status, reason or failure code, attempts, the mailbox, connection, ' +
+      'detection and quarantine entry, creation and completion times and the latency. Filters `status`, `action`, `trigger`, `mailboxId`, `connectionId`, ' +
       '`detectionId`, `from`/`to` (at most 31 days; default the last 7). v1 list ' +
       '(`api_remediation_actions`). From the read replica. Needs `remediation:read`.' +
       NEVER_PROVIDER_IDS,

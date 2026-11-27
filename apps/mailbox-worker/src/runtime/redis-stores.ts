@@ -150,6 +150,13 @@ export const COUNTER_FIELDS = [
   'remediation_throttled',
   'remediation_latency_count',
   'remediation_latency_sum_ms',
+  // Step API-3 (note 37 §3.2, migration 45).
+  'internal_copies',
+  'clawback_targets_queued',
+  'clawback_targets_succeeded',
+  'clawback_targets_failed',
+  'reports_received',
+  'reports_resolved',
 ] as const;
 export type CounterField = (typeof COUNTER_FIELDS)[number];
 /** Maximum fields (kept with GREATEST, never summed). */
@@ -314,7 +321,9 @@ export class CounterStore {
          lag_le_3600s, lag_gt_3600s, lag_max_ms, fetch_bytes, lag_sum_ms,
          remediation_succeeded, remediation_failed, remediation_skipped, remediation_simulated,
          restores_succeeded, restores_failed, remediation_throttled, remediation_latency_count,
-         remediation_latency_sum_ms, remediation_latency_max_ms, updated_at)
+         remediation_latency_sum_ms, remediation_latency_max_ms, internal_copies,
+         clawback_targets_queued, clawback_targets_succeeded, clawback_targets_failed,
+         reports_received, reports_resolved, updated_at)
       VALUES (${organizationId}, ${apiConnectionId}, ${hour}, ${v('journal_copies')},
         ${v('feed_copies')}, ${v('duplicates')}, ${v('skipped_internal')}, ${v('too_large')},
         ${v('provider_requests')}, ${v('throttled_429')}, ${v('throttled_503')},
@@ -324,7 +333,9 @@ export class CounterStore {
         ${v('remediation_failed')}, ${v('remediation_skipped')}, ${v('remediation_simulated')},
         ${v('restores_succeeded')}, ${v('restores_failed')}, ${v('remediation_throttled')},
         ${v('remediation_latency_count')}, ${v('remediation_latency_sum_ms')}, ${remediationMax},
-        NOW(3))
+        ${v('internal_copies')}, ${v('clawback_targets_queued')},
+        ${v('clawback_targets_succeeded')}, ${v('clawback_targets_failed')},
+        ${v('reports_received')}, ${v('reports_resolved')}, NOW(3))
       ON DUPLICATE KEY UPDATE
         journal_copies = journal_copies + VALUES(journal_copies),
         feed_copies = feed_copies + VALUES(feed_copies),
@@ -357,6 +368,13 @@ export class CounterStore {
           remediation_latency_sum_ms + VALUES(remediation_latency_sum_ms),
         remediation_latency_max_ms =
           GREATEST(remediation_latency_max_ms, VALUES(remediation_latency_max_ms)),
+        internal_copies = internal_copies + VALUES(internal_copies),
+        clawback_targets_queued = clawback_targets_queued + VALUES(clawback_targets_queued),
+        clawback_targets_succeeded =
+          clawback_targets_succeeded + VALUES(clawback_targets_succeeded),
+        clawback_targets_failed = clawback_targets_failed + VALUES(clawback_targets_failed),
+        reports_received = reports_received + VALUES(reports_received),
+        reports_resolved = reports_resolved + VALUES(reports_resolved),
         updated_at = NOW(3)`;
   }
 }

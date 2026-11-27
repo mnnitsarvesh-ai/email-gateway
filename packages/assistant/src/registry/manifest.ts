@@ -302,6 +302,43 @@ export const AI5_WRITES_TESTED_BY: Readonly<Record<string, string>> = {
   ),
 };
 
+/** Integration suite of the step API-3 API-mode writes (design note 37 C15, §9.4). */
+export const API_MODE_WRITES_TESTED_BY_SUITE =
+  'apps/api/integration/assistant-writes-api-mode.test.ts';
+
+/**
+ * Step API-3 C15 (docs/plan/steps/37-api-mode-clawback-reporting.md): the 20 API-mode writes that
+ * become confirmed write tools (phase AI-6) and the suite that covers each (`testedBy`): the six
+ * API-2 remediation writes, the three API-1 connection writes, the six clawback writes (not the
+ * portal-only hard delete), the four report writes and the settings put. Approving a purge is a
+ * high-risk write of the approver's own session (password + TOTP); the api's separation of duties
+ * stays the authority.
+ */
+export const API_MODE_WRITES_TESTED_BY: Readonly<Record<string, string>> = Object.fromEntries(
+  [
+    'ApiModeRemediationController_remediate_v1',
+    'ApiModeRemediationController_restore_v1',
+    'ApiModeRemediationController_retry_v1',
+    'ApiModeRemediationController_putPolicy_v1',
+    'ApiModeRemediationController_putDomainPolicy_v1',
+    'ApiModeRemediationController_deleteDomainPolicy_v1',
+    'ApiModeController_updateSettings_v1',
+    'ApiModeController_inventorySync_v1',
+    'ApiModeController_resyncMailbox_v1',
+    'ApiModeClawbackController_create_v1',
+    'ApiModeClawbackController_submit_v1',
+    'ApiModeClawbackController_approve_v1',
+    'ApiModeClawbackController_deny_v1',
+    'ApiModeClawbackController_cancel_v1',
+    'ApiModeClawbackController_restore_v1',
+    'ApiModeReportsController_triage_v1',
+    'ApiModeReportsController_clawback_v1',
+    'ApiModeReportsController_addMailbox_v1',
+    'ApiModeReportsController_setMailbox_v1',
+    'ApiModeSettingsController_put_v1',
+  ].map((id) => [id, API_MODE_WRITES_TESTED_BY_SUITE]),
+);
+
 /**
  * Input properties of enabled writes whose key matches the credential-key pattern
  * (`isCredentialKey`) but which are not credentials (step AI-3 D6, I14). Named per operation and
@@ -374,33 +411,23 @@ export const NOT_APPLICABLE_REASONS = {
   consent: 'credential or OAuth consent ceremony (portal only)',
   fileExport: 'file export stream (portal only; chat links to the page)',
   critical: 'critical: portal only by policy (chat links to the page)',
-  apiModeDeferred: 'API-mode write: assistant tool planned for step API-3 (portal only until then)',
+  apiModePortalOnly:
+    'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
 } as const;
 
 /**
- * Step API-1 D15 (docs/plan/steps/35-api-mode-protection.md): the five API-mode writes (protection
- * mode of the organization and of a domain, change-feed settings, inventory sync, mailbox
- * resync) are `not_applicable` until step API-3 adds their confirmed write tools (API-3 removes
- * the entries and adds the specs). The API-mode reads are ordinary enabled read tools. Step API-2
- * R16 (docs/plan/steps/36-api-mode-remediation.md) adds its six remediation writes (organization
- * and domain policy, domain policy removal, retry, remediate, restore) with the same reason; its
- * three reads (policy, history list and detail) are enabled read tools. The existing quarantine
- * write tools (release, approve, reject, delete, bulk, …) also act on mailbox-located entries:
- * the same operations with the same confirmation and risk (no registry change).
+ * Step API-1 D15 (docs/plan/steps/35-api-mode-protection.md) made the API-mode writes
+ * `not_applicable` until step API-3; step API-2 R16 added its six remediation writes to that set.
+ * Step API-3 C15 (docs/plan/steps/37-api-mode-clawback-reporting.md) turns every API-mode write
+ * into a confirmed write tool (`API_MODE_WRITES_TESTED_BY`) except the two protection-mode writes:
+ * they stay portal only because they are bound to the MX conflict checks and the open
+ * domain-onboarding decision PO-D1. The clawback hard delete is a critical portal-only operation
+ * (`CRITICAL_OPERATIONS`). The existing quarantine write tools also act on mailbox-located
+ * entries: the same operations with the same confirmation and risk.
  */
-export const API_MODE_DEFERRED_WRITES: ReadonlySet<string> = new Set([
+export const API_MODE_PORTAL_ONLY_WRITES: ReadonlySet<string> = new Set([
   'ProtectionModeController_putOrganization_v1',
   'ProtectionModeController_putDomain_v1',
-  'ApiModeController_updateSettings_v1',
-  'ApiModeController_inventorySync_v1',
-  'ApiModeController_resyncMailbox_v1',
-  // Step API-2 R16.
-  'ApiModeRemediationController_putPolicy_v1',
-  'ApiModeRemediationController_putDomainPolicy_v1',
-  'ApiModeRemediationController_deleteDomainPolicy_v1',
-  'ApiModeRemediationController_retry_v1',
-  'ApiModeRemediationController_remediate_v1',
-  'ApiModeRemediationController_restore_v1',
 ]);
 
 /** Tags whose operations are never tools (D3 consistency rule). */
@@ -428,6 +455,8 @@ export const CRITICAL_OPERATIONS: ReadonlySet<string> = new Set([
   'DlpEvidenceController_purgeAll_v1',
   'DlpMessageEvidenceController_purge_v1',
   'BecFeedbackController_purgeHistory_v1',
+  // Step API-3 C15: a hard-delete purge (irreversible; always a second approver) is portal only.
+  'ApiModeClawbackController_submitHardDelete_v1',
 ]);
 
 /** Planned phase of each module's writes and side-effect-free POSTs (§6). Reads (GET) are AI-1. */
@@ -457,6 +486,8 @@ export const MODULE_WRITE_PHASE: Readonly<Record<string, ProgramPhase>> = {
   journaling: 'AI-5',
   ediscovery: 'AI-5',
   'provider-connections': 'AI-5',
+  // Step API-3 C15: the API-mode writes are confirmed write tools of the hardening phase.
+  'api-mode': 'AI-6',
 };
 
 /** The facts of one operation the rules look at. */
@@ -566,6 +597,29 @@ export const RISK_OVERRIDES: Readonly<Record<string, ToolRisk>> = {
   // delete on expiry; a provider health check only queues a read-only probe.
   ArchiveRetentionController_create_v1: 'high',
   ProviderHealthController_checkNow_v1: 'low',
+  // Step API-3 C15 (design note 37): bulk purge, its approval, a restore of remediated mail,
+  // policy and settings changes that can weaken protection need re-authentication (I20); a
+  // search, a cancel, triage and report mailboxes are medium; retries, resyncs and denials low.
+  ApiModeRemediationController_remediate_v1: 'medium',
+  ApiModeRemediationController_restore_v1: 'high',
+  ApiModeRemediationController_retry_v1: 'low',
+  ApiModeRemediationController_putPolicy_v1: 'high',
+  ApiModeRemediationController_putDomainPolicy_v1: 'high',
+  ApiModeRemediationController_deleteDomainPolicy_v1: 'high',
+  ApiModeController_updateSettings_v1: 'high',
+  ApiModeController_inventorySync_v1: 'low',
+  ApiModeController_resyncMailbox_v1: 'low',
+  ApiModeClawbackController_create_v1: 'medium',
+  ApiModeClawbackController_submit_v1: 'high',
+  ApiModeClawbackController_approve_v1: 'high',
+  ApiModeClawbackController_deny_v1: 'low',
+  ApiModeClawbackController_cancel_v1: 'medium',
+  ApiModeClawbackController_restore_v1: 'high',
+  ApiModeReportsController_triage_v1: 'medium',
+  ApiModeReportsController_clawback_v1: 'medium',
+  ApiModeReportsController_addMailbox_v1: 'medium',
+  ApiModeReportsController_setMailbox_v1: 'medium',
+  ApiModeSettingsController_put_v1: 'high',
 };
 
 export const CONFIRM_OF_RISK: Readonly<Record<ToolRisk, ToolConfirm>> = {
@@ -582,8 +636,8 @@ function notApplicableReason(facts: OperationFacts): string | null {
     const reason = NOT_APPLICABLE_TAGS[tag];
     if (reason) return reason;
   }
-  if (API_MODE_DEFERRED_WRITES.has(facts.operationId))
-    return NOT_APPLICABLE_REASONS.apiModeDeferred;
+  if (API_MODE_PORTAL_ONLY_WRITES.has(facts.operationId))
+    return NOT_APPLICABLE_REASONS.apiModePortalOnly;
   const { method, path } = facts;
   if (path.startsWith('/platform/overrides')) return NOT_APPLICABLE_REASONS.identity;
   if (facts.returnsSecret) return NOT_APPLICABLE_REASONS.secret;
@@ -710,6 +764,10 @@ export const CONTROLLER_HINTS: Readonly<
     portalRoute: '/api-mode',
     resourceType: 'api_remediation',
   },
+  // Step API-3: clawbacks, user reports and settings (tabs of the API-mode page).
+  ApiModeClawbackController: { portalRoute: '/api-mode', resourceType: 'api_clawback' },
+  ApiModeReportsController: { portalRoute: '/api-mode', resourceType: 'api_user_report' },
+  ApiModeSettingsController: { portalRoute: '/api-mode', resourceType: 'api_mode_settings' },
   ArchiveAdminController: { portalRoute: '/archive', resourceType: 'archive' },
   ArchiveMessagesController: {
     portalRoute: '/archive/{messageId}',
@@ -1335,6 +1393,45 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
     // `decision` is a union (the R2.4 record or `{ requestedAction, reason }`): marked as a whole.
     untrustedFields: ['mailbox.address', 'requestReason', 'decision'],
   },
+  // Step API-3 C15: the clawback, report and settings reads. Target senders and subjects are
+  // mail-derived; report originals' senders and subject keys come from the reported mail;
+  // reporter and mailbox addresses from the directory; reasons and notes are operator text.
+  ApiModeClawbackController_list_v1: {
+    display: columns('createdAt', 'trigger', 'status', 'counts.targetsEligible', 'approval.status'),
+  },
+  ApiModeClawbackController_detail_v1: {
+    untrustedFields: [
+      'criteria.keys.senders',
+      'criteria.keys.senderSubject.sender',
+      'criteria.keys.senderSubject.subjectKey',
+      'requestReason',
+      'approvalDecision.reason',
+    ],
+  },
+  ApiModeClawbackController_targets_v1: {
+    display: columns('receivedAt', 'mailbox.address', 'status', 'plannedAction', 'reasonCode'),
+    untrustedFields: ['data[].mailbox.address', 'data[].headerFrom', 'data[].subject'],
+  },
+  ApiModeReportsController_list_v1: {
+    display: columns('reportedAt', 'reporterAddress', 'status', 'assessment', 'analystVerdict'),
+    untrustedFields: ['data[].reporterAddress'],
+  },
+  ApiModeReportsController_detail_v1: {
+    untrustedFields: [
+      'reporterAddress',
+      'reporter.address',
+      'reportMailbox.address',
+      'original.sender',
+      'original.subjectKey',
+      'analyst.note',
+      'group.members[].reporterAddress',
+    ],
+  },
+  ApiModeReportsController_listMailboxes_v1: {
+    display: columns('address', 'status', 'coverage', 'reportMailboxAt', 'lastReportAt'),
+    untrustedFields: ['data[].address', 'data[].domain.name'],
+  },
+  ApiModeSettingsController_get_v1: {},
 
   // --- own organization (bind {id}) ---
   ProtectionModeController_getOrganization_v1: { bind: SELF_ORGANIZATION },
@@ -1346,7 +1443,7 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
   OrganizationConfigurationController_getSettings_v1: { bind: SELF_ORGANIZATION },
 };
 
-/** The overrides with the AI-2, AI-3, AI-4 and AI-5 writes' `testedBy` merged in. */
+/** The overrides with the AI-2, AI-3, AI-4, AI-5 and API-3 writes' `testedBy` merged in. */
 export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = (() => {
   const out: Record<string, OperationOverride> = { ...BASE_OVERRIDES };
   for (const [operationId, testedBy] of Object.entries({
@@ -1354,6 +1451,7 @@ export const OPERATION_OVERRIDES: Readonly<Record<string, OperationOverride>> = 
     ...AI3_WRITES_TESTED_BY,
     ...AI4_WRITES_TESTED_BY,
     ...AI5_WRITES_TESTED_BY,
+    ...API_MODE_WRITES_TESTED_BY,
   }))
     out[operationId] = { ...out[operationId], testedBy };
   return out;

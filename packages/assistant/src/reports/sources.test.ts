@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { compileValidator, findTool } from '../registry/registry';
 import {
   atoOverviewBody,
+  apiModeOverviewBody,
   atoAccountsBody,
   deliveryBody,
   okResults,
@@ -31,6 +32,13 @@ import {
 import { REPORT_SECTIONS } from './types';
 
 const NOW = new Date('2026-11-23T09:00:30.000Z');
+const WINDOW_FOR_ARGS = {
+  from: '2026-11-16T09:00:00.000Z',
+  to: '2026-11-23T09:00:00.000Z',
+  granularity: 'day' as const,
+  range: '7d' as const,
+  atoRange: '7d' as const,
+};
 const opts = { now: NOW, maxRangeDays: 31 };
 
 const OPERATION_OF: Record<ReportSourceKey, string> = {
@@ -43,6 +51,7 @@ const OPERATION_OF: Record<ReportSourceKey, string> = {
   quarantine_summary: 'QuarantineToolsController_summary_v1',
   ato_overview: 'AtoOverviewController_overview_v1',
   ato_accounts: 'AtoAccountsController_list_v1',
+  api_mode_overview: 'ApiModeController_overview_v1',
 };
 
 interface OpenApiDoc {
@@ -80,6 +89,7 @@ describe('report source plan (design D2 step 4)', () => {
       url_clicks: ['url_clicks'],
       quarantine: ['quarantine_summary'],
       ato: ['ato_overview', 'ato_accounts'],
+      api_mode: ['api_mode_overview'],
     });
     const w = WINDOW_7D;
     const args = Object.fromEntries(
@@ -95,6 +105,7 @@ describe('report source plan (design D2 step 4)', () => {
       quarantine_tools_summary: { from: w.from, to: w.to },
       ato_overview_overview: { range: '7d' },
       ato_accounts_list: { sort: '-riskScore', limit: '10' },
+      api_mode_overview: {},
     });
   });
 
@@ -125,7 +136,9 @@ describe('report source plan (design D2 step 4)', () => {
       'quarantine_summary',
       'ato_overview',
     ]);
-    expect(plannedSources([...REPORT_SECTIONS])).toHaveLength(9);
+    expect(plannedSources([...REPORT_SECTIONS])).toHaveLength(10);
+    expect(plannedSources(['api_mode']).map((d) => d.key)).toEqual(['api_mode_overview']);
+    expect(REPORT_SOURCE_DEFS.api_mode_overview.args(WINDOW_FOR_ARGS)).toEqual({});
     expect(REPORT_SOURCE_DEFS.ato_accounts.after).toBe('ato_overview');
   });
 
@@ -134,6 +147,7 @@ describe('report source plan (design D2 step 4)', () => {
     expect(sourcePermission(REPORT_SOURCE_DEFS.quarantine_summary)).toBe('quarantine:read');
     expect(sourcePermission(REPORT_SOURCE_DEFS.ato_overview)).toBe('ato:read');
     expect(sourcePermission(REPORT_SOURCE_DEFS.ato_accounts)).toBe('ato:read');
+    expect(sourcePermission(REPORT_SOURCE_DEFS.api_mode_overview)).toBe('remediation:read');
   });
 });
 
@@ -148,6 +162,7 @@ describe('report source parsers (design D2 step 6)', () => {
     quarantine_summary: quarantineSummaryBody(),
     ato_overview: atoOverviewBody(),
     ato_accounts: atoAccountsBody(),
+    api_mode_overview: apiModeOverviewBody(),
   };
 
   it('accept the synthetic fixtures and keep unknown fields (passthrough)', () => {
@@ -156,7 +171,7 @@ describe('report source parsers (design D2 step 6)', () => {
       expect(parsed.ok, key).toBe(true);
       if (parsed.ok) expect((parsed.data as Record<string, unknown>).extraField).toBe(1);
     }
-    expect(Object.keys(okResults())).toHaveLength(9);
+    expect(Object.keys(okResults())).toHaveLength(10);
   });
 
   it('accept the OpenAPI examples where the document has one', () => {

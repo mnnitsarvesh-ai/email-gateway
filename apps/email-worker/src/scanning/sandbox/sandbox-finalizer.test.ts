@@ -308,4 +308,20 @@ describe('risk revision 1 from the sandbox final (step 5.1 R13 (a), ADR-0042)', 
     expect(t.store.final(t.scan.scanId, RECEIVED)).toBeUndefined();
     expect(t.store.submission(sub.id).status).toBe('submitted');
   });
+
+  it('passes the transaction clock and correlation id to the revision (step API-3 C2.1)', async () => {
+    const t = setup();
+    t.store.setScanStatus(t.scan.scanId, RECEIVED, 'completed');
+    const sub = t.sub(1);
+    const seen: Array<{ now: Date; correlationId: string }> = [];
+    await t.store.transaction((tx) => {
+      const original = tx.scoreRiskRevision.bind(tx);
+      tx.scoreRiskRevision = (scan, ctx) => {
+        seen.push(ctx);
+        return original(scan, ctx);
+      };
+      return finishSubmissions(tx, [{ submission: sub, outcome: expiredOutcome() }], t.ctx);
+    });
+    expect(seen).toEqual([{ now: t.ctx.now, correlationId: t.ctx.correlationId }]);
+  });
 });

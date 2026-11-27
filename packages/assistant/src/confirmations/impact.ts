@@ -2928,11 +2928,461 @@ const AI5_TEMPLATES: Readonly<Record<string, Template>> = {
   },
 };
 
+// ---------------------------------------------------------------------------------------------
+// Step API-3 templates (design note 37 C15): API-mode remediation, connection settings,
+// clawbacks (search and purge), user reports and the organization settings. Mailbox and reporter
+// addresses, the copy's sender, the original's sender and subject key and operator reasons are
+// marked untrusted; hashes are never shown.
+// ---------------------------------------------------------------------------------------------
+
+const MAILBOX_ACTION_WORDS: Readonly<Record<string, string>> = {
+  move_quarantine: 'move to the hidden quarantine folder',
+  move_junk: 'move to Junk',
+  tag: 'tag as suspicious',
+  soft_delete: 'move to deleted items',
+  hard_delete: 'delete permanently',
+};
+const mailboxActionWords = (value: unknown): string =>
+  typeof value === 'string'
+    ? (MAILBOX_ACTION_WORDS[value] ?? sanitizeText(value, 32))
+    : 'the action';
+
+const detectionTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Detection', ctx.args.detectionId),
+  ...target('Mailbox', ctx.snap.mailboxAddress, true),
+  ...target('Sender', ctx.snap.headerFrom, true),
+  ...target('Verdict', ctx.snap.verdict),
+  ...target('Risk score', ctx.snap.riskScore),
+  ...target('Verdict authority', ctx.snap.verdictAuthority),
+];
+
+const clawbackTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Clawback', ctx.args.clawbackId),
+  ...target('Trigger', ctx.snap.trigger),
+  ...target('Status', ctx.snap.status),
+  ...target('Eligible copies', ctx.snap['counts.targetsEligible']),
+  ...target('Distinct mailboxes', ctx.snap['counts.mailboxesEligible']),
+];
+
+const reportTarget = (ctx: TemplateContext): ConfirmationTarget[] => [
+  ...target('Report', ctx.args.reportId),
+  ...target('Reporter', ctx.snap.reporterAddress, true),
+  ...target('Status', ctx.snap.status),
+  ...target('Assessment', ctx.snap.assessment),
+  ...target('Scan verdict', ctx.snap['scan.verdict']),
+  ...target('Original sender', ctx.snap['original.sender'], true),
+  ...target('Reports of the same message', ctx.snap['group.size']),
+];
+
+const policyRulesText = (document: unknown): string | null => {
+  if (!isRecord(document) || !Array.isArray(document.rules)) return null;
+  return cappedList(
+    document.rules.map((rule) =>
+      isRecord(rule)
+        ? `${sanitizeText(text(rule.id) ?? '?', 40)} → ${mailboxActionWords(rule.action)}`
+        : '?',
+    ),
+    8,
+  );
+};
+
+const POLICY_WARNING =
+  'A weaker policy stops removing threats from mailboxes; detect-only records decisions without acting.';
+
+const API_MODE_TEMPLATES: Readonly<Record<string, Template>> = {
+  ApiModeRemediationController_remediate_v1: (ctx) => ({
+    title: 'Remediate mailbox copy',
+    action: `Queues the mailbox action: ${mailboxActionWords(ctx.body.action)}.`,
+    target: detectionTarget(ctx),
+    changes: [
+      ...change(
+        'Remediation',
+        ctx.snap.remediationAction ?? ctx.snap.remediationState,
+        ctx.body.action,
+      ),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'The mailbox-worker moves the message in the user’s mailbox within seconds.',
+      'Quarantine-folder, Junk and deleted-items moves create a mailbox quarantine entry that can be restored.',
+    ],
+    reversible: ctx.body.action !== 'hard_delete',
+  }),
+  ApiModeRemediationController_restore_v1: (ctx) => ({
+    title: 'Restore mailbox copy',
+    action:
+      'Puts the remediated message back: a tag is removed; a moved message returns to the Inbox through the quarantine release of its entry.',
+    target: [
+      ...detectionTarget(ctx),
+      ...target('Remediation in effect', ctx.snap.remediationAction),
+    ],
+    changes: [
+      ...change('Remediation', ctx.snap.remediationState, 'restore requested'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'The message is visible to the user again.',
+      'A hard-blocked entry may need a second approver under the quarantine rules.',
+    ],
+    warnings: ['A restored threat reaches the user’s Inbox again.'],
+    reversible: true,
+  }),
+  ApiModeRemediationController_retry_v1: (ctx) => ({
+    title: 'Retry mailbox action',
+    action: `Runs the failed mailbox action (${mailboxActionWords(ctx.snap.action)}) again.`,
+    target: [
+      ...target('Remediation', ctx.args.remediationId),
+      ...target('Mailbox', ctx.snap['mailbox.address'], true),
+      ...target('Trigger', ctx.snap.trigger),
+      ...target('Attempts', ctx.snap.attempts),
+    ],
+    changes: change('Status', ctx.snap.status, 'pending'),
+    impact: ['The mailbox-worker retries the action with fresh attempts.'],
+    reversible: false,
+  }),
+  ApiModeRemediationController_putPolicy_v1: (ctx) => ({
+    title: 'Set API-mode remediation policy',
+    action: `Replaces the organization’s remediation policy (mode ${text(ctx.body.mode) ?? '?'}).`,
+    target: [
+      ...target('Current source', ctx.snap['organization.source']),
+      ...target('Current mode', ctx.snap['organization.mode']),
+      ...target('Hard delete allowed on this platform', yesNo(ctx.snap.hardDeleteAvailable)),
+    ],
+    changes: [
+      ...change('Mode', ctx.snap['organization.mode'], ctx.body.mode),
+      ...change('Rules', undefined, policyRulesText(ctx.body.document)),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'New verdicts of every API-mode mailbox are decided with this policy.',
+      'Domains with their own override keep it.',
+    ],
+    warnings: [POLICY_WARNING],
+    reversible: true,
+  }),
+  ApiModeRemediationController_putDomainPolicy_v1: (ctx) => ({
+    title: 'Set domain remediation policy',
+    action: `Sets the remediation policy override of the domain (mode ${text(ctx.body.mode) ?? '?'}).`,
+    target: [
+      ...target('Domain', ctx.snap.domainName ?? ctx.args.domainId, true),
+      ...target('Current mode', ctx.snap.mode),
+    ],
+    changes: [
+      ...change('Mode', ctx.snap.mode ?? null, ctx.body.mode),
+      ...change('Rules', undefined, policyRulesText(ctx.body.document)),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['New verdicts of the domain’s mailboxes are decided with this override.'],
+    warnings: [POLICY_WARNING],
+    reversible: true,
+  }),
+  ApiModeRemediationController_deleteDomainPolicy_v1: (ctx) => ({
+    title: 'Remove domain remediation policy',
+    action: 'Removes the domain’s policy override; the domain inherits the organization policy.',
+    target: [
+      ...target('Domain', ctx.snap.domainName ?? ctx.args.domainId, true),
+      ...target('Override mode', ctx.snap.mode),
+    ],
+    changes: change('Override', ctx.snap.mode ?? 'none', 'removed (inherits the organization)'),
+    impact: ['New verdicts of the domain’s mailboxes follow the organization policy.'],
+    warnings: ['A removed override cannot be restored; set it again to bring it back.'],
+    reversible: false,
+  }),
+  ApiModeController_updateSettings_v1: (ctx) => ({
+    title: 'Update API-mode connection settings',
+    action: 'Changes the change-feed settings and the remediation pause of this connection.',
+    target: [
+      ...target('Connection', ctx.snap.displayName, true),
+      ...target('Provider', ctx.snap.provider),
+    ],
+    changes: [
+      ...change('Change feeds', onOff(ctx.snap.feedsEnabled), onOff(ctx.body.feedsEnabled)),
+      ...change('Feed mode', ctx.snap.feedMode, ctx.body.feedMode),
+      ...change(
+        'Remediation paused',
+        yesNo(ctx.snap.remediationPaused),
+        yesNo(ctx.body.remediationPaused),
+      ),
+    ],
+    impact: [
+      'Pausing remediation stops automatic mailbox actions of this connection (admin and release actions still run).',
+    ],
+    warnings: ['A paused connection leaves detected threats in mailboxes until it is resumed.'],
+    reversible: true,
+  }),
+  ApiModeController_inventorySync_v1: (ctx) => ({
+    title: 'Sync mailbox inventory',
+    action: 'Requests a mailbox inventory sync of this connection.',
+    target: [
+      ...target('Connection', ctx.snap.displayName, true),
+      ...target('Inventory', ctx.snap.inventoryStatus),
+    ],
+    changes: change('Inventory', ctx.snap.inventoryStatus, 'sync requested'),
+    impact: [
+      'The mailbox-worker reads the provider’s mailbox list; coverage updates when it is done.',
+    ],
+    reversible: false,
+  }),
+  ApiModeController_resyncMailbox_v1: (ctx) => ({
+    title: 'Resync mailbox',
+    action: 'Restarts the change feed of this mailbox (no backfill of older mail).',
+    target: [
+      ...target('Mailbox', ctx.snap.address, true),
+      ...target('Feed', ctx.snap.feedStatus),
+      ...target('Coverage', ctx.snap.coverage),
+    ],
+    changes: change('Feed', ctx.snap.feedStatus, 'resync requested'),
+    impact: ['The mailbox-worker re-initializes the feed cursor of the mailbox.'],
+    reversible: false,
+  }),
+  ApiModeClawbackController_create_v1: (ctx) => {
+    const c = isRecord(ctx.body.criteria) ? ctx.body.criteria : {};
+    const expand = isRecord(ctx.body.expand) ? ctx.body.expand : null;
+    const keys = [
+      c.messageId !== undefined ? 'Message-ID' : null,
+      Array.isArray(c.attachmentSha256) ? `${c.attachmentSha256.length} attachment hash(es)` : null,
+      c.url !== undefined || Array.isArray(c.urlSha256) ? 'URL' : null,
+      c.sender !== undefined ? 'sender + subject' : null,
+      ctx.body.seedDetectionId !== undefined ? 'seed detection' : null,
+    ].filter((k): k is string => k !== null);
+    return {
+      title: 'Search API-mode mailboxes',
+      action:
+        'Creates a clawback search over the recorded copies of your organization. Nothing in mailboxes changes until it is submitted.',
+      target: [
+        ...target('Keys', cappedList(keys, 5)),
+        ...target('Sender', c.sender, true),
+        ...target('Subject', c.subject, true),
+        ...target('Window from', c.from),
+        ...target('Window to', c.to),
+        ...target('Seed detection', ctx.body.seedDetectionId),
+      ],
+      changes: [
+        ...change('Campaign expansion', undefined, expand ? cappedList(keysOf(expand), 3) : null),
+        ...change(
+          'Directions',
+          undefined,
+          Array.isArray(ctx.body.directions)
+            ? cappedList(ctx.body.directions.map(String), 2)
+            : null,
+        ),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        'The mailbox-worker lists the matching copies; preview them before submitting a purge.',
+      ],
+      reversible: true,
+    };
+  },
+  ApiModeClawbackController_submit_v1: (ctx) => {
+    const explicit = ctx.body.mode === 'explicit';
+    return {
+      title: 'Submit purge',
+      action: explicit
+        ? `Purges the eligible copies of this clawback: ${mailboxActionWords(ctx.body.action)}.`
+        : `Re-decides the eligible copies through your remediation policy as ${text(ctx.body.verdict) ?? 'the signal verdict'} (${text(ctx.body.level) ?? 'critical'}).`,
+      target: clawbackTarget(ctx),
+      changes: [
+        ...change('Status', ctx.snap.status, 'queued or pending approval'),
+        ...change('Mode', undefined, ctx.body.mode),
+        ...change('Action', undefined, explicit ? ctx.body.action : null),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        'Messages are removed from every listed mailbox by the mailbox-worker.',
+        'Above the organization’s approval threshold of distinct mailboxes a second administrator must approve first.',
+      ],
+      warnings: [
+        'A purge removes the message from many mailboxes at once; check the target list first.',
+      ],
+      reversible: true,
+    };
+  },
+  ApiModeClawbackController_approve_v1: (ctx) => ({
+    title: 'Approve purge',
+    action: 'Approves another administrator’s purge; the mailbox-worker then removes the messages.',
+    target: [
+      ...clawbackTarget(ctx),
+      ...target('Approval reasons', snapshotList(ctx.snap['approval.reasons'])),
+      ...target('Expires at', ctx.snap['approval.expiresAt']),
+      ...target('Action', ctx.snap.action ?? ctx.snap.decisionMode),
+    ],
+    changes: [
+      ...change('Approval', 'pending', 'approved'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['The purge runs across every eligible mailbox of the clawback.'],
+    warnings: ['You are the second person of this purge: approve only what you checked.'],
+    reversible: true,
+  }),
+  ApiModeClawbackController_deny_v1: (ctx) => ({
+    title: 'Deny purge',
+    action: 'Denies another administrator’s purge; nothing is removed.',
+    target: clawbackTarget(ctx),
+    changes: [
+      ...change('Approval', 'pending', 'denied'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    reversible: false,
+  }),
+  ApiModeClawbackController_cancel_v1: (ctx) => ({
+    title: 'Cancel clawback',
+    action:
+      'Cancels the clawback: queued mailbox actions are cancelled, running ones finish, nothing new starts.',
+    target: clawbackTarget(ctx),
+    changes: [
+      ...change('Status', ctx.snap.status, 'cancelled or cancel requested'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: ['Messages already removed stay removed; restore them in bulk afterwards if needed.'],
+    reversible: false,
+  }),
+  ApiModeClawbackController_restore_v1: (ctx) => ({
+    title: 'Restore purged messages',
+    action:
+      'Puts the messages this clawback removed back where the provider allows it (Inbox; tags removed).',
+    target: [...clawbackTarget(ctx), ...target('Succeeded copies', ctx.snap['counts.succeeded'])],
+    changes: [
+      ...change('Restore', ctx.snap['restore.status'], 'requested'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Entries that need an approval and hard-deleted messages are skipped and listed with a code.',
+    ],
+    warnings: ['Restored messages reach the users’ Inboxes again, threats included.'],
+    reversible: false,
+  }),
+  ApiModeReportsController_triage_v1: (ctx) => ({
+    title: 'Triage user report',
+    action: `Sets the report to ${text(ctx.body.status) ?? '?'}${ctx.body.verdict !== undefined ? ` (${text(ctx.body.verdict)})` : ''}.`,
+    target: reportTarget(ctx),
+    changes: [
+      ...change('Status', ctx.snap.status, ctx.body.status),
+      ...change('Verdict', undefined, ctx.body.verdict),
+      ...change('Note', undefined, ctx.body.note),
+      ...change('Notify the reporter', undefined, yesNo(ctx.body.notifyReporter)),
+      ...change('Apply to the group', undefined, yesNo(ctx.body.applyToGroup)),
+    ],
+    impact: [
+      'A resolve also resolves the open reports of the same message unless applyToGroup is false.',
+      'Reporters get a result e-mail without the reported message’s subject or content when notified.',
+    ],
+    reversible: true,
+  }),
+  ApiModeReportsController_clawback_v1: (ctx) => ({
+    title: 'Clawback from report',
+    action:
+      'Creates a clawback search for the reported message across your mailboxes. Nothing changes until it is submitted.',
+    target: reportTarget(ctx),
+    changes: [
+      ...change(
+        'Campaign expansion',
+        undefined,
+        isRecord(ctx.body.expand) ? cappedList(keysOf(ctx.body.expand), 3) : null,
+      ),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'The mailbox-worker lists the matching copies; preview and submit the purge afterwards.',
+    ],
+    reversible: true,
+  }),
+  ApiModeReportsController_addMailbox_v1: (ctx) => ({
+    title: 'Add report mailbox',
+    action:
+      'Makes the address a report mailbox: users forward suspicious mail to it and each forward becomes a report.',
+    target: target('Address', ctx.body.address, true),
+    changes: [
+      ...change('Report mailbox', undefined, 'on'),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Copies in a report mailbox are never remediated or clawed back.',
+      'An address not known yet is added as a discovered mailbox of its domain’s connection.',
+    ],
+    reversible: true,
+  }),
+  ApiModeReportsController_setMailbox_v1: (ctx) => ({
+    title: ctx.body.enabled === true ? 'Designate report mailbox' : 'Clear report mailbox',
+    action:
+      ctx.body.enabled === true
+        ? 'Makes this mailbox a report mailbox (no add-in needed).'
+        : 'Stops treating this mailbox as a report mailbox.',
+    target: [
+      ...target('Mailbox', ctx.snap.address, true),
+      ...target('Status', ctx.snap.status),
+      ...target('Domain', ctx.snap['domain.name'], true),
+    ],
+    changes: [
+      ...change('Report mailbox', undefined, onOff(ctx.body.enabled)),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      ctx.body.enabled === true
+        ? 'Forwards to it become reports; its copies are never remediated.'
+        : 'Its new copies are remediated like any other mailbox.',
+    ],
+    reversible: true,
+  }),
+  ApiModeSettingsController_put_v1: (ctx) => ({
+    title: 'Update API-mode settings',
+    action: "Replaces the organization's API-mode settings with the values shown.",
+    target: target('Current source', ctx.snap.source),
+    changes: [
+      ...change(
+        'Internal mail',
+        onOff(ctx.snap['settings.internalMailEnabled']),
+        onOff(ctx.body.internalMailEnabled),
+      ),
+      ...change('Automatic clawback', ctx.snap['settings.autoClawback'], ctx.body.autoClawback),
+      ...change(
+        'Automatic cap (mailboxes)',
+        ctx.snap['settings.autoMaxMailboxes'],
+        ctx.body.autoMaxMailboxes,
+      ),
+      ...change(
+        'Approval threshold (mailboxes)',
+        ctx.snap['settings.purgeApprovalMailboxes'],
+        ctx.body.purgeApprovalMailboxes,
+      ),
+      ...change(
+        'Lookback (days)',
+        ctx.snap['settings.clawbackLookbackDays'],
+        ctx.body.clawbackLookbackDays,
+      ),
+      ...change(
+        'Threat-intel confidence',
+        ctx.snap['settings.tiMinConfidence'],
+        ctx.body.tiMinConfidence,
+      ),
+      ...change(
+        'Report acknowledgement',
+        onOff(ctx.snap['settings.reportAckEnabled']),
+        onOff(ctx.body.reportAckEnabled),
+      ),
+      ...change(
+        'Report result e-mail',
+        onOff(ctx.snap['settings.reportFeedbackEnabled']),
+        onOff(ctx.body.reportFeedbackEnabled),
+      ),
+      ...change('Reason', undefined, ctx.body.reason),
+    ],
+    impact: [
+      'Automatic clawbacks, the purge approval threshold and reporter e-mails follow the new values.',
+    ],
+    warnings: [
+      'Turning automatic clawback off or raising the approval threshold weakens post-delivery protection.',
+    ],
+    reversible: true,
+  }),
+};
+
 /**
- * The 168 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
- * AI-R, 64 of step AI-4, 25 of step AI-5), keyed by operation id.
+ * The 188 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
+ * AI-R, 64 of step AI-4, 25 of step AI-5, 20 of step API-3), keyed by operation id.
  */
 export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
+  ...API_MODE_TEMPLATES,
   // --- native (step AI-R D5) ---
   AssistantNative_reportSendEmail: reportSendEmail,
   // --- policies ---

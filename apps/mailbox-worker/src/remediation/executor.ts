@@ -245,7 +245,9 @@ export class RemediationRunner {
         'failed',
       );
     }
-    if (l.paused && a.trigger === 'policy') {
+    // R5.1 / C5.7: automatic rows (policy, clawback) wait while the connection is paused; admin
+    // requests and admin purges proceed.
+    if (l.paused && (a.trigger === 'policy' || a.trigger === 'clawback')) {
       return this.report(
         await this.outcomes.defer(l.ctx, held, new Date(now.getTime() + PAUSED_RECHECK_MS), now),
         'deferred',
@@ -329,6 +331,7 @@ export class RemediationRunner {
         lastErrorCode: true,
         verdictAt: true,
         rowVersion: true,
+        clawbackId: true,
       },
     });
     if (!row || row.rowVersion !== claim.rowVersion || row.status !== 'in_progress') return 'lost';
@@ -452,9 +455,10 @@ export class RemediationRunner {
       // Every trigger: a remediation of an older generation (the copy was restored since, e.g. a
       // stale admin request retried) never moves the message again. Policy rows also yield to
       // any later action on the copy.
+      const automatic = a.trigger === 'policy' || a.trigger === 'clawback';
       const movedOn =
         copy.remediationGeneration !== a.generation ||
-        (a.trigger === 'policy' &&
+        (automatic &&
           ((copy.lastActionId !== null && copy.lastActionId !== a.id) ||
             copy.remediationState === 'restored'));
       if (movedOn) {

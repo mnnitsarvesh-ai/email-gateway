@@ -13,8 +13,10 @@ import {
   evaluateMailboxCoverage,
   lagPercentileSeconds,
   type ApiModeHealthConfig,
+  type ApiModeClawbackHealthInput,
   type ApiModeHealthInput,
   type ApiModeRemediationHealthInput,
+  type ApiModeReportsHealthInput,
   type LagBucket,
 } from '@email-gateway/mailbox-api';
 import { isApiSide, loadOrgApiModeState, type OrgApiModeState } from '../domain/api-mode-state';
@@ -49,7 +51,20 @@ export interface HealthConfig extends ApiModeHealthConfig {
   notificationsAvailable: boolean;
   /** Step API-2 R14 thresholds of the four `remediation.*` checks. */
   remediation: ApiModeRemediationHealthInput['thresholds'];
+  /** Step API-3 C13 thresholds of `clawback.stalled` and `reports.backlog`. */
+  clawback: ApiModeClawbackHealthInput['thresholds'];
+  reports: ApiModeReportsHealthInput['thresholds'];
 }
+
+/** Statuses of an active clawback (`api_mode_clawback_active{status}`, C13). */
+export const ACTIVE_CLAWBACK_GAUGE_STATUSES = [
+  'searching',
+  'ready',
+  'review_required',
+  'pending_approval',
+  'queued',
+  'running',
+] as const;
 
 export interface HealthDeps {
   prisma: PrismaClient;
@@ -165,6 +180,10 @@ export class HealthJob {
     }
     const m = this.deps.metrics;
     if (m) {
+      const api3 = await this.clawbackAndReportGauges(now);
+      for (const [status, n] of api3.clawbacks) m.clawbackActive.set({ status }, n);
+      m.reportsPending.set(api3.reportsPending);
+      m.reportsOldestPending.set(api3.oldestPendingSeconds);
       for (const [provider, b] of await this.remediationBacklog(now)) {
         m.remediationBacklog.set({ provider }, b.count);
         m.remediationOldestPending.set({ provider }, b.oldestSeconds);
@@ -372,6 +391,8 @@ export class HealthJob {
         succeeded1h: remediationSucceeded,
         failed1h: remediationFailed,
       }),
+      clawback: await this.clawbackInput(ctx, now),
+      reports: await this.reportsInput(ctx, now),
     };
     const result = evaluateApiModeHealth(input, this.deps.config);
     const document = result.document as unknown as Prisma.InputJsonValue;
@@ -471,8 +492,8 @@ export class HealthJob {
         status: { in: ['pending', 'in_progress'] },
         trigger: {
           in: paused
-            ? ['admin', 'release', 'end_user']
-            : ['policy', 'admin', 'release', 'end_user'],
+            ? ['admin', 'release', 'end_user', 'purge']
+            : ['policy', 'admin', 'release', 'end_user', 'clawback', 'purge'],
         },
       },
       orderBy: { createdAt: 'asc' },
@@ -499,6 +520,96 @@ export class HealthJob {
       enforceWithoutGrant,
       paused,
       thresholds: this.deps.config.remediation,
+    };
+  }
+
+  /**
+   * Step API-3 C13 `clawback.stalled`: the age of the oldest `queued`/`running` clawback of the
+   * connection's organization with targets on this connection (since submitted, else created).
+   */
+  private async clawbackInput(
+    ctx: ConnectionContext,
+    now: Date,
+  ): Promise<ApiModeClawbackHealthInput> {
+    const rows = await this.deps.prisma.$queryRaw<Array<{ oldest: Date | null }>>`
+      SELECT MIN(COALESCE(c.submitted_at, c.created_at)) AS oldest FROM api_clawbacks c
+      WHERE c.organization_id = ${ctx.organizationId} AND c.status IN ('queued', 'running')
+        AND EXISTS (
+          SELECT 1 FROM api_clawback_targets t
+          WHERE t.clawback_id = c.id AND t.api_connection_id = ${ctx.id})`;
+    const oldest = rows[0]?.oldest ?? null;
+    return {
+      oldestActiveAgeSeconds: oldest
+        ? Math.max(0, Math.floor((now.getTime() - oldest.getTime()) / 1000))
+        : null,
+      thresholds: this.deps.config.clawback,
+    };
+  }
+
+  /**
+   * Step API-3 C13 `reports.backlog`: whether the connection owns a report mailbox and the age of
+   * the oldest `pending_triage` report received through it.
+   */
+  private async reportsInput(
+    ctx: ConnectionContext,
+    now: Date,
+  ): Promise<ApiModeReportsHealthInput> {
+    const prisma = this.deps.prisma;
+    const owned = await prisma.apiMailbox.count({
+      where: { apiConnectionId: ctx.id, organizationId: ctx.organizationId, reportMailbox: true },
+    });
+    const oldest =
+      owned === 0
+        ? null
+        : await prisma.apiUserReport.findFirst({
+            where: {
+              apiConnectionId: ctx.id,
+              organizationId: ctx.organizationId,
+              status: 'pending_triage',
+            },
+            orderBy: { reportedAt: 'asc' },
+            select: { reportedAt: true },
+          });
+    return {
+      hasReportMailbox: owned > 0,
+      oldestPendingTriageAgeSeconds: oldest
+        ? Math.max(0, Math.floor((now.getTime() - oldest.reportedAt.getTime()) / 1000))
+        : null,
+      thresholds: this.deps.config.reports,
+    };
+  }
+
+  /**
+   * Step API-3 C13 gauges (no organization label): active clawbacks by status, reports pending
+   * triage and the age of the oldest (0 when none).
+   */
+  async clawbackAndReportGauges(now: Date): Promise<{
+    clawbacks: Map<string, number>;
+    reportsPending: number;
+    oldestPendingSeconds: number;
+  }> {
+    const orgs = this.deps.organizationIds;
+    const orgFilter = orgs
+      ? Prisma.sql`AND organization_id IN (${Prisma.join(orgs)})`
+      : Prisma.empty;
+    const rows = await this.deps.prisma.$queryRaw<Array<{ status: string; n: bigint | number }>>`
+      SELECT status, COUNT(*) AS n FROM api_clawbacks
+      WHERE status IN (${Prisma.join([...ACTIVE_CLAWBACK_GAUGE_STATUSES])}) ${orgFilter}
+      GROUP BY status`;
+    const clawbacks = new Map<string, number>(ACTIVE_CLAWBACK_GAUGE_STATUSES.map((s) => [s, 0]));
+    for (const r of rows) clawbacks.set(r.status, Number(r.n));
+    const pending = await this.deps.prisma.$queryRaw<
+      Array<{ n: bigint | number; oldest: Date | null }>
+    >`
+      SELECT COUNT(*) AS n, MIN(reported_at) AS oldest FROM api_user_reports
+      WHERE status = 'pending_triage' ${orgFilter}`;
+    const oldest = pending[0]?.oldest ?? null;
+    return {
+      clawbacks,
+      reportsPending: Number(pending[0]?.n ?? 0),
+      oldestPendingSeconds: oldest
+        ? Math.max(0, Math.floor((now.getTime() - oldest.getTime()) / 1000))
+        : 0,
     };
   }
 

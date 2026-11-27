@@ -27,7 +27,8 @@ export type ReportSourceKey =
   | 'url_clicks'
   | 'quarantine_summary'
   | 'ato_overview'
-  | 'ato_accounts';
+  | 'ato_accounts'
+  | 'api_mode_overview';
 
 // ---------------------------------------------------------------------------------------------
 // Parsers (field names from the 200 response schemas of docs/api/openapi.json)
@@ -288,6 +289,58 @@ export const atoAccountsResponse = z.looseObject({
     .max(100),
 });
 
+const health = z.enum(['unknown', 'healthy', 'degraded', 'failing']);
+
+/**
+ * Step API-3 C16: `GET /api-mode/overview` (current state; counters of the last 24 hours). Only
+ * the fields the `api_mode` section uses; connection names are tenant-authored (capped and
+ * escaped by the model and renderer).
+ */
+export const apiModeOverviewResponse = z.looseObject({
+  generatedAt: instant,
+  active: z.boolean(),
+  coverage: z.looseObject({
+    covered: count,
+    gap: count,
+    total: count.nullable(),
+    percent: z.number().min(0).max(100).nullable(),
+  }),
+  connectionsByHealth: z.looseObject({
+    unknown: count,
+    healthy: count,
+    degraded: count,
+    failing: count,
+  }),
+  lag: z.looseObject({ p95Seconds24h: z.number().min(0).nullable() }),
+  throttling: z.looseObject({ events24h: count }),
+  remediation: z.looseObject({
+    succeeded24h: count,
+    failed24h: count,
+    restores24h: count,
+    throttled24h: count,
+  }),
+  internal: z.looseObject({ copies24h: count, enabled: z.boolean() }),
+  clawback: z.looseObject({
+    active: count,
+    pendingApproval: count,
+    completed24h: count,
+    targetsSucceeded24h: count,
+    targetsFailed24h: count,
+  }),
+  reports: z.looseObject({ pendingTriage: count, received24h: count, resolved24h: count }),
+  connections: z
+    .array(
+      z.looseObject({
+        displayName: z.string().max(4096),
+        provider: z.string().max(64),
+        health,
+        coverage: z.looseObject({ percent: z.number().min(0).max(100).nullable() }),
+        lag: z.looseObject({ p95Seconds24h: z.number().min(0).nullable() }),
+      }),
+    )
+    .max(200),
+});
+
 export interface ReportSourceBodies {
   traffic: z.output<typeof trafficResponse>;
   threats: z.output<typeof threatsResponse>;
@@ -298,6 +351,7 @@ export interface ReportSourceBodies {
   quarantine_summary: z.output<typeof quarantineSummaryResponse>;
   ato_overview: z.output<typeof atoOverviewResponse>;
   ato_accounts: z.output<typeof atoAccountsResponse>;
+  api_mode_overview: z.output<typeof apiModeOverviewResponse>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -389,6 +443,14 @@ export const REPORT_SOURCE_DEFS: { readonly [K in ReportSourceKey]: ReportSource
     parser: atoAccountsResponse,
     after: 'ato_overview',
   },
+  // Step API-3 C16: the API-mode overview has no window (current state, counters of 24 hours).
+  api_mode_overview: {
+    key: 'api_mode_overview',
+    tool: 'api_mode_overview',
+    label: 'Mailbox protection (API mode) overview',
+    args: () => ({}),
+    parser: apiModeOverviewResponse,
+  },
 };
 
 /** Per section, its source tools (design D2 step 4 table); `summary` has no own read. */
@@ -402,6 +464,7 @@ export const REPORT_SOURCES: { readonly [S in ReportSection]: readonly ReportSou
   url_clicks: ['url_clicks'],
   quarantine: ['quarantine_summary'],
   ato: ['ato_overview', 'ato_accounts'],
+  api_mode: ['api_mode_overview'],
 };
 
 /** Sources whose values the summary cards and figures use (the summary has no own read). */

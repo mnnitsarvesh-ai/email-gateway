@@ -1,8 +1,11 @@
 # API-mode protection (step API-1 D5, D16; ADR-0098..0100; docs/deployment/mailbox-worker.md): the
-# mailbox-worker image with MAILBOX_WORKER_ROLES=copies,feeds,inventory,health,remediate.
-#   copies:    consumes email.mailbox (topology v17) as the role user eg-mailbox (ledger
+# mailbox-worker image with MAILBOX_WORKER_ROLES=copies,feeds,inventory,health,remediate,clawback,
+# reports.
+#   copies:    consumes email.mailbox (topology v18) as the role user eg-mailbox (ledger
 #              mailbox-worker.copies, reconciled by the event-relay), records per-mailbox copies
-#              and (step API-2 R4) writes the remediation decision in the same transaction.
+#              (step API-3: internal recipients with direction internal, report-mailbox copies as
+#              user reports), writes the remediation decision in the same transaction (step API-2
+#              R4) and turns mail.threat.late_signal.v1 into automatic clawbacks (step API-3 C2.1).
 #   feeds:     claims due mailboxes (FOR UPDATE SKIP LOCKED, lease 120 s) and runs the Graph Inbox
 #              delta / Gmail history; fetched copies go to the mail bucket and the registry.
 #   inventory: mailbox directory sync per API connection.
@@ -12,13 +15,24 @@
 #              Gmail (gmail.modify); writes mailbox-located quarantine entries and completes
 #              releases (restore to the Inbox). Shares the per-connection budgets and Retry-After
 #              pauses with feeds.
+#   clawback:  (step API-3 C1-C7, ADR-0103) claims due api_clawbacks (FOR UPDATE SKIP LOCKED, lease
+#              API_MODE_CLAWBACK_LEASE_SECONDS): materializes searches into frozen targets, plans
+#              them through the remediation policy, queues api_remediation_actions (trigger
+#              clawback / purge; ≤ API_MODE_CLAWBACK_MAX_PENDING_PER_CONNECTION pending per
+#              connection), reconciles, cancels, expires approvals, runs bulk restores; the
+#              threat-intelligence sweep is leader-elected (GET_LOCK('eg:mailbox:clawback-ti')).
+#              MySQL only: never calls a provider (the remediate role executes every action).
+#   reports:   (step API-3 C10, ADR-0104) claims received api_user_reports (lease 120 s): reporter
+#              checks and per-reporter rate limit (Redis mbx:rpt:*), bounded EML read from the mail
+#              bucket, original identification, original ingest (PutObject + registry message,
+#              detect-mode scan), acknowledgement outbox rows. Never calls a provider.
 #   health:    leader-elected (GET_LOCK('eg:mailbox:health')): coverage, connection health incl. the
-#              remediation.* checks and api_mode_unhealthy alerts (outbox), mailbox entry expiry,
-#              pruning (remediation actions after API_MODE_REMEDIATION_RETENTION_DAYS) and the Redis
-#              counter flush.
+#              remediation.*, clawback.stalled and reports.backlog checks and api_mode_unhealthy
+#              alerts (outbox), mailbox entry expiry, pruning (remediation actions, terminal
+#              clawbacks and reports after their retention days) and the Redis counter flush.
 # Every replica runs every role (claims and leases make that safe; health waits for the lock). The
 # writer-only MySQL (ADR-0014), Redis (budgets mbx:rb:*, throttle pauses mbx:throttle:*, counters
-# mbx:cnt:*), RabbitMQ, S3 (mail bucket: PutObject of fetched copies, ranged GetObject of journal
+# mbx:cnt:*, report rate limits mbx:rpt:*), RabbitMQ, S3 (mail bucket: PutObject of fetched copies, ranged GetObject of journal
 # copies) and HTTPS to the provider APIs and 8.2's token endpoints. Holder of 8.2's credential key
 # (decrypting *.mailbox_remediation grants, ADR-0099) and of API_MODE_NOTIFICATION_SECRET (Graph
 # client states). Never receives inbound traffic except Prometheus.
@@ -63,7 +77,10 @@ spec:
             - configMapRef: { name: email-gateway-config }
           env:
             - { name: MAILBOX_WORKER_HTTP_PORT, value: '3087' }
-            - { name: MAILBOX_WORKER_ROLES, value: 'copies,feeds,inventory,health,remediate' }
+            - {
+                name: MAILBOX_WORKER_ROLES,
+                value: 'copies,feeds,inventory,health,remediate,clawback,reports',
+              }
             - { name: INGEST_HEADER_MAX_BYTES, value: '65536' }
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }

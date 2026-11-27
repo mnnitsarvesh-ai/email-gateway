@@ -47,6 +47,8 @@ import {
   type ProtectionModeValue,
 } from '../../src/tenancy/api-mode-status.service';
 import { OrganizationFeaturesService } from '../../src/tenancy/organization-features.service';
+import { ApiClawbackRepository } from '../../src/modules/api-mode/repositories/api-clawback.repository';
+import { ClawbackStore, clawbackRepositoryDouble } from './api-mode-clawback-fixtures';
 
 const copy = <T>(value: T): T => structuredClone(value);
 
@@ -99,7 +101,9 @@ export interface StoredAction {
   action: RemediationActionKind;
   generation: number;
   actionKey: string;
-  trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+  trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
+  /** Step API-3: the clawback of a `clawback` / `purge` row (public id). */
+  clawbackPublicId?: string | null;
   status:
     'pending' | 'in_progress' | 'succeeded' | 'failed' | 'skipped' | 'simulated' | 'cancelled';
   reasonCode: string | null;
@@ -147,6 +151,10 @@ export class ApiModeWorld {
   /** `markCopyPending` calls (copy id, action, last action id). */
   copyUpdates: Array<{ copyId: bigint; remediationAction: string | null; lastActionId: bigint }> =
     [];
+  /** Step API-3: clawbacks, targets, reports, settings, outbox and alert windows. */
+  claw = new ClawbackStore();
+  /** User id → public id (the joined public ids of the clawback and report views). */
+  userPublicIds = new Map<bigint, string>();
   private nextId = 7000n;
 
   id(): bigint {
@@ -169,6 +177,7 @@ export class ApiModeWorld {
     this.remediationCounters = [];
     this.copyEntries.clear();
     this.copyUpdates = [];
+    this.claw.reset();
   }
 
   addOrganization(id: bigint, publicId: string, mode: ProtectionModeValue = 'inline') {
@@ -315,6 +324,7 @@ export class ApiModeWorld {
       quarantineEntryId: null,
       remediationGeneration: 0,
       lastActionId: null,
+      verdictRevision: 0,
       ...patch,
     };
     this.copies.push(row);
@@ -646,6 +656,7 @@ export class ApiModeWorld {
                 (filter.minRiskScore === undefined || (c.riskScore ?? -1) >= filter.minRiskScore) &&
                 (!filter.remediationState ||
                   filter.remediationState.includes(c.remediationState)) &&
+                (!filter.direction || filter.direction.includes(c.direction)) &&
                 (page.before === undefined ||
                   c.receivedAt < page.before.at ||
                   (c.receivedAt.getTime() === page.before.at.getTime() && c.id < page.before.id)),
@@ -754,6 +765,7 @@ export class ApiModeWorld {
         connectionPublicId: mailbox.connectionPublicId,
         detectionPublicId: c?.publicId ?? null,
         quarantineEntryPublicId: a.quarantineEntryPublicId,
+        clawbackPublicId: a.clawbackPublicId ?? null,
         createdAt: a.createdAt,
         nextAttemptAt: a.nextAttemptAt,
         verdictAt: a.verdictAt,
@@ -1106,6 +1118,8 @@ export function overrideApiMode(
     .useValue(world.remediationDouble())
     .overrideProvider(RemediationActionWriter)
     .useValue(world.actionWriterDouble())
+    .overrideProvider(ApiClawbackRepository)
+    .useValue(clawbackRepositoryDouble(world))
     .overrideProvider(ApiModeStatusService)
     .useValue(world.statusDouble())
     .overrideProvider(OrganizationFeaturesService)

@@ -44,6 +44,9 @@ describe('proposal guards (design 30 D3)', () => {
         'Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive.',
       case_active_holds:
         'This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that.',
+      // step API-3 C6 (design note 37)
+      api_mode_purge_four_eyes:
+        'This purge needs a different person to decide it. The person who requested or submitted it cannot approve or deny it, the approval request must still be pending, and API keys never decide. Ask another administrator with the purge permission to decide it in chat or on the API-mode page.',
     });
   });
 
@@ -74,6 +77,11 @@ describe('proposal guards (design 30 D3)', () => {
       ArchiveRetentionController_delete_v1: 'guard: isDefault = false',
       ArchiveAdminController_retry_v1: 'guard: status = failed',
       EdiscoveryCasesController_close_v1: 'guard: counts.activeHolds = 0',
+      // step API-3 C15 (design note 37, C-I4)
+      ApiModeClawbackController_approve_v1:
+        'guard: not requester; guard: not requester; guard: hints.canApprove = true',
+      ApiModeClawbackController_deny_v1:
+        'guard: not requester; guard: not requester; guard: hints.canApprove = true',
     });
   });
 
@@ -186,9 +194,10 @@ describe('proposal guards (design 30 D3)', () => {
 
   it('phases and messages never contain argument values', () => {
     const guards: ProposalGuard[] = CONFIRMATION_SPECS.flatMap((s) => s.guards ?? []);
-    // roles_update, the two four-eyes guards of ATO approve and reject (step AI-4) and the
-    // three compliance guards (step AI-5).
-    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(8);
+    // roles_update, the two four-eyes guards of ATO approve and reject (step AI-4), the three
+    // compliance guards (step AI-5) and the three purge four-eyes guards of the API-mode approve
+    // and deny (step API-3).
+    expect(guards.filter((g) => guardPhase(g) === 'after_read')).toHaveLength(14);
     const marker = 'VALUE-MARKER-1234';
     const refusals = [
       before(spec('UsersController_update_v1'), { id: SELF, body: { displayName: marker } }),

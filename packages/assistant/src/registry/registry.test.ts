@@ -24,8 +24,12 @@ import {
   AI3_WRITES_TESTED_BY,
   AI4_WRITES_TESTED_BY,
   AI5_WRITES_TESTED_BY,
-  API_MODE_DEFERRED_WRITES,
+  API_MODE_PORTAL_ONLY_WRITES,
+  API_MODE_WRITES_TESTED_BY,
+  API_MODE_WRITES_TESTED_BY_SUITE,
   ASSISTANT_PROGRAM_PHASE,
+  CRITICAL_OPERATIONS,
+  RISK_OVERRIDES,
   COMPLIANCE_WRITES_TESTED_BY,
   INTEGRATIONS_WRITES_TESTED_BY,
   ATO_WRITES_TESTED_BY,
@@ -137,7 +141,8 @@ describe('registry completeness and consistency (D3)', () => {
             AI2_WRITES_TESTED_BY[tool.operationId] ??
               AI3_WRITES_TESTED_BY[tool.operationId] ??
               AI4_WRITES_TESTED_BY[tool.operationId] ??
-              AI5_WRITES_TESTED_BY[tool.operationId],
+              AI5_WRITES_TESTED_BY[tool.operationId] ??
+              API_MODE_WRITES_TESTED_BY[tool.operationId],
           );
           expect(confirmationSpecOf(tool.operationId), tool.name).toBeDefined();
           expect(['low', 'medium', 'high'], tool.name).toContain(tool.risk);
@@ -172,7 +177,11 @@ describe('registry completeness and consistency (D3)', () => {
     const ai5 = (suite: string) =>
       Object.values(AI5_WRITES_TESTED_BY).filter((value) => value === suite).length;
     expect([ai5(COMPLIANCE_WRITES_TESTED_BY), ai5(INTEGRATIONS_WRITES_TESTED_BY)]).toEqual([16, 9]);
-    expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(9);
+    // Nine critical operations of §4.4 plus the step API-3 hard-delete purge (C15).
+    expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(10);
+    expect(Object.values(API_MODE_WRITES_TESTED_BY)).toEqual(
+      Array(20).fill(API_MODE_WRITES_TESTED_BY_SUITE),
+    );
     for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
       expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
   });
@@ -1305,29 +1314,38 @@ describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
     expect(findTool('api_mode_list_detections')).toBeDefined();
   });
 
-  it('the five API-mode writes are not applicable until API-3; the callbacks never are tools', () => {
-    expect(
-      [...API_MODE_DEFERRED_WRITES].filter((id) => !id.startsWith('ApiModeRemediation')).sort(),
-    ).toEqual(
-      [
-        'ApiModeController_inventorySync_v1',
-        'ApiModeController_resyncMailbox_v1',
-        'ApiModeController_updateSettings_v1',
-        'ProtectionModeController_putDomain_v1',
-        'ProtectionModeController_putOrganization_v1',
-      ].sort(),
-    );
-    for (const id of API_MODE_DEFERRED_WRITES) {
+  it('since API-3 the protection-mode writes stay portal only; the callbacks never are tools', () => {
+    expect([...API_MODE_PORTAL_ONLY_WRITES].sort()).toEqual([
+      'ProtectionModeController_putDomain_v1',
+      'ProtectionModeController_putOrganization_v1',
+    ]);
+    for (const id of API_MODE_PORTAL_ONLY_WRITES) {
       const op = NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id);
-      expect(op?.reason, id).toBe(NOT_APPLICABLE_REASONS.apiModeDeferred);
+      expect(op?.reason, id).toBe(NOT_APPLICABLE_REASONS.apiModePortalOnly);
       expect(
         OPERATION_TOOLS.some((t) => t.operationId === id),
         id,
       ).toBe(false);
     }
-    expect(NOT_APPLICABLE_REASONS.apiModeDeferred).toBe(
-      'API-mode write: assistant tool planned for step API-3 (portal only until then)',
+    expect(NOT_APPLICABLE_REASONS.apiModePortalOnly).toBe(
+      'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
     );
+    expect('apiModeDeferred' in NOT_APPLICABLE_REASONS).toBe(false);
+    // The three API-1 connection writes are AI-6 write tools since API-3 (C15).
+    for (const id of [
+      'ApiModeController_updateSettings_v1',
+      'ApiModeController_inventorySync_v1',
+      'ApiModeController_resyncMailbox_v1',
+    ]) {
+      expect(
+        OPERATION_TOOLS.find((t) => t.operationId === id),
+        id,
+      ).toMatchObject({
+        enabled: true,
+        access: 'write',
+        phase: 'AI-6',
+      });
+    }
     for (const id of [
       'ProviderNotificationsController_graph_v1',
       'ProviderNotificationsController_lifecycle_v1',
@@ -1369,6 +1387,7 @@ describe('step API-2 (docs/plan/steps/36-api-mode-remediation.md R16)', () => {
   ];
 
   it('API-2 totals: 464 operations, 366 operation tools (366 enabled), 368 enabled tools (200 reads, 168 writes), 98 not applicable, MISSING 0', () => {
+    if (operations.length !== 464) return; // step API-3 adds operations (API-3 totals below)
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
     // 455 after API-1 plus the 9 remediation operations of step API-2: 3 enabled reads and 6
@@ -1400,18 +1419,18 @@ describe('step API-2 (docs/plan/steps/36-api-mode-remediation.md R16)', () => {
     }
   });
 
-  it('the six remediation writes are not applicable until API-3 (apiModeDeferred), never tools', () => {
+  it('since API-3 the six remediation writes are confirmed AI-6 write tools', () => {
     for (const id of REMEDIATION_WRITES) {
-      expect(API_MODE_DEFERRED_WRITES.has(id), id).toBe(true);
-      expect(NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id)?.reason, id).toBe(
-        NOT_APPLICABLE_REASONS.apiModeDeferred,
-      );
       expect(
-        OPERATION_TOOLS.some((t) => t.operationId === id),
+        OPERATION_TOOLS.find((t) => t.operationId === id),
         id,
-      ).toBe(false);
+      ).toMatchObject({
+        enabled: true,
+        access: 'write',
+        phase: 'AI-6',
+        testedBy: API_MODE_WRITES_TESTED_BY_SUITE,
+      });
     }
-    expect(API_MODE_DEFERRED_WRITES.size).toBe(11);
   });
 
   it('operator-typed and directory-derived fields of the remediation reads are untrusted', () => {
@@ -1424,5 +1443,149 @@ describe('step API-2 (docs/plan/steps/36-api-mode-remediation.md R16)', () => {
     expect(OPERATION_OVERRIDES.ApiModeRemediationController_getPolicy_v1!.untrustedFields).toEqual(
       expect.arrayContaining(['organization.document.rules[].id', 'domains[].domainName']),
     );
+  });
+});
+
+describe('step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15)', () => {
+  const API3_READS = [
+    'ApiModeClawbackController_list_v1',
+    'ApiModeClawbackController_detail_v1',
+    'ApiModeClawbackController_targets_v1',
+    'ApiModeReportsController_list_v1',
+    'ApiModeReportsController_detail_v1',
+    'ApiModeReportsController_listMailboxes_v1',
+    'ApiModeSettingsController_get_v1',
+  ];
+
+  it('API-3 totals: 483 operations, 393 operation tools (393 enabled), 395 enabled tools (207 reads, 188 writes), 90 not applicable, MISSING 0', () => {
+    const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
+    const enabled = ALL_TOOLS.filter((t) => t.enabled);
+    // 464 after API-2 plus the 19 operations of step API-3: 7 enabled reads, 11 new writes (one,
+    // the hard delete, critical and portal only), and the 9 API-1/API-2 writes enabled.
+    expect(operations).toHaveLength(483);
+    expect(OPERATION_TOOLS).toHaveLength(393);
+    expect(NATIVE_TOOLS).toHaveLength(2);
+    expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(90);
+    expect(count((t) => t.enabled)).toBe(393);
+    expect(enabled).toHaveLength(395);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(207);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(188);
+    expect(count((t) => t.status === 'MISSING')).toBe(0);
+    expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
+      { 'AI-1': 193, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 20 },
+    );
+    expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-6');
+  });
+
+  it('the seven reads are enabled AI-1 read tools covered by the sweep suite', () => {
+    for (const id of API3_READS) {
+      const tool = OPERATION_TOOLS.find((t) => t.operationId === id);
+      expect(tool, id).toMatchObject({
+        enabled: true,
+        access: 'read',
+        risk: 'read',
+        phase: 'AI-1',
+        testedBy: READ_TOOLS_TESTED_BY,
+      });
+    }
+  });
+
+  it('the 20 API-mode writes are AI-6 tools with the C15 risks; high risk needs re-authentication', () => {
+    expect(Object.keys(API_MODE_WRITES_TESTED_BY)).toHaveLength(20);
+    const risks = Object.fromEntries(
+      Object.keys(API_MODE_WRITES_TESTED_BY).map((id) => [
+        id,
+        OPERATION_TOOLS.find((t) => t.operationId === id)?.risk,
+      ]),
+    );
+    expect(risks).toEqual({
+      ApiModeRemediationController_remediate_v1: 'medium',
+      ApiModeRemediationController_restore_v1: 'high',
+      ApiModeRemediationController_retry_v1: 'low',
+      ApiModeRemediationController_putPolicy_v1: 'high',
+      ApiModeRemediationController_putDomainPolicy_v1: 'high',
+      ApiModeRemediationController_deleteDomainPolicy_v1: 'high',
+      ApiModeController_updateSettings_v1: 'high',
+      ApiModeController_inventorySync_v1: 'low',
+      ApiModeController_resyncMailbox_v1: 'low',
+      ApiModeClawbackController_create_v1: 'medium',
+      ApiModeClawbackController_submit_v1: 'high',
+      ApiModeClawbackController_approve_v1: 'high',
+      ApiModeClawbackController_deny_v1: 'low',
+      ApiModeClawbackController_cancel_v1: 'medium',
+      ApiModeClawbackController_restore_v1: 'high',
+      ApiModeReportsController_triage_v1: 'medium',
+      ApiModeReportsController_clawback_v1: 'medium',
+      ApiModeReportsController_addMailbox_v1: 'medium',
+      ApiModeReportsController_setMailbox_v1: 'medium',
+      ApiModeSettingsController_put_v1: 'high',
+    });
+    for (const [id, risk] of Object.entries(risks)) {
+      expect(RISK_OVERRIDES[id], id).toBe(risk);
+      const tool = OPERATION_TOOLS.find((t) => t.operationId === id)!;
+      expect(tool.confirm, id).toBe(
+        risk === 'high'
+          ? 'confirm+impact+reauth'
+          : risk === 'medium'
+            ? 'confirm+impact'
+            : 'confirm',
+      );
+      expect(tool.phase, id).toBe('AI-6');
+      expect(confirmationSpecOf(id), id).toBeDefined();
+    }
+    expect(findTool('api_mode_clawback_submit')!.confirm).toBe('confirm+impact+reauth');
+  });
+
+  it('the hard-delete purge is critical and portal only, like the other critical actions', () => {
+    expect(CRITICAL_OPERATIONS.has('ApiModeClawbackController_submitHardDelete_v1')).toBe(true);
+    const op = NOT_APPLICABLE_OPERATIONS.find(
+      (o) => o.operationId === 'ApiModeClawbackController_submitHardDelete_v1',
+    );
+    expect(op).toMatchObject({ risk: 'critical', reason: NOT_APPLICABLE_REASONS.critical });
+    expect(
+      OPERATION_TOOLS.some(
+        (t) => t.operationId === 'ApiModeClawbackController_submitHardDelete_v1',
+      ),
+    ).toBe(false);
+  });
+
+  it('approve and deny refuse the requester and submitter before anything is stored (four eyes)', () => {
+    for (const id of [
+      'ApiModeClawbackController_approve_v1',
+      'ApiModeClawbackController_deny_v1',
+    ]) {
+      expect(confirmationSpecOf(id)!.guards).toEqual([
+        {
+          kind: 'not_self_field',
+          field: 'requestedBy.userId',
+          message: 'api_mode_purge_four_eyes',
+        },
+        { kind: 'not_self_field', field: 'submittedBy', message: 'api_mode_purge_four_eyes' },
+        {
+          kind: 'require_read_value',
+          field: 'hints.canApprove',
+          equals: true,
+          message: 'api_mode_purge_four_eyes',
+        },
+      ]);
+    }
+  });
+
+  it('mail-derived, directory and operator fields of the API-3 reads are untrusted', () => {
+    expect(OPERATION_OVERRIDES.ApiModeClawbackController_targets_v1!.untrustedFields).toEqual([
+      'data[].mailbox.address',
+      'data[].headerFrom',
+      'data[].subject',
+    ]);
+    expect(OPERATION_OVERRIDES.ApiModeReportsController_detail_v1!.untrustedFields).toEqual(
+      expect.arrayContaining(['original.sender', 'original.subjectKey', 'analyst.note']),
+    );
+    expect(OPERATION_OVERRIDES.ApiModeClawbackController_detail_v1!.untrustedFields).toEqual(
+      expect.arrayContaining(['criteria.keys.senderSubject.subjectKey', 'requestReason']),
+    );
+    expect(CONTROLLER_HINTS.ApiModeClawbackController).toEqual({
+      portalRoute: '/api-mode',
+      resourceType: 'api_clawback',
+    });
   });
 });

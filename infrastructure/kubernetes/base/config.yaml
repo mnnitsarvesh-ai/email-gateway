@@ -450,6 +450,33 @@ data:
   API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES: '15'
   API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES: '60'
   API_MODE_REMEDIATION_RETENTION_DAYS: '400'
+  # Step API-3 clawback, search and purge, internal mail and reports
+  # (docs/plan/steps/37-api-mode-clawback-reporting.md C17, ADR-0103/0104): the mailbox-worker
+  # clawback and reports roles (claim loops, limits, TI sweep), health thresholds and retention;
+  # the api reads API_MODE_CLAWBACK_MAX_WINDOW_DAYS, API_MODE_PURGE_APPROVAL_TTL_HOURS and
+  # API_MODE_REPORT_MAILBOXES_MAX. Organization-level defaults (internal mail, automatic clawback,
+  # caps, thresholds) live in api_mode_org_settings, not here. Nothing secret.
+  API_MODE_CLAWBACK_TICK_MS: '5000'
+  API_MODE_CLAWBACK_LEASE_SECONDS: '120'
+  API_MODE_CLAWBACK_MAX_TARGETS: '20000'
+  API_MODE_CLAWBACK_QUEUE_BATCH: '500'
+  API_MODE_CLAWBACK_MAX_PENDING_PER_CONNECTION: '1000'
+  API_MODE_CLAWBACK_MAX_WINDOW_DAYS: '31'
+  API_MODE_CLAWBACK_TI_INTERVAL_SECONDS: '60'
+  API_MODE_CLAWBACK_TI_BATCH: '100'
+  API_MODE_PURGE_APPROVAL_TTL_HOURS: '72'
+  API_MODE_CLAWBACK_STALLED_WARN_MINUTES: '60'
+  API_MODE_CLAWBACK_STALLED_FAIL_MINUTES: '240'
+  API_MODE_CLAWBACK_RETENTION_DAYS: '400'
+  API_MODE_REPORT_RETENTION_DAYS: '400'
+  API_MODE_REPORTS_TICK_MS: '5000'
+  API_MODE_REPORT_MAX_BYTES: '26214400'
+  API_MODE_REPORTS_PER_REPORTER_PER_HOUR: '30'
+  API_MODE_REPORT_MAILBOXES_MAX: '5'
+  API_MODE_REPORT_TRIAGE_WARN_HOURS: '24'
+  API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES: '60'
+  # mailbox-worker: an ingested report original without a scan after this many minutes → triage.
+  API_MODE_REPORT_SCAN_TIMEOUT_MINUTES: '60'
   # api: Graph notification requests per client IP per minute on the public callback routes.
   API_MODE_NOTIFICATION_RATE_PER_MINUTE: '1200'
   # Client ids of the operator's mailbox-access app / service account (profiles

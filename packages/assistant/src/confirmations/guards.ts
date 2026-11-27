@@ -35,6 +35,9 @@ export const GUARD_MESSAGES = {
     'Only a failed capture can be retried. A lost capture cannot be recovered, and a pending one is still being retried by the archive.',
   case_active_holds:
     'This case still has active legal holds, so it cannot be closed. Legal holds are released only on the Legal holds page in the portal by a person with the legal-hold permission; close the case after that.',
+  // Step API-3 (design note 37 C6, C-I4).
+  api_mode_purge_four_eyes:
+    'This purge needs a different person to decide it. The person who requested or submitted it cannot approve or deny it, the approval request must still be pending, and API keys never decide. Ask another administrator with the purge permission to decide it in chat or on the API-mode page.',
 } as const;
 export type GuardMessageKey = keyof typeof GUARD_MESSAGES;
 

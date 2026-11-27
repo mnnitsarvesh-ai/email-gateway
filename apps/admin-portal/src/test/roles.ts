@@ -5,7 +5,8 @@
  * added `compliance_officer` (archive access) and `journal:read` / `journal:manage`; step AI-1
  * `assistant:use` (every role but `mailbox_user`) and `assistant:configure`; step API-1
  * `remediation:read` (the read set, domain_admin, security_analyst) and `remediation:write`
- * (organization_admin, security_analyst).
+ * (organization_admin, security_analyst); step API-3 `remediation:purge` (organization_admin,
+ * security_analyst).
  */
 export const SYSTEM_ROLE_KEYS = [
   'super_admin',
@@ -103,6 +104,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'assistant:configure',
     'remediation:read',
     'remediation:write',
+    'remediation:purge',
   ],
   platform_admin: [
     'organization:read',
@@ -196,6 +198,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'assistant:configure',
     'remediation:read',
     'remediation:write',
+    'remediation:purge',
   ],
   domain_admin: [
     'organization:read',
@@ -257,6 +260,7 @@ export const ROLE_PERMISSIONS: Readonly<Record<SystemRoleKey, readonly string[]>
     'assistant:use',
     'remediation:read',
     'remediation:write',
+    'remediation:purge',
   ],
   quarantine_reviewer: [
     'organization:read',

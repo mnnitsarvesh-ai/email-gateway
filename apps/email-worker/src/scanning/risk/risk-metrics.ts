@@ -10,6 +10,7 @@ import {
   TRUST_STATUSES,
 } from '@email-gateway/risk-scoring';
 import { ENGINE_CATALOG } from '@email-gateway/security-contracts';
+import { LateSignalMetrics } from '../late-signal';
 
 /** `scan_risk_score` buckets: 100 … 1000 step 100 (R19). */
 const SCORE_BUCKETS = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
@@ -66,6 +67,7 @@ export class RiskMetrics {
   readonly duration: Histogram;
   readonly skipped: Counter<'revision' | 'reason'>;
   readonly inconsistentReads: Counter<'read'>;
+  private readonly lateSignals: LateSignalMetrics;
 
   /** One instance per registry (completion, the sweeper and the sandbox path share it). */
   static for(registry: MetricsService): RiskMetrics {
@@ -140,6 +142,7 @@ export class RiskMetrics {
       'Writer reads of the risk path that returned rows of another scan, message or organization (the transaction is retried), by read',
       ['read'],
     );
+    this.lateSignals = LateSignalMetrics.for(metrics);
     for (const reason of SCORING_ERROR_REASONS) this.errors.inc({ reason }, 0);
     for (const reason of RISK_FALLBACK_REASONS) this.profileFallback.inc({ reason }, 0);
     for (const revision of ['0', '1']) {
@@ -199,6 +202,11 @@ export class RiskMetrics {
 
   skip(revision: 0 | 1, reason: RiskSkipReason): void {
     this.skipped.inc({ revision: String(revision), reason });
+  }
+
+  /** Step API-3 C2.1: a late-signal row of a sandbox revision committed. */
+  lateSignal(kind: 'sandbox_revision'): void {
+    this.lateSignals.signal(kind);
   }
 
   inconsistent(read: RiskRead): void {

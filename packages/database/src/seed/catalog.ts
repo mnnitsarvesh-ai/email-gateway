@@ -335,7 +335,10 @@ export const PERMISSIONS = Object.freeze([
   // remediation:read is in TENANT_READ_PERMISSIONS (platform_admin, compliance_auditor,
   // read_only_user) and held by security_analyst and domain_admin; security_analyst also holds
   // remediation:write. Granting mailbox access (`*.mailbox_remediation` grants) additionally
-  // needs remediation:write. remediation:purge is API-3 (not created yet).
+  // needs remediation:write. Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md
+  // §3.3, ADR-0103) adds remediation:purge: organization_admin and super_admin hold it through
+  // TENANT_PERMISSIONS / ALL_PERMISSIONS, security_analyst explicitly; NOT in
+  // TENANT_READ_PERMISSIONS. The migration `api_mode_clawback_reporting` writes the same row.
   {
     key: 'remediation:read',
     description:
@@ -348,6 +351,13 @@ export const PERMISSIONS = Object.freeze([
     description:
       'Manage API-mode protection: change feeds, mailbox inventory and resync (and, from API-2, ' +
       'remediation and restore actions)',
+    category: 'remediation',
+  },
+  {
+    key: 'remediation:purge',
+    description:
+      'Search API-mode mailbox copies and purge or claw back messages across mailboxes; ' +
+      "approve another administrator's purge",
     category: 'remediation',
   },
 ] as const satisfies readonly PermissionDef[]);
@@ -577,6 +587,8 @@ export const SYSTEM_ROLES: readonly RoleDef[] = Object.freeze([
       // Step API-1 (§3.3): API-mode detections, feeds, inventory and resync.
       'remediation:read',
       'remediation:write',
+      // Step API-3 (§3.3): clawbacks, search and purge, approval of another user's purge.
+      'remediation:purge',
     ],
   },
   {

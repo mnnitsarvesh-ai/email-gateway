@@ -7,12 +7,13 @@ import {
 } from './registry';
 
 /**
- * RabbitMQ topology v17 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
+ * RabbitMQ topology v18 as data (step 3.2 §3, ADR-0024; v2: step 3.3 L7, ADR-0025; v3: step 4.1
  * S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
  * ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
  * v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
  * step 8.4 D3, ADR-0070; v14: step 8.2 D12, ADR-0079; v15: step AI-R D8, ADR-0095; v16: step AI-6
- * D5, ADR-0096; v17: step API-1 D7, D8, ADR-0100): exactly six topic exchanges and twenty-six
+ * D5, ADR-0096; v17: step API-1 D7, D8, ADR-0100; v18: step API-3 C2.1, C12, ADR-0103,
+ * ADR-0104): exactly six topic exchanges and twenty-six
  * quorum queues in the vhost
  * `email-gateway`. v2 added the bindings of `mail.message.rescan_requested.v1`
  * (`email.security`) to the five scan queues, and `mail.message.state_changed.v1`
@@ -189,6 +190,18 @@ import {
  * and dead-letter hops); the `eg-ops` replay grant gains the queue's retry prefix. v17 = v16 +
  * one queue, two bindings (seventy-eight: 73 queue + 5 exchange) and one policy (twenty-six).
  *
+ * v18 (step API-3 C2.1, C12, §5, ADR-0103, ADR-0104) adds two event bindings to existing queues:
+ * `email.mailbox` binds `org.*.mail.threat.late_signal.v1` on `email.security` (producer
+ * email-worker through the outbox, in the sandbox risk-revision or URL dynamic-verdict
+ * transaction; the same exchange as `mail.message.copy_scanned.v1`; consumer the mailbox-worker
+ * `copies` role, same ledger `mailbox-worker.copies`, which writes its ledger row for every late
+ * signal it handles, the acked ones of organizations without API mode included, because the
+ * queue is reconciled) and `email.notifications` binds `org.*.mail.report.feedback_requested.v1`
+ * on `email.policy` (producers api and mailbox-worker through the outbox; consumer the
+ * notification-worker, as quarantine notifications). v18 = v17 + two bindings (eighty: 75 queue +
+ * 5 exchange); no exchange, queue, policy or broker user is added and no permission changes (the
+ * relay publishes every `org.` key; `eg-mailbox` already reads its queue).
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -197,7 +210,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 17;
+export const TOPOLOGY_VERSION = 18;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -962,6 +975,8 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.security', 'ato.notification.requested.v1'),
         // v15 (step AI-R D8, ADR-0095): assistant report emails
         eventBinding('email.policy', 'assistant.report.email_requested.v1'),
+        // v18 (step API-3 C12, ADR-0104): reporter feedback of API-mode user reports.
+        eventBinding('email.policy', 'mail.report.feedback_requested.v1'),
         retryBinding('email.policy', 'email.notifications'),
       ],
       consumer: {
@@ -978,7 +993,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.notifications'),
       description:
-        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3), security alerts (step 6.2), account takeover notifications (step 8.4) and assistant report emails (step AI-R)',
+        'Policy alert and sender non-delivery notifications (step 5.2), quarantine notifications (step 5.3), security alerts (step 6.2), account takeover notifications (step 8.4), assistant report emails (step AI-R) and reporter feedback of API-mode user reports (step API-3)',
     },
     {
       // v11 (step 6.2 W1, W3, §4.3, ADR-0055): the webhook-worker fanout projects these internal
@@ -1143,6 +1158,8 @@ export const TOPOLOGY: Topology = {
       homeExchange: 'email.security',
       bindings: [
         eventBinding('email.security', 'mail.message.copy_scanned.v1'),
+        // v18 (step API-3 C2.1, ADR-0103): late sandbox / URL verdicts become clawbacks.
+        eventBinding('email.security', 'mail.threat.late_signal.v1'),
         retryBinding('email.security', 'email.mailbox'),
       ],
       consumer: { kind: 'ledger', ledgerName: 'mailbox-worker.copies', service: 'mailbox-worker' },
@@ -1155,7 +1172,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.mailbox'),
       description:
-        'Detect-mode scanned copies (journal intake and mailbox API) recorded per mailbox by the mailbox-worker copies role (step API-1)',
+        'Detect-mode scanned copies (journal intake and mailbox API) recorded per mailbox by the mailbox-worker copies role (step API-1) and late sandbox / URL verdicts that become clawbacks (step API-3)',
     },
     dormant(
       'email.analytics',

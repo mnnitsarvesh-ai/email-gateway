@@ -20,9 +20,13 @@ import {
 } from '@email-gateway/event-contracts';
 import type { Logger } from '@email-gateway/logger';
 import {
+  assessReport,
   classifyRecipientDirection,
   copyMessageIdHash,
   extractCopyHeaders,
+  reportGroupKey,
+  reportOriginalSchema,
+  type ResolvedOrgSettings,
 } from '@email-gateway/mailbox-api';
 import {
   domainForAddress,
@@ -33,10 +37,21 @@ import {
 import { ensureApiConnection } from '../domain/connections';
 import {
   findInlineMessage,
+  findMailboxByAddress,
   resolveOrDiscoverMailbox,
   type InlineLink,
   type MailboxRef,
 } from '../domain/mailboxes';
+import { loadOrgSettings } from '../domain/org-settings';
+import type { LateSignalHandler } from '../clawback/late-signal.handler';
+import {
+  addrSpecOf,
+  latestRiskFacts,
+  recordUserReport,
+  REPORT_SCAN_TIMEOUT_CODE,
+  reporterAddressOf,
+  requestReportAlert,
+} from '../reports/report-intake';
 import type { CopyResult, MailboxMetrics, RemediationResult } from '../metrics/mailbox-metrics';
 import {
   loadDecisionCopy,
@@ -46,7 +61,7 @@ import {
 } from '../remediation/decide';
 import type { CounterDelta, CounterStore } from '../runtime/redis-stores';
 import { TX_MAX_WAIT_MS, TX_TIMEOUT_MS, big, bigOrNull, type Db } from '../shared/db';
-import { domainOf, errorFields } from '../shared/errors';
+import { domainOf, errorFields, InconsistentReadError } from '../shared/errors';
 import type { HeaderReader } from './header-reader';
 import {
   STATUS_OF_OUTCOME,
@@ -57,14 +72,22 @@ import {
   storedVerdict,
 } from './copy-plan';
 
-/** Queue, ledger consumer and accepted event of the copies role (topology v17). */
+/**
+ * Queue, ledger consumer and accepted events of the copies role (topology v18: step API-3 adds
+ * `mail.threat.late_signal.v1` on the same queue and ledger consumer, C1, C2.1).
+ */
 export const COPIES_QUEUE = 'email.mailbox' as const;
 export const COPIES_CONSUMER = 'mailbox-worker.copies';
-export const COPIES_EVENT_TYPES = [EventTypes.MessageCopyScanned] as const;
+export const COPIES_EVENT_TYPES = [
+  EventTypes.MessageCopyScanned,
+  EventTypes.ThreatLateSignal,
+] as const;
 
 export interface CopiesConfig {
   hybridLinkWindowHours: number;
   headerMaxBytes: number;
+  /** `API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES` (C13): an ingested original reaching triage. */
+  reportAlertMinIntervalMinutes: number;
 }
 
 export interface CopiesDeps {
@@ -77,6 +100,8 @@ export interface CopiesDeps {
   config: CopiesConfig;
   /** Step API-2 R4: the remediation decision taken in the copies transaction (null: off). */
   decider: RemediationDecider | null;
+  /** Step API-3 C2.1: the handler of `mail.threat.late_signal.v1` (same queue and ledger). */
+  lateSignals: LateSignalHandler;
   /** TEST SEAM: only these organizations are handled (others are acked untouched). */
   organizationIds?: readonly bigint[];
 }
@@ -86,6 +111,10 @@ interface JournalTarget {
   mailbox: MailboxRef;
   address: string;
   inline: InlineLink | null;
+  /** Step API-3 C8.1: `internal` when sender and recipient are org-side (D7.4). */
+  direction: 'inbound' | 'internal';
+  /** Step API-3 C9.2: the mailbox is a report mailbox (recorded, never decided, a report). */
+  reportMailbox: boolean;
 }
 
 interface CopyMessage {
@@ -109,6 +138,8 @@ interface Outcome {
   lags: number[];
   /** Remediation decisions written (`api_mode_remediations_total` after the commit). */
   remediations: Array<{ provider: string; action: string; result: RemediationResult }>;
+  /** Step API-3: reports that reached `pending_triage` (seconds since reported). */
+  triaged: number[];
 }
 
 const tally = (o: Outcome, result: CopyResult, n = 1) =>
@@ -122,14 +153,22 @@ const count = (o: Outcome, apiConnectionId: bigint, delta: CounterDelta) =>
  *
  * - **journal copies** (`journal_intake`): the intake source's provider connection gives the API
  *   connection (created lazily); every recipient on an organization domain whose effective mode is
- *   `api`/`hybrid` resolves to a mailbox (`discovered` when unknown); internal recipients only
- *   count `skipped_internal` (API-1 records inbound only); per mailbox the Message-ID dedupe
+ *   `api`/`hybrid` resolves to a mailbox (`discovered` when unknown); internal recipients are
+ *   recorded with `direction = internal` when the organization's internal-mail setting is on
+ *   (step API-3 C8, ADR-0104; otherwise they count `skipped_internal`), outbound-only messages
+ *   end `outbound_only` without discovery; per mailbox the Message-ID dedupe
  *   (`api_copy_dedupe_keys`, UNIQUE (mailbox, hash)) either records the copy (`INSERT … ON DUPLICATE
  *   KEY UPDATE` on UNIQUE (message, received_at, mailbox)), takes over an in-flight feed claim, or
  *   marks the feed copy already recorded `seen_journal` (no second row); hybrid copies link to the
  *   inline gateway message (verdict authority `inline`); lag from the topmost `Received:` header
  *   (bounded range GET) else the ingest time;
- * - **feed copies** (`mailbox_api`): the pending row written at ingest (D10.3) is finalized.
+ * - **feed copies** (`mailbox_api`): the pending row written at ingest (D10.3) is finalized; a
+ *   `mailbox_api` message without a copy row is a report original ingested by the `reports` role
+ *   (C10.4): its scan facts go to the report (`pending_triage`).
+ *
+ * Step API-3: a copy recorded for a **report mailbox** (C9.2) gets no remediation decision and an
+ * `api_user_reports` row instead; `mail.threat.late_signal.v1` on the same queue is handed to the
+ * `LateSignalHandler` (same ledger consumer, C2.1).
  *
  * Every write of an event — and the ledger row, also for skipped events (the queue is reconciled)
  * — commits in one writer transaction (`processOnce`), so a redelivery is a `duplicate` with no
@@ -148,6 +187,9 @@ export class CopiesHandler {
   }
 
   readonly handle = async (event: EventEnvelope<unknown>): Promise<HandleOutcome> => {
+    if (event.eventType === EventTypes.ThreatLateSignal) {
+      return this.deps.lateSignals.handle(event);
+    }
     const parsed = messageCopyScannedV1.safeParse(event.payload);
     if (!parsed.success) throw new NonRetryableError('copy_scanned payload invalid');
     if (!/^[1-9][0-9]{0,19}$/.test(event.organizationId)) {
@@ -164,6 +206,7 @@ export class CopiesHandler {
       counters: new Map(),
       lags: [],
       remediations: [],
+      triaged: [],
     };
     const prepared = await this.prepare(organizationId, payload, outcome);
     const result = await processOnce(this.txPrisma, COPIES_CONSUMER, event.eventId, (tx) =>
@@ -178,6 +221,10 @@ export class CopiesHandler {
       this.deps.metrics?.lag.observe({ source: outcome.source }, lag / 1000);
     for (const r of outcome.remediations) {
       this.deps.metrics?.remediation(r.provider, r.action, r.result);
+    }
+    for (const seconds of outcome.triaged) {
+      this.deps.metrics?.report('pending_triage');
+      this.deps.metrics?.reportTriage.observe(seconds);
     }
     return 'handled';
   };
@@ -219,9 +266,23 @@ export class CopiesHandler {
       tally(outcome, 'no_connection');
       return noop;
     }
-    const targets = await this.journalTargets(message, state, connection.id, outcome);
+    const settings = await loadOrgSettings(this.deps.prisma, organizationId);
+    const { targets, apiSideRecipients } = await this.journalTargets(
+      message,
+      state,
+      connection.id,
+      settings,
+      outcome,
+    );
     if (targets.length === 0) {
-      if (!outcome.results.has('skipped_internal')) tally(outcome, 'no_recipient');
+      if (!outcome.results.has('skipped_internal')) {
+        // C8.2: no recipient on an API-side domain and an org-side sender → outbound-only
+        // (metric only: no copy, no mailbox discovery).
+        const sender = addrSpecOf(message.headerFrom) ?? addrSpecOf(message.envelopeFrom);
+        const outbound =
+          apiSideRecipients === 0 && sender !== null && domainForAddress(state.domains, sender);
+        tally(outcome, outbound ? 'outbound_only' : 'no_recipient');
+      }
       return noop;
     }
     const delivery = journalDelivery(await this.topReceivedAt(message), message.receivedAt);
@@ -268,13 +329,20 @@ export class CopiesHandler {
     return source.providerConnectionId;
   }
 
-  /** D7 steps 3–5: the in-scope, inbound recipients as mailboxes (discovering unknown ones). */
+  /**
+   * D7 steps 3–5: the in-scope recipients as mailboxes (discovering unknown ones). Step API-3
+   * (C8.1, ADR-0104): internal recipients are recorded (`direction = internal`) when the
+   * organization's internal-mail setting is on, otherwise counted `skipped_internal` without
+   * discovery — except a known report mailbox, which is recorded whatever the direction and
+   * setting (C9.2). `apiSideRecipients` counts recipients on API-side domains (C8.2).
+   */
   private async journalTargets(
     message: CopyMessage,
     state: OrgApiModeState,
     apiConnectionId: bigint,
+    settings: ResolvedOrgSettings,
     outcome: Outcome,
-  ): Promise<JournalTarget[]> {
+  ): Promise<{ targets: JournalTarget[]; apiSideRecipients: number }> {
     const recipients = await this.deps.prisma.emailRecipient.findMany({
       where: {
         messageId: message.id,
@@ -289,24 +357,33 @@ export class CopiesHandler {
     const seen = new Set<string>();
     const targets: JournalTarget[] = [];
     const now = this.deps.now();
+    let apiSideRecipients = 0;
     for (const { address: raw } of recipients) {
       const address = raw.trim().toLowerCase();
       if (seen.has(address)) continue;
       seen.add(address);
       const domain = domainForAddress(state.domains, address);
       if (!domain || !isApiSide(domain.effectiveMode)) continue;
-      if (classifyRecipientDirection(sender, address, orgDomains) === 'internal') {
-        tally(outcome, 'skipped_internal');
-        count(outcome, apiConnectionId, { skipped_internal: 1 });
-        continue;
+      apiSideRecipients += 1;
+      const direction = classifyRecipientDirection(sender, address, orgDomains);
+      let mailbox: MailboxRef | null = null;
+      if (direction === 'internal' && !settings.internalMailEnabled) {
+        const known = await findMailboxByAddress(this.deps.prisma, message.organizationId, address);
+        if (!known || !(await this.isReportMailbox(known))) {
+          tally(outcome, 'skipped_internal');
+          count(outcome, apiConnectionId, { skipped_internal: 1 });
+          continue;
+        }
+        mailbox = known;
       }
-      const mailbox = await resolveOrDiscoverMailbox(this.deps.prisma, {
+      mailbox ??= await resolveOrDiscoverMailbox(this.deps.prisma, {
         organizationId: message.organizationId,
         apiConnectionId,
         address,
         domainId: domain.id,
         now,
       });
+      const reportMailbox = await this.isReportMailbox(mailbox);
       const inline =
         domain.effectiveMode === 'hybrid' && message.messageIdKey
           ? await findInlineMessage(this.deps.prisma, {
@@ -317,9 +394,19 @@ export class CopiesHandler {
               windowHours: this.deps.config.hybridLinkWindowHours,
             })
           : null;
-      targets.push({ mailbox, address, inline });
+      targets.push({ mailbox, address, inline, direction, reportMailbox });
     }
-    return targets;
+    return { targets, apiSideRecipients };
+  }
+
+  /** `api_mailboxes.report_mailbox` of a mailbox (organization echo-checked). */
+  private async isReportMailbox(mailbox: MailboxRef, db: Db = this.deps.prisma): Promise<boolean> {
+    const row = await db.apiMailbox.findUnique({
+      where: { id: mailbox.id },
+      select: { organizationId: true, reportMailbox: true },
+    });
+    if (!row || row.organizationId !== mailbox.organizationId) return false;
+    return row.reportMailbox;
   }
 
   /** The topmost `Received:` date of the stored copy (bounded range GET); null when unavailable. */
@@ -372,6 +459,7 @@ export class CopiesHandler {
         delivery,
         hash,
         inline: target.inline,
+        direction: target.direction,
         now,
       };
       const copy =
@@ -386,13 +474,20 @@ export class CopiesHandler {
             updated_at = ${now}
         WHERE id = ${mailbox.id} AND organization_id = ${message.organizationId}`;
       if (recorded) {
-        tally(outcome, 'recorded');
+        const internal = target.direction === 'internal';
+        tally(outcome, internal ? 'recorded_internal' : 'recorded');
         count(outcome, mailbox.apiConnectionId, {
           journal_copies: 1,
+          ...(internal ? { internal_copies: 1 } : {}),
           ...(lag !== null ? lagDelta(lag) : {}),
         });
         if (lag !== null) outcome.lags.push(lag);
-        await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
+        if (target.reportMailbox) {
+          // C9.2 / C-I5: a report-mailbox copy is never decided; it becomes a user report.
+          await this.intakeReport(tx, message, mailbox, copy, now, outcome);
+        } else {
+          await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
+        }
       } else {
         tally(outcome, 'duplicate');
         count(outcome, mailbox.apiConnectionId, { duplicates: 1 });
@@ -403,6 +498,7 @@ export class CopiesHandler {
           mailboxId: mailbox.publicId,
           recipientDomain: domainOf(target.address),
           result: recorded ? 'recorded' : 'duplicate',
+          direction: target.direction,
           authority,
         },
         'journal copy recorded for mailbox',
@@ -496,6 +592,115 @@ export class CopiesHandler {
     }
   }
 
+  /** C9.2: the `api_user_reports` row of a copy recorded in a report mailbox (same transaction). */
+  private async intakeReport(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    mailbox: Pick<MailboxRef, 'id' | 'apiConnectionId'>,
+    copy: { id: bigint; receivedAt: Date },
+    now: Date,
+    outcome: Outcome,
+  ): Promise<void> {
+    const created = await recordUserReport(tx, {
+      organizationId: message.organizationId,
+      apiConnectionId: mailbox.apiConnectionId,
+      mailboxId: mailbox.id,
+      copy,
+      messageId: message.id,
+      reporterAddress: reporterAddressOf(message.headerFrom, message.envelopeFrom),
+      now,
+    });
+    if (!created) return;
+    tally(outcome, 'report_received');
+    count(outcome, mailbox.apiConnectionId, { reports_received: 1 });
+  }
+
+  /**
+   * C10.4: the detect-mode scan of a report original ingested by the `reports` role (a
+   * `mailbox_api` message without a copy row) — its scan facts, assessment and group key on the
+   * report, which moves `scanning → pending_triage` in this ledger transaction. A report the
+   * reports role already moved to triage because this scan was overdue (`last_error_code =
+   * original_scan_timeout`, still open) gets the late scan's facts and assessment instead (no new
+   * alert). False when no report references the message (the event stays `no_copy`).
+   */
+  private async scanOfReportOriginal(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    payload: MessageCopyScannedV1,
+    outcome: Outcome,
+  ): Promise<boolean> {
+    const report = await tx.apiUserReport.findFirst({
+      where: {
+        originalMessageId: message.id,
+        originalReceivedAt: message.receivedAt,
+        organizationId: message.organizationId,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        apiConnectionId: true,
+        status: true,
+        original: true,
+        groupKey: true,
+        reportedAt: true,
+        rowVersion: true,
+        lastErrorCode: true,
+      },
+    });
+    if (!report) return false;
+    if (report.organizationId !== message.organizationId) {
+      throw new InconsistentReadError('api_user_reports');
+    }
+    tally(outcome, 'report_scanned');
+    const overdue =
+      report.lastErrorCode === REPORT_SCAN_TIMEOUT_CODE &&
+      (report.status === 'pending_triage' || report.status === 'in_review');
+    if (report.status !== 'scanning' && !overdue) return true;
+    const now = this.deps.now();
+    const scanId =
+      payload.scanId !== null && /^[1-9][0-9]{0,19}$/.test(payload.scanId)
+        ? BigInt(payload.scanId)
+        : null;
+    const risk = scanId === null ? null : await latestRiskFacts(tx, message, scanId);
+    const verdict = payload.verdict ?? risk?.verdict ?? null;
+    const score = payload.riskScore ?? risk?.score ?? null;
+    const level = risk?.level ?? null;
+    const assessment = assessReport(
+      verdict === null ? null : { verdict, level, hardBlocks: risk?.hardBlocks ?? [] },
+    );
+    const parsedOriginal = reportOriginalSchema.safeParse(report.original);
+    const groupKey =
+      report.groupKey ?? (parsedOriginal.success ? reportGroupKey(parsedOriginal.data) : null);
+    if (overdue) {
+      await tx.$executeRaw`
+        UPDATE api_user_reports
+        SET scan_verdict = ${verdict},
+            scan_risk_score = ${score === null ? null : Math.min(65_535, Math.max(0, score))},
+            scan_level = ${level}, assessment = ${assessment}, group_key = ${groupKey},
+            last_error_code = NULL, row_version = row_version + 1, updated_at = ${now}
+        WHERE id = ${report.id} AND organization_id = ${message.organizationId}
+          AND status = ${report.status} AND row_version = ${report.rowVersion}
+          AND last_error_code = ${REPORT_SCAN_TIMEOUT_CODE}`;
+      return true;
+    }
+    const moved = await tx.$executeRaw`
+      UPDATE api_user_reports
+      SET status = 'pending_triage', scan_verdict = ${verdict},
+          scan_risk_score = ${score === null ? null : Math.min(65_535, Math.max(0, score))},
+          scan_level = ${level}, assessment = ${assessment}, group_key = ${groupKey},
+          next_attempt_at = NULL, row_version = row_version + 1, updated_at = ${now}
+      WHERE id = ${report.id} AND organization_id = ${message.organizationId}
+        AND status = 'scanning' AND row_version = ${report.rowVersion}`;
+    if (moved !== 1) return true;
+    await requestReportAlert(tx, {
+      organizationId: message.organizationId,
+      windowMinutes: this.deps.config.reportAlertMinIntervalMinutes,
+      now,
+    });
+    outcome.triaged.push(Math.max(0, (now.getTime() - report.reportedAt.getTime()) / 1000));
+    return true;
+  }
+
   /** D7 step 7 (+ 5, 8): the pending copy row(s) written at ingest are finalized. */
   private async finalizeFeedCopies(
     tx: Prisma.TransactionClient,
@@ -519,7 +724,9 @@ export class CopiesHandler {
       },
     });
     if (copies.length === 0) {
-      tally(outcome, 'no_copy');
+      if (!(await this.scanOfReportOriginal(tx, message, payload, outcome))) {
+        tally(outcome, 'no_copy');
+      }
       return;
     }
     const now = this.deps.now();
@@ -544,7 +751,18 @@ export class CopiesHandler {
         outcome.lags.push(lag);
         count(outcome, copy.apiConnectionId, lagDelta(lag));
       }
-      await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
+      const mailbox: MailboxRef = {
+        id: copy.mailboxId,
+        publicId: '',
+        organizationId: message.organizationId,
+        apiConnectionId: copy.apiConnectionId,
+      };
+      if (await this.isReportMailbox(mailbox, tx)) {
+        // C9.2: feed copies of a report mailbox become reports too (never decided).
+        await this.intakeReport(tx, message, mailbox, copy, now, outcome);
+      } else {
+        await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
+      }
     }
   }
 
@@ -601,12 +819,15 @@ interface CopyWrite {
   delivery: { at: Date; basis: ApiCopyDeliveredBasis };
   hash: string | null;
   inline: InlineLink | null;
+  /** Step API-3 C8.1: written to `api_message_copies.direction`. */
+  direction: 'inbound' | 'internal';
   now: Date;
 }
 
 /**
  * The journal copy row of (message, mailbox): `INSERT … ON DUPLICATE KEY UPDATE` on UNIQUE
- * (message_id, received_at, mailbox_id) (D7 step 6), `seen_journal = 1`, direction `inbound`.
+ * (message_id, received_at, mailbox_id) (D7 step 6), `seen_journal = 1`, the recipient's
+ * direction (`inbound`, or `internal` since step API-3 C8.1).
  */
 async function upsertJournalCopy(
   tx: Prisma.TransactionClient,
@@ -620,7 +841,7 @@ async function upsertJournalCopy(
        status, verdict, risk_score, verdict_at, lag_ms, verdict_authority, inline_message_id,
        inline_received_at, created_at, updated_at)
     VALUES (${message.receivedAt}, ${uuidv7(w.now.getTime())}, ${message.organizationId},
-            ${mailbox.apiConnectionId}, ${mailbox.id}, ${message.id}, 'journal', 1, 0, 'inbound',
+            ${mailbox.apiConnectionId}, ${mailbox.id}, ${message.id}, 'journal', 1, 0, ${w.direction},
             ${w.hash}, ${w.delivery.at}, ${w.delivery.basis}, ${w.status}, ${w.verdict},
             ${w.riskScore}, ${w.verdictAt}, ${w.lag}, ${w.authority},
             ${w.inline?.messageId ?? null}, ${w.inline?.receivedAt ?? null}, ${w.now}, ${w.now})

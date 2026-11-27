@@ -336,3 +336,130 @@ describe('api_mode_unhealthy template (step API-1 D11.3)', () => {
     expect(notice.text).not.toContain('/api-mode');
   });
 });
+
+describe('api_mode_unhealthy check titles of step API-3 (C13)', () => {
+  it('titles clawback.stalled and reports.backlog', () => {
+    const notice = renderSecurityAlert({
+      ...common,
+      severity: 'medium',
+      kind: 'api_mode_unhealthy',
+      apiMode: {
+        connectionPublicId: '0192f0c4-cccc-7ddd-8eee-0000000000a1',
+        name: 'Contoso M365',
+        provider: 'microsoft_365',
+        healthNow: 'degraded',
+        failingChecks: ['clawback.stalled', 'reports.backlog'],
+      },
+    });
+    expect(notice.text).toContain('- Clawback without progress (clawback.stalled)');
+    expect(notice.text).toContain('- User reports waiting for triage (reports.backlog)');
+  });
+});
+
+describe('api_mode_purge_approval template (step API-3 C6)', () => {
+  const CLAWBACK = '0192f0c4-dddd-7eee-8fff-0000000000c1';
+  const purge = (
+    over: Partial<Extract<AlertFacts, { kind: 'api_mode_purge_approval' }>['clawback']> = {},
+  ) =>
+    ({
+      ...common,
+      severity: 'medium',
+      kind: 'api_mode_purge_approval',
+      clawback: {
+        clawbackPublicId: CLAWBACK,
+        trigger: 'late_verdict',
+        status: 'review_required',
+        action: null,
+        mailboxesEligible: 640,
+        targetsEligible: 702,
+        approvalStatus: null,
+        approvalReasons: ['auto_cap'],
+        approvalExpiresAt: null,
+        ...over,
+      },
+    }) as AlertFacts;
+
+  it('trigger, status, counts, reasons, expiry and the purge link; nothing else', () => {
+    const notice = renderSecurityAlert(
+      purge({
+        status: 'pending_approval',
+        action: 'hard_delete',
+        approvalStatus: 'pending',
+        approvalReasons: ['mailbox_threshold', 'hard_delete'],
+        approvalExpiresAt: '2026-11-16T09:00:00.000Z',
+      }),
+    );
+    expect(notice.subject).toBe(
+      '[Email Gateway] Security alert (medium): clawback approval requested',
+    );
+    expect(notice.text).toContain('A security alert was raised for Acme Corp.');
+    expect(notice.text).toContain(`Clawback: ${CLAWBACK}`);
+    expect(notice.text).toContain('Trigger: late verdict (sandbox or URL inspection)');
+    expect(notice.text).toContain('Status now: pending_approval');
+    expect(notice.text).toContain('Requested action: hard_delete');
+    expect(notice.text).toContain('Eligible mailboxes: 640 (702 message copies)');
+    expect(notice.text).toContain(
+      'Approval needed because: more mailboxes than the approval threshold; permanent deletion requested',
+    );
+    expect(notice.text).toContain('Approval status: pending');
+    expect(notice.text).toContain('Approval expires: 2026-11-16T09:00:00.000Z');
+    expect(notice.text).toContain(`Review: ${PORTAL}/api-mode?tab=purge&clawback=${CLAWBACK}`);
+    assertNoForbiddenContent(notice.text);
+  });
+
+  it('review required without a request; unknown trigger, codes and ids are neutral (no link)', () => {
+    const plain = renderSecurityAlert(purge());
+    expect(plain.text).toContain(
+      'Approval needed because: automatic clawback above the mailbox cap',
+    );
+    expect(plain.text).toContain('Approval status: not requested');
+    expect(plain.text).toContain('Approval expires: unknown');
+    expect(plain.text).not.toContain('Requested action');
+    const odd = renderSecurityAlert(
+      purge({
+        clawbackPublicId: 'not-an-id',
+        trigger: 'evil\r\nBcc: x@y.example',
+        status: 'Bad Status',
+        approvalReasons: ['injected <b>', 'auto_cap'],
+      }),
+    );
+    expect(odd.text).toContain('Trigger: unknown');
+    expect(odd.text).toContain('Status now: unknown');
+    expect(odd.text).toContain('Clawback: unknown');
+    expect(odd.text).not.toContain('/api-mode');
+    expect(odd.text).not.toContain('injected');
+    assertNoForbiddenContent(odd.text);
+  });
+});
+
+describe('api_mode_report_received template (step API-3 C13)', () => {
+  it('report counts and the reports link; no reporter, subject or sender', () => {
+    const notice = renderSecurityAlert({
+      ...common,
+      severity: 'medium',
+      kind: 'api_mode_report_received',
+      reports: {
+        pendingTriage: 12,
+        inReview: 2,
+        receivedInWindow: 5,
+        oldestPendingAt: '2026-11-13T06:00:00.000Z',
+      },
+    });
+    expect(notice.subject).toBe(
+      '[Email Gateway] Security alert (medium): reported messages need triage',
+    );
+    expect(notice.text).toContain('Reports waiting for triage: 12');
+    expect(notice.text).toContain('Reports in review: 2');
+    expect(notice.text).toContain('Reports received in this window: 5');
+    expect(notice.text).toContain('Oldest report waiting since: 2026-11-13T06:00:00.000Z');
+    expect(notice.text).toContain(`Review: ${PORTAL}/api-mode?tab=reports`);
+    assertNoForbiddenContent(notice.text);
+    const none = renderSecurityAlert({
+      ...common,
+      severity: 'medium',
+      kind: 'api_mode_report_received',
+      reports: { pendingTriage: 0, inReview: 0, receivedInWindow: 0, oldestPendingAt: null },
+    });
+    expect(none.text).toContain('Oldest report waiting since: none waiting');
+  });
+});

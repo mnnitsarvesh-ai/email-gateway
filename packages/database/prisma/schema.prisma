@@ -1790,6 +1790,9 @@ model Organization {
   aiChatReportJobs         AiChatReportJob[]
   apiModeConnections       ApiModeConnection[]
   apiRemediationPolicies   ApiRemediationPolicy[]
+  apiClawbacks             ApiClawback[]
+  apiUserReports           ApiUserReport[]
+  apiModeOrgSetting        ApiModeOrgSetting?
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -4193,6 +4196,8 @@ model ThreatIndicator {
   @@index([indicatorType, valueSha256])
   @@index([organizationId, indicatorType])
   @@index([source, createdAt])
+  /// Step API-3 (C2.2): keyset cursor of the mailbox-worker threat-intelligence sweep.
+  @@index([createdAt, id])
   @@map("threat_indicators")
 }
 
@@ -4279,6 +4284,8 @@ model MalwareSignature {
   addedBy User? @relation(fields: [addedByUserId], references: [id], onDelete: SetNull)
 
   @@index([source, createdAt])
+  /// Step API-3 (C2.2): keyset cursor of the mailbox-worker threat-intelligence sweep.
+  @@index([createdAt, id])
   @@map("malware_signatures")
 }
 
@@ -8793,7 +8800,9 @@ enum ApiCopySource {
   gmail
 }
 
-/// Recipient direction of a copy (D7.4); API-1 records `inbound` only (`internal` is API-3).
+/// Recipient direction of a copy (D7.4). Journal copies of internal (east-west) recipients are
+/// recorded as `internal` from step API-3 when the organization's internal-mail setting is on
+/// (C8, ADR-0104); feed copies of internal mail carried `internal` since API-1.
 enum ApiCopyDirection {
   inbound
   internal
@@ -8867,6 +8876,7 @@ model ApiModeConnection {
   mailboxes          ApiMailbox[]
   counters           ApiModeCounter[]
   remediationActions ApiRemediationAction[]
+  userReports        ApiUserReport[]
 
   @@index([organizationId])
   @@index([healthStatus])
@@ -8919,13 +8929,22 @@ model ApiMailbox {
   /// Step API-2 (R3): cached Gmail label id of the tag label (Graph categories need none).
   tagContainerId        String?                 @map("tag_container_id") @db.VarChar(256)
   containersCheckedAt   DateTime?               @map("containers_checked_at") @db.DateTime(3)
+  /// Step API-3 (C9, ADR-0104): the mailbox is a report mailbox (≤ API_MODE_REPORT_MAILBOXES_MAX
+  /// per organization, set by the api). Its copies are recorded whatever their direction, get no
+  /// remediation decision, create `api_user_reports` rows and are never clawback targets (C-I5).
+  reportMailbox         Boolean                 @default(false) @map("report_mailbox")
+  /// When `report_mailbox` was last turned on (NULL = never or turned off).
+  reportMailboxAt       DateTime?               @map("report_mailbox_at") @db.DateTime(3)
 
   apiConnection      ApiModeConnection      @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
   addresses          ApiMailboxAddress[]
   remediationActions ApiRemediationAction[]
+  userReports        ApiUserReport[]
 
   @@unique([apiConnectionId, providerUserId])
   @@index([organizationId, status])
+  /// Step API-3: report mailboxes of an organization (C9.1 limit, intake lookups).
+  @@index([organizationId, reportMailbox])
   @@index([apiConnectionId, coverageState])
   @@index([feedStatus, nextSyncAt])
   @@index([syncRequestedAt])
@@ -9001,6 +9020,9 @@ model ApiMessageCopy {
   /// api_remediation_actions.id of the latest action (no FK: partitioned table).
   lastActionId          BigInt?                   @map("last_action_id") @db.UnsignedBigInt
   remediationUpdatedAt  DateTime?                 @map("remediation_updated_at") @db.DateTime(3)
+  /// Step API-3 (C3.3): number of late signals (`mail.threat.late_signal.v1` of the copy's own
+  /// registry message) that raised the stored `verdict` / `risk_score`; 0 = the first scan's.
+  verdictRevision       Int                       @default(0) @map("verdict_revision") @db.UnsignedTinyInt
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt, mailboxId])
@@ -9039,45 +9061,53 @@ model ApiCopyDedupeKey {
 /// the mailbox-worker's counter flush (`(api_connection_id, hour)`); pruned after 400 days by the
 /// health role. Lag buckets back the overview percentiles.
 model ApiModeCounter {
-  id                      BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId          BigInt   @map("organization_id") @db.UnsignedBigInt
-  apiConnectionId         BigInt   @map("api_connection_id") @db.UnsignedBigInt
+  id                       BigInt   @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId           BigInt   @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId          BigInt   @map("api_connection_id") @db.UnsignedBigInt
   /// UTC hour start.
-  hour                    DateTime @db.DateTime(0)
-  journalCopies           Int      @default(0) @map("journal_copies") @db.UnsignedInt
-  feedCopies              Int      @default(0) @map("feed_copies") @db.UnsignedInt
-  duplicates              Int      @default(0) @db.UnsignedInt
-  skippedInternal         Int      @default(0) @map("skipped_internal") @db.UnsignedInt
-  tooLarge                Int      @default(0) @map("too_large") @db.UnsignedInt
-  providerRequests        Int      @default(0) @map("provider_requests") @db.UnsignedInt
-  throttled429            Int      @default(0) @map("throttled_429") @db.UnsignedInt
-  throttled503            Int      @default(0) @map("throttled_503") @db.UnsignedInt
-  providerErrors          Int      @default(0) @map("provider_errors") @db.UnsignedInt
-  cursorResets            Int      @default(0) @map("cursor_resets") @db.UnsignedInt
-  lagCount                Int      @default(0) @map("lag_count") @db.UnsignedInt
-  lagLe60s                Int      @default(0) @map("lag_le_60s") @db.UnsignedInt
-  lagLe300s               Int      @default(0) @map("lag_le_300s") @db.UnsignedInt
-  lagLe900s               Int      @default(0) @map("lag_le_900s") @db.UnsignedInt
-  lagLe3600s              Int      @default(0) @map("lag_le_3600s") @db.UnsignedInt
-  lagGt3600s              Int      @default(0) @map("lag_gt_3600s") @db.UnsignedInt
-  lagMaxMs                Int      @default(0) @map("lag_max_ms") @db.UnsignedInt
-  fetchBytes              BigInt   @default(0) @map("fetch_bytes") @db.UnsignedBigInt
-  lagSumMs                BigInt   @default(0) @map("lag_sum_ms") @db.UnsignedBigInt
-  updatedAt               DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+  hour                     DateTime @db.DateTime(0)
+  journalCopies            Int      @default(0) @map("journal_copies") @db.UnsignedInt
+  feedCopies               Int      @default(0) @map("feed_copies") @db.UnsignedInt
+  duplicates               Int      @default(0) @db.UnsignedInt
+  skippedInternal          Int      @default(0) @map("skipped_internal") @db.UnsignedInt
+  tooLarge                 Int      @default(0) @map("too_large") @db.UnsignedInt
+  providerRequests         Int      @default(0) @map("provider_requests") @db.UnsignedInt
+  throttled429             Int      @default(0) @map("throttled_429") @db.UnsignedInt
+  throttled503             Int      @default(0) @map("throttled_503") @db.UnsignedInt
+  providerErrors           Int      @default(0) @map("provider_errors") @db.UnsignedInt
+  cursorResets             Int      @default(0) @map("cursor_resets") @db.UnsignedInt
+  lagCount                 Int      @default(0) @map("lag_count") @db.UnsignedInt
+  lagLe60s                 Int      @default(0) @map("lag_le_60s") @db.UnsignedInt
+  lagLe300s                Int      @default(0) @map("lag_le_300s") @db.UnsignedInt
+  lagLe900s                Int      @default(0) @map("lag_le_900s") @db.UnsignedInt
+  lagLe3600s               Int      @default(0) @map("lag_le_3600s") @db.UnsignedInt
+  lagGt3600s               Int      @default(0) @map("lag_gt_3600s") @db.UnsignedInt
+  lagMaxMs                 Int      @default(0) @map("lag_max_ms") @db.UnsignedInt
+  fetchBytes               BigInt   @default(0) @map("fetch_bytes") @db.UnsignedBigInt
+  lagSumMs                 BigInt   @default(0) @map("lag_sum_ms") @db.UnsignedBigInt
+  updatedAt                DateTime @updatedAt @map("updated_at") @db.DateTime(3)
   /// Step API-2 (R14): terminal remediation outcomes of the hour. `remediation_*` count
   /// remediations, `restores_*` reversals (restore_inbox, remove_tag); `remediation_throttled`
   /// counts 429/503 pauses (no attempt counted); latency = completed_at − verdict_at of
   /// policy-triggered actions (count, sum and max in milliseconds).
-  remediationSucceeded    Int      @default(0) @map("remediation_succeeded") @db.UnsignedInt
-  remediationFailed       Int      @default(0) @map("remediation_failed") @db.UnsignedInt
-  remediationSkipped      Int      @default(0) @map("remediation_skipped") @db.UnsignedInt
-  remediationSimulated    Int      @default(0) @map("remediation_simulated") @db.UnsignedInt
-  restoresSucceeded       Int      @default(0) @map("restores_succeeded") @db.UnsignedInt
-  restoresFailed          Int      @default(0) @map("restores_failed") @db.UnsignedInt
-  remediationThrottled    Int      @default(0) @map("remediation_throttled") @db.UnsignedInt
-  remediationLatencyCount Int      @default(0) @map("remediation_latency_count") @db.UnsignedInt
-  remediationLatencyMaxMs Int      @default(0) @map("remediation_latency_max_ms") @db.UnsignedInt
-  remediationLatencySumMs BigInt   @default(0) @map("remediation_latency_sum_ms") @db.UnsignedBigInt
+  remediationSucceeded     Int      @default(0) @map("remediation_succeeded") @db.UnsignedInt
+  remediationFailed        Int      @default(0) @map("remediation_failed") @db.UnsignedInt
+  remediationSkipped       Int      @default(0) @map("remediation_skipped") @db.UnsignedInt
+  remediationSimulated     Int      @default(0) @map("remediation_simulated") @db.UnsignedInt
+  restoresSucceeded        Int      @default(0) @map("restores_succeeded") @db.UnsignedInt
+  restoresFailed           Int      @default(0) @map("restores_failed") @db.UnsignedInt
+  remediationThrottled     Int      @default(0) @map("remediation_throttled") @db.UnsignedInt
+  remediationLatencyCount  Int      @default(0) @map("remediation_latency_count") @db.UnsignedInt
+  remediationLatencyMaxMs  Int      @default(0) @map("remediation_latency_max_ms") @db.UnsignedInt
+  remediationLatencySumMs  BigInt   @default(0) @map("remediation_latency_sum_ms") @db.UnsignedBigInt
+  /// Step API-3 (C8, C5.5, C9.2, C11.4): internal (east-west) copies recorded, clawback targets
+  /// queued / succeeded / failed, reports received and resolved in the hour.
+  internalCopies           Int      @default(0) @map("internal_copies") @db.UnsignedInt
+  clawbackTargetsQueued    Int      @default(0) @map("clawback_targets_queued") @db.UnsignedInt
+  clawbackTargetsSucceeded Int      @default(0) @map("clawback_targets_succeeded") @db.UnsignedInt
+  clawbackTargetsFailed    Int      @default(0) @map("clawback_targets_failed") @db.UnsignedInt
+  reportsReceived          Int      @default(0) @map("reports_received") @db.UnsignedInt
+  reportsResolved          Int      @default(0) @map("reports_resolved") @db.UnsignedInt
 
   apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Cascade)
 
@@ -9119,13 +9149,18 @@ enum ApiRemediationActionKind {
 
 /// Who asked for an action (R1, R10, R12): the remediation policy, an operator (manual
 /// remediation, restore, retry, entry delete), a quarantine release or approval, an end-user
-/// self-release, or the platform. Append-only.
+/// self-release, or the platform. Step API-3 appends `clawback` (an automatic clawback re-decided
+/// through the policy: late verdict, threat intelligence; waits while the connection is paused)
+/// and `purge` (an admin, report or campaign clawback; runs like `admin`), both with
+/// `clawback_id` set (C5.4, C5.7). Append-only.
 enum ApiRemediationTrigger {
   policy
   admin
   release
   end_user
   system
+  clawback
+  purge
 }
 
 /// Action state (R5.2): `pending → in_progress → succeeded | failed | pending (retry)`;
@@ -9275,6 +9310,10 @@ model ApiRemediationAction {
   rowVersion         Int                      @default(1) @map("row_version") @db.UnsignedInt
   createdAt          DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
   updatedAt          DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-3 (C5.4): api_clawbacks.id of a `clawback` / `purge` action (no FK: purge order
+  /// §3.4, terminal clawbacks are pruned independently). Set again when a clawback re-arms an
+  /// existing `skipped` / `simulated` / `failed` / `cancelled` row of the same `action_key`.
+  clawbackId         BigInt?                  @map("clawback_id") @db.UnsignedBigInt
 
   apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
   mailbox       ApiMailbox        @relation(fields: [mailboxId], references: [id], onDelete: Restrict)
@@ -9286,5 +9325,463 @@ model ApiRemediationAction {
   @@index([organizationId, mailboxId, createdAt])
   @@index([organizationId, status, createdAt])
   @@index([quarantineEntryId])
+  /// Step API-3: reconcile and cancel of a clawback's actions (C5.5, C5.6) and the per-connection
+  /// pending cap (C5.4).
+  @@index([clawbackId, status])
   @@map("api_remediation_actions")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step API-3: API-mode clawback, search and purge, internal mail and reported phishing
+// (docs/plan/steps/37-api-mode-clawback-reporting.md §3; ADR-0103, ADR-0104). Five tables, none
+// partitioned: clawbacks with their frozen per-copy targets, user reports from report mailboxes,
+// per-organization API-mode settings and the mailbox-worker's durable sweep cursors. Content-free
+// (C-I6): hashes, normalized keys (`subject_key` ≤ 128, Message-ID hash), sender / reporter
+// addresses, time windows, enums, codes, counts and timings; EML bytes stay in S3 (N4); analyst
+// notes and reasons are operator text marked untrusted. Writers: the api (admin / campaign /
+// report clawbacks, submit, approval, cancel, restore requests, triage, settings, report
+// mailboxes) and the mailbox-worker roles `copies` (late signals, report intake), `clawback`
+// (materialization, planning, queueing, reconcile, restore, expiry, threat-intelligence sweep)
+// and `reports` (parsing, identification). Organization purge (§3.4): targets (cascade) and
+// clawbacks and reports before api_remediation_actions, api_mailboxes and api_mode_connections;
+// settings before the organization. Terminal clawbacks and reports are pruned after
+// API_MODE_CLAWBACK_RETENTION_DAYS / API_MODE_REPORT_RETENTION_DAYS (400) by the health leader.
+// ---------------------------------------------------------------------------------------------
+
+/// What created a clawback (C2): a late sandbox / URL verdict (`mail.threat.late_signal.v1`), the
+/// threat-intelligence sweep, a campaign expansion of a seed, an analyst's report decision or an
+/// admin search. Append-only.
+enum ApiClawbackTrigger {
+  late_verdict
+  threat_intel
+  campaign
+  report
+  admin
+}
+
+/// How the targets of a clawback are decided (C3.2, C3.4): `policy` re-decides each copy through
+/// the tenant's remediation policy with the signal facts; `explicit` applies the admin's action.
+enum ApiClawbackDecisionMode {
+  policy
+  explicit
+}
+
+/// The explicit action of an admin purge (C3.4). `hard_delete` only through the portal-only
+/// submit with API_MODE_HARD_DELETE_ENABLED and a second approver (ADR-0103 (4)). Append-only.
+enum ApiClawbackAction {
+  move_quarantine
+  move_junk
+  soft_delete
+  hard_delete
+}
+
+/// Risk level of the signal facts a policy-mode clawback decides on (C3.1). Append-only.
+enum ApiClawbackSignalLevel {
+  low
+  medium
+  high
+  critical
+}
+
+/// Clawback lifecycle (C5.1): `searching → no_match | too_broad | failed | ready |
+/// review_required | queued`; `ready | review_required → pending_approval | queued` (submit);
+/// `pending_approval → queued | denied | expired | cancelled`; `queued → running → completed |
+/// completed_with_errors`; active states → `cancelled`. Append-only.
+enum ApiClawbackStatus {
+  searching
+  ready
+  review_required
+  pending_approval
+  queued
+  running
+  completed
+  completed_with_errors
+  no_match
+  too_broad
+  denied
+  expired
+  cancelled
+  failed
+}
+
+/// Bulk restore of a clawback (C7). Append-only.
+enum ApiClawbackRestoreStatus {
+  none
+  requested
+  running
+  completed
+  completed_with_errors
+}
+
+/// Second-approver state of a clawback (C6; the 5.3 Q14 statuses). Append-only.
+enum ApiClawbackApprovalStatus {
+  pending
+  approved
+  denied
+  expired
+  cancelled
+}
+
+/// State of one clawback target (C5.2–C5.6): `matched` (eligible, not yet queued), `skipped`
+/// (with a reason code), `simulated` (detect-only policy), `queued` (an action row exists),
+/// `succeeded` / `failed` / `cancelled` (the action's outcome). Append-only.
+enum ApiClawbackTargetStatus {
+  matched
+  skipped
+  simulated
+  queued
+  succeeded
+  failed
+  cancelled
+}
+
+/// Restore state of one clawback target (C7). Append-only.
+enum ApiClawbackTargetRestoreStatus {
+  none
+  queued
+  succeeded
+  failed
+  skipped
+}
+
+/// Automatic clawbacks of an organization (`api_mode_org_settings.auto_clawback`, C2, C5.1):
+/// `enforce` = queued within the cap, `review` = always `review_required`, `off` = none created.
+enum ApiModeAutoClawback {
+  enforce
+  review
+  off
+}
+
+/// Report lifecycle (C11.1): `received → parsing → scanning → pending_triage → in_review →
+/// resolved`; `rejected` automatically from `received` / `parsing` or by an analyst; `resolved`
+/// may be reopened to `in_review` once. Append-only.
+enum ApiUserReportStatus {
+  received
+  parsing
+  scanning
+  pending_triage
+  in_review
+  resolved
+  rejected
+}
+
+/// How the reported original was found in the report e-mail (C10.2). Append-only.
+enum ApiUserReportIdentification {
+  attachment
+  inline
+  none
+  unsupported
+}
+
+/// Automatic pre-triage hint from the scan facts (C11.2; never acts). Append-only.
+enum ApiUserReportAssessment {
+  malicious
+  suspicious
+  clean
+  unknown
+}
+
+/// Analyst verdict of a report (C11.4). Append-only.
+enum ApiUserReportVerdict {
+  malicious
+  phishing_simulation
+  spam
+  clean
+  inconclusive
+}
+
+/// Reporter feedback state per kind (C12): `queued` = a `mail.report.feedback_requested.v1` was
+/// written; `skipped` = disabled or not applicable. Append-only.
+enum ApiUserReportFeedback {
+  none
+  queued
+  skipped
+}
+
+/// One clawback: a per-organization search over the tenant's recorded API-mode copies, its frozen
+/// targets and their execution through api_remediation_actions (step API-3 §3.1, C2–C7,
+/// ADR-0103). `signal` = `api-clawback-signal/1`, `criteria` = `api-clawback-criteria/1` (strict
+/// zod of @email-gateway/mailbox-api; hashes, normalized keys, sender addresses and the window
+/// only); `criteria_sha256` = hex SHA-256 of its canonical JSON. `signal_key` (C2.5; NULL for
+/// admin / report / campaign) with the unique key below gives one clawback per organization and
+/// automatic signal (`INSERT IGNORE`). Approval (C6) lives on the row like 8.4 ATO responses:
+/// `approval_reasons` ⊆ [`mailbox_threshold`, `hard_delete`, `auto_cap`], the decider's id and
+/// permission hash. Written by the api and the mailbox-worker `copies` / `clawback` roles; CAS on
+/// `row_version`; the worker claims with `lease_until` / `next_step_at`. The user ids,
+/// `report_id` and the seed copy have no FK (trail survives the user, purge order §3.4,
+/// partitioned copy). Terminal rows (with their targets) are pruned after
+/// API_MODE_CLAWBACK_RETENTION_DAYS (400). Never subjects or bodies; reasons are untrusted text.
+model ApiClawback {
+  id                      BigInt                     @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String                     @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt                     @map("organization_id") @db.UnsignedBigInt
+  trigger                 ApiClawbackTrigger
+  /// Hex SHA-256 of the automatic signal tuple (C2.5); NULL for admin, report and campaign.
+  signalKey               String?                    @map("signal_key") @db.Char(64)
+  /// `api-clawback-signal/1` `{ v, kind, refs, facts, signalAt }` (contracts §38).
+  signal                  Json
+  /// `api-clawback-criteria/1` `{ v, window, keys, directions, includeReportMailboxes }` (C4.1).
+  criteria                Json
+  criteriaSha256          String                     @map("criteria_sha256") @db.Char(64)
+  /// `policy` for automatic clawbacks; set at submit for admin / report / campaign.
+  decisionMode            ApiClawbackDecisionMode?   @map("decision_mode")
+  /// Explicit mode only.
+  action                  ApiClawbackAction?
+  /// Facts the policy decides on (C3.1).
+  signalVerdict           MessageVerdict?            @map("signal_verdict")
+  signalLevel             ApiClawbackSignalLevel?    @map("signal_level")
+  /// Hard-block ids (≤ 9; `^[a-z0-9_.:-]{1,64}$`, e.g. `hb.clawback.threat_intel`).
+  signalHardBlocks        Json?                      @map("signal_hard_blocks")
+  status                  ApiClawbackStatus
+  /// Set by the api; applied by the `clawback` role (lock order, C5.6).
+  cancelRequestedAt       DateTime?                  @map("cancel_requested_at") @db.DateTime(3)
+  restoreStatus           ApiClawbackRestoreStatus   @default(none) @map("restore_status")
+  /// After materialization (C5.2): all targets / distinct mailboxes, and the `matched` ones.
+  targetsTotal            Int                        @default(0) @map("targets_total") @db.UnsignedInt
+  mailboxesTotal          Int                        @default(0) @map("mailboxes_total") @db.UnsignedInt
+  targetsEligible         Int                        @default(0) @map("targets_eligible") @db.UnsignedInt
+  mailboxesEligible       Int                        @default(0) @map("mailboxes_eligible") @db.UnsignedInt
+  /// Reconciled target counts (C5.5).
+  targetsSkipped          Int                        @default(0) @map("targets_skipped") @db.UnsignedInt
+  targetsSimulated        Int                        @default(0) @map("targets_simulated") @db.UnsignedInt
+  targetsQueued           Int                        @default(0) @map("targets_queued") @db.UnsignedInt
+  targetsSucceeded        Int                        @default(0) @map("targets_succeeded") @db.UnsignedInt
+  targetsFailed           Int                        @default(0) @map("targets_failed") @db.UnsignedInt
+  targetsCancelled        Int                        @default(0) @map("targets_cancelled") @db.UnsignedInt
+  /// Reconciled restore counts (C7).
+  restoresQueued          Int                        @default(0) @map("restores_queued") @db.UnsignedInt
+  restoresSucceeded       Int                        @default(0) @map("restores_succeeded") @db.UnsignedInt
+  restoresFailed          Int                        @default(0) @map("restores_failed") @db.UnsignedInt
+  restoresSkipped         Int                        @default(0) @map("restores_skipped") @db.UnsignedInt
+  requiresApproval        Boolean                    @default(false) @map("requires_approval")
+  /// Subset of `mailbox_threshold`, `hard_delete`, `auto_cap`.
+  approvalReasons         Json?                      @map("approval_reasons")
+  approvalStatus          ApiClawbackApprovalStatus? @map("approval_status")
+  approvalRequestedAt     DateTime?                  @map("approval_requested_at") @db.DateTime(3)
+  approvalExpiresAt       DateTime?                  @map("approval_expires_at") @db.DateTime(3)
+  approvalDecidedAt       DateTime?                  @map("approval_decided_at") @db.DateTime(3)
+  /// The second person who approved or denied (no FK).
+  approvedByUserId        BigInt?                    @map("approved_by_user_id") @db.UnsignedBigInt
+  /// Untrusted operator text.
+  approvalDecisionReason  String?                    @map("approval_decision_reason") @db.VarChar(512)
+  /// Hex SHA-256 of the decider's permission set (Q14 practice).
+  approverPermissionsHash String?                    @map("approver_permissions_hash") @db.Char(64)
+  /// `system` for automatic clawbacks.
+  requestedByType         ActorType                  @map("requested_by_type")
+  /// Who created it (admin) (no FK).
+  requestedByUserId       BigInt?                    @map("requested_by_user_id") @db.UnsignedBigInt
+  /// Who submitted it (also the requester of a `review_required` automatic clawback) (no FK).
+  submittedByUserId       BigInt?                    @map("submitted_by_user_id") @db.UnsignedBigInt
+  /// Untrusted operator text.
+  requestReason           String?                    @map("request_reason") @db.VarChar(512)
+  submittedAt             DateTime?                  @map("submitted_at") @db.DateTime(3)
+  /// api_user_reports.id of a report clawback (no FK).
+  reportId                BigInt?                    @map("report_id") @db.UnsignedBigInt
+  /// The detection (api_message_copies id / received_at) the search was seeded from (no FK).
+  seedCopyId              BigInt?                    @map("seed_copy_id") @db.UnsignedBigInt
+  seedCopyReceivedAt      DateTime?                  @map("seed_copy_received_at") @db.DateTime(3)
+  /// When the signal arose (C5.3 restore check); `created_at` for admin clawbacks.
+  signalAt                DateTime                   @map("signal_at") @db.DateTime(3)
+  /// Claim lease and next due time of the `clawback` role.
+  leaseUntil              DateTime?                  @map("lease_until") @db.DateTime(3)
+  nextStepAt              DateTime?                  @map("next_step_at") @db.DateTime(3)
+  /// Code only (contracts §38).
+  lastErrorCode           String?                    @map("last_error_code") @db.VarChar(64)
+  /// Compare-and-set counter of every state change.
+  rowVersion              Int                        @default(1) @map("row_version") @db.UnsignedInt
+  startedAt               DateTime?                  @map("started_at") @db.DateTime(3)
+  completedAt             DateTime?                  @map("completed_at") @db.DateTime(3)
+  createdAt               DateTime                   @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime                   @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  targets      ApiClawbackTarget[]
+
+  @@unique([organizationId, signalKey])
+  @@index([organizationId, createdAt, id])
+  @@index([organizationId, status, createdAt])
+  @@index([status, nextStepAt])
+  @@index([approvalStatus, approvalExpiresAt])
+  @@index([restoreStatus, nextStepAt])
+  @@index([reportId])
+  @@map("api_clawbacks")
+}
+
+/// One matched copy of a clawback: the frozen hit list (C-I2, C4.3, C5). Materialized once in
+/// pages with `INSERT IGNORE` on (clawback_id, copy_id, copy_received_at); submit, approval and
+/// restore act on these rows only, never on a re-run search. `match_keys` = JSON array of the
+/// keys that matched (`message_id`, `attachment`, `url`, `url_domain`, `sender_subject`,
+/// `sender`, `sender_domain`; design §3.1 names a MySQL SET, which Prisma cannot map — WP1
+/// deviation in note 37 §15.1). `reason_code` / `restore_reason_code` = contracts §38 codes.
+/// `action_id` / `restore_action_id` reference api_remediation_actions (no FK). The connection,
+/// mailbox, copy and message have no FK (purge order §3.4, partitioned copy); `organization_id`
+/// is echo-checked. Deleted with the clawback (CASCADE). Content-free.
+model ApiClawbackTarget {
+  id                BigInt                         @id @default(autoincrement()) @db.UnsignedBigInt
+  clawbackId        BigInt                         @map("clawback_id") @db.UnsignedBigInt
+  organizationId    BigInt                         @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId   BigInt                         @map("api_connection_id") @db.UnsignedBigInt
+  mailboxId         BigInt                         @map("mailbox_id") @db.UnsignedBigInt
+  /// api_message_copies.id / received_at (no FK: partitioned).
+  copyId            BigInt                         @map("copy_id") @db.UnsignedBigInt
+  copyReceivedAt    DateTime                       @map("copy_received_at") @db.DateTime(3)
+  /// email_messages.id of the copy's registry message (no FK: partitioned).
+  messageId         BigInt                         @map("message_id") @db.UnsignedBigInt
+  /// JSON array of matched key names (see the model comment).
+  matchKeys         Json                           @map("match_keys")
+  status            ApiClawbackTargetStatus
+  /// Skip / result code (contracts §38), e.g. `policy_none`, `already_remediated`.
+  reasonCode        String?                        @map("reason_code") @db.VarChar(64)
+  plannedAction     ApiCopyRemediationAction?      @map("planned_action")
+  /// api_remediation_actions.id of the queued (or linked existing) action (no FK).
+  actionId          BigInt?                        @map("action_id") @db.UnsignedBigInt
+  restoreStatus     ApiClawbackTargetRestoreStatus @default(none) @map("restore_status")
+  /// `approval_required`, `refused`, `not_reversible`, `entry_<state>` or an action code.
+  restoreReasonCode String?                        @map("restore_reason_code") @db.VarChar(64)
+  restoreActionId   BigInt?                        @map("restore_action_id") @db.UnsignedBigInt
+  createdAt         DateTime                       @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt         DateTime                       @updatedAt @map("updated_at") @db.DateTime(3)
+
+  clawback ApiClawback @relation(fields: [clawbackId], references: [id], onDelete: Cascade)
+
+  @@unique([clawbackId, copyId, copyReceivedAt])
+  @@index([clawbackId, status, id])
+  @@index([clawbackId, mailboxId])
+  @@index([clawbackId, restoreStatus, id])
+  @@index([organizationId, copyId, copyReceivedAt])
+  @@index([actionId])
+  @@map("api_clawback_targets")
+}
+
+/// One report e-mail received in a report mailbox (step API-3 §3.1, C9–C12, ADR-0104). Created by
+/// the mailbox-worker `copies` role with `INSERT IGNORE` on the report copy (idempotent intake);
+/// parsed and identified by the `reports` role (claim with `lease_until` / `next_attempt_at`);
+/// triaged by the api (CAS on `row_version`). `original` = `api-report-original/1` (hashes,
+/// `subjectKey`, sender address, date; never bodies); `group_key` groups reports of the same
+/// original (C11.3). The report copy, the original's copy and registry message, the reporter's
+/// mailbox / user, the triager and `clawback_id` have no FK (partitioned rows, purge order §3.4,
+/// trail survives the user). `reporter_address` lower case. A report never remediates by itself
+/// (C-I5). Terminal rows (`resolved`, `rejected`) are pruned after
+/// API_MODE_REPORT_RETENTION_DAYS (400); an ingested original follows the message retention.
+/// `analyst_note` is untrusted operator text.
+model ApiUserReport {
+  id                     BigInt                       @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId               String                       @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId         BigInt                       @map("organization_id") @db.UnsignedBigInt
+  apiConnectionId        BigInt                       @map("api_connection_id") @db.UnsignedBigInt
+  reportMailboxId        BigInt                       @map("report_mailbox_id") @db.UnsignedBigInt
+  /// The report copy (api_message_copies id / received_at) and its registry message (no FK).
+  reportCopyId           BigInt                       @map("report_copy_id") @db.UnsignedBigInt
+  reportCopyReceivedAt   DateTime                     @map("report_copy_received_at") @db.DateTime(3)
+  reportMessageId        BigInt                       @map("report_message_id") @db.UnsignedBigInt
+  /// Lower case; header From addr-spec, else the envelope sender.
+  reporterAddress        String                       @map("reporter_address") @db.VarChar(320)
+  /// Resolved organization mailbox / user of the reporter (no FK).
+  reporterMailboxId      BigInt?                      @map("reporter_mailbox_id") @db.UnsignedBigInt
+  reporterUserId         BigInt?                      @map("reporter_user_id") @db.UnsignedBigInt
+  status                 ApiUserReportStatus
+  /// Contracts §38 code (`external_reporter`, `loop`, `auto_submitted`, `rate_limited`,
+  /// `analyst_rejected`, `too_large`, `parse_failed`).
+  rejectReason           String?                      @map("reject_reason") @db.VarChar(64)
+  identification         ApiUserReportIdentification?
+  /// `api-report-original/1` (C10.2).
+  original               Json?
+  /// `copyMessageIdHash` of the original's Message-ID.
+  originalMessageIdHash  String?                      @map("original_message_id_hash") @db.Char(64)
+  groupKey               String?                      @map("group_key") @db.Char(64)
+  /// The original's copy found in the tenant (no FK).
+  originalCopyId         BigInt?                      @map("original_copy_id") @db.UnsignedBigInt
+  originalCopyReceivedAt DateTime?                    @map("original_copy_received_at") @db.DateTime(3)
+  /// Registry message whose scan is the original's: the found copy's message or the ingested
+  /// original (no FK).
+  originalMessageId      BigInt?                      @map("original_message_id") @db.UnsignedBigInt
+  originalReceivedAt     DateTime?                    @map("original_received_at") @db.DateTime(3)
+  /// The attached original was ingested as a `mailbox_api` registry message for a scan (C10.4).
+  originalIngested       Boolean                      @default(false) @map("original_ingested")
+  /// The original's scan (else the report copy's).
+  scanVerdict            MessageVerdict?              @map("scan_verdict")
+  scanRiskScore          Int?                         @map("scan_risk_score") @db.UnsignedSmallInt
+  scanLevel              RiskLevel?                   @map("scan_level")
+  assessment             ApiUserReportAssessment?
+  analystVerdict         ApiUserReportVerdict?        @map("analyst_verdict")
+  /// Untrusted operator text.
+  analystNote            String?                      @map("analyst_note") @db.VarChar(1000)
+  triagedByUserId        BigInt?                      @map("triaged_by_user_id") @db.UnsignedBigInt
+  triagedAt              DateTime?                    @map("triaged_at") @db.DateTime(3)
+  /// api_clawbacks.id created from this report (no FK).
+  clawbackId             BigInt?                      @map("clawback_id") @db.UnsignedBigInt
+  ackFeedback            ApiUserReportFeedback        @default(none) @map("ack_feedback")
+  resultFeedback         ApiUserReportFeedback        @default(none) @map("result_feedback")
+  /// The report copy's `received_at`.
+  reportedAt             DateTime                     @map("reported_at") @db.DateTime(3)
+  /// `reports` role claim.
+  attempts               Int                          @default(0) @db.UnsignedSmallInt
+  leaseUntil             DateTime?                    @map("lease_until") @db.DateTime(3)
+  nextAttemptAt          DateTime?                    @map("next_attempt_at") @db.DateTime(3)
+  lastErrorCode          String?                      @map("last_error_code") @db.VarChar(64)
+  /// Compare-and-set counter of every state change.
+  rowVersion             Int                          @default(1) @map("row_version") @db.UnsignedInt
+  createdAt              DateTime                     @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt              DateTime                     @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization  Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
+  reportMailbox ApiMailbox        @relation(fields: [reportMailboxId], references: [id], onDelete: Restrict)
+
+  @@unique([reportCopyId, reportCopyReceivedAt])
+  @@index([organizationId, reportedAt, id])
+  @@index([organizationId, status, reportedAt, id])
+  @@index([organizationId, groupKey, status])
+  @@index([status, nextAttemptAt])
+  @@index([originalMessageId, originalReceivedAt])
+  @@index([organizationId, reporterAddress(length: 100), reportedAt])
+  @@map("api_user_reports")
+}
+
+/// API-mode settings of one organization (step API-3 §3.1, C8, C2, C6, C10, C12). No row = the
+/// defaults (`ORG_SETTINGS_DEFAULTS` of @email-gateway/mailbox-api, equal to the column
+/// defaults); the api and the mailbox-worker resolve "row or defaults" with the same pure
+/// `resolveOrgSettings`. Written by the api only (CAS on `row_version`; `updated_by_user_id` has
+/// no FK). Deleted before the organization (§3.4). Content-free.
+model ApiModeOrgSetting {
+  organizationId           BigInt              @id @map("organization_id") @db.UnsignedBigInt
+  /// Record internal (east-west) journal recipients as copies (C8; ADR-0104).
+  internalMailEnabled      Boolean             @default(true) @map("internal_mail_enabled")
+  autoClawback             ApiModeAutoClawback @default(enforce) @map("auto_clawback")
+  /// Automatic clawbacks above this many eligible mailboxes need review (C5.1).
+  autoMaxMailboxes         Int                 @default(500) @map("auto_max_mailboxes") @db.UnsignedInt
+  /// P2: purges above this many distinct eligible mailboxes need a second approver (C6).
+  purgeApprovalMailboxes   Int                 @default(50) @map("purge_approval_mailboxes") @db.UnsignedInt
+  /// Window of automatic clawback searches before the signal (C2.1).
+  clawbackLookbackDays     Int                 @default(14) @map("clawback_lookback_days") @db.UnsignedSmallInt
+  /// Minimum threat-indicator confidence for the TI sweep (C2.2).
+  tiMinConfidence          Int                 @default(80) @map("ti_min_confidence") @db.UnsignedTinyInt
+  reportAckEnabled         Boolean             @default(true) @map("report_ack_enabled")
+  reportFeedbackEnabled    Boolean             @default(true) @map("report_feedback_enabled")
+  rowVersion               Int                 @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId          BigInt?             @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt                DateTime            @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt                DateTime            @updatedAt @map("updated_at") @db.DateTime(3)
+  /// P2 separation of duties: the principal (`user:<publicId>` / `api_key:<publicId>`) who last
+  /// raised `purge_approval_mailboxes`; null when it is not above `purge_approval_before_raise`.
+  purgeApprovalRaisedBy    String?             @map("purge_approval_raised_by") @db.VarChar(80)
+  /// The threshold in effect before that principal's raise: their own purges are still checked
+  /// against it (they cannot lift the second-approver rule for themselves).
+  purgeApprovalBeforeRaise Int?                @map("purge_approval_before_raise") @db.UnsignedInt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@map("api_mode_org_settings")
+}
+
+/// Durable sweep cursors of the mailbox-worker (step API-3 C2.2): `name` = `ti:threat_indicators`
+/// or `ti:malware_signatures`, `position` = `{ createdAt, id }` of the last committed batch
+/// (keyset over the `(created_at, id)` indexes). Platform table (no tenant data); written by the
+/// `clawback` role leader only.
+model ApiModeCursor {
+  name      String   @id @db.VarChar(64)
+  position  Json
+  updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
+
+  @@map("api_mode_cursors")
 }

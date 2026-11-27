@@ -3,11 +3,13 @@ import type { PrismaClient } from '@email-gateway/database';
 import {
   EventTypes,
   type EventEnvelope,
+  threatLateSignalV1,
   type UrlInspectionCompletedV1,
 } from '@email-gateway/event-contracts';
 import { createLogger } from '@email-gateway/logger';
 import type { DynamicCacheValue, UrlCache } from '@email-gateway/url-security';
 import { describe, expect, it } from 'vitest';
+import { InconsistentLateSignalReadError } from '../../late-signal';
 import { UrlMetrics } from './url-metrics';
 import { dynamicVerdict, highConfidenceOf, UrlResultsService } from './url-results';
 import { InconsistentUrlReadError } from './url-store';
@@ -86,6 +88,7 @@ describe('dynamic verdict (U10 M5, S9, U3)', () => {
 });
 
 const AT = new Date('2026-11-05T10:00:00.123Z');
+const SIGNAL_AT = new Date('2026-11-05T10:02:00.000Z');
 const SHA = 'a'.repeat(64);
 const row = (over: Record<string, unknown> = {}) => ({
   id: 11n,
@@ -99,11 +102,39 @@ const row = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function service(state: { row: unknown; scanResult?: unknown; updated?: number }) {
+function service(state: {
+  row: unknown;
+  scanResult?: unknown;
+  updated?: number;
+  /** `email_scans` row of the round (default: running); null = gone. */
+  scan?: Record<string, unknown> | null;
+}) {
   const updates: unknown[] = [];
   const cacheWrites: Array<[string, DynamicCacheValue]> = [];
+  const outbox: Array<Record<string, unknown>> = [];
+  let scanReads = 0;
+  const scan =
+    state.scan === undefined
+      ? {
+          id: 99n,
+          received_at: new Date(AT),
+          organization_id: 7n,
+          message_id: 55n,
+          status: 'running',
+        }
+      : state.scan;
   const tx = {
     messageIdempotency: { create: () => Promise.resolve({}) },
+    messageOutbox: {
+      create: (args: { data: Record<string, unknown> }) => {
+        outbox.push(args.data);
+        return Promise.resolve({ id: 1n });
+      },
+    },
+    $queryRaw: () => {
+      scanReads += 1;
+      return Promise.resolve(scan === null ? [] : [scan]);
+    },
     urlDynamicInspection: {
       findFirst: () => Promise.resolve(state.row),
       updateMany: (args: unknown) => {
@@ -130,8 +161,9 @@ function service(state: { row: unknown; scanResult?: unknown; updated?: number }
     metrics: UrlMetrics.for(registry),
     logger: createLogger({ service: 'url-results-test', level: 'silent' }),
     highScore: 0.85,
+    now: () => new Date(SIGNAL_AT),
   });
-  return { results, updates, cacheWrites, registry };
+  return { results, updates, cacheWrites, registry, outbox, scanReads: () => scanReads };
 }
 
 const event = (
@@ -261,5 +293,102 @@ describe('results consumer (U15)', () => {
     await expect(
       s.results.handle(event({ status: 'failed', errorCode: null })),
     ).rejects.toBeInstanceOf(NonRetryableError);
+  });
+
+  it('ignores the late signal while the round is running (no outbox row)', async () => {
+    const s = service({ row: row() });
+    expect(
+      await s.results.handle(
+        event({ signals: signals({ passwordFields: 1, titleBrandMatches: ['paypal'] }) }),
+      ),
+    ).toBe('handled');
+    expect(s.scanReads()).toBe(1);
+    expect(s.outbox).toEqual([]);
+  });
+});
+
+const finished = (status = 'completed') => ({
+  id: 99n,
+  received_at: new Date(AT),
+  organization_id: 7n,
+  message_id: 55n,
+  status,
+});
+
+describe('late url verdicts (step API-3 C2.1)', () => {
+  it('malicious after the round completed: one late_signal.v1 row in the same transaction', async () => {
+    const s = service({ row: row(), scan: finished() });
+    expect(
+      await s.results.handle(
+        event({ signals: signals({ passwordFields: 1, titleBrandMatches: ['paypal'] }) }),
+      ),
+    ).toBe('handled');
+    expect(s.outbox).toHaveLength(1);
+    const written = s.outbox[0]!;
+    expect(written).toMatchObject({
+      organizationId: 7n,
+      eventType: EventTypes.ThreatLateSignal,
+      aggregateType: 'message',
+      aggregateId: '55',
+      correlationId: 'c',
+    });
+    expect(written.payload).toEqual({
+      kind: 'url_dynamic',
+      messageId: '55',
+      receivedAt: AT.toISOString(),
+      scanId: '99',
+      revision: null,
+      verdict: 'phishing',
+      level: 'critical',
+      hardBlocks: ['hb.clawback.url'],
+      attachmentSha256: [],
+      urlSha256: [SHA],
+      signalAt: SIGNAL_AT.toISOString(),
+    });
+    expect(threatLateSignalV1.safeParse(written.payload).success).toBe(true);
+    expect(await s.registry.metrics()).toMatch(
+      /scan_late_signals_total\{[^}]*kind="url_dynamic"[^}]*\} 1/,
+    );
+  });
+
+  it('suspicious after a timed-out round: suspicious, high, no hard block', async () => {
+    const s = service({ row: row(), scan: finished('timed_out') });
+    await s.results.handle(event({ signals: signals({ downloadAttempted: true }) }));
+    expect(s.outbox).toHaveLength(1);
+    expect(s.outbox[0]!.payload).toMatchObject({
+      verdict: 'suspicious',
+      level: 'high',
+      hardBlocks: [],
+    });
+  });
+
+  it('clean or failed inspections never read the round nor write a signal', async () => {
+    const clean = service({ row: row(), scan: finished() });
+    await clean.results.handle(event());
+    const failed = service({ row: row(), scan: finished() });
+    await failed.results.handle(
+      event({ status: 'failed', errorCode: 'navigation_timeout', signals: signals() }),
+    );
+    for (const s of [clean, failed]) {
+      expect(s.scanReads()).toBe(0);
+      expect(s.outbox).toEqual([]);
+    }
+  });
+
+  it('a gone round writes nothing; a round of another message is a wrong read (thrown)', async () => {
+    const gone = service({ row: row(), scan: null });
+    await gone.results.handle(event({ signals: signals({ downloadAttempted: true }) }));
+    expect(gone.outbox).toEqual([]);
+    const foreign = service({ row: row(), scan: { ...finished(), message_id: 56n } });
+    await expect(
+      foreign.results.handle(event({ signals: signals({ downloadAttempted: true }) })),
+    ).rejects.toBeInstanceOf(InconsistentLateSignalReadError);
+    expect(foreign.outbox).toEqual([]);
+  });
+
+  it('a duplicate (row no longer pending) writes no second signal', async () => {
+    const s = service({ row: row({ status: 'completed' }), scan: finished() });
+    await s.results.handle(event({ signals: signals({ downloadAttempted: true }) }));
+    expect(s.outbox).toEqual([]);
   });
 });

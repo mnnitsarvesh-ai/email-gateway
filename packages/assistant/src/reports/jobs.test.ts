@@ -117,6 +117,8 @@ describe('queued report card and envelope', () => {
 describe('reportJobRoutePaths (I26: the job token allow-list)', () => {
   it('is the sorted, deduplicated /api/v1 GET paths of every report source tool', () => {
     expect(reportJobRoutePaths()).toEqual([
+      // Step API-3 C16: the API-mode overview of the `api_mode` section.
+      '/api/v1/api-mode/overview',
       '/api/v1/ato/accounts',
       '/api/v1/ato/overview',
       '/api/v1/quarantine/summary',
@@ -133,7 +135,7 @@ describe('reportJobRoutePaths (I26: the job token allow-list)', () => {
   it('every source of REPORT_SOURCES maps to one of them', () => {
     const paths = new Set(reportJobRoutePaths());
     const keys = new Set(Object.values(REPORT_SOURCES).flat());
-    expect(keys.size).toBe(9);
+    expect(keys.size).toBe(10);
     for (const path of paths) expect(path.startsWith('/api/v1/')).toBe(true);
     expect(findTool('report_generate')!.description).toContain(
       'Windows longer than 7 days are generated in the background.',

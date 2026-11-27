@@ -65,7 +65,16 @@ export const REMEDIATION_ACTION_KINDS = [
   'restore_inbox',
   'remove_tag',
 ] as const;
-export const REMEDIATION_TRIGGERS = ['policy', 'admin', 'release', 'end_user', 'system'] as const;
+export const REMEDIATION_TRIGGERS = [
+  'policy',
+  'admin',
+  'release',
+  'end_user',
+  'system',
+  // Step API-3: automatic clawbacks and administrator purges (C5.4).
+  'clawback',
+  'purge',
+] as const;
 export const COPY_REMEDIATION_STATES = [
   'none',
   'pending',
@@ -110,6 +119,8 @@ export const TRIGGER_LABEL: Record<string, string> = {
   release: 'Quarantine release',
   end_user: 'End user (self-service)',
   system: 'System',
+  clawback: 'Automatic clawback',
+  purge: 'Purge (search, report or campaign)',
 };
 
 export const VERDICT_LABEL: Record<RuleVerdict, string> = {

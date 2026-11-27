@@ -33,7 +33,9 @@ import { stack } from './support/env';
  * assistant action confirmations of step AI-2 (29-ai-chat-confirmations-mail-writes.md §3) and
  * the AI assistant reports and report emails of step AI-R (31-ai-chat-reports.md §3) and the
  * API-mode protection tables and columns of step API-1 (35-api-mode-protection.md §3) and the
- * API-mode remediation tables and columns of step API-2 (36-api-mode-remediation.md §3).
+ * API-mode remediation tables and columns of step API-2 (36-api-mode-remediation.md §3) and the
+ * API-mode clawback and report tables and columns of step API-3
+ * (37-api-mode-clawback-reporting.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -143,6 +145,8 @@ const NOT_TENANT_OWNED = [
   // Step 8.2 §3.1: the platform snapshot of provider egress ranges.
   'provider_egress_range_sets',
   'provider_egress_ranges',
+  // Step API-3 §3.1: the mailbox-worker's durable sweep cursors (platform, no tenant data).
+  'api_mode_cursors',
 ];
 
 /** Tenant-owned tables whose `organization_id` is nullable (platform-level rows), per D1. */
@@ -358,17 +362,23 @@ const TENANT_OWNED = [
   // Step API-2 §3.1: remediation policies and mailbox actions (organization_id NOT NULL on both).
   'api_remediation_policies',
   'api_remediation_actions',
+  // Step API-3 §3.1: clawbacks, their targets, user reports and per-organization API-mode
+  // settings (organization_id NOT NULL on all four).
+  'api_clawbacks',
+  'api_clawback_targets',
+  'api_user_reports',
+  'api_mode_org_settings',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 191 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 196 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(191);
-    expect(new Set(ALL_TABLES).size).toBe(191);
+    expect(ALL_TABLES).toHaveLength(196);
+    expect(new Set(ALL_TABLES).size).toBe(196);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -7078,6 +7088,9 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       quarantine_container_id: ['varchar(256)', 'YES'],
       tag_container_id: ['varchar(256)', 'YES'],
       containers_checked_at: ['datetime(3)', 'YES'],
+      // Step API-3 §3.2: the report-mailbox flag.
+      report_mailbox: ['tinyint(1)', 'NO'],
+      report_mailbox_at: ['datetime(3)', 'YES'],
     });
     expect(cols.get('api_mailboxes.status')!.columnDefault).toBe('discovered');
     expect(cols.get('api_mailboxes.coverage_state')!.columnDefault).toBe('out_of_scope');
@@ -7170,6 +7183,8 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       remediation_generation: ['smallint unsigned', 'NO'],
       last_action_id: ['bigint unsigned', 'YES'],
       remediation_updated_at: ['datetime(3)', 'YES'],
+      // Step API-3 §3.2 (C3.3).
+      verdict_revision: ['tinyint unsigned', 'NO'],
     });
     const idx = await indexes(table);
     expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
@@ -7267,6 +7282,13 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       'remediation_throttled',
       'remediation_latency_count',
       'remediation_latency_max_ms',
+      // Step API-3 §3.2 (C8, C5.5, C9.2, C11.4).
+      'internal_copies',
+      'clawback_targets_queued',
+      'clawback_targets_succeeded',
+      'clawback_targets_failed',
+      'reports_received',
+      'reports_resolved',
     ]) {
       counters[column] = ['int unsigned', 'NO'];
     }
@@ -7546,7 +7568,8 @@ describe('step API-2 API-mode remediation schema (36-api-mode-remediation.md §3
       action: [ACTION, 'NO'],
       generation: ['smallint unsigned', 'NO'],
       action_key: ['char(64)', 'NO'],
-      trigger: ["enum('policy','admin','release','end_user','system')", 'NO'],
+      // Step API-3 §3.2 appends `clawback`, `purge`.
+      trigger: ["enum('policy','admin','release','end_user','system','clawback','purge')", 'NO'],
       status: [
         "enum('pending','in_progress','succeeded','failed','skipped','simulated','cancelled')",
         'NO',
@@ -7573,6 +7596,8 @@ describe('step API-2 API-mode remediation schema (36-api-mode-remediation.md §3
       row_version: ['int unsigned', 'NO'],
       created_at: ['datetime(3)', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-3 §3.2 (C5.4).
+      clawback_id: ['bigint unsigned', 'YES'],
     });
     expect(cols.get(`${table}.generation`)!.columnDefault).toBe('0');
     await expectIndexes(table, {
@@ -7785,6 +7810,682 @@ describe('step API-2 API-mode remediation schema (36-api-mode-remediation.md §3
       await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
       await prisma.apiMailbox.deleteMany({ where: { organizationId } });
       await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
+      await prisma.providerConnection.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step API-3 API-mode clawback and report schema (37-api-mode-clawback-reporting.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<
+      { columnName: string; referenced: string; onDelete: string; onUpdate: string }[]
+    >`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete, r.UPDATE_RULE AS onUpdate
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectColumns = async (table: string, expected: Record<string, [string, string]>) => {
+    const cols = await columns([table]);
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({ columnType, nullable });
+    }
+    return cols;
+  };
+
+  const expectIndexes = async (
+    table: string,
+    expected: Record<string, { columns: string[]; unique: boolean }>,
+  ) => {
+    const idx = await indexes(table);
+    for (const [name, definition] of Object.entries(expected)) {
+      expect(idx.get(name), name).toEqual(definition);
+    }
+  };
+
+  const expectDefaults = (
+    cols: Map<string, ColumnInfo>,
+    table: string,
+    expected: Record<string, string | null>,
+  ) => {
+    for (const [column, columnDefault] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`)!.columnDefault, column).toBe(columnDefault);
+    }
+  };
+
+  const VERDICT =
+    "enum('clean','spam','bulk','phishing','malware','bec','dlp_violation','suspicious','unknown')";
+  const COPY_ACTION = "enum('move_quarantine','move_junk','tag','soft_delete','hard_delete')";
+  const COUNTS = [
+    'targets_total',
+    'mailboxes_total',
+    'targets_eligible',
+    'mailboxes_eligible',
+    'targets_skipped',
+    'targets_simulated',
+    'targets_queued',
+    'targets_succeeded',
+    'targets_failed',
+    'targets_cancelled',
+    'restores_queued',
+    'restores_succeeded',
+    'restores_failed',
+    'restores_skipped',
+  ];
+
+  it('creates api_clawbacks (not partitioned, one clawback per organization and signal key)', async () => {
+    const table = 'api_clawbacks';
+    const expected: Record<string, [string, string]> = {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      trigger: ["enum('late_verdict','threat_intel','campaign','report','admin')", 'NO'],
+      signal_key: ['char(64)', 'YES'],
+      signal: ['json', 'NO'],
+      criteria: ['json', 'NO'],
+      criteria_sha256: ['char(64)', 'NO'],
+      decision_mode: ["enum('policy','explicit')", 'YES'],
+      action: ["enum('move_quarantine','move_junk','soft_delete','hard_delete')", 'YES'],
+      signal_verdict: [VERDICT, 'YES'],
+      signal_level: ["enum('low','medium','high','critical')", 'YES'],
+      signal_hard_blocks: ['json', 'YES'],
+      status: [
+        "enum('searching','ready','review_required','pending_approval','queued','running'," +
+          "'completed','completed_with_errors','no_match','too_broad','denied','expired'," +
+          "'cancelled','failed')",
+        'NO',
+      ],
+      cancel_requested_at: ['datetime(3)', 'YES'],
+      restore_status: [
+        "enum('none','requested','running','completed','completed_with_errors')",
+        'NO',
+      ],
+      requires_approval: ['tinyint(1)', 'NO'],
+      approval_reasons: ['json', 'YES'],
+      approval_status: ["enum('pending','approved','denied','expired','cancelled')", 'YES'],
+      approval_requested_at: ['datetime(3)', 'YES'],
+      approval_expires_at: ['datetime(3)', 'YES'],
+      approval_decided_at: ['datetime(3)', 'YES'],
+      approved_by_user_id: ['bigint unsigned', 'YES'],
+      approval_decision_reason: ['varchar(512)', 'YES'],
+      approver_permissions_hash: ['char(64)', 'YES'],
+      requested_by_type: ["enum('system','user','api_key')", 'NO'],
+      requested_by_user_id: ['bigint unsigned', 'YES'],
+      submitted_by_user_id: ['bigint unsigned', 'YES'],
+      request_reason: ['varchar(512)', 'YES'],
+      submitted_at: ['datetime(3)', 'YES'],
+      report_id: ['bigint unsigned', 'YES'],
+      seed_copy_id: ['bigint unsigned', 'YES'],
+      seed_copy_received_at: ['datetime(3)', 'YES'],
+      signal_at: ['datetime(3)', 'NO'],
+      lease_until: ['datetime(3)', 'YES'],
+      next_step_at: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      started_at: ['datetime(3)', 'YES'],
+      completed_at: ['datetime(3)', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    };
+    for (const column of COUNTS) expected[column] = ['int unsigned', 'NO'];
+    const cols = await expectColumns(table, expected);
+    expectDefaults(cols, table, {
+      restore_status: 'none',
+      requires_approval: '0',
+      row_version: '1',
+      signal_key: null,
+      approval_status: null,
+      ...Object.fromEntries(COUNTS.map((c) => [c, '0'])),
+    });
+    await expectIndexes(table, {
+      api_clawbacks_public_id_key: { columns: ['public_id'], unique: true },
+      api_clawbacks_organization_id_signal_key_key: {
+        columns: ['organization_id', 'signal_key'],
+        unique: true,
+      },
+      api_clawbacks_organization_id_created_at_id_idx: {
+        columns: ['organization_id', 'created_at', 'id'],
+        unique: false,
+      },
+      api_clawbacks_organization_id_status_created_at_idx: {
+        columns: ['organization_id', 'status', 'created_at'],
+        unique: false,
+      },
+      api_clawbacks_status_next_step_at_idx: {
+        columns: ['status', 'next_step_at'],
+        unique: false,
+      },
+      api_clawbacks_approval_status_approval_expires_at_idx: {
+        columns: ['approval_status', 'approval_expires_at'],
+        unique: false,
+      },
+      api_clawbacks_restore_status_next_step_at_idx: {
+        columns: ['restore_status', 'next_step_at'],
+        unique: false,
+      },
+      api_clawbacks_report_id_idx: { columns: ['report_id'], unique: false },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      {
+        columnName: 'organization_id',
+        referenced: 'organizations',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+    expect(PARTITIONED[table]).toBeUndefined();
+  });
+
+  it('creates api_clawback_targets (frozen hit list, cascade with the clawback)', async () => {
+    const table = 'api_clawback_targets';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      clawback_id: ['bigint unsigned', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      mailbox_id: ['bigint unsigned', 'NO'],
+      copy_id: ['bigint unsigned', 'NO'],
+      copy_received_at: ['datetime(3)', 'NO'],
+      message_id: ['bigint unsigned', 'NO'],
+      // JSON array of matched key names (design §3.1 names a SET; WP1 deviation, note 37 §15.1).
+      match_keys: ['json', 'NO'],
+      status: [
+        "enum('matched','skipped','simulated','queued','succeeded','failed','cancelled')",
+        'NO',
+      ],
+      reason_code: ['varchar(64)', 'YES'],
+      planned_action: [COPY_ACTION, 'YES'],
+      action_id: ['bigint unsigned', 'YES'],
+      restore_status: ["enum('none','queued','succeeded','failed','skipped')", 'NO'],
+      restore_reason_code: ['varchar(64)', 'YES'],
+      restore_action_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expectDefaults(cols, table, { restore_status: 'none' });
+    await expectIndexes(table, {
+      api_clawback_targets_clawback_id_copy_id_copy_received_at_key: {
+        columns: ['clawback_id', 'copy_id', 'copy_received_at'],
+        unique: true,
+      },
+      api_clawback_targets_clawback_id_status_id_idx: {
+        columns: ['clawback_id', 'status', 'id'],
+        unique: false,
+      },
+      api_clawback_targets_clawback_id_mailbox_id_idx: {
+        columns: ['clawback_id', 'mailbox_id'],
+        unique: false,
+      },
+      api_clawback_targets_clawback_id_restore_status_id_idx: {
+        columns: ['clawback_id', 'restore_status', 'id'],
+        unique: false,
+      },
+      api_clawback_targets_organization_id_copy_id_copy_received_a_idx: {
+        columns: ['organization_id', 'copy_id', 'copy_received_at'],
+        unique: false,
+      },
+      api_clawback_targets_action_id_idx: { columns: ['action_id'], unique: false },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      {
+        columnName: 'clawback_id',
+        referenced: 'api_clawbacks',
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+    expect(PARTITIONED[table]).toBeUndefined();
+  });
+
+  it('creates api_user_reports (idempotent intake key, reporter prefix index)', async () => {
+    const table = 'api_user_reports';
+    const cols = await expectColumns(table, {
+      id: ['bigint unsigned', 'NO'],
+      public_id: ['char(36)', 'NO'],
+      organization_id: ['bigint unsigned', 'NO'],
+      api_connection_id: ['bigint unsigned', 'NO'],
+      report_mailbox_id: ['bigint unsigned', 'NO'],
+      report_copy_id: ['bigint unsigned', 'NO'],
+      report_copy_received_at: ['datetime(3)', 'NO'],
+      report_message_id: ['bigint unsigned', 'NO'],
+      reporter_address: ['varchar(320)', 'NO'],
+      reporter_mailbox_id: ['bigint unsigned', 'YES'],
+      reporter_user_id: ['bigint unsigned', 'YES'],
+      status: [
+        "enum('received','parsing','scanning','pending_triage','in_review','resolved','rejected')",
+        'NO',
+      ],
+      reject_reason: ['varchar(64)', 'YES'],
+      identification: ["enum('attachment','inline','none','unsupported')", 'YES'],
+      original: ['json', 'YES'],
+      original_message_id_hash: ['char(64)', 'YES'],
+      group_key: ['char(64)', 'YES'],
+      original_copy_id: ['bigint unsigned', 'YES'],
+      original_copy_received_at: ['datetime(3)', 'YES'],
+      original_message_id: ['bigint unsigned', 'YES'],
+      original_received_at: ['datetime(3)', 'YES'],
+      original_ingested: ['tinyint(1)', 'NO'],
+      scan_verdict: [VERDICT, 'YES'],
+      scan_risk_score: ['smallint unsigned', 'YES'],
+      scan_level: ["enum('none','low','medium','high','critical')", 'YES'],
+      assessment: ["enum('malicious','suspicious','clean','unknown')", 'YES'],
+      analyst_verdict: [
+        "enum('malicious','phishing_simulation','spam','clean','inconclusive')",
+        'YES',
+      ],
+      analyst_note: ['varchar(1000)', 'YES'],
+      triaged_by_user_id: ['bigint unsigned', 'YES'],
+      triaged_at: ['datetime(3)', 'YES'],
+      clawback_id: ['bigint unsigned', 'YES'],
+      ack_feedback: ["enum('none','queued','skipped')", 'NO'],
+      result_feedback: ["enum('none','queued','skipped')", 'NO'],
+      reported_at: ['datetime(3)', 'NO'],
+      attempts: ['smallint unsigned', 'NO'],
+      lease_until: ['datetime(3)', 'YES'],
+      next_attempt_at: ['datetime(3)', 'YES'],
+      last_error_code: ['varchar(64)', 'YES'],
+      row_version: ['int unsigned', 'NO'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expectDefaults(cols, table, {
+      original_ingested: '0',
+      ack_feedback: 'none',
+      result_feedback: 'none',
+      attempts: '0',
+      row_version: '1',
+    });
+    await expectIndexes(table, {
+      api_user_reports_public_id_key: { columns: ['public_id'], unique: true },
+      api_user_reports_report_copy_id_report_copy_received_at_key: {
+        columns: ['report_copy_id', 'report_copy_received_at'],
+        unique: true,
+      },
+      api_user_reports_organization_id_reported_at_id_idx: {
+        columns: ['organization_id', 'reported_at', 'id'],
+        unique: false,
+      },
+      api_user_reports_organization_id_status_reported_at_id_idx: {
+        columns: ['organization_id', 'status', 'reported_at', 'id'],
+        unique: false,
+      },
+      api_user_reports_organization_id_group_key_status_idx: {
+        columns: ['organization_id', 'group_key', 'status'],
+        unique: false,
+      },
+      api_user_reports_status_next_attempt_at_idx: {
+        columns: ['status', 'next_attempt_at'],
+        unique: false,
+      },
+      api_user_reports_original_message_id_original_received_at_idx: {
+        columns: ['original_message_id', 'original_received_at'],
+        unique: false,
+      },
+      api_user_reports_organization_id_reporter_address_reported_a_idx: {
+        columns: ['organization_id', 'reporter_address', 'reported_at'],
+        unique: false,
+      },
+    });
+    const prefix = await prisma.$queryRaw<{ subPart: number | bigint | null }[]>`
+      SELECT SUB_PART AS subPart FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ${table}
+        AND INDEX_NAME = 'api_user_reports_organization_id_reporter_address_reported_a_idx'
+        AND COLUMN_NAME = 'reporter_address'`;
+    expect(Number(prefix[0]!.subPart)).toBe(100);
+    expect(await foreignKeys(table)).toEqual([
+      {
+        columnName: 'api_connection_id',
+        referenced: 'api_mode_connections',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+      {
+        columnName: 'organization_id',
+        referenced: 'organizations',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+      {
+        columnName: 'report_mailbox_id',
+        referenced: 'api_mailboxes',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+    expect(PARTITIONED[table]).toBeUndefined();
+  });
+
+  it('creates api_mode_org_settings (defaults = ORG_SETTINGS_DEFAULTS) and the platform api_mode_cursors', async () => {
+    const settings = 'api_mode_org_settings';
+    const cols = await expectColumns(settings, {
+      organization_id: ['bigint unsigned', 'NO'],
+      internal_mail_enabled: ['tinyint(1)', 'NO'],
+      auto_clawback: ["enum('enforce','review','off')", 'NO'],
+      auto_max_mailboxes: ['int unsigned', 'NO'],
+      purge_approval_mailboxes: ['int unsigned', 'NO'],
+      clawback_lookback_days: ['smallint unsigned', 'NO'],
+      ti_min_confidence: ['tinyint unsigned', 'NO'],
+      report_ack_enabled: ['tinyint(1)', 'NO'],
+      report_feedback_enabled: ['tinyint(1)', 'NO'],
+      row_version: ['int unsigned', 'NO'],
+      updated_by_user_id: ['bigint unsigned', 'YES'],
+      created_at: ['datetime(3)', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+      // API-3 review fix (migration 20261127120000): P2 separation of duties.
+      purge_approval_before_raise: ['int unsigned', 'YES'],
+      purge_approval_raised_by: ['varchar(80)', 'YES'],
+    });
+    expectDefaults(cols, settings, {
+      internal_mail_enabled: '1',
+      auto_clawback: 'enforce',
+      auto_max_mailboxes: '500',
+      purge_approval_mailboxes: '50',
+      clawback_lookback_days: '14',
+      ti_min_confidence: '80',
+      report_ack_enabled: '1',
+      report_feedback_enabled: '1',
+      row_version: '1',
+    });
+    expect((await indexes(settings)).get('PRIMARY')).toEqual({
+      columns: ['organization_id'],
+      unique: true,
+    });
+    expect(await foreignKeys(settings)).toEqual([
+      {
+        columnName: 'organization_id',
+        referenced: 'organizations',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+
+    await expectColumns('api_mode_cursors', {
+      name: ['varchar(64)', 'NO'],
+      position: ['json', 'NO'],
+      updated_at: ['datetime(3)', 'NO'],
+    });
+    expect((await indexes('api_mode_cursors')).get('PRIMARY')).toEqual({
+      columns: ['name'],
+      unique: true,
+    });
+    expect(await foreignKeys('api_mode_cursors')).toEqual([]);
+  });
+
+  it('adds the §3.2 columns, indexes and the appended triggers to existing tables', async () => {
+    const cols = await columns([
+      'api_mailboxes',
+      'api_message_copies',
+      'api_mode_counters',
+      'api_remediation_actions',
+    ]);
+    const expected: Record<string, [string, string, string | null]> = {
+      'api_mailboxes.report_mailbox': ['tinyint(1)', 'NO', '0'],
+      'api_mailboxes.report_mailbox_at': ['datetime(3)', 'YES', null],
+      'api_message_copies.verdict_revision': ['tinyint unsigned', 'NO', '0'],
+      'api_remediation_actions.clawback_id': ['bigint unsigned', 'YES', null],
+      'api_remediation_actions.trigger': [
+        "enum('policy','admin','release','end_user','system','clawback','purge')",
+        'NO',
+        null,
+      ],
+    };
+    for (const column of [
+      'internal_copies',
+      'clawback_targets_queued',
+      'clawback_targets_succeeded',
+      'clawback_targets_failed',
+      'reports_received',
+      'reports_resolved',
+    ]) {
+      expected[`api_mode_counters.${column}`] = ['int unsigned', 'NO', '0'];
+    }
+    for (const [key, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(key), key).toMatchObject({ columnType, nullable, columnDefault });
+    }
+    await expectIndexes('api_mailboxes', {
+      api_mailboxes_organization_id_report_mailbox_idx: {
+        columns: ['organization_id', 'report_mailbox'],
+        unique: false,
+      },
+    });
+    await expectIndexes('api_remediation_actions', {
+      api_remediation_actions_clawback_id_status_idx: {
+        columns: ['clawback_id', 'status'],
+        unique: false,
+      },
+    });
+    await expectIndexes('threat_indicators', {
+      threat_indicators_created_at_id_idx: { columns: ['created_at', 'id'], unique: false },
+    });
+    await expectIndexes('malware_signatures', {
+      malware_signatures_created_at_id_idx: { columns: ['created_at', 'id'], unique: false },
+    });
+    // No backfill: nothing is a report mailbox or has a clawback before API-3 writers run, and
+    // the partition registry is unchanged (no new partitioned table).
+    expect(Object.keys(PARTITIONED)).toHaveLength(42);
+  });
+
+  it('dedupes signals and targets, cascades targets, enforces RESTRICT and the §3.4 purge order', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const provider = await prisma.providerConnection.create({
+      data: { organizationId, provider: 'microsoft_365', displayName: `it-apiclaw-${suffix}` },
+    });
+    try {
+      const connection = await prisma.apiModeConnection.create({
+        data: { organizationId, providerConnectionId: provider.id, provider: 'microsoft_365' },
+      });
+      const mailbox = await prisma.apiMailbox.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          primaryAddress: `user@it-apiclaw-${suffix}.example.test`,
+        },
+      });
+      expect(mailbox).toMatchObject({ reportMailbox: false, reportMailboxAt: null });
+      const reportMailbox = await prisma.apiMailbox.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          primaryAddress: `report@it-apiclaw-${suffix}.example.test`,
+          reportMailbox: true,
+          reportMailboxAt: new Date(),
+        },
+      });
+      const receivedAt = new Date();
+      const copy = await prisma.apiMessageCopy.create({
+        data: {
+          receivedAt,
+          publicId: randomUUID(),
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          messageId: 9_310_000_000n,
+          source: 'journal',
+          direction: 'internal',
+          status: 'scanned',
+          verdict: 'clean',
+        },
+      });
+      expect(copy).toMatchObject({ verdictRevision: 0, direction: 'internal' });
+
+      // One clawback per (organization, signal_key): INSERT IGNORE returns 0 on a replay.
+      const signalKey = 'd'.repeat(64);
+      const insertSignal = () => prisma.$executeRaw`
+        INSERT IGNORE INTO api_clawbacks
+          (public_id, organization_id, \`trigger\`, signal_key, \`signal\`, criteria,
+           criteria_sha256, decision_mode, status, requested_by_type, signal_at, updated_at)
+        VALUES (${randomUUID()}, ${organizationId}, 'late_verdict', ${signalKey},
+           JSON_OBJECT('v', 1, 'kind', 'sandbox_revision'), JSON_OBJECT('v', 1),
+           ${'e'.repeat(64)}, 'policy', 'searching', 'system', NOW(3), NOW(3))`;
+      expect(await insertSignal()).toBe(1);
+      expect(await insertSignal()).toBe(0);
+      expect(await prisma.apiClawback.count({ where: { organizationId, signalKey } })).toBe(1);
+      // Admin clawbacks have no signal key: NULLs never collide.
+      const admin = {
+        organizationId,
+        trigger: 'admin' as const,
+        signal: { v: 1, kind: 'admin', refs: {}, facts: null },
+        criteria: { v: 1 },
+        criteriaSha256: 'f'.repeat(64),
+        status: 'searching' as const,
+        requestedByType: 'user' as const,
+        signalAt: new Date(),
+      };
+      const clawback = await prisma.apiClawback.create({ data: admin });
+      await prisma.apiClawback.create({ data: admin });
+      expect(clawback).toMatchObject({
+        restoreStatus: 'none',
+        requiresApproval: false,
+        targetsTotal: 0,
+        rowVersion: 1,
+        signalKey: null,
+      });
+      expect(clawback.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+
+      // Frozen targets: one per (clawback, copy); INSERT IGNORE returns 0 on a replay.
+      const target = await prisma.apiClawbackTarget.create({
+        data: {
+          clawbackId: clawback.id,
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          copyId: copy.id,
+          copyReceivedAt: receivedAt,
+          messageId: copy.messageId,
+          matchKeys: ['message_id', 'attachment'],
+          status: 'matched',
+        },
+      });
+      expect(target).toMatchObject({ restoreStatus: 'none', plannedAction: null });
+      const ignoredTarget = await prisma.$executeRaw`
+        INSERT IGNORE INTO api_clawback_targets
+          (clawback_id, organization_id, api_connection_id, mailbox_id, copy_id, copy_received_at,
+           message_id, match_keys, status, updated_at)
+        VALUES (${clawback.id}, ${organizationId}, ${connection.id}, ${mailbox.id}, ${copy.id},
+           ${receivedAt}, ${copy.messageId}, JSON_ARRAY('url'), 'matched', NOW(3))`;
+      expect(ignoredTarget).toBe(0);
+
+      // The appended triggers and the clawback link on an action row.
+      const action = await prisma.apiRemediationAction.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          copyId: copy.id,
+          copyReceivedAt: receivedAt,
+          messageId: copy.messageId,
+          action: 'move_quarantine',
+          actionKey: '1'.repeat(64),
+          trigger: 'purge',
+          status: 'pending',
+          requestedByType: 'user',
+          clawbackId: clawback.id,
+        },
+      });
+      expect(action).toMatchObject({ trigger: 'purge', clawbackId: clawback.id });
+      await prisma.apiRemediationAction.update({
+        where: { id: action.id },
+        data: { trigger: 'clawback' },
+      });
+
+      // Reports: one per report copy (idempotent intake).
+      const report = {
+        organizationId,
+        apiConnectionId: connection.id,
+        reportMailboxId: reportMailbox.id,
+        reportCopyId: 9_310_000_001n,
+        reportCopyReceivedAt: receivedAt,
+        reportMessageId: 9_310_000_002n,
+        reporterAddress: `user@it-apiclaw-${suffix}.example.test`,
+        status: 'received' as const,
+        reportedAt: receivedAt,
+      };
+      const created = await prisma.apiUserReport.create({ data: report });
+      expect(created).toMatchObject({
+        ackFeedback: 'none',
+        resultFeedback: 'none',
+        originalIngested: false,
+        attempts: 0,
+        rowVersion: 1,
+      });
+      await expect(prisma.apiUserReport.create({ data: report })).rejects.toMatchObject({
+        code: 'P2002',
+      });
+      const ignoredReport = await prisma.$executeRaw`
+        INSERT IGNORE INTO api_user_reports
+          (public_id, organization_id, api_connection_id, report_mailbox_id, report_copy_id,
+           report_copy_received_at, report_message_id, reporter_address, status, reported_at,
+           updated_at)
+        VALUES (${randomUUID()}, ${organizationId}, ${connection.id}, ${reportMailbox.id},
+           ${report.reportCopyId}, ${receivedAt}, ${report.reportMessageId},
+           ${report.reporterAddress}, 'received', ${receivedAt}, NOW(3))`;
+      expect(ignoredReport).toBe(0);
+
+      const settings = await prisma.apiModeOrgSetting.create({ data: { organizationId } });
+      expect(settings).toMatchObject({
+        internalMailEnabled: true,
+        autoClawback: 'enforce',
+        autoMaxMailboxes: 500,
+        purgeApprovalMailboxes: 50,
+        clawbackLookbackDays: 14,
+        tiMinConfidence: 80,
+        reportAckEnabled: true,
+        reportFeedbackEnabled: true,
+        rowVersion: 1,
+        purgeApprovalRaisedBy: null,
+        purgeApprovalBeforeRaise: null,
+      });
+      await expect(
+        prisma.apiModeOrgSetting.create({ data: { organizationId } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // RESTRICT: the report mailbox and the connection cannot go while a report references
+      // them; the organization cannot go while clawbacks, reports or settings exist.
+      await expect(
+        prisma.$executeRaw`DELETE FROM api_mailboxes WHERE id = ${reportMailbox.id}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      await expect(
+        prisma.$executeRaw`DELETE FROM organizations WHERE id = ${organizationId}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+
+      // CASCADE: deleting a clawback removes its targets.
+      await prisma.apiClawback.delete({ where: { id: clawback.id } });
+      expect(await prisma.apiClawbackTarget.count({ where: { clawbackId: clawback.id } })).toBe(0);
+
+      // Purge order (§3.4): targets (cascade) and clawbacks, reports, then actions, copies,
+      // mailboxes and connections; settings before the organization.
+      await prisma.apiClawback.deleteMany({ where: { organizationId } });
+      await prisma.apiUserReport.deleteMany({ where: { organizationId } });
+      await prisma.apiRemediationAction.deleteMany({ where: { organizationId } });
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.delete({ where: { id: connection.id } });
+      await prisma.apiModeOrgSetting.delete({ where: { organizationId } });
+
+      // The platform cursor table holds no tenant data.
+      const name = `it-apiclaw-${suffix}`;
+      await prisma.apiModeCursor.create({
+        data: { name, position: { createdAt: receivedAt.toISOString(), id: '0' } },
+      });
+      await prisma.apiModeCursor.delete({ where: { name } });
+    } finally {
+      await prisma.apiClawback.deleteMany({ where: { organizationId } });
+      await prisma.apiUserReport.deleteMany({ where: { organizationId } });
+      await prisma.apiRemediationAction.deleteMany({ where: { organizationId } });
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
+      await prisma.apiModeOrgSetting.deleteMany({ where: { organizationId } });
+      await prisma.apiModeCursor.deleteMany({ where: { name: `it-apiclaw-${suffix}` } });
       await prisma.providerConnection.deleteMany({ where: { organizationId } });
       await cleanup();
     }

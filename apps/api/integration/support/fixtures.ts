@@ -48,6 +48,11 @@ export interface CreateOrganizationOptions {
   features?: Partial<Record<FeatureKey, boolean>>;
   mfaRequired?: boolean;
   status?: 'active' | 'suspended';
+  /**
+   * Slug and name prefix after `it-` (e.g. `apiclaw` → `it-apiclaw-<suffix>`), so a suite's
+   * synthetic organizations are recognisable (step API-3 §9).
+   */
+  slugPrefix?: string;
 }
 
 export interface CreateUserOptions {
@@ -97,7 +102,7 @@ export class Fixtures {
       select: { id: true },
     });
     const suffix = uniqueSuffix();
-    const slug = `it-${suffix}`;
+    const slug = options.slugPrefix ? `it-${options.slugPrefix}-${suffix}` : `it-${suffix}`;
     const kind = options.kind ?? 'customer';
     const org = await this.prisma.organization.create({
       data: {

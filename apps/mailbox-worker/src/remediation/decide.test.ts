@@ -25,6 +25,9 @@ interface World {
   mailboxStatus: 'active' | 'discovered' | 'disabled' | 'deleted';
   risk: { level: string; hard_blocks: unknown } | null;
   insertResult: number;
+  /** Step API-3: `api_mode_org_settings.internal_mail_enabled` (null = no row, defaults). */
+  internalMailEnabled: boolean | null;
+  reportMailbox: boolean;
 }
 
 /** A fake writer transaction answering the decision's reads; records the writes. */
@@ -38,7 +41,26 @@ function fakeTx(world: World) {
         apiConnectionId: 7n,
         status: world.mailboxStatus,
         domainId: 3n,
+        reportMailbox: world.reportMailbox,
       })),
+    },
+    apiModeOrgSetting: {
+      findUnique: vi.fn(async () =>
+        world.internalMailEnabled === null
+          ? null
+          : {
+              organizationId: ORG,
+              internalMailEnabled: world.internalMailEnabled,
+              autoClawback: 'enforce',
+              autoMaxMailboxes: 500,
+              purgeApprovalMailboxes: 50,
+              clawbackLookbackDays: 14,
+              tiMinConfidence: 80,
+              reportAckEnabled: true,
+              reportFeedbackEnabled: true,
+              rowVersion: 1,
+            },
+      ),
     },
     providerConnectionGrant: {
       findUnique: vi.fn(async () =>
@@ -99,6 +121,8 @@ const world = (over: Partial<World> = {}): World => ({
     hard_blocks: [{ id: 'hb.malware_attachment', verdict: 'malware', action: 'block' }],
   },
   insertResult: 1,
+  internalMailEnabled: null,
+  reportMailbox: false,
   ...over,
 });
 
@@ -117,6 +141,7 @@ const copy = (over: Partial<DecisionCopy> = {}): DecisionCopy => ({
   verdictAt: new Date('2026-11-26T11:00:30.000Z'),
   remediationState: 'none',
   remediationGeneration: 0,
+  direction: 'inbound',
   ...over,
 });
 
@@ -128,6 +153,27 @@ const decider = (now = () => NOW) =>
 
 const insertOf = (writes: { sql: string; values: unknown[] }[]) =>
   writes.find((w) => w.sql.startsWith(' INSERT IGNORE INTO api_remediation_actions'));
+
+describe('RemediationDecider (R4) with step API-3 context (C8.5, C9.2)', () => {
+  it('an internal copy with internal mail disabled → skipped internal_mail_disabled', async () => {
+    const { tx, writes } = fakeTx(world({ internalMailEnabled: false }));
+    const result = await decider().decide(tx, copy({ direction: 'internal' }), '12', NOW);
+    expect(result).toMatchObject({ kind: 'skipped', inserted: true });
+    expect(insertOf(writes)!.values).toContain('internal_mail_disabled');
+  });
+
+  it('an internal copy with the default settings is decided like an inbound one', async () => {
+    const { tx } = fakeTx(world());
+    const result = await decider().decide(tx, copy({ direction: 'internal' }), '12', NOW);
+    expect(result).toMatchObject({ kind: 'pending', action: 'move_quarantine' });
+  });
+
+  it('a report-mailbox copy gets no decision (C-I5)', async () => {
+    const { tx, writes } = fakeTx(world({ reportMailbox: true }));
+    expect(await decider().decide(tx, copy(), '12', NOW)).toEqual({ kind: 'none' });
+    expect(writes).toHaveLength(0);
+  });
+});
 
 describe('RemediationDecider (R4)', () => {
   it('P1: a hard-blocked malware copy gets a pending move_quarantine due now', async () => {

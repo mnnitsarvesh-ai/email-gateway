@@ -191,6 +191,56 @@ export function RemediationTiles({ summary }: { summary: RemediationSummary }) {
   );
 }
 
+/**
+ * Step API-3 C13: internal copies, clawbacks and reports of the last 24 hours (organization
+ * block of the overview).
+ */
+export function ClawbackTiles({ overview }: { overview: Overview }) {
+  const { internal, clawback, reports } = overview;
+  return (
+    <ul
+      className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"
+      aria-label="Clawback and reports summary"
+    >
+      <li>
+        <Tile
+          label="Internal copies, last 24 hours"
+          value={formatNumber(internal.copies24h)}
+          detail={internal.enabled ? 'Internal mail protection on' : 'Internal mail protection off'}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Active clawbacks"
+          value={formatNumber(clawback.active)}
+          detail={`${formatNumber(clawback.reviewRequired)} awaiting review · ${formatNumber(clawback.pendingApproval)} awaiting approval${clawback.oldestActiveAgeSeconds !== null ? ` · ${ageText(clawback.oldestActiveAgeSeconds)}` : ''}`}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Clawbacks completed, last 24 hours"
+          value={formatNumber(clawback.completed24h)}
+          detail={`${formatNumber(clawback.targetsSucceeded24h)} messages removed · ${formatNumber(clawback.targetsFailed24h)} failed`}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Reports waiting for triage"
+          value={formatNumber(reports.pendingTriage)}
+          detail={`${ageText(reports.oldestPendingAgeSeconds)} · ${formatNumber(reports.inReview)} in review`}
+        />
+      </li>
+      <li>
+        <Tile
+          label="Reports resolved, last 24 hours"
+          value={formatNumber(reports.resolved24h)}
+          detail={`${formatNumber(reports.received24h)} received · ${formatNumber(reports.reportMailboxes)} report mailbox${reports.reportMailboxes === 1 ? '' : 'es'}`}
+        />
+      </li>
+    </ul>
+  );
+}
+
 function settingsErrorText(error: ApiError | null): string | null {
   if (!error) return null;
   switch (error.code) {
@@ -517,6 +567,7 @@ export function CoverageTab() {
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <CoverageTiles overview={overview.data} />
       <RemediationTiles summary={overview.data.remediation} />
+      <ClawbackTiles overview={overview.data} />
       <p className="text-xs text-muted-foreground">
         Updated <DateTime value={overview.data.generatedAt} />. Lag is measured from the
         provider&apos;s delivery to the verdict; coverage counts in-scope mailboxes of domains in

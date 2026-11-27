@@ -285,8 +285,10 @@ function seedOrg(organizationId: string): OrgApiState {
         lagMs: i === 5 ? null : lag,
         subject: null,
         subjectMasked: true,
-        headerFrom: `s•••@sender-${i % 5}.example.test`,
-        direction: 'inbound',
+        headerFrom: `s•••@sender-${i % 6}.example.test`,
+        direction: i % 9 === 4 ? 'internal' : 'inbound',
+        verdictRevision: i === 6 ? 1 : 0,
+        clawbacks: [],
         deliveredBasis: source === 'graph' ? 'graph_received' : 'received_header',
         reasonCodes: verdict === 'clean' ? [] : ['url.reputation_malicious', 'auth.dmarc_fail'],
         remediationState: 'none',
@@ -295,12 +297,13 @@ function seedOrg(organizationId: string): OrgApiState {
         quarantineEntryId: null,
       };
     });
+    org.detections.forEach((d, i) => SEARCH_KEYS.set(d.id, searchKeysOf(i)));
     seedRemediations(organizationId, org, first);
     for (const mailbox of org.mailboxes)
       mailbox.recentDetections = org.detections
         .filter((d) => d.mailboxId === mailbox.id)
         .slice(0, 20)
-        .map(({ direction: _d, deliveredBasis: _b, reasonCodes: _r, ...rest }) => rest);
+        .map(({ deliveredBasis: _b, reasonCodes: _r, ...rest }) => rest);
   }
   return org;
 }
@@ -627,6 +630,7 @@ function listView(action: Action): ActionRow {
     nextAttemptAt: action.nextAttemptAt,
     completedAt: action.completedAt,
     latencyMs: action.latencyMs,
+    clawbackId: action.clawbackId,
   };
 }
 
@@ -641,6 +645,7 @@ function newAction(
     reason?: string | null;
     userId?: string | null;
     ruleId?: string | null;
+    clawbackId?: string | null;
   },
 ): Action {
   const completed = input.status === 'succeeded' || input.status === 'failed';
@@ -686,7 +691,7 @@ function newAction(
           }
         : { requestedAction: input.action, reason: input.reason ?? null },
     requestedBy:
-      input.trigger === 'policy' || input.trigger === 'system'
+      input.trigger === 'policy' || input.trigger === 'system' || input.trigger === 'clawback'
         ? { type: 'system', userId: null }
         : { type: 'user', userId: input.userId ?? null },
     requestReason: input.reason ?? null,
@@ -705,6 +710,7 @@ function newAction(
     verdictAt: detection.verdictAt,
     startedAt: completed ? new Date(Date.parse(input.at) + 1_000).toISOString() : null,
     updatedAt: completedAt ?? input.at,
+    clawbackId: input.clawbackId ?? null,
   };
 }
 
@@ -1056,6 +1062,197 @@ function userOf(request: FixtureRequest): string {
   return stableUuid(`user:${request.token ?? 'unknown'}`);
 }
 
+// ---- step API-3: what the clawback fixture (api-mode-clawback.ts) needs from this state --------
+
+/** Synthetic search keys of a seeded copy (the registry message's Message-ID, sender, …; C4.2). */
+export interface CopySearchKeys {
+  readonly messageId: string;
+  readonly sender: string;
+  readonly subject: string;
+  readonly attachmentSha256: readonly string[];
+  readonly urls: readonly string[];
+}
+
+const SEARCH_KEYS = new Map<string, CopySearchKeys>();
+
+/** Copies of one campaign group (index mod 6) share their keys: a search finds several mailboxes. */
+function searchKeysOf(index: number): CopySearchKeys {
+  const g = index % 6;
+  return {
+    messageId: `<campaign-${g}@mail.sender-${g}.example.test>`,
+    sender: `billing@sender-${g}.example.test`,
+    subject: `Invoice ${1000 + g} overdue`,
+    attachmentSha256: g % 2 === 0 ? [sha(`attachment:${g}`)] : [],
+    urls: g % 3 === 0 ? [`https://login-${g}.phish.example.test/reset`] : [],
+  };
+}
+
+export function copySearchKeys(detectionId: string): CopySearchKeys | null {
+  return SEARCH_KEYS.get(detectionId) ?? null;
+}
+
+type OverviewBody = SuccessBody<'ApiModeController_overview_v1'>;
+type OrgBlocks = Pick<OverviewBody, 'internal' | 'clawback' | 'reports'>;
+type ConnectionBlocks = Pick<
+  OverviewBody['connections'][number],
+  'internal' | 'clawback' | 'reports'
+>;
+interface ClawbackHooks {
+  overview: (organizationId: string, connectionId: null) => OrgBlocks;
+  connection: (organizationId: string, connectionId: string) => ConnectionBlocks;
+}
+const EMPTY_REPORTS = {
+  pendingTriage: 0,
+  inReview: 0,
+  received24h: 0,
+  resolved24h: 0,
+  oldestPendingAgeSeconds: null,
+  reportMailboxes: 0,
+};
+const hookStore = globalThis as typeof globalThis & { __egDevFixtureClawbackHooks?: ClawbackHooks };
+
+/** The clawback fixture provides the overview's internal, clawback and reports blocks (C13). */
+export function registerClawbackHooks(hooks: ClawbackHooks): void {
+  hookStore.__egDevFixtureClawbackHooks = hooks;
+}
+
+function clawbackHooks(): ClawbackHooks {
+  return (
+    hookStore.__egDevFixtureClawbackHooks ?? {
+      overview: () => ({
+        internal: { copies24h: 0, enabled: true },
+        clawback: {
+          active: 0,
+          reviewRequired: 0,
+          pendingApproval: 0,
+          completed24h: 0,
+          targetsSucceeded24h: 0,
+          targetsFailed24h: 0,
+          oldestActiveAgeSeconds: null,
+        },
+        reports: EMPTY_REPORTS,
+      }),
+      connection: () => ({
+        internal: { copies24h: 0, enabled: true },
+        clawback: { targetsQueued24h: 0, targetsSucceeded24h: 0, targetsFailed24h: 0 },
+        reports: EMPTY_REPORTS,
+      }),
+    }
+  );
+}
+
+/** The organization's API-mode rows (the worker has run, as on every read). */
+export function apiModeStateOf(organizationId: string): {
+  mailboxes: Mailbox[];
+  detections: Detection[];
+  actions: Action[];
+  connectionIds: string[];
+} {
+  const org = orgState(organizationId);
+  return {
+    mailboxes: org.mailboxes,
+    detections: org.detections,
+    actions: org.actions,
+    connectionIds: [...org.connections.keys()],
+  };
+}
+
+/** API-mode domains of the organization (report mailboxes added by address must be in one). */
+export function apiModeDomainsOf(organizationId: string): Array<{ id: string; name: string }> {
+  return apiDomains(organizationId).map((d) => ({ id: d.id, name: d.name }));
+}
+
+/**
+ * A mailbox action queued for a clawback target (C5.4): the `remediate` role of this fixture
+ * runs it like any other (about 8 s later) and the mailbox entry follows (R9.1).
+ */
+export function queueClawbackAction(
+  organizationId: string,
+  detection: Detection,
+  input: {
+    action: Action['action'];
+    trigger: 'clawback' | 'purge' | 'admin' | 'release';
+    clawbackId: string;
+    userId: string | null;
+    reason: string | null;
+    reverses?: string | null;
+  },
+): Action {
+  const org = orgState(organizationId);
+  const action = newAction(detection, {
+    seed: `${input.clawbackId}:${detection.id}:${input.action}:${Date.now()}`,
+    action: input.action,
+    trigger: input.trigger,
+    status: 'pending',
+    at: new Date().toISOString(),
+    reason: input.reason,
+    userId: input.userId,
+    clawbackId: input.clawbackId,
+  });
+  action.reverses = input.reverses ?? null;
+  org.actions.unshift(action);
+  applyToDetection(detection, action);
+  return action;
+}
+
+/** Cancels a pending clawback action (C5.6); the copy goes back to its earlier state. */
+export function cancelClawbackAction(organizationId: string, actionId: string): void {
+  const org = orgState(organizationId);
+  const action = org.actions.find((a) => a.id === actionId);
+  if (!action || action.status !== 'pending') return;
+  action.status = 'cancelled';
+  action.nextAttemptAt = null;
+  action.updatedAt = new Date().toISOString();
+  const detection = org.detections.find((d) => d.id === action.detectionId);
+  if (!detection) return;
+  const previous = org.actions.find(
+    (a) =>
+      a.detectionId === detection.id &&
+      a.id !== action.id &&
+      a.status === 'succeeded' &&
+      a.action !== 'restore_inbox' &&
+      a.action !== 'remove_tag',
+  );
+  detection.remediationState = previous ? 'remediated' : 'none';
+  detection.remediationAction =
+    previous && previous.action !== 'restore_inbox' && previous.action !== 'remove_tag'
+      ? previous.action
+      : null;
+  detection.remediationId = previous?.id ?? null;
+}
+
+/** A discovered mailbox added by address (C9.1: no provider user id yet). */
+export function addDiscoveredMailbox(
+  organizationId: string,
+  address: string,
+  domain: { id: string; name: string },
+): Mailbox {
+  const org = orgState(organizationId);
+  const connectionId = [...org.connections.keys()][0] ?? '';
+  const mailbox: Mailbox = {
+    id: stableUuid(`${organizationId}:mailbox:${address}`),
+    connectionId,
+    address,
+    domain,
+    status: 'discovered',
+    coverage: 'gap',
+    coverageChangedAt: new Date().toISOString(),
+    feedStatus: 'off',
+    journalLastSeenAt: null,
+    lastSyncAt: null,
+    lastErrorCode: null,
+    aliases: [],
+    feedStartedAt: null,
+    notifications: { subscribed: false, expiresAt: null },
+    lastChangeAt: null,
+    lastGapAt: null,
+    consecutiveFailures: 0,
+    recentDetections: [],
+  };
+  org.mailboxes.push(mailbox);
+  return mailbox;
+}
+
 export const fixtures: FixtureHandlers = {
   ProtectionModeController_getOrganization_v1: guarded(
     'ProtectionModeController_getOrganization_v1',
@@ -1177,6 +1374,7 @@ export const fixtures: FixtureHandlers = {
       throttling: { events1h: 0, events24h: 2 },
       copiesToday: org.detections.filter((d) => Date.parse(d.receivedAt) > Date.now() - DAY).length,
       remediation: summaryOf(p.organizationId, null),
+      ...clawbackHooks().overview(p.organizationId, null),
       connections: rows.map((r, i) => ({
         id: r.id,
         displayName: r.displayName,
@@ -1196,6 +1394,7 @@ export const fixtures: FixtureHandlers = {
         copiesToday: i === 0 ? org.detections.length : 0,
         throttledUntil: r.throttledUntil,
         remediation: summaryOf(p.organizationId, r.id),
+        ...clawbackHooks().connection(p.organizationId, r.id),
       })),
     });
   }),
@@ -1380,10 +1579,11 @@ export const fixtures: FixtureHandlers = {
             (!q.get('mailboxId') || d.mailboxId === q.get('mailboxId')) &&
             (!q.get('connectionId') || d.connectionId === q.get('connectionId')) &&
             (!q.get('remediationState') ||
-              (q.get('remediationState') ?? '').split(',').includes(d.remediationState))
+              (q.get('remediationState') ?? '').split(',').includes(d.remediationState)) &&
+            (!q.get('direction') || (q.get('direction') ?? '').split(',').includes(d.direction))
           );
         })
-        .map(({ direction: _d, deliveredBasis: _b, reasonCodes: _r, ...row }) => row);
+        .map(({ deliveredBasis: _b, reasonCodes: _r, ...row }) => row);
       return { status: 200, body: paginate(rows, q) };
     },
   ),

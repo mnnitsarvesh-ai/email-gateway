@@ -44,13 +44,13 @@ const mutableQueue = (topology: { queues: QueueDefinition[] }, name: QueueName) 
   return queue;
 };
 
-describe('TOPOLOGY v17', () => {
+describe('TOPOLOGY v18', () => {
   it('satisfies every invariant of design §3', () => {
     expect(validateTopology(TOPOLOGY)).toEqual([]);
   });
 
-  it('declares exactly the six exchanges and twenty-six queues (v17)', () => {
-    expect(TOPOLOGY_VERSION).toBe(17);
+  it('declares exactly the six exchanges and twenty-six queues (v18)', () => {
+    expect(TOPOLOGY_VERSION).toBe(18);
     expect(DEFAULT_VHOST).toBe('email-gateway');
     expect([...TOPOLOGY.exchanges]).toEqual([
       'email.ingestion',
@@ -101,7 +101,7 @@ describe('TOPOLOGY v17', () => {
     }
   });
 
-  it('assigns roles: twenty-two work queues, one delay, one dead-letter, two dormant (v17)', () => {
+  it('assigns roles: twenty-two work queues, one delay, one dead-letter, two dormant (v18)', () => {
     const byRole = (role: string) =>
       TOPOLOGY.queues.filter((q) => q.role === role).map((q) => q.name);
     expect(byRole('work')).toEqual([
@@ -280,6 +280,8 @@ describe('TOPOLOGY v17', () => {
         'email.security org.*.ato.notification.requested.v1',
         // v15 (step AI-R D8): assistant report emails.
         'email.policy org.*.assistant.report.email_requested.v1',
+        // v18 (step API-3 C12): reporter feedback of API-mode user reports.
+        'email.policy org.*.mail.report.feedback_requested.v1',
         'email.policy retry.email.notifications.#',
       ],
       // v11 (step 6.2 §4.3): each source event on the exchange it is published to.
@@ -332,6 +334,8 @@ describe('TOPOLOGY v17', () => {
       'email.mailbox': [
         'email.security',
         'email.security org.*.mail.message.copy_scanned.v1',
+        // v18 (step API-3 C2.1): late sandbox / URL verdicts.
+        'email.security org.*.mail.threat.late_signal.v1',
         'email.security retry.email.mailbox.#',
       ],
       'email.analytics': [
@@ -1364,7 +1368,14 @@ describe('routing (topic semantics)', () => {
       'ato.notification.requested.v1',
       'mail.policy.notification_requested.v1',
       'mail.quarantine.notification_requested.v1',
+      // v18 (step API-3 C12).
+      'mail.report.feedback_requested.v1',
       'notification.alert_requested.v1',
+    ]);
+    // v18 (step API-3 C2.1): the copies role also consumes late signals.
+    expect(eventTypesBoundTo('email.mailbox')).toEqual([
+      'mail.message.copy_scanned.v1',
+      'mail.threat.late_signal.v1',
     ]);
     // v13 (step 8.4 D3).
     expect(eventTypesBoundTo('ato.events')).toEqual([
@@ -1629,7 +1640,7 @@ describe('toRabbitDefinitions (Q5)', () => {
   const definitions = toRabbitDefinitions(TOPOLOGY, { vhost: DEFAULT_VHOST });
 
   it('declares topic exchanges and quorum queues with no other argument', () => {
-    expect(definitions.topology_version).toBe(17);
+    expect(definitions.topology_version).toBe(18);
     expect(definitions.exchanges).toHaveLength(6);
     for (const exchange of definitions.exchanges) {
       expect(exchange).toEqual({
@@ -1678,8 +1689,10 @@ describe('toRabbitDefinitions (Q5)', () => {
     // D8): email.notifications adds one (assistant.report.email_requested.v1): 69 queue + 5
     // exchange = 74. v16 (step AI-6 D5): assistant.reports adds two (generate_requested.v1 +
     // retry): 71 queue + 5 exchange = 76. v17 (step API-1 D7): email.mailbox adds two
-    // (copy_scanned.v1 + retry): 73 queue + 5 exchange = 78.
-    expect(definitions.bindings).toHaveLength(78);
+    // (copy_scanned.v1 + retry): 73 queue + 5 exchange = 78. v18 (step API-3 C2.1, C12):
+    // email.mailbox adds late_signal.v1 and email.notifications report.feedback_requested.v1:
+    // 75 queue + 5 exchange = 80.
+    expect(definitions.bindings).toHaveLength(80);
     const keys = definitions.bindings.map(
       (b) => `${b.source}|${b.destination_type}|${b.destination}|${b.routing_key}`,
     );

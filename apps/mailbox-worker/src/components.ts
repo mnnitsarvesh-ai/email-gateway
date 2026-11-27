@@ -3,6 +3,9 @@ import type { PrismaClient } from '@email-gateway/database';
 import type { RateBudget, Sleep } from '@email-gateway/idp-adapters';
 import type { Logger } from '@email-gateway/logger';
 import type { ThrottleEvent, ThrottleGate } from '@email-gateway/mailbox-api';
+import { ClawbackRunner } from './clawback/clawback-runner';
+import { LateSignalHandler } from './clawback/late-signal.handler';
+import { TI_SWEEP_LOCK, TiSweep } from './clawback/ti-sweep';
 import { hasRole, notificationsAvailable, type WorkerConfig } from './config';
 import { CopiesHandler } from './copies/copies.handler';
 import { S3HeaderReader, type HeaderReader } from './copies/header-reader';
@@ -15,6 +18,7 @@ import type { MailboxMetrics } from './metrics/mailbox-metrics';
 import { RemediationDecider } from './remediation/decide';
 import { RemediationRunner } from './remediation/executor';
 import { RemediationPolicyLoader } from './remediation/policy-loader';
+import { ReportsRunner } from './reports/reports-runner';
 import {
   createMailboxAccessTokens,
   ProviderRuntime,
@@ -56,9 +60,13 @@ export interface ComponentDeps {
  * Every component of the mailbox-worker (design D5), built once per process and started per role
  * (`MAILBOX_WORKER_ROLES`): `copies` (the `email.mailbox` handler with the step API-2 remediation
  * decision; the consumer is started by the module), `feeds` (claim loop), `inventory` (claim
- * loop), `remediate` (claim loop over `api_remediation_actions`, step API-2 R5) and `health`
- * (leader-locked health, maintenance incl. mailbox entry expiry, and the counters flush). The provider runtime (credential key, token cache, provider
- * HTTPS) exists only where a provider-calling role runs.
+ * loop), `remediate` (claim loop over `api_remediation_actions`, step API-2 R5), `clawback`
+ * (step API-3: materialization, queueing, reconcile, cancel, approval expiry, bulk restore and the
+ * leader-locked threat-intelligence sweep), `reports` (step API-3: report parsing,
+ * identification, original ingest, acknowledgements) and `health` (leader-locked health,
+ * maintenance incl. mailbox entry expiry and API-3 retention, and the counters flush). The
+ * provider runtime (credential key, token cache, provider HTTPS) exists only where a
+ * provider-calling role runs; `clawback` and `reports` never call a provider (C-I1).
  */
 export class MailboxComponents {
   readonly now: () => Date;
@@ -72,6 +80,14 @@ export class MailboxComponents {
   /** Step API-2 R5: the `remediate` role's claim loop (null without a provider runtime). */
   readonly remediation: RemediationRunner | null;
   readonly policies: RemediationPolicyLoader;
+  /** Step API-3 C2.1: late signals on the copies queue. */
+  readonly lateSignals: LateSignalHandler;
+  /** Step API-3 C1: the `clawback` role (no provider call). */
+  readonly clawback: ClawbackRunner;
+  readonly tiSweep: TiSweep;
+  readonly tiLeader: LeaderJob;
+  /** Step API-3 C10: the `reports` role (no provider call). */
+  readonly reports: ReportsRunner;
   readonly health: HealthJob;
   readonly maintenance: Maintenance;
   readonly healthLeader: LeaderJob;
@@ -114,9 +130,18 @@ export class MailboxComponents {
       now,
       logger: logger.child({ component: 'remediation-policies' }),
     });
+    this.lateSignals = new LateSignalHandler({
+      prisma,
+      metrics,
+      logger: logger.child({ role: 'copies' }),
+      now,
+      ...orgs,
+    });
+    const headers = deps.headers ?? new S3HeaderReader(deps.s3, deps.mailBucket);
+    const sink = deps.sink ?? new S3EmlSink(deps.s3, deps.mailBucket);
     this.copies = new CopiesHandler({
       prisma,
-      headers: deps.headers ?? new S3HeaderReader(deps.s3, deps.mailBucket),
+      headers,
       counters: this.counters,
       metrics,
       logger: logger.child({ role: 'copies' }),
@@ -124,11 +149,80 @@ export class MailboxComponents {
       config: {
         hybridLinkWindowHours: config.API_MODE_HYBRID_LINK_WINDOW_HOURS,
         headerMaxBytes: config.INGEST_HEADER_MAX_BYTES,
+        reportAlertMinIntervalMinutes: config.API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES,
       },
       decider: new RemediationDecider({
         policies: this.policies,
         hardDeleteEnabled: config.API_MODE_HARD_DELETE_ENABLED,
       }),
+      lateSignals: this.lateSignals,
+      ...orgs,
+    });
+    const quarantineBounds = {
+      maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
+      maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
+    };
+    this.clawback = new ClawbackRunner({
+      prisma,
+      policies: this.policies,
+      counters: this.counters,
+      metrics,
+      logger: logger.child({ role: 'clawback' }),
+      now,
+      config: {
+        tickMs: config.API_MODE_CLAWBACK_TICK_MS,
+        leaseSeconds: config.API_MODE_CLAWBACK_LEASE_SECONDS,
+        maxTargets: config.API_MODE_CLAWBACK_MAX_TARGETS,
+        maxWindowDays: config.API_MODE_CLAWBACK_MAX_WINDOW_DAYS,
+        queueBatch: config.API_MODE_CLAWBACK_QUEUE_BATCH,
+        maxPendingPerConnection: config.API_MODE_CLAWBACK_MAX_PENDING_PER_CONNECTION,
+        hardDeleteEnabled: config.API_MODE_HARD_DELETE_ENABLED,
+        approvalTtlHours: config.API_MODE_PURGE_APPROVAL_TTL_HOURS,
+        bounds: quarantineBounds,
+      },
+      ...orgs,
+    });
+    this.tiSweep = new TiSweep({
+      prisma,
+      metrics,
+      logger: logger.child({ role: 'clawback' }),
+      now,
+      config: {
+        batch: config.API_MODE_CLAWBACK_TI_BATCH,
+        maxTargets: config.API_MODE_CLAWBACK_MAX_TARGETS,
+      },
+      cursorPrefix: deps.lockPrefix ?? '',
+      ...orgs,
+    });
+    this.tiLeader = new LeaderJob(
+      'clawback-ti',
+      `${deps.lockPrefix ?? ''}${TI_SWEEP_LOCK}`,
+      config.API_MODE_CLAWBACK_TI_INTERVAL_SECONDS * 1000,
+      async () => {
+        await this.tiSweep.runOnce();
+      },
+      {
+        locks: deps.locks,
+        logger,
+        onLeadership: (leader) => metrics?.leader.set({ job: 'clawback-ti' }, leader ? 1 : 0),
+      },
+    );
+    this.reports = new ReportsRunner({
+      prisma,
+      redis: deps.redis,
+      reader: headers,
+      sink,
+      metrics,
+      logger: logger.child({ role: 'reports' }),
+      now,
+      config: {
+        maxBytes: config.API_MODE_REPORT_MAX_BYTES,
+        maxOriginalBytes: config.API_MODE_MAX_MESSAGE_BYTES,
+        headerMaxBytes: config.INGEST_HEADER_MAX_BYTES,
+        perReporterPerHour: config.API_MODE_REPORTS_PER_REPORTER_PER_HOUR,
+        alertMinIntervalMinutes: config.API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES,
+        scanTimeoutMinutes: config.API_MODE_REPORT_SCAN_TIMEOUT_MINUTES,
+      },
       ...orgs,
     });
     this.feeds = this.runtime
@@ -136,7 +230,7 @@ export class MailboxComponents {
           prisma,
           runtime: this.runtime,
           throttle: this.throttle,
-          sink: deps.sink ?? new S3EmlSink(deps.s3, deps.mailBucket),
+          sink,
           counters: this.counters,
           metrics,
           logger: logger.child({ role: 'feeds' }),
@@ -199,10 +293,7 @@ export class MailboxComponents {
             quarantineFolderHidden: config.API_MODE_QUARANTINE_FOLDER_HIDDEN,
             gmailQuarantineLabel: config.API_MODE_GMAIL_QUARANTINE_LABEL,
             tagName: config.API_MODE_TAG_NAME,
-            bounds: {
-              maxHoldDays: config.QUARANTINE_MAX_HOLD_DAYS,
-              maxReviewDays: config.QUARANTINE_MAX_REVIEW_DAYS,
-            },
+            bounds: quarantineBounds,
           },
           ...orgs,
         })
@@ -230,6 +321,11 @@ export class MailboxComponents {
           backlogWarnMinutes: config.API_MODE_REMEDIATION_BACKLOG_WARN_MINUTES,
           backlogFailMinutes: config.API_MODE_REMEDIATION_BACKLOG_FAIL_MINUTES,
         },
+        clawback: {
+          stalledWarnMinutes: config.API_MODE_CLAWBACK_STALLED_WARN_MINUTES,
+          stalledFailMinutes: config.API_MODE_CLAWBACK_STALLED_FAIL_MINUTES,
+        },
+        reports: { triageWarnHours: config.API_MODE_REPORT_TRIAGE_WARN_HOURS },
       },
       policies: this.policies,
       ...orgs,
@@ -242,6 +338,8 @@ export class MailboxComponents {
       config: {
         dedupeWindowHours: config.API_MODE_DEDUPE_WINDOW_HOURS,
         remediationRetentionDays: config.API_MODE_REMEDIATION_RETENTION_DAYS,
+        clawbackRetentionDays: config.API_MODE_CLAWBACK_RETENTION_DAYS,
+        reportRetentionDays: config.API_MODE_REPORT_RETENTION_DAYS,
       },
       ...orgs,
     });
@@ -320,6 +418,24 @@ export class MailboxComponents {
         ),
       );
     }
+    if (hasRole(config, 'clawback')) {
+      const clawback = this.clawback;
+      this.periodics.push(
+        new Periodic(
+          'clawback',
+          config.API_MODE_CLAWBACK_TICK_MS,
+          () => clawback.tick(),
+          deps.logger,
+        ),
+      );
+      this.tiLeader.start();
+    }
+    if (hasRole(config, 'reports')) {
+      const reports = this.reports;
+      this.periodics.push(
+        new Periodic('reports', config.API_MODE_REPORTS_TICK_MS, () => reports.tick(), deps.logger),
+      );
+    }
     if (hasRole(config, 'inventory') && this.inventory) {
       const inventory = this.inventory;
       this.periodics.push(new Periodic('inventory', 30_000, () => inventory.tick(), deps.logger));
@@ -347,6 +463,7 @@ export class MailboxComponents {
     await Promise.all(this.periodics.map((p) => p.stop()));
     this.periodics.length = 0;
     await this.healthLeader.stop();
+    await this.tiLeader.stop();
     // A last flush keeps the counters of this process (the next leader would flush them too).
     if (hasRole(this.config, 'health')) {
       await this.counters.flush(this.deps.organizationIds).catch(() => undefined);

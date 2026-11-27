@@ -10,6 +10,8 @@ import type { ApiConfig } from '../../config';
 export const API_MODE_PERMISSIONS = {
   read: 'remediation:read',
   write: 'remediation:write',
+  // Step API-3 §3.3 (docs/plan/steps/37-api-mode-clawback-reporting.md).
+  purge: 'remediation:purge',
   organizationRead: 'organization:read',
   organizationManage: 'organization:manage',
   domainManage: 'domain:manage',
@@ -27,6 +29,18 @@ export const API_MODE_AUDIT = {
   remediationRequested: 'api_mode.remediation_requested',
   restoreRequested: 'api_mode.restore_requested',
   remediationRetryRequested: 'api_mode.remediation_retry_requested',
+  // Step API-3 §5 (docs/plan/steps/37-api-mode-clawback-reporting.md); content-free metadata.
+  clawbackCreated: 'api_mode.clawback_created',
+  clawbackSubmitted: 'api_mode.clawback_submitted',
+  clawbackApprovalRequested: 'api_mode.clawback_approval_requested',
+  clawbackApproved: 'api_mode.clawback_approved',
+  clawbackDenied: 'api_mode.clawback_denied',
+  clawbackCancelled: 'api_mode.clawback_cancelled',
+  clawbackRestoreRequested: 'api_mode.clawback_restore_requested',
+  settingsOrgUpdated: 'api_mode.settings_org_updated',
+  reportMailboxUpdated: 'api_mode.report_mailbox_updated',
+  reportTriaged: 'api_mode.report_triaged',
+  reportClawbackRequested: 'api_mode.report_clawback_requested',
 } as const;
 
 /** `audit_logs.resource_type` of the module's rows. */
@@ -38,6 +52,10 @@ export const API_MODE_RESOURCES = {
   remediationPolicy: 'api_remediation_policy',
   remediation: 'api_remediation_action',
   detection: 'api_message_copy',
+  // Step API-3.
+  clawback: 'api_clawback',
+  report: 'api_user_report',
+  orgSettings: 'api_mode_org_settings',
 } as const;
 
 /** Stable Idempotency-Key operation names. */
@@ -54,6 +72,19 @@ export const API_MODE_OPERATIONS = {
   remediationRetry: 'api_mode.remediation_retry',
   remediate: 'api_mode.remediate',
   restore: 'api_mode.restore',
+  // Step API-3 C14.
+  clawbackCreate: 'api_mode.clawback_create',
+  clawbackSubmit: 'api_mode.clawback_submit',
+  clawbackSubmitHardDelete: 'api_mode.clawback_submit_hard_delete',
+  clawbackApprove: 'api_mode.clawback_approve',
+  clawbackDeny: 'api_mode.clawback_deny',
+  clawbackCancel: 'api_mode.clawback_cancel',
+  clawbackRestore: 'api_mode.clawback_restore',
+  reportTriage: 'api_mode.report_triage',
+  reportClawback: 'api_mode.report_clawback',
+  reportMailboxAdd: 'api_mode.report_mailbox_add',
+  reportMailboxSet: 'api_mode.report_mailbox_set',
+  orgSettingsPut: 'api_mode.settings_org_put',
 } as const;
 
 /** v1 cursor resources (ADR-0051). */
@@ -61,6 +92,10 @@ export const API_MODE_CURSOR_RESOURCES = {
   mailboxes: 'api_mailboxes',
   detections: 'api_message_copies',
   remediations: 'api_remediation_actions',
+  // Step API-3 C14.
+  clawbacks: 'api_clawbacks',
+  clawbackTargets: 'api_clawback_targets',
+  reports: 'api_user_reports',
 } as const;
 
 /** Writer transaction budget of the module's mutations. */
@@ -80,6 +115,26 @@ export const REMEDIATIONS_MAX_DAYS = 31;
 export const REMEDIATION_BACKLOG_COUNT_CAP = 10_000;
 /** `quarantine:release`: the extra permission of a restore that delegates to the release (R12). */
 export const QUARANTINE_RELEASE_PERMISSION = 'quarantine:release';
+
+/** Step API-3 C14 #2, #11: default window and the longest range of the clawback/report lists. */
+export const CLAWBACKS_DEFAULT_DAYS = 30;
+export const CLAWBACKS_MAX_DAYS = 93;
+export const REPORTS_DEFAULT_DAYS = 30;
+export const REPORTS_MAX_DAYS = 93;
+/** Step API-3 C14 #12: at most this many group members in a report detail. */
+export const REPORT_GROUP_MEMBERS_MAX = 50;
+/** Step API-3 C14 #12: at most this many triage history entries (audit rows). */
+export const REPORT_HISTORY_MAX = 50;
+/** Step API-3: detections list/detail show at most this many clawbacks that targeted the copy. */
+export const DETECTION_CLAWBACKS_MAX = 5;
+/** Step API-3 C13: live counts of the overview's clawback and reports blocks stop here. */
+export const CLAWBACK_COUNT_CAP = 10_000;
+/** Step API-3 C2.4: the campaign expansion's sender + subject window (hours). */
+export const CAMPAIGN_SENDER_SUBJECT_HOURS = { min: 1, max: 168, default: 72 } as const;
+/** Step API-3 C2.4: at most this many attachment / URL hashes a campaign seed contributes. */
+export const CAMPAIGN_SEED_HASHES_MAX = 20;
+/** Step API-3 C11.4: a resolved report can be reopened once. */
+export const REPORT_REOPEN_LIMIT = 1;
 
 /** `GET /api-mode/connections/{id}`: days of counters. */
 export const CONNECTION_COUNTER_DAYS = 7;
@@ -102,4 +157,7 @@ export type ApiModeConfig = Pick<
   | 'PROVIDER_M365_MAILBOX_APP_CLIENT_ID'
   | 'PROVIDER_GOOGLE_MAILBOX_SA_CLIENT_ID'
   | 'API_MODE_HARD_DELETE_ENABLED'
+  | 'API_MODE_CLAWBACK_MAX_WINDOW_DAYS'
+  | 'API_MODE_PURGE_APPROVAL_TTL_HOURS'
+  | 'API_MODE_REPORT_MAILBOXES_MAX'
 >;

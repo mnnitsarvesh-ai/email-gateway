@@ -93,10 +93,11 @@ The `permissions` table is seeded from `PERMISSIONS` in `packages/database/src/s
 | `assistant:configure`          | Enable the AI assistant for the organization, set its budget and retention, view its usage (step AI-1; category `assistant`)             |
 | `remediation:read`             | View API-mode protection: mailbox coverage, connection health, intake lag, throttling and detections (step API-1; in the read set)       |
 | `remediation:write`            | Manage API-mode protection: change feeds, mailbox inventory and resync; grant mailbox access (step API-1; category `remediation`)        |
+| `remediation:purge`            | Search, purge, approve and restore clawbacks of API-mode copies across mailboxes (step API-3; category `remediation`)                    |
 
 Step 8.6 (ADR-0089) also re-scoped `archive:read` to "View archive configuration, retention policies, key versions and status (no records)" (it is in the read set) and exports `ARCHIVE_ACCESS_PERMISSIONS` = `archive:search`, `archive:retrieve`, `archive:export`, `archive:legal_hold`, `archive:manage`, `ediscovery:manage` (the permissions that open archived mail or govern it).
 
-The catalog has **76** permissions (74 before step API-1, 72 before step AI-1, 70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
+The catalog has **77** permissions (76 before step API-3, 74 before step API-1, 72 before step AI-1, 70 before step 8.6, 68 before step 8.2, 64 before step 8.4, 60 before step 8.1, 59 before step 7.2, 58 before step 6.2, 55 before step 6.1, 49 before step 5.3). There is no generic `incident:*` permission: access to security incidents is per category (see [Account takeover and security incidents](#account-takeover-and-security-incidents-step-84)).
 
 `GET /permissions` lists `platform:*` keys only to users of the platform organization who are not under an override; customer users and API keys see the tenant permissions only.
 
@@ -198,6 +199,7 @@ Generated from the seed catalog (`SYSTEM_ROLES`); if the catalog changes, regene
 | `assistant:configure`          |  ✓  |     |  ✓  |     |     |     |     |     |     |     |
 | `remediation:read`             |  ✓  |  ✓  |  ✓  |  ✓  |  ✓  |     |  ✓  |  ✓  |     |     |
 | `remediation:write`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
+| `remediation:purge`            |  ✓  |     |  ✓  |     |  ✓  |     |     |     |     |     |
 
 **Platform roles** are the roles that hold any `platform:*` permission: `super_admin` and `platform_admin` (`PLATFORM_ROLE_KEYS`). They can be assigned only to users of the platform organization (`kind = platform`); assigning one in a customer organization is `400`. Customer organizations never see platform roles in `GET /roles` or `GET /roles/{key}` (`404`). Domain Admin is organization-wide; per-domain scoping of roles is out of scope for now.
 
@@ -598,7 +600,7 @@ Design [25-m365-google-connectors.md](../plan/steps/25-m365-google-connectors.md
 
 ## API-mode protection (step API-1)
 
-Design [35-api-mode-protection.md](../plan/steps/35-api-mode-protection.md) §3.3, D2, D4, D12; [ADR-0098](../architecture/adr/0098-protection-modes-and-detect-mode-copies.md), [ADR-0099](../architecture/adr/0099-mailbox-access-consent-and-custody.md). Permissions (category `remediation`): `remediation:read` (coverage, connection health, lag, throttling, mailboxes, detections; part of `TENANT_READ_PERMISSIONS`) and `remediation:write` (change feeds, inventory and resync requests, and the mailbox-access grants; from step API-2 remediation and restore actions). `remediation:purge` is designed for step API-3 and does not exist yet. The protection-mode changes use the existing organization and domain permissions. Grants of the migration `api_mode_protection` are additive only (no user loses a permission; effect check with the `effective-permissions export|compare` CLI).
+Design [35-api-mode-protection.md](../plan/steps/35-api-mode-protection.md) §3.3, D2, D4, D12; [ADR-0098](../architecture/adr/0098-protection-modes-and-detect-mode-copies.md), [ADR-0099](../architecture/adr/0099-mailbox-access-consent-and-custody.md). Permissions (category `remediation`): `remediation:read` (coverage, connection health, lag, throttling, mailboxes, detections; part of `TENANT_READ_PERMISSIONS`) and `remediation:write` (change feeds, inventory and resync requests, and the mailbox-access grants; from step API-2 remediation and restore actions). `remediation:purge` (step API-3, migration 45: search and purge, clawback approval and restore; held by super_admin, organization_admin and security_analyst; restore of a clawback also needs `quarantine:release`). The protection-mode changes use the existing organization and domain permissions. Grants of the migration `api_mode_protection` are additive only (no user loses a permission; effect check with the `effective-permissions export|compare` CLI).
 
 | Route                                                                                                                                                               | Permission(s)                                                                                                                     | Principals                                  | Override |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | -------- |

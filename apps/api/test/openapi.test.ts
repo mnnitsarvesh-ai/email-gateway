@@ -229,8 +229,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // 11 hardening operations of step AI-6 (docs/plan/steps/34-ai-chat-hardening-operations.md
     // §4.1, contracts §35.6): 439; plus the 16 operations of step API-1
     // (docs/plan/steps/35-api-mode-protection.md D12): 455; plus the 9 remediation operations of
-    // step API-2 (docs/plan/steps/36-api-mode-remediation.md R13): 464, all under /api/v1.
-    expect(count).toBe(464);
+    // step API-2 (docs/plan/steps/36-api-mode-remediation.md R13): 464; plus the 19 clawback,
+    // report and settings operations of step API-3
+    // (docs/plan/steps/37-api-mode-clawback-reporting.md C14): 483, all under /api/v1.
+    expect(count).toBe(483);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -948,8 +950,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // update and address rotation); step API-1: 5 transactional protection-mode and API-mode
     // mutations (organization and domain mode, settings, inventory sync, mailbox resync); step
     // API-2: 6 transactional remediation mutations (policy, domain policy put and delete, retry,
-    // remediate, restore).
-    expect(keyed).toHaveLength(106);
+    // remediate, restore); step API-3: 12 transactional clawback, report and settings mutations
+    // (create, submit, hard-delete submit, approve, deny, cancel, restore, triage, report
+    // clawback, report mailbox add and set, settings put).
+    expect(keyed).toHaveLength(118);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1323,11 +1327,12 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
   it('documents the 16 step API-1 operations with their ids, permissions, keys, tags and no secret-shaped examples (D12)', () => {
     const raw = (method: string, path: string) =>
       (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
-    // Step API-2's remediation operations are checked by their own test below.
+    // Step API-2's remediation and step API-3's clawback, report and settings operations are
+    // checked by their own tests below.
     const isApi2 = (key: string) => {
       const [method, path] = key.split(' ') as [string, string];
-      return String(raw(method.toLowerCase(), path).operationId).startsWith(
-        'ApiModeRemediationController_',
+      return /^ApiMode(Remediation|Clawback|Reports|Settings)Controller_/.test(
+        String(raw(method.toLowerCase(), path).operationId),
       );
     };
     const ops = operations(doc).filter(
@@ -1509,6 +1514,129 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     expect(JSON.stringify(raw('get', '/api/v1/quarantine/entries/{entryId}'))).toContain(
       'detectionId',
     );
+  });
+
+  it('documents the 19 step API-3 clawback, report and settings operations with their ids, permissions, keys, classes, cursors, errors and no secret-shaped examples (C14)', () => {
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    const ops = operations(doc).filter((o) => {
+      const [method, path] = o.key.split(' ') as [string, string];
+      return /^ApiMode(Clawback|Reports|Settings)Controller_/.test(
+        String(raw(method.toLowerCase(), path).operationId),
+      );
+    });
+    const B = '/api/v1/api-mode';
+    const K = `${B}/clawbacks/{clawbackId}`;
+    const R = `${B}/reports/{reportId}`;
+    const purge = ['remediation:purge'];
+    const expected: Array<[string, string, string, string[], boolean]> = [
+      ['POST', `${B}/clawbacks`, 'ApiModeClawbackController_create_v1', purge, true],
+      ['GET', `${B}/clawbacks`, 'ApiModeClawbackController_list_v1', ['remediation:read'], false],
+      ['GET', K, 'ApiModeClawbackController_detail_v1', ['remediation:read'], false],
+      ['GET', `${K}/targets`, 'ApiModeClawbackController_targets_v1', ['remediation:read'], false],
+      ['POST', `${K}/submit`, 'ApiModeClawbackController_submit_v1', purge, true],
+      [
+        'POST',
+        `${K}/submit-hard-delete`,
+        'ApiModeClawbackController_submitHardDelete_v1',
+        purge,
+        true,
+      ],
+      ['POST', `${K}/approve`, 'ApiModeClawbackController_approve_v1', purge, true],
+      ['POST', `${K}/deny`, 'ApiModeClawbackController_deny_v1', purge, true],
+      ['POST', `${K}/cancel`, 'ApiModeClawbackController_cancel_v1', purge, true],
+      [
+        'POST',
+        `${K}/restore`,
+        'ApiModeClawbackController_restore_v1',
+        ['remediation:purge', 'quarantine:release'],
+        true,
+      ],
+      ['GET', `${B}/reports`, 'ApiModeReportsController_list_v1', ['remediation:read'], false],
+      ['GET', R, 'ApiModeReportsController_detail_v1', ['remediation:read'], false],
+      ['POST', `${R}/triage`, 'ApiModeReportsController_triage_v1', ['remediation:write'], true],
+      ['POST', `${R}/clawback`, 'ApiModeReportsController_clawback_v1', purge, true],
+      [
+        'GET',
+        `${B}/report-mailboxes`,
+        'ApiModeReportsController_listMailboxes_v1',
+        ['remediation:read'],
+        false,
+      ],
+      [
+        'POST',
+        `${B}/report-mailboxes`,
+        'ApiModeReportsController_addMailbox_v1',
+        ['remediation:write'],
+        true,
+      ],
+      [
+        'PUT',
+        `${B}/mailboxes/{mailboxId}/report-mailbox`,
+        'ApiModeReportsController_setMailbox_v1',
+        ['remediation:write'],
+        true,
+      ],
+      ['GET', `${B}/settings`, 'ApiModeSettingsController_get_v1', ['remediation:read'], false],
+      ['PUT', `${B}/settings`, 'ApiModeSettingsController_put_v1', ['remediation:write'], true],
+    ];
+    expect(ops.map((o) => o.key).sort()).toEqual(expected.map(([m, p]) => `${m} ${p}`).sort());
+    for (const [method, path, operationId, permissions, keyed] of expected) {
+      const op = raw(method.toLowerCase(), path);
+      // The operation ids the registry and the portal client rely on (C14, C15).
+      expect(op.operationId, path).toBe(operationId);
+      expect(op.tags, path).toEqual(['api-mode']);
+      expect(op['x-eg-permissions'], path).toEqual({ mode: 'all', permissions });
+      if (keyed) {
+        expect(op['x-eg-idempotency'], path).toBe('required');
+        expect(op['x-eg-rate-class'], path).toBe('sensitive');
+      } else {
+        expect(op['x-eg-idempotency'], path).toBeUndefined();
+      }
+    }
+    for (const path of [`${B}/clawbacks`, `${K}/targets`, `${B}/reports`]) {
+      expect(raw('get', path)['x-eg-cursor'], path).toBe('v1');
+    }
+    const all = JSON.stringify(ops.map((o) => doc.paths[o.key.split(' ')[1]!]));
+    for (const code of [
+      'api_mode_clawback_not_found',
+      'api_mode_report_not_found',
+      'api_mode_clawback_criteria_invalid',
+      'api_mode_clawback_state_conflict',
+      'api_mode_clawback_not_cancellable',
+      'api_mode_clawback_not_restorable',
+      'api_mode_purge_approval_forbidden',
+      'api_mode_purge_approval_not_pending',
+      'api_mode_report_state_conflict',
+      'api_mode_report_not_reopenable',
+      'api_mode_report_original_unknown',
+      'api_mode_report_mailbox_limit',
+      'api_mode_report_address_out_of_scope',
+      'api_mode_settings_conflict',
+      'api_mode_hard_delete_disabled',
+    ]) {
+      expect(all, code).toContain(code);
+    }
+    expect(all).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    expect(all).not.toMatch(/providerMessageId|AAMk/);
+    // The additive changes of C13/C14: overview blocks, detection fields and filter, the
+    // remediation trigger filter and clawbackId.
+    const overview = JSON.stringify(raw('get', `${B}/overview`));
+    for (const field of [
+      'internal',
+      'clawback',
+      'reports',
+      'oldestActiveAgeSeconds',
+      'resolved24h',
+    ]) {
+      expect(overview, field).toContain(field);
+    }
+    const detections = JSON.stringify(raw('get', `${B}/detections`));
+    expect(detections).toContain('verdictRevision');
+    expect(detections).toContain('"direction"');
+    const remediations = JSON.stringify(raw('get', `${B}/remediations`));
+    expect(remediations).toContain('clawbackId');
+    expect(remediations).toContain('purge');
   });
 
   it('documents the step 8.4 account takeover and incident operations (§5) with their operation ids and no secret-shaped examples', () => {

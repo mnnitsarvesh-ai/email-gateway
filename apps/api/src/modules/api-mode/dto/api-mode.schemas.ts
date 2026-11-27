@@ -58,6 +58,8 @@ export const CONNECTION_STATUSES = [
   'disabled',
 ] as const;
 /** `api_message_copies.remediation_state` (step API-2 §3.2). */
+/** Step API-3 C8: `api_message_copies.direction`. */
+export const COPY_DIRECTIONS = ['inbound', 'internal'] as const;
 export const COPY_REMEDIATION_STATES = [
   'none',
   'pending',
@@ -238,6 +240,40 @@ export const RemediationSummarySchema = z.object({
 });
 export type RemediationSummaryView = z.infer<typeof RemediationSummarySchema>;
 
+/** Step API-3 C13: internal (east-west) mail of the overview. */
+export const InternalMailSummarySchema = z.object({
+  copies24h: z.number().int().describe('Internal copies recorded in the last 24 hours'),
+  enabled: z.boolean().describe('The organization records and remediates internal mail'),
+});
+
+/** Step API-3 C13: clawbacks of the organization (live counts capped at 10 000). */
+export const ClawbackSummarySchema = z.object({
+  active: z.number().int().describe('Clawbacks not yet final (searching … running)'),
+  reviewRequired: z.number().int(),
+  pendingApproval: z.number().int(),
+  completed24h: z.number().int(),
+  targetsSucceeded24h: z.number().int(),
+  targetsFailed24h: z.number().int(),
+  oldestActiveAgeSeconds: z.number().int().nullable(),
+});
+
+/** Step API-3 C13: a connection's clawback targets of the last 24 hours (counters). */
+export const ConnectionClawbackSummarySchema = z.object({
+  targetsQueued24h: z.number().int(),
+  targetsSucceeded24h: z.number().int(),
+  targetsFailed24h: z.number().int(),
+});
+
+/** Step API-3 C13: user reports (live open counts and the counters of the last 24 hours). */
+export const ReportsSummarySchema = z.object({
+  pendingTriage: z.number().int(),
+  inReview: z.number().int(),
+  received24h: z.number().int(),
+  resolved24h: z.number().int(),
+  oldestPendingAgeSeconds: z.number().int().nullable(),
+  reportMailboxes: z.number().int(),
+});
+
 export const ApiModeConnectionSchema = z.object({
   id: PublicIdSchema.describe('The 8.2 provider connection public id'),
   apiConnectionId: PublicIdSchema.nullable().describe('The API-mode row (null until first used)'),
@@ -332,6 +368,9 @@ export const ApiModeOverviewSchema = z.object({
   throttling: throttlingSchema,
   copiesToday: z.number().int().describe('Journal and feed copies recorded since 00:00 UTC'),
   remediation: RemediationSummarySchema.describe('Step API-2: summed over the connections'),
+  internal: InternalMailSummarySchema.describe('Step API-3: internal (east-west) mail'),
+  clawback: ClawbackSummarySchema.describe('Step API-3: clawbacks, search and purge'),
+  reports: ReportsSummarySchema.describe('Step API-3: user-reported phishing'),
   connections: z.array(
     z.object({
       id: PublicIdSchema,
@@ -349,6 +388,9 @@ export const ApiModeOverviewSchema = z.object({
       copiesToday: z.number().int(),
       throttledUntil: nullableInstant,
       remediation: RemediationSummarySchema,
+      internal: InternalMailSummarySchema,
+      clawback: ConnectionClawbackSummarySchema,
+      reports: ReportsSummarySchema,
     }),
   ),
 });
@@ -438,6 +480,8 @@ export const DetectionListQuerySchema = defineListQuery({
     connectionId: { type: 'publicId', maxValues: 1 },
     minRiskScore: { type: 'int', min: 0, max: 1000, maxValues: 1 },
     remediationState: { type: 'enum', values: COPY_REMEDIATION_STATES, maxValues: 7 },
+    // Step API-3 C8.6.
+    direction: { type: 'enum', values: COPY_DIRECTIONS, maxValues: 2 },
   },
   sorts: ['-receivedAt'],
   defaultSort: '-receivedAt',
@@ -456,6 +500,7 @@ export const DETECTION_LIST_PARAMETERS: Record<string, string> = {
   minRiskScore: 'Lowest risk score (0-1000)',
   remediationState:
     '`none`, `pending`, `simulated`, `remediated`, `restored`, `failed`, `skipped`; comma list',
+  direction: '`inbound`, `internal` (east-west mail, step API-3); comma list',
   from: 'Start of the receipt window (default `to` − 7 days; at most 31 days)',
   to: 'End of the receipt window (exclusive; default now)',
   sort: '`-receivedAt` (newest first)',
@@ -494,6 +539,14 @@ export const DetectionSchema = z.object({
   quarantineEntryId: PublicIdSchema.nullable().describe(
     'The mailbox-located quarantine entry of the copy (latest), if any',
   ),
+  direction: z.enum(COPY_DIRECTIONS).describe('Step API-3: `internal` = east-west mail'),
+  verdictRevision: z
+    .number()
+    .int()
+    .describe('Step API-3: late signals that raised the stored verdict (0 = the first scan)'),
+  clawbacks: z
+    .array(PublicIdSchema)
+    .describe('Step API-3: clawbacks that targeted this copy (newest first, ≤ 5)'),
 });
 export type DetectionView = z.infer<typeof DetectionSchema>;
 
@@ -504,7 +557,6 @@ export const DetectionPageSchema = z.object({
 export type DetectionPage = z.infer<typeof DetectionPageSchema>;
 
 export const DetectionDetailSchema = DetectionSchema.extend({
-  direction: z.enum(['inbound', 'internal']),
   deliveredBasis: z
     .enum(['received_header', 'graph_received', 'gmail_internal', 'ingest'])
     .nullable(),
@@ -666,6 +718,28 @@ const detection = {
   remediationAction: 'move_quarantine' as const,
   remediationId: '0192f3a0-8888-7000-8000-000000000008',
   quarantineEntryId: '0192f3a0-aaaa-7000-8000-00000000000a',
+  direction: 'inbound' as const,
+  verdictRevision: 0,
+  clawbacks: [],
+};
+
+const internalSummary = { copies24h: 37, enabled: true };
+const clawbackSummary = {
+  active: 1,
+  reviewRequired: 0,
+  pendingApproval: 1,
+  completed24h: 2,
+  targetsSucceeded24h: 64,
+  targetsFailed24h: 1,
+  oldestActiveAgeSeconds: 1800,
+};
+const reportsSummary = {
+  pendingTriage: 3,
+  inReview: 1,
+  received24h: 9,
+  resolved24h: 5,
+  oldestPendingAgeSeconds: 5400,
+  reportMailboxes: 1,
 };
 
 const remediationSummary = {
@@ -735,6 +809,9 @@ export const API_MODE_EXAMPLES = {
     throttling: { events1h: 0, events24h: 3 },
     copiesToday: 412,
     remediation: remediationSummary,
+    internal: internalSummary,
+    clawback: clawbackSummary,
+    reports: reportsSummary,
     connections: [
       {
         id: CONNECTION,
@@ -752,6 +829,9 @@ export const API_MODE_EXAMPLES = {
         copiesToday: 412,
         throttledUntil: null,
         remediation: remediationSummary,
+        internal: internalSummary,
+        clawback: { targetsQueued24h: 65, targetsSucceeded24h: 64, targetsFailed24h: 1 },
+        reports: reportsSummary,
       },
     ],
   },
@@ -815,7 +895,6 @@ export const API_MODE_EXAMPLES = {
   detectionPage: { data: [detection], nextCursor: null },
   detectionDetail: {
     ...detection,
-    direction: 'inbound' as const,
     deliveredBasis: 'received_header' as const,
     reasonCodes: ['url.phishing_kit', 'auth.dmarc_fail'],
   },

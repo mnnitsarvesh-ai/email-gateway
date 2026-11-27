@@ -73,6 +73,44 @@ export async function resolveOrganizationQuarantineSettings(
   ).settings;
 }
 
+/** Step API-3 C5.5: the clawback of an entry-creating action (public id, trigger, signal). */
+export interface MailboxEntryClawback {
+  publicId: string;
+  trigger: string;
+  /** `api_clawbacks.signal_verdict` (policy mode); null for an explicit admin purge. */
+  signalVerdict: MessageVerdict | null;
+}
+
+/** Copy verdicts that name a threat (an explicit purge keeps their reason; else `manual`). */
+const THREAT_ENTRY_VERDICTS: readonly MessageVerdict[] = [
+  'malware',
+  'phishing',
+  'bec',
+  'suspicious',
+  'spam',
+  'bulk',
+  'dlp_violation',
+];
+
+/**
+ * C5.5: the entry `reason` of a clawback action — the quarantine reason of the signal verdict;
+ * an explicit purge (no signal verdict) of a copy without a threat verdict → `manual`, otherwise
+ * the copy verdict's reason.
+ */
+export function clawbackEntryReason(
+  clawback: MailboxEntryClawback,
+  copyVerdict: MessageVerdict | null,
+): string {
+  if (clawback.signalVerdict !== null) return verdictToQuarantineReason(clawback.signalVerdict);
+  return copyVerdict !== null && THREAT_ENTRY_VERDICTS.includes(copyVerdict)
+    ? verdictToQuarantineReason(copyVerdict)
+    : 'manual';
+}
+
+/** C5.5 explanation template (content-free). */
+export const clawbackEntryExplanation = (clawback: MailboxEntryClawback): string =>
+  `Removed from the mailbox by clawback ${clawback.publicId} (${clawback.trigger})`;
+
 /** What the entry writer needs about the remediation (ids and codes only). */
 export interface MailboxEntryInput {
   organizationId: bigint;
@@ -81,6 +119,8 @@ export interface MailboxEntryInput {
   container: RemediationMailboxContainer;
   /** The policy rule of the decision (R2.4), null for an admin action. */
   ruleId: string | null;
+  /** Step API-3: the clawback that queued the action (reason and explanation, C5.5). */
+  clawback?: MailboxEntryClawback | null;
   copy: {
     id: bigint;
     receivedAt: Date;
@@ -222,7 +262,9 @@ export async function createMailboxEntry(
         direction: message.direction,
         kind: 'quarantine',
         origin: 'api_remediation',
-        reason: verdictToQuarantineReason(copy.verdict),
+        reason: (input.clawback
+          ? clawbackEntryReason(input.clawback, copy.verdict)
+          : verdictToQuarantineReason(copy.verdict)) as never,
         status: 'held',
         envelopeFrom: message.envelopeFrom,
         headerFrom: message.headerFrom,
@@ -238,7 +280,9 @@ export async function createMailboxEntry(
         reasonCodes,
         primaryEngine: hardBlockToPrimaryEngine(hardBlocks),
         decisionSource: null,
-        explanationText: mailboxEntryExplanation(input.ruleId),
+        explanationText: input.clawback
+          ? clawbackEntryExplanation(input.clawback)
+          : mailboxEntryExplanation(input.ruleId),
         emlObjectKey: message.emlObjectKey,
         quarantinedAt: now,
         expiresAt,

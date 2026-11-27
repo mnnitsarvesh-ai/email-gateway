@@ -145,7 +145,10 @@ describe('report_generate (step AI-R D2)', () => {
       sizeBytes: row.sizeBytes,
       templateVersion: 'assistant-report/1',
     });
-    expect((meta.sources as unknown[]).length).toBe(9);
+    // Nine sources read; the step API-3 overview (api_mode section) is recorded as skipped for a
+    // principal without remediation:read.
+    expect((meta.sources as unknown[]).length).toBe(10);
+    expect(report.sections).toContain('api_mode');
     expect(JSON.stringify(meta)).not.toContain('org/7001');
   });
 

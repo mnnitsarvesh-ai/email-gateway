@@ -1,5 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { coveragePercent, type LagBucket, lagPercentileSeconds } from '@email-gateway/mailbox-api';
+import {
+  coveragePercent,
+  type LagBucket,
+  lagPercentileSeconds,
+  resolveOrgSettings,
+} from '@email-gateway/mailbox-api';
 import { z } from 'zod';
 import { API_CONFIG } from '../../../api-config.token';
 import { AuditService } from '../../../audit/audit.service';
@@ -34,7 +39,9 @@ import {
   API_MODE_RESOURCES,
   API_MODE_TX_TIMEOUT_MS,
   type ApiModeConfig,
+  CLAWBACK_COUNT_CAP,
   CONNECTION_COUNTER_DAYS,
+  DETECTION_CLAWBACKS_MAX,
   DETECTION_REASON_CODES,
   DETECTIONS_DEFAULT_DAYS,
   DETECTIONS_MAX_DAYS,
@@ -55,6 +62,7 @@ import {
   type ApiModeConnectionListView,
   type ApiModeConnectionView,
   type ApiModeOverviewView,
+  type ClawbackSummarySchema,
   type DetectionDetailView,
   type DetectionListQuery,
   type DetectionPage,
@@ -77,6 +85,13 @@ import {
   type RemediationBacklog,
   type RemediationCounterRow,
 } from '../repositories/api-mode.repository';
+import {
+  ApiClawbackRepository,
+  type ClawbackCounterRow,
+  type ClawbackOverviewCounts,
+  copyKey,
+  type ReportOverviewCounts,
+} from '../repositories/api-clawback.repository';
 import { parseBody, parsePublicId } from './protection-mode.service';
 
 const HOUR_MS = 3_600_000;
@@ -210,6 +225,69 @@ export function remediationSummary(
   };
 }
 
+/** Step API-3 C13: the counter sums of the last 24 hours. */
+function clawbackCounterSums(rows: readonly ClawbackCounterRow[], now: Date) {
+  const recent = rows.filter((r) => r.hour.getTime() >= now.getTime() - DAY_MS);
+  const sum = (k: keyof Omit<ClawbackCounterRow, 'apiConnectionId' | 'hour'>) =>
+    recent.reduce((n, r) => n + Number(r[k]), 0);
+  return {
+    internalCopies: sum('internalCopies'),
+    targetsQueued: sum('clawbackTargetsQueued'),
+    targetsSucceeded: sum('clawbackTargetsSucceeded'),
+    targetsFailed: sum('clawbackTargetsFailed'),
+    reportsReceived: sum('reportsReceived'),
+    reportsResolved: sum('reportsResolved'),
+  };
+}
+
+const ageSeconds = (now: Date, at: Date | null): number | null =>
+  at === null ? null : Math.max(0, Math.floor((now.getTime() - at.getTime()) / 1000));
+
+/** Step API-3 C13: the organization's clawback block. */
+export function clawbackSummary(
+  live: ClawbackOverviewCounts,
+  counters: readonly ClawbackCounterRow[],
+  now: Date,
+): z.infer<typeof ClawbackSummarySchema> {
+  const sums = clawbackCounterSums(counters, now);
+  return {
+    active: live.active,
+    reviewRequired: live.reviewRequired,
+    pendingApproval: live.pendingApproval,
+    completed24h: live.completed24h,
+    targetsSucceeded24h: sums.targetsSucceeded,
+    targetsFailed24h: sums.targetsFailed,
+    oldestActiveAgeSeconds: ageSeconds(now, live.oldestActiveCreatedAt),
+  };
+}
+
+/** Step API-3 C13: a reports block from the live counts of some connections and their counters. */
+export function reportsSummary(
+  live: readonly ReportOverviewCounts[],
+  counters: readonly ClawbackCounterRow[],
+  now: Date,
+) {
+  const sums = clawbackCounterSums(counters, now);
+  const oldest = live
+    .map((l) => l.oldestPendingReportedAt)
+    .filter((d): d is Date => d !== null)
+    .reduce<Date | null>((min, d) => (min === null || d < min ? d : min), null);
+  return {
+    pendingTriage: Math.min(
+      live.reduce((n, l) => n + l.pendingTriage, 0),
+      CLAWBACK_COUNT_CAP,
+    ),
+    inReview: Math.min(
+      live.reduce((n, l) => n + l.inReview, 0),
+      CLAWBACK_COUNT_CAP,
+    ),
+    received24h: sums.reportsReceived,
+    resolved24h: sums.reportsResolved,
+    oldestPendingAgeSeconds: ageSeconds(now, oldest),
+    reportMailboxes: live.reduce((n, l) => n + l.reportMailboxes, 0),
+  };
+}
+
 /** Coverage of one connection: total only with an `ok` inventory (D11.2). */
 function coverageOf(
   facts: ConnectionFacts,
@@ -255,6 +333,7 @@ export class ApiModeService {
     private readonly idempotency: IdempotencyService,
     private readonly audit: AuditService,
     private readonly codec: CursorCodec,
+    private readonly clawbacks: ApiClawbackRepository,
   ) {}
 
   now(): Date {
@@ -321,6 +400,14 @@ export class ApiModeService {
       this.repository.remediationBacklog(scope, apiIds, REMEDIATION_BACKLOG_COUNT_CAP),
       this.repository.organizationRemediationMode(scope),
     ]);
+    // Step API-3 C13: internal mail, clawbacks and reports.
+    const [clawCounters, clawLive, reportLive, settingsRow] = await Promise.all([
+      this.clawbacks.clawbackCounters(scope, apiIds, new Date(now.getTime() - DAY_MS)),
+      this.clawbacks.clawbackOverview(scope, now, CLAWBACK_COUNT_CAP),
+      this.clawbacks.reportOverview(scope, apiIds),
+      this.clawbacks.orgSettings(scope),
+    ]);
+    const internalEnabled = resolveOrgSettings(settingsRow).internalMailEnabled;
     const byHealth = { unknown: 0, healthy: 0, degraded: 0, failing: 0 };
     const items = connections.map((c) => {
       const health = c.api?.healthStatus ?? 'unknown';
@@ -351,6 +438,20 @@ export class ApiModeService {
           c.api?.remediationPaused ?? false,
           now,
         ),
+        ...(() => {
+          const mine = clawCounters.filter((r) => c.api !== null && r.apiConnectionId === c.api.id);
+          const sums = clawbackCounterSums(mine, now);
+          const live = c.api === null ? undefined : reportLive.get(c.api.id);
+          return {
+            internal: { copies24h: sums.internalCopies, enabled: internalEnabled },
+            clawback: {
+              targetsQueued24h: sums.targetsQueued,
+              targetsSucceeded24h: sums.targetsSucceeded,
+              targetsFailed24h: sums.targetsFailed,
+            },
+            reports: reportsSummary(live === undefined ? [] : [live], mine, now),
+          };
+        })(),
       };
     });
     const covered = items.reduce((n, i) => n + i.coverage.covered, 0);
@@ -378,6 +479,12 @@ export class ApiModeService {
         connections.some((c) => c.api?.remediationPaused === true),
         now,
       ),
+      internal: {
+        copies24h: clawbackCounterSums(clawCounters, now).internalCopies,
+        enabled: internalEnabled,
+      },
+      clawback: clawbackSummary(clawLive, clawCounters, now),
+      reports: reportsSummary([...reportLive.values()], clawCounters, now),
       connections: items,
     };
   }
@@ -710,7 +817,7 @@ export class ApiModeService {
   }
 
   /** A copy as the API item: subject withheld, sender masked (ADR-0062). */
-  detectionView(row: CopyRow): DetectionView {
+  detectionView(row: CopyRow, clawbacks: ReadonlyMap<string, string[]> = new Map()): DetectionView {
     return {
       id: row.publicId,
       mailboxId: row.mailboxPublicId,
@@ -735,7 +842,19 @@ export class ApiModeService {
       remediationAction: row.remediationAction,
       remediationId: row.remediationId,
       quarantineEntryId: row.quarantineEntryId,
+      direction: row.direction,
+      verdictRevision: row.verdictRevision,
+      clawbacks: [...(clawbacks.get(copyKey(row.id, row.receivedAt)) ?? [])],
     };
+  }
+
+  /** Step API-3: the clawbacks that targeted each copy (≤ 5 per copy). */
+  private clawbacksOf(scope: TenantScope, rows: readonly CopyRow[]) {
+    return this.clawbacks.clawbacksOfCopies(
+      scope,
+      rows.map((r) => ({ id: r.id, receivedAt: r.receivedAt })),
+      DETECTION_CLAWBACKS_MAX,
+    );
   }
 
   /** `GET /api-mode/mailboxes` (v1 cursor list, newest first). */
@@ -785,6 +904,7 @@ export class ApiModeService {
     const row = await this.repository.mailbox(scope, parsePublicId(rawId, 'mailboxId'));
     if (row === null) throw mailboxNotFound();
     const copies = await this.repository.recentCopies(scope, row.id, MAILBOX_RECENT_COPIES);
+    const clawbacks = await this.clawbacksOf(scope, copies);
     return {
       ...this.mailboxView(row),
       aliases: row.aliases,
@@ -793,7 +913,7 @@ export class ApiModeService {
       lastChangeAt: iso(row.lastChangeAt),
       lastGapAt: iso(row.lastGapAt),
       consecutiveFailures: row.consecutiveFailures,
-      recentDetections: copies.map((c) => this.detectionView(c)),
+      recentDetections: copies.map((c) => this.detectionView(c, clawbacks)),
     };
   }
 
@@ -833,6 +953,7 @@ export class ApiModeService {
         }),
         ...(one(f.minRiskScore) !== undefined && { minRiskScore: Number(one(f.minRiskScore)) }),
         ...(f.remediationState?.values && { remediationState: [...f.remediationState.values] }),
+        ...(f.direction?.values && { direction: [...f.direction.values] }),
       },
       range,
       { take: query.limit + 1, ...(before && { before }) },
@@ -842,8 +963,10 @@ export class ApiModeService {
       limit: query.limit,
       keyOf: (r) => ({ at: r.receivedAt, id: r.id }),
     });
+    const page = fetched.slice(0, decision.rows);
+    const clawbacks = await this.clawbacksOf(scope, page);
     return {
-      data: fetched.slice(0, decision.rows).map((r) => this.detectionView(r)),
+      data: page.map((r) => this.detectionView(r, clawbacks)),
       nextCursor:
         decision.next === null
           ? null
@@ -855,10 +978,12 @@ export class ApiModeService {
   async detection(scope: TenantScope, rawId: unknown): Promise<DetectionDetailView> {
     const row = await this.repository.detection(scope, parsePublicId(rawId, 'detectionId'));
     if (row === null) throw detectionNotFound();
-    const codes = await this.repository.reasonCodes(scope, row.messageId, row.receivedAt);
+    const [codes, clawbacks] = await Promise.all([
+      this.repository.reasonCodes(scope, row.messageId, row.receivedAt),
+      this.clawbacksOf(scope, [row]),
+    ]);
     return {
-      ...this.detectionView(row),
-      direction: row.direction,
+      ...this.detectionView(row, clawbacks),
       deliveredBasis: row.deliveredBasis,
       reasonCodes: codes.slice(0, DETECTION_REASON_CODES),
     };

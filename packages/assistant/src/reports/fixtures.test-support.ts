@@ -353,6 +353,54 @@ export function atoAccountsBody(
   };
 }
 
+/** Step API-3 C16: `GET /api-mode/overview` (synthetic; one connection). */
+export function apiModeOverviewBody(connections = 1) {
+  return {
+    generatedAt: FIXTURE_GENERATED_AT,
+    entitled: true,
+    active: true,
+    organizationMode: 'api',
+    coverage: { covered: 118, gap: 2, total: 120, percent: 98.3 },
+    connectionsByHealth: { unknown: 0, healthy: connections, degraded: 0, failing: 0 },
+    lag: { p50Seconds1h: 60, p95Seconds1h: 300, p50Seconds24h: 60, p95Seconds24h: 900 },
+    throttling: { events1h: 0, events24h: 3 },
+    copiesToday: 412,
+    remediation: {
+      succeeded24h: 14,
+      failed24h: 1,
+      restores24h: 1,
+      throttled24h: 0,
+      skipped24h: 3,
+    },
+    internal: { copies24h: 37, enabled: true },
+    clawback: {
+      active: 1,
+      reviewRequired: 0,
+      pendingApproval: 1,
+      completed24h: 2,
+      targetsSucceeded24h: 64,
+      targetsFailed24h: 1,
+      oldestActiveAgeSeconds: 1800,
+    },
+    reports: {
+      pendingTriage: 3,
+      inReview: 1,
+      received24h: 9,
+      resolved24h: 5,
+      oldestPendingAgeSeconds: 5400,
+      reportMailboxes: 1,
+    },
+    connections: Array.from({ length: connections }, (_, i) => ({
+      id: `0193bbbb-0000-7000-8000-${String(i + 1).padStart(12, '0')}`,
+      displayName: i === 0 ? 'Example <Test> M365' : `Connection ${i + 1}`,
+      provider: 'microsoft_365',
+      health: 'healthy',
+      coverage: { covered: 118, gap: 2, total: 120, percent: 98.3 },
+      lag: { p50Seconds1h: 60, p95Seconds1h: 300, p50Seconds24h: 60, p95Seconds24h: 900 },
+    })),
+  };
+}
+
 /** Every source answered with its fixture body (200). */
 export function okResults(
   overrides: Partial<Record<ReportSourceKey, unknown>> = {},
@@ -367,6 +415,7 @@ export function okResults(
     quarantine_summary: quarantineSummaryBody(),
     ato_overview: atoOverviewBody(),
     ato_accounts: atoAccountsBody(),
+    api_mode_overview: apiModeOverviewBody(),
     ...overrides,
   };
   return Object.fromEntries(

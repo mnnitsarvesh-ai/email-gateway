@@ -61,6 +61,9 @@ describe('step 6.2 vocabularies', () => {
       'integration_unhealthy',
       'journal_intake_silent',
       'api_mode_unhealthy',
+      // Step API-3 C6, C13.
+      'api_mode_purge_approval',
+      'api_mode_report_received',
     ]);
     expect(NOTIFICATION_ALERT_SEVERITY_VALUES).toEqual(['info', 'low', 'medium', 'high']);
   });

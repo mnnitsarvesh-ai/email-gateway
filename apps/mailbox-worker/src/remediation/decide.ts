@@ -12,7 +12,10 @@ import {
   type RemediationInput,
   type RiskLevel,
 } from '@email-gateway/mailbox-api';
+import type { ApiMailboxStatus } from '@email-gateway/database';
+import type { EffectiveRemediationPolicy } from '@email-gateway/mailbox-api';
 import { mailboxProfileOf } from '../domain/connections';
+import { OrgSettingsMemo } from '../domain/org-settings';
 import type { CounterDelta } from '../runtime/redis-stores';
 import { big, bool, type Db } from '../shared/db';
 import { InconsistentReadError } from '../shared/errors';
@@ -49,12 +52,14 @@ export interface DecisionCopy {
   verdictAt: Date | null;
   remediationState: ApiCopyRemediationState;
   remediationGeneration: number;
+  /** Step API-3 C8.5: `inbound` or `internal`. */
+  direction: 'inbound' | 'internal';
 }
 
 /** States in which a new policy decision leaves the copy alone (R4, R5.5, API2-15). */
 const DECIDED_STATES: readonly ApiCopyRemediationState[] = ['pending', 'remediated', 'restored'];
 
-interface ConnectionFacts {
+export interface ConnectionFacts {
   provider: IntegrationProvider;
   paused: boolean;
   grantActive: boolean;
@@ -64,12 +69,151 @@ interface ConnectionFacts {
 export interface DecisionMemo {
   connections: Map<bigint, ConnectionFacts>;
   domainModes: Map<string, DomainEffectiveMode | null>;
+  /** Step API-3: organization settings (`internal_mail_enabled`, C8.5). */
+  settings: OrgSettingsMemo;
 }
 
 export const newDecisionMemo = (): DecisionMemo => ({
   connections: new Map(),
   domainModes: new Map(),
+  settings: new OrgSettingsMemo(),
 });
+
+/**
+ * The real context of a copy's decision (R4; reused by the clawback role, note 37 C3.2): the
+ * mailbox (status, domain, report flag), the connection's provider, pause flag and mailbox-access
+ * grant, the domain's effective mode, the effective policy of the mailbox (R2.6) and the
+ * organization's internal-mail setting. Every row is organization echo-checked.
+ */
+export interface DecisionContext {
+  mailbox: {
+    apiConnectionId: bigint;
+    status: ApiMailboxStatus;
+    domainId: bigint | null;
+    reportMailbox: boolean;
+  };
+  connection: ConnectionFacts;
+  domainEffectiveMode: DomainEffectiveMode | null;
+  effective: EffectiveRemediationPolicy;
+  internalMailEnabled: boolean;
+}
+
+/** The copy fields the context reads need. */
+export type DecisionContextCopy = Pick<
+  DecisionCopy,
+  'organizationId' | 'apiConnectionId' | 'mailboxId'
+>;
+
+/** Reads the decision context of a copy (shared by the copies role and the clawback role). */
+export async function loadDecisionContext(
+  tx: Db,
+  policies: RemediationPolicyLoader,
+  copy: DecisionContextCopy,
+  memo: DecisionMemo,
+): Promise<DecisionContext> {
+  const mailbox = await tx.apiMailbox.findUnique({
+    where: { id: copy.mailboxId },
+    select: {
+      organizationId: true,
+      apiConnectionId: true,
+      status: true,
+      domainId: true,
+      reportMailbox: true,
+    },
+  });
+  if (!mailbox || mailbox.organizationId !== copy.organizationId) {
+    throw new InconsistentReadError('api_mailboxes');
+  }
+  const connection = await connectionFacts(tx, copy, memo);
+  const domainEffectiveMode = await domainMode(tx, copy.organizationId, mailbox.domainId, memo);
+  const effective = await policies.effective(tx, copy.organizationId, mailbox.domainId);
+  const settings = await memo.settings.get(tx, copy.organizationId);
+  return {
+    mailbox: {
+      apiConnectionId: mailbox.apiConnectionId,
+      status: mailbox.status,
+      domainId: mailbox.domainId,
+      reportMailbox: mailbox.reportMailbox,
+    },
+    connection,
+    domainEffectiveMode,
+    effective,
+    internalMailEnabled: settings.internalMailEnabled,
+  };
+}
+
+/** The connection's provider, pause flag and mailbox-access grant (organization echo). */
+export async function connectionFacts(
+  tx: Db,
+  copy: Pick<DecisionCopy, 'organizationId' | 'apiConnectionId'>,
+  memo: DecisionMemo,
+): Promise<ConnectionFacts> {
+  const known = memo.connections.get(copy.apiConnectionId);
+  if (known) return known;
+  const rows = await tx.$queryRaw<
+    Array<{
+      organization_id: bigint | number;
+      provider: IntegrationProvider;
+      remediation_paused: unknown;
+      provider_connection_id: bigint | number;
+    }>
+  >`
+    SELECT organization_id, provider, remediation_paused, provider_connection_id
+    FROM api_mode_connections WHERE id = ${copy.apiConnectionId}`;
+  const row = rows[0];
+  if (!row || big(row.organization_id) !== copy.organizationId) {
+    throw new InconsistentReadError('api_mode_connections');
+  }
+  const grant = await tx.providerConnectionGrant.findUnique({
+    where: {
+      connectionId_profile: {
+        connectionId: big(row.provider_connection_id),
+        profile: mailboxProfileOf(row.provider),
+      },
+    },
+    select: { organizationId: true, status: true },
+  });
+  if (grant && grant.organizationId !== copy.organizationId) {
+    throw new InconsistentReadError('provider_connection_grants');
+  }
+  const facts: ConnectionFacts = {
+    provider: row.provider,
+    paused: bool(row.remediation_paused),
+    grantActive: grant?.status === 'active',
+  };
+  memo.connections.set(copy.apiConnectionId, facts);
+  return facts;
+}
+
+/** `COALESCE(domains.protection_mode, organizations.protection_mode)`; null without a domain. */
+export async function domainMode(
+  tx: Db,
+  organizationId: bigint,
+  domainId: bigint | null,
+  memo: DecisionMemo,
+): Promise<DomainEffectiveMode | null> {
+  if (domainId === null) return null;
+  const key = domainId.toString();
+  if (memo.domainModes.has(key)) return memo.domainModes.get(key) ?? null;
+  const domain = await tx.domain.findUnique({
+    where: { id: domainId },
+    select: {
+      organizationId: true,
+      protectionMode: true,
+      deletedAt: true,
+      organization: { select: { id: true, protectionMode: true } },
+    },
+  });
+  if (domain && domain.organizationId !== organizationId) {
+    throw new InconsistentReadError('domains');
+  }
+  const mode =
+    !domain || domain.deletedAt !== null
+      ? null
+      : (domain.protectionMode ?? domain.organization.protectionMode);
+  memo.domainModes.set(key, mode);
+  return mode;
+}
 
 /** The latest revision of the copy's scan round (`message_risk_scores`), or null. */
 export interface RoundRisk {
@@ -115,6 +259,7 @@ export async function loadDecisionCopy(
       verdictAt: true,
       remediationState: true,
       remediationGeneration: true,
+      direction: true,
     },
   });
   if (!row) return null;
@@ -195,28 +340,18 @@ export class RemediationDecider {
     }
     if (copy.verdict === 'unknown') return { kind: 'none' };
 
-    const mailbox = await tx.apiMailbox.findUnique({
-      where: { id: copy.mailboxId },
-      select: { organizationId: true, apiConnectionId: true, status: true, domainId: true },
-    });
-    if (!mailbox || mailbox.organizationId !== copy.organizationId) {
-      throw new InconsistentReadError('api_mailboxes');
-    }
-    const connection = await this.connectionFacts(tx, copy, memo);
+    const ctx = await loadDecisionContext(tx, this.deps.policies, copy, memo);
+    // Step API-3 C9.2 / C-I5: report-mailbox copies are never remediated.
+    if (ctx.mailbox.reportMailbox) return { kind: 'none' };
+    const { connection, effective } = ctx;
     const risk = await loadRoundRisk(tx, copy, scanId);
-    const domainEffectiveMode = await this.domainMode(
-      tx,
-      copy.organizationId,
-      mailbox.domainId,
-      memo,
-    );
-    const effective = await this.deps.policies.effective(tx, copy.organizationId, mailbox.domainId);
     const input: RemediationInput = {
       copy: {
         status: copy.status,
         verdict: copy.verdict,
         riskScore: copy.riskScore,
         verdictAuthority: copy.verdictAuthority,
+        direction: copy.direction,
       },
       risk,
       policyOutcome: null,
@@ -224,8 +359,9 @@ export class RemediationDecider {
         provider: connection.provider,
         grantActive: connection.grantActive,
         remediationPaused: connection.paused,
-        domainEffectiveMode,
-        mailboxStatus: mailbox.status,
+        domainEffectiveMode: ctx.domainEffectiveMode,
+        mailboxStatus: ctx.mailbox.status,
+        internalMailEnabled: ctx.internalMailEnabled,
       },
     };
     const decision: RemediationDecision = decideRemediation(input, effective.policy, {
@@ -278,78 +414,5 @@ export class RemediationDecider {
           ? { remediation_simulated: 1 }
           : {};
     return { ...base, inserted: true, counters };
-  }
-
-  /** The connection's provider, pause flag and mailbox-access grant (organization echo). */
-  private async connectionFacts(
-    tx: Prisma.TransactionClient,
-    copy: DecisionCopy,
-    memo: DecisionMemo,
-  ): Promise<ConnectionFacts> {
-    const known = memo.connections.get(copy.apiConnectionId);
-    if (known) return known;
-    const rows = await tx.$queryRaw<
-      Array<{
-        organization_id: bigint | number;
-        provider: IntegrationProvider;
-        remediation_paused: unknown;
-        provider_connection_id: bigint | number;
-      }>
-    >`
-      SELECT organization_id, provider, remediation_paused, provider_connection_id
-      FROM api_mode_connections WHERE id = ${copy.apiConnectionId}`;
-    const row = rows[0];
-    if (!row || big(row.organization_id) !== copy.organizationId) {
-      throw new InconsistentReadError('api_mode_connections');
-    }
-    const grant = await tx.providerConnectionGrant.findUnique({
-      where: {
-        connectionId_profile: {
-          connectionId: big(row.provider_connection_id),
-          profile: mailboxProfileOf(row.provider),
-        },
-      },
-      select: { organizationId: true, status: true },
-    });
-    if (grant && grant.organizationId !== copy.organizationId) {
-      throw new InconsistentReadError('provider_connection_grants');
-    }
-    const facts: ConnectionFacts = {
-      provider: row.provider,
-      paused: bool(row.remediation_paused),
-      grantActive: grant?.status === 'active',
-    };
-    memo.connections.set(copy.apiConnectionId, facts);
-    return facts;
-  }
-
-  /** `COALESCE(domains.protection_mode, organizations.protection_mode)`; null without a domain. */
-  private async domainMode(
-    tx: Prisma.TransactionClient,
-    organizationId: bigint,
-    domainId: bigint | null,
-    memo: DecisionMemo,
-  ): Promise<DomainEffectiveMode | null> {
-    if (domainId === null) return null;
-    const key = domainId.toString();
-    if (memo.domainModes.has(key)) return memo.domainModes.get(key) ?? null;
-    const domain = await tx.domain.findUnique({
-      where: { id: domainId },
-      select: {
-        organizationId: true,
-        protectionMode: true,
-        deletedAt: true,
-        organization: { select: { id: true, protectionMode: true } },
-      },
-    });
-    if (domain && domain.organizationId !== organizationId) {
-      throw new InconsistentReadError('domains');
-    }
-    const mode =
-      !domain || domain.deletedAt !== null
-        ? null
-        : (domain.protectionMode ?? domain.organization.protectionMode);
-    memo.domainModes.set(key, mode);
-    return mode;
   }
 }

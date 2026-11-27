@@ -28,6 +28,7 @@ import { useCan } from '@/lib/auth/me';
 import { formatDuration, formatNumber, humanize } from '@/lib/format';
 import { DetailList, FilterSelect, MutationError } from '@/features/domains/kit';
 import { entryHref, releaseHref } from '@/features/quarantine/links';
+import { clawbackHref } from './clawback-model';
 import {
   CONTAINER_LABEL,
   POLICY_SOURCE_LABEL,
@@ -316,6 +317,14 @@ export function RemediationDrawer({
                     className="text-primary underline-offset-2 hover:underline"
                   >
                     Open the quarantine entry
+                  </Link>
+                ) : null}
+                {r.clawbackId ? (
+                  <Link
+                    href={clawbackHref(r.clawbackId)}
+                    className="text-primary underline-offset-2 hover:underline"
+                  >
+                    Open the clawback
                   </Link>
                 ) : null}
                 {r.releaseId ? (

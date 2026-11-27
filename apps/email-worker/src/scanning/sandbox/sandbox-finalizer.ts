@@ -246,7 +246,8 @@ export async function writeRoundFinal(
   // revision 1 here; a round still running gets it from its completion (whichever transaction
   // comes second writes it, both under this scan row lock; the unique key is the backstop).
   if (aggregate.outcome !== 'skipped' && scan.status !== 'running') {
-    await tx.scoreRiskRevision(scan);
+    // Step API-3 C2.1: a revision that raises the round writes its late signal here too.
+    await tx.scoreRiskRevision(scan, { now: ctx.now, correlationId: ctx.correlationId });
   }
   return aggregate.outcome;
 }

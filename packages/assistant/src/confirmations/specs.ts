@@ -724,6 +724,91 @@ const mailFlow = (): SinglePrecondition =>
  * docs/api/openapi.json (request and response schemas; the
  * package tests resolve every state, row-version, display and select path).
  */
+// --- step API-3 (design note 37 C15) ---
+
+const apiModeDetection = (stateFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'api_mode_get_detection',
+  params: { detectionId: 'detectionId' },
+  stateFields,
+  displayFields: ['mailboxAddress', 'verdict', 'riskScore', 'headerFrom', 'verdictAuthority'],
+});
+const apiModePolicy = (
+  stateFields: readonly string[],
+  displayFields: readonly string[],
+): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'api_mode_remediation_get_policy',
+  params: {},
+  stateFields,
+  displayFields,
+});
+const apiModeConnection = (stateFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'api_mode_get_connection',
+  params: { connectionId: 'connectionId' },
+  stateFields,
+  rowVersionField: 'rowVersion',
+  displayFields: [
+    'displayName',
+    'provider',
+    'feedsEnabled',
+    'feedMode',
+    'remediationPaused',
+    'inventoryStatus',
+  ],
+});
+const apiModeClawback = (stateFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'api_mode_clawback_detail',
+  params: { clawbackId: 'clawbackId' },
+  stateFields,
+  rowVersionField: 'rowVersion',
+  displayFields: [
+    'trigger',
+    'status',
+    'decisionMode',
+    'action',
+    'counts.targetsEligible',
+    'counts.mailboxesEligible',
+    'counts.succeeded',
+    'approval.reasons',
+    'approval.expiresAt',
+    'restore.status',
+  ],
+});
+const apiModeReport = (stateFields: readonly string[]): SinglePrecondition => ({
+  kind: 'single',
+  tool: 'api_mode_reports_detail',
+  params: { reportId: 'reportId' },
+  stateFields,
+  rowVersionField: 'rowVersion',
+  displayFields: [
+    'reporterAddress',
+    'status',
+    'assessment',
+    'scan.verdict',
+    'group.size',
+    'original.sender',
+  ],
+});
+/**
+ * C-I4 / K8: approving or denying a purge needs a second person. The read's hints carry the
+ * api's own decision for the caller (`canApprove`: a user, not the requester or submitter, the
+ * request pending and not expired); the requester and submitter are also refused by id. The
+ * api's `api_mode_purge_approval_forbidden` stays the authority.
+ */
+const PURGE_FOUR_EYES: readonly ProposalGuard[] = [
+  { kind: 'not_self_field', field: 'requestedBy.userId', message: 'api_mode_purge_four_eyes' },
+  { kind: 'not_self_field', field: 'submittedBy', message: 'api_mode_purge_four_eyes' },
+  {
+    kind: 'require_read_value',
+    field: 'hints.canApprove',
+    equals: true,
+    message: 'api_mode_purge_four_eyes',
+  },
+];
+
 export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
   // --- policies (11) ---
   {
@@ -1914,6 +1999,160 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
       previewTool: 'provider_mail_flow_preview',
       params: { id: 'id' },
       change: { from: 'body.change' },
+    },
+  },
+  // ===== step API-3 (20; design note 37 C15) =====
+  // --- API-2 remediation (6) and API-1 connection writes (3) ---
+  {
+    operationId: 'ApiModeRemediationController_remediate_v1',
+    precondition: apiModeDetection(['status', 'remediationState', 'remediationAction']),
+  },
+  {
+    operationId: 'ApiModeRemediationController_restore_v1',
+    precondition: apiModeDetection(['remediationState', 'remediationAction', 'quarantineEntryId']),
+  },
+  {
+    operationId: 'ApiModeRemediationController_retry_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_mode_remediation_detail',
+      params: { remediationId: 'remediationId' },
+      stateFields: ['status', 'attempts', 'generation'],
+      displayFields: ['action', 'trigger', 'status', 'mailbox.address', 'attempts'],
+    },
+  },
+  // The policy's `expectedRowVersion` may be null (no row yet): the model passes it; the state
+  // digest of the version read proves it unchanged at confirm time.
+  {
+    operationId: 'ApiModeRemediationController_putPolicy_v1',
+    precondition: apiModePolicy(
+      ['organization.rowVersion', 'organization.mode', 'organization.sha256'],
+      [
+        'organization.source',
+        'organization.mode',
+        'organization.rowVersion',
+        'hardDeleteAvailable',
+      ],
+    ),
+  },
+  {
+    operationId: 'ApiModeRemediationController_putDomainPolicy_v1',
+    precondition: {
+      ...apiModePolicy(['rowVersion', 'mode', 'sha256'], ['domainName', 'mode', 'rowVersion']),
+      select: { array: 'domains', field: 'domainId', arg: 'domainId', required: false },
+    },
+  },
+  {
+    operationId: 'ApiModeRemediationController_deleteDomainPolicy_v1',
+    precondition: {
+      ...apiModePolicy(['rowVersion', 'mode', 'sha256'], ['domainName', 'mode', 'rowVersion']),
+      select: { array: 'domains', field: 'domainId', arg: 'domainId', required: false },
+    },
+  },
+  {
+    operationId: 'ApiModeController_updateSettings_v1',
+    precondition: apiModeConnection([
+      'rowVersion',
+      'feedsEnabled',
+      'feedMode',
+      'remediationPaused',
+    ]),
+    inject: BODY_ROW_VERSION,
+  },
+  {
+    operationId: 'ApiModeController_inventorySync_v1',
+    precondition: apiModeConnection(['inventoryStatus', 'inventoryRequestedAt']),
+  },
+  {
+    operationId: 'ApiModeController_resyncMailbox_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_mode_get_mailbox',
+      params: { mailboxId: 'mailboxId' },
+      stateFields: ['status', 'feedStatus'],
+      displayFields: ['address', 'status', 'feedStatus', 'coverage'],
+    },
+  },
+  // --- clawbacks (6; the hard delete is portal only) ---
+  // A search changes no mailbox: the impact is from the arguments.
+  { operationId: 'ApiModeClawbackController_create_v1', precondition: null },
+  {
+    // The body is a union (policy | explicit): the model passes `expectedRowVersion`; the state
+    // digest of the version read proves it unchanged at confirm time.
+    operationId: 'ApiModeClawbackController_submit_v1',
+    precondition: apiModeClawback(['rowVersion', 'status', 'counts.mailboxesEligible']),
+  },
+  {
+    operationId: 'ApiModeClawbackController_approve_v1',
+    precondition: apiModeClawback(['rowVersion', 'status', 'approval.status']),
+    inject: BODY_ROW_VERSION,
+    guards: PURGE_FOUR_EYES,
+  },
+  {
+    operationId: 'ApiModeClawbackController_deny_v1',
+    precondition: apiModeClawback(['rowVersion', 'status', 'approval.status']),
+    inject: BODY_ROW_VERSION,
+    guards: PURGE_FOUR_EYES,
+  },
+  {
+    operationId: 'ApiModeClawbackController_cancel_v1',
+    precondition: apiModeClawback(['status', 'cancelRequested']),
+  },
+  {
+    operationId: 'ApiModeClawbackController_restore_v1',
+    precondition: apiModeClawback(['status', 'restore.status', 'counts.succeeded']),
+  },
+  // --- reports (4) and settings (1) ---
+  {
+    operationId: 'ApiModeReportsController_triage_v1',
+    precondition: apiModeReport(['rowVersion', 'status']),
+    inject: BODY_ROW_VERSION,
+  },
+  {
+    operationId: 'ApiModeReportsController_clawback_v1',
+    precondition: apiModeReport(['status', 'clawbackId']),
+  },
+  // The address may be a mailbox not known yet (created as discovered): no target to read.
+  { operationId: 'ApiModeReportsController_addMailbox_v1', precondition: null },
+  {
+    operationId: 'ApiModeReportsController_setMailbox_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_mode_get_mailbox',
+      params: { mailboxId: 'mailboxId' },
+      stateFields: ['status'],
+      displayFields: ['address', 'status', 'coverage', 'domain.name'],
+    },
+  },
+  // The settings' `expectedRowVersion` may be null (no row yet): the model passes it.
+  {
+    operationId: 'ApiModeSettingsController_put_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_mode_settings_get',
+      params: {},
+      stateFields: [
+        'rowVersion',
+        'settings.internalMailEnabled',
+        'settings.autoClawback',
+        'settings.autoMaxMailboxes',
+        'settings.purgeApprovalMailboxes',
+        'settings.clawbackLookbackDays',
+        'settings.tiMinConfidence',
+        'settings.reportAckEnabled',
+        'settings.reportFeedbackEnabled',
+      ],
+      displayFields: [
+        'source',
+        'settings.internalMailEnabled',
+        'settings.autoClawback',
+        'settings.autoMaxMailboxes',
+        'settings.purgeApprovalMailboxes',
+        'settings.clawbackLookbackDays',
+        'settings.tiMinConfidence',
+        'settings.reportAckEnabled',
+        'settings.reportFeedbackEnabled',
+      ],
     },
   },
   // --- native (step AI-R D5) ---

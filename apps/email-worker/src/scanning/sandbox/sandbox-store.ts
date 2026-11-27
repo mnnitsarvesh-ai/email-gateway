@@ -8,6 +8,7 @@ import type {
   SandboxSubmissionStatus,
   SandboxVerdict,
 } from '@email-gateway/security-contracts';
+import { readRevisionZero, sandboxRevisionSignal, writeLateSignalOutbox } from '../late-signal';
 import type { RiskScorer, RiskScoreRecord } from '../risk/risk-scorer';
 import type { SandboxRead } from './sandbox-metrics';
 
@@ -261,8 +262,13 @@ export interface SandboxTx {
    * Step 5.1 R13 (a): the round's risk score revision 1 (its inputs plus the sandbox final just
    * inserted), for a round that is no longer running, under the scan row lock the caller holds.
    * A row written earlier is kept (unique key; counted as a duplicate).
+   *
+   * Step API-3 C2.1: when the revision is written and, compared with revision 0 of the round
+   * (read `FOR SHARE` in this transaction), raises the level or reaches a different threat
+   * verdict, one `mail.threat.late_signal.v1` outbox row (kind `sandbox_revision`) is written in
+   * the same transaction. A duplicate revision writes no event.
    */
-  scoreRiskRevision(scan: ScanLockRow): Promise<void>;
+  scoreRiskRevision(scan: ScanLockRow, ctx: { now: Date; correlationId: string }): Promise<void>;
   writeOutbox(row: OutboxRow): Promise<void>;
   publishHash(sha256: string, publicId: string, now: Date, expiresAt: Date): Promise<boolean>;
 
@@ -742,9 +748,34 @@ class PrismaSandboxTx implements SandboxTx {
     return created.count === 1;
   }
 
-  async scoreRiskRevision(scan: ScanLockRow): Promise<void> {
+  async scoreRiskRevision(
+    scan: ScanLockRow,
+    ctx: { now: Date; correlationId: string },
+  ): Promise<void> {
     const record = await this.scorer.scoreSandboxRevision(this.tx, scan);
-    if (record) this.risk.push(record);
+    if (!record) return;
+    this.risk.push(record);
+    if (record.kind !== 'written' || record.revision !== 1) return;
+    // Lock order kept: the scan row (held) → its risk rows and submissions (`FOR SHARE`).
+    const base = await readRevisionZero(this.tx, scan);
+    const submissions = await this.roundSubmissions(scan);
+    const payload = sandboxRevisionSignal({
+      messageId: scan.messageId,
+      receivedAt: scan.receivedAt,
+      scanId: scan.scanId,
+      revision: record.revision,
+      written: { level: record.level, verdict: record.verdict, hardBlocks: record.hardBlocks },
+      base,
+      submissions,
+      signalAt: ctx.now,
+    });
+    if (payload === null) return;
+    await writeLateSignalOutbox(this.tx, {
+      organizationId: scan.organizationId,
+      payload,
+      correlationId: ctx.correlationId,
+    });
+    record.lateSignal = true;
   }
 
   async writeOutbox(row: OutboxRow): Promise<void> {

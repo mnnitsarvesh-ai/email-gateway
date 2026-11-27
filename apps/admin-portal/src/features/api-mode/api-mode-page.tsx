@@ -10,13 +10,19 @@ import { DetectionsTab } from './detections-tab';
 import { HistoryTab } from './history-tab';
 import { MailboxesTab } from './mailboxes-tab';
 import { MODE_LABEL } from './model';
+import { PurgeTab } from './purge-tab';
 import { RemediationTab } from './remediation-tab';
+import { ReportsTab } from './reports-tab';
+import { SettingsTab } from './settings-tab';
 import { SetupTab } from './setup-tab';
 
 export const API_MODE_TABS: readonly TabDefinition[] = [
   { id: 'coverage', label: 'Coverage', ops: ['ApiModeController_overview_v1'] },
   { id: 'mailboxes', label: 'Mailboxes', ops: ['ApiModeController_listMailboxes_v1'] },
   { id: 'detections', label: 'Detections', ops: ['ApiModeController_listDetections_v1'] },
+  // Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C14).
+  { id: 'purge', label: 'Search & purge', ops: ['ApiModeClawbackController_list_v1'] },
+  { id: 'reports', label: 'Reports', ops: ['ApiModeReportsController_list_v1'] },
   // Step API-2 R15.
   {
     id: 'remediation',
@@ -24,6 +30,7 @@ export const API_MODE_TABS: readonly TabDefinition[] = [
     ops: ['ApiModeRemediationController_getPolicy_v1'],
   },
   { id: 'history', label: 'History', ops: ['ApiModeRemediationController_list_v1'] },
+  { id: 'settings', label: 'Settings', ops: ['ApiModeSettingsController_get_v1'] },
   { id: 'setup', label: 'Setup', ops: ['ApiModeController_getConnection_v1'] },
 ];
 
@@ -59,9 +66,11 @@ function StatusNotice() {
 }
 
 /**
- * `/api-mode` "Mailbox protection" (step API-1 D14, step API-2 R15): coverage and health,
- * mailboxes, detections with their mailbox actions, the remediation policy, the history of mailbox
- * actions and per-connection setup. Read-only users see every tab without the write controls.
+ * `/api-mode` "Mailbox protection" (step API-1 D14, step API-2 R15, step API-3 C14): coverage and
+ * health, mailboxes, detections with their mailbox actions, search and purge (clawbacks), reported
+ * phishing, the remediation policy, the history of mailbox actions, the organization settings with
+ * the report mailboxes and per-connection setup. Read-only users see every tab without the write
+ * controls.
  */
 export function ApiModePage() {
   return (
@@ -83,10 +92,16 @@ export function ApiModePage() {
               <MailboxesTab />
             ) : tab === 'detections' ? (
               <DetectionsTab />
+            ) : tab === 'purge' ? (
+              <PurgeTab />
+            ) : tab === 'reports' ? (
+              <ReportsTab />
             ) : tab === 'remediation' ? (
               <RemediationTab />
             ) : tab === 'history' ? (
               <HistoryTab />
+            ) : tab === 'settings' ? (
+              <SettingsTab />
             ) : (
               <SetupTab />
             )

@@ -120,8 +120,10 @@ describe('db:seed', () => {
     // Step API-1: 76 permissions (remediation:read, remediation:write) and one more feature
     // (api_mode_protection: enterprise and dedicated only). Step API-2 (§3.3): unchanged (no
     // permission, role, feature or plan data; the seed stays a no-op for the two new tables).
+    // Step API-3 (§3.3): 77 permissions (remediation:purge for organization_admin,
+    // security_analyst and super_admin: three more role grants); no role, feature or plan change.
     expect(afterFirst).toMatchObject({
-      permissions: 76,
+      permissions: 77,
       systemRoles: 10,
       destinationPresets: 2,
       plans: expect.any(Number) as unknown,
@@ -146,8 +148,10 @@ describe('db:seed', () => {
 
     // Step API-1 (§3.3): the remediation permissions (category remediation) and their holders,
     // exactly as the migration api_mode_protection grants them (the seed is a no-op afterwards).
+    // Step API-3 (§3.3): remediation:purge, exactly as the migration api_mode_clawback_reporting
+    // grants it (the holders of remediation:write).
     const remediation = await prisma.permission.findMany({
-      where: { key: { in: ['remediation:read', 'remediation:write'] } },
+      where: { key: { in: ['remediation:read', 'remediation:write', 'remediation:purge'] } },
       select: {
         key: true,
         category: true,
@@ -165,6 +169,11 @@ describe('db:seed', () => {
         roles: p.roles.map((r) => r.role.key).sort(),
       })),
     ).toEqual([
+      {
+        key: 'remediation:purge',
+        category: 'remediation',
+        roles: ['organization_admin', 'security_analyst', 'super_admin'],
+      },
       {
         key: 'remediation:read',
         category: 'remediation',
@@ -184,7 +193,12 @@ describe('db:seed', () => {
         roles: ['organization_admin', 'security_analyst', 'super_admin'],
       },
     ]);
-    expect(await prisma.permission.count({ where: { key: 'remediation:purge' } })).toBe(0);
+    expect(
+      (await prisma.permission.findUnique({ where: { key: 'remediation:purge' } }))!.description,
+    ).toBe(
+      'Search API-mode mailbox copies and purge or claw back messages across mailboxes; ' +
+        "approve another administrator's purge",
+    );
     // The feature follows the plans: platform = enterprise (on), demo = standard (off).
     const apiModeFeature = await prisma.organizationFeature.findMany({
       where: {
@@ -439,7 +453,7 @@ describe('db:seed', () => {
     );
   });
 
-  it('seeds exactly the 72 permissions and the 10 system roles (D8 + mailbox_user, 5.3, compliance_officer, 8.6), with their permissions', async () => {
+  it('seeds exactly the catalog permissions (77 since step API-3) and the 10 system roles (D8 + mailbox_user, 5.3, compliance_officer, 8.6), with their permissions', async () => {
     expect(seed().status).toBe(0);
     const permissions = await prisma.permission.findMany({ select: { key: true } });
     expect(permissions.map((p) => p.key).sort()).toEqual(PERMISSIONS.map((p) => p.key).sort());

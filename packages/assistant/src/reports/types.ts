@@ -19,6 +19,8 @@ export const REPORT_SECTIONS = [
   'url_clicks',
   'quarantine',
   'ato',
+  // Step API-3 C16 (docs/plan/steps/37-api-mode-clawback-reporting.md): mailbox protection.
+  'api_mode',
 ] as const;
 export type ReportSection = (typeof REPORT_SECTIONS)[number];
 
@@ -157,6 +159,11 @@ export interface SummaryCard {
 
 export interface ReportSectionModel {
   section: ReportSection;
+  /**
+   * Step API-3 C16: the section is a skipped note (no permission or nothing to report on); it
+   * does not count as data (`reportHasNoData`).
+   */
+  skipped?: true;
   title: string;
   cards: SummaryCard[];
   charts: ChartSpec[];

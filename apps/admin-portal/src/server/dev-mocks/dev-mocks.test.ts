@@ -51,6 +51,7 @@ describe('dev fixture layer (design P9)', () => {
         'provider-connections',
         'ato-providers',
         'api-mode',
+        'api-mode-clawback',
       ].sort(),
     );
     for (const name of Object.keys(FEATURE_FIXTURES)) {

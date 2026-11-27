@@ -136,6 +136,24 @@ const overview = (over: Partial<Overview> = {}): Overview => ({
   throttling: { events1h: 0, events24h: 2 },
   copiesToday: 17,
   remediation: remediationSummary(),
+  internal: { copies24h: 3, enabled: true },
+  clawback: {
+    active: 0,
+    reviewRequired: 0,
+    pendingApproval: 0,
+    completed24h: 0,
+    targetsSucceeded24h: 0,
+    targetsFailed24h: 0,
+    oldestActiveAgeSeconds: null,
+  },
+  reports: {
+    pendingTriage: 0,
+    inReview: 0,
+    received24h: 0,
+    resolved24h: 0,
+    oldestPendingAgeSeconds: null,
+    reportMailboxes: 0,
+  },
   connections: [
     {
       id: CONN,
@@ -153,6 +171,16 @@ const overview = (over: Partial<Overview> = {}): Overview => ({
       copiesToday: 17,
       throttledUntil: null,
       remediation: remediationSummary(),
+      internal: { copies24h: 3, enabled: true },
+      clawback: { targetsQueued24h: 0, targetsSucceeded24h: 0, targetsFailed24h: 0 },
+      reports: {
+        pendingTriage: 0,
+        inReview: 0,
+        received24h: 0,
+        resolved24h: 0,
+        oldestPendingAgeSeconds: null,
+        reportMailboxes: 0,
+      },
     },
   ],
   ...over,
@@ -195,6 +223,9 @@ const detection = {
   remediationAction: null,
   remediationId: null,
   quarantineEntryId: null,
+  direction: 'inbound' as const,
+  verdictRevision: 0,
+  clawbacks: [] as string[],
 };
 
 // ---- wizard ------------------------------------------------------------------------------------

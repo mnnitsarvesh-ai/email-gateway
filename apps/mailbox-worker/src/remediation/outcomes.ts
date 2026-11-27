@@ -8,6 +8,7 @@ import {
   isRemediationAction,
   isReversal,
   REMEDIATION_ACTIONS,
+  type ApiModeActionTrigger,
   type MessageVerdict,
   type ProviderRefContainer,
   type RemediationActionKind,
@@ -17,6 +18,7 @@ import type { QuarantinePlatformBounds, QuarantineSettings } from '@email-gatewa
 import type { MailboxMetrics, RemediationResult } from '../metrics/mailbox-metrics';
 import type { CounterDelta, CounterStore } from '../runtime/redis-stores';
 import { big, systemAudit, TX_MAX_WAIT_MS, TX_TIMEOUT_MS } from '../shared/db';
+import { InconsistentReadError } from '../shared/errors';
 import {
   blockApprovedRestore,
   completeRestore,
@@ -25,6 +27,7 @@ import {
   staleRestore,
   type ApprovedRecheck,
   type LockedEntry,
+  type MailboxEntryClawback,
   type ReleaseLogRow,
 } from './quarantine-entries';
 
@@ -40,7 +43,8 @@ export interface ActionRow {
   messageId: bigint;
   action: RemediationActionKind;
   generation: number;
-  trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+  /** Step API-3 adds `clawback` (automatic, policy-like) and `purge` (admin-like), C5.7. */
+  trigger: ApiModeActionTrigger;
   status: string;
   decision: unknown;
   reversesActionId: bigint | null;
@@ -52,6 +56,8 @@ export interface ActionRow {
   lastErrorCode: string | null;
   verdictAt: Date | null;
   rowVersion: number;
+  /** Step API-3: the clawback that queued this action (`api_clawbacks.id`), else null. */
+  clawbackId: bigint | null;
 }
 
 /** Everything an outcome writes about besides the action (public ids for the audit row). */
@@ -217,12 +223,17 @@ export class RemediationOutcomes {
           container !== null &&
           a.quarantineEntryId === null
         ) {
+          const clawback =
+            a.clawbackId === null
+              ? null
+              : await loadEntryClawback(tx, a.clawbackId, a.organizationId);
           const entry = await createMailboxEntry(tx, {
             organizationId: a.organizationId,
             actionId: a.id,
             actionPublicId: a.publicId,
             container,
             ruleId: a.trigger === 'policy' ? ruleIdOf(a.decision) : null,
+            clawback,
             copy: {
               id: ctx.copy.id,
               receivedAt: ctx.copy.receivedAt,
@@ -482,6 +493,25 @@ export class RemediationOutcomes {
     );
     return 'lost';
   }
+}
+
+/**
+ * Step API-3 C5.5: what a mailbox entry created by a clawback action needs about its clawback
+ * (public id, trigger, the signal verdict of policy mode; organization echo-checked). Null when
+ * the clawback row is gone (retention), the entry then reads like an API-2 entry.
+ */
+async function loadEntryClawback(
+  tx: Prisma.TransactionClient,
+  clawbackId: bigint,
+  organizationId: bigint,
+): Promise<MailboxEntryClawback | null> {
+  const row = await tx.apiClawback.findUnique({
+    where: { id: clawbackId },
+    select: { organizationId: true, publicId: true, trigger: true, signalVerdict: true },
+  });
+  if (!row) return null;
+  if (row.organizationId !== organizationId) throw new InconsistentReadError('api_clawbacks');
+  return { publicId: row.publicId, trigger: row.trigger, signalVerdict: row.signalVerdict };
 }
 
 type SettledState = 'none' | 'remediated' | 'restored' | 'failed' | 'simulated' | 'skipped';

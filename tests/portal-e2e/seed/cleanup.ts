@@ -88,9 +88,15 @@ const ORDER = [
   // Step API-1: the API-mode tables (copies and dedupe keys before mailboxes, counters and
   // mailboxes before the API-mode connections, those before the provider connections). Step
   // API-2: remediation actions (RESTRICT on mailboxes and connections) and policies (RESTRICT on
-  // domains) first, as API_MODE_PURGE_ORDER.
+  // domains) first, as API_MODE_PURGE_ORDER. Step API-3 (design §3.4): clawback targets,
+  // clawbacks and user reports (RESTRICT on mailboxes and connections) before the actions, the
+  // organization settings before the organization.
+  'api_clawback_targets',
+  'api_clawbacks',
+  'api_user_reports',
   'api_remediation_actions',
   'api_remediation_policies',
+  'api_mode_org_settings',
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mailbox_addresses',

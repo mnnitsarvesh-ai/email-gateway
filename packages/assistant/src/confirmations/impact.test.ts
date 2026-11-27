@@ -1382,6 +1382,219 @@ const AI5_ARGS: Record<string, Record<string, unknown>> = {
 };
 Object.assign(ARGS, AI5_ARGS);
 
+// --- step API-3 (design note 37 C15): the API-mode writes ---
+const API_DETECTION = ID(120);
+const API_CONNECTION = ID(121);
+const API_MAILBOX = ID(122);
+const API_REMEDIATION = ID(123);
+const API_DOMAIN = ID(124);
+const API_CLAWBACK = ID(125);
+const API_REPORT = ID(126);
+const API_POLICY_DOCUMENT = {
+  v: 1,
+  rules: [
+    {
+      id: 'p1-high-confidence-malware-phishing',
+      when: { verdicts: ['malware', 'phishing'], minLevel: 'critical' },
+      action: 'move_quarantine',
+    },
+    { id: 'p1-suspicious', when: { verdicts: ['suspicious'] }, action: 'tag' },
+  ],
+};
+const API_SETTINGS = {
+  internalMailEnabled: true,
+  autoClawback: 'enforce',
+  autoMaxMailboxes: 500,
+  purgeApprovalMailboxes: 50,
+  clawbackLookbackDays: 14,
+  tiMinConfidence: 80,
+  reportAckEnabled: true,
+  reportFeedbackEnabled: true,
+};
+const API3_READS: Record<string, unknown> = {
+  api_mode_get_detection: {
+    id: API_DETECTION,
+    mailboxAddress: 'alex@contoso.example',
+    headerFrom: 'b***@fabrikam.example',
+    verdict: 'phishing',
+    riskScore: 910,
+    verdictAuthority: 'copy',
+    status: 'scanned',
+    remediationState: 'remediated',
+    remediationAction: 'tag',
+    quarantineEntryId: null,
+  },
+  api_mode_remediation_detail: {
+    id: API_REMEDIATION,
+    action: 'move_junk',
+    trigger: 'policy',
+    status: 'failed',
+    attempts: 8,
+    generation: 0,
+    mailbox: { id: API_MAILBOX, address: 'alex@contoso.example' },
+  },
+  api_mode_remediation_get_policy: {
+    organization: {
+      source: 'organization',
+      id: ID(127),
+      mode: 'enforce',
+      document: API_POLICY_DOCUMENT,
+      sha256: 'a'.repeat(64),
+      rowVersion: 3,
+      updatedAt: '2026-11-26T09:00:00.000Z',
+    },
+    domains: [
+      {
+        id: ID(128),
+        domainId: API_DOMAIN,
+        domainName: 'contoso.example',
+        mode: 'detect_only',
+        document: API_POLICY_DOCUMENT,
+        sha256: 'b'.repeat(64),
+        rowVersion: 1,
+        updatedAt: '2026-11-26T09:00:00.000Z',
+      },
+    ],
+    hardDeleteAvailable: false,
+  },
+  api_mode_get_connection: {
+    id: API_CONNECTION,
+    displayName: 'Contoso Microsoft 365',
+    provider: 'microsoft_365',
+    feedsEnabled: true,
+    feedMode: 'poll',
+    remediationPaused: false,
+    inventoryStatus: 'ok',
+    inventoryRequestedAt: null,
+    rowVersion: 2,
+  },
+  api_mode_get_mailbox: {
+    id: API_MAILBOX,
+    address: 'report-phishing@contoso.example',
+    status: 'disabled',
+    feedStatus: 'active',
+    coverage: 'covered',
+    domain: { id: API_DOMAIN, name: 'contoso.example' },
+  },
+  api_mode_clawback_detail: {
+    id: API_CLAWBACK,
+    trigger: 'admin',
+    status: 'pending_approval',
+    decisionMode: 'explicit',
+    action: 'move_junk',
+    counts: { targetsEligible: 62, mailboxesEligible: 60, succeeded: 4 },
+    approval: {
+      status: 'pending',
+      reasons: ['mailbox_threshold'],
+      expiresAt: '2026-11-30T09:00:00.000Z',
+    },
+    restore: { status: 'none' },
+    cancelRequested: false,
+    requestedBy: { type: 'user', userId: ID(129) },
+    submittedBy: ID(129),
+    hints: { canApprove: true },
+    rowVersion: 4,
+  },
+  api_mode_reports_detail: {
+    id: API_REPORT,
+    reporterAddress: 'sam@contoso.example',
+    status: 'pending_triage',
+    assessment: 'malicious',
+    scan: { verdict: 'phishing' },
+    group: { size: 2 },
+    original: { sender: 'billing@fabrikam.example' },
+    clawbackId: null,
+    rowVersion: 3,
+  },
+  api_mode_settings_get: { source: 'row', settings: API_SETTINGS, rowVersion: 2 },
+};
+Object.assign(READS, API3_READS);
+
+const API3_ARGS: Record<string, Record<string, unknown>> = {
+  ApiModeRemediationController_remediate_v1: {
+    detectionId: API_DETECTION,
+    body: { action: 'move_quarantine', reason: 'Confirmed phishing' },
+  },
+  ApiModeRemediationController_restore_v1: {
+    detectionId: API_DETECTION,
+    body: { reason: 'False positive' },
+  },
+  ApiModeRemediationController_retry_v1: { remediationId: API_REMEDIATION },
+  ApiModeRemediationController_putPolicy_v1: {
+    body: {
+      mode: 'enforce',
+      document: API_POLICY_DOCUMENT,
+      reason: 'Pilot',
+      expectedRowVersion: 3,
+    },
+  },
+  ApiModeRemediationController_putDomainPolicy_v1: {
+    domainId: API_DOMAIN,
+    body: {
+      mode: 'enforce',
+      document: API_POLICY_DOCUMENT,
+      reason: 'Pilot',
+      expectedRowVersion: 1,
+    },
+  },
+  ApiModeRemediationController_deleteDomainPolicy_v1: { domainId: API_DOMAIN },
+  ApiModeController_updateSettings_v1: {
+    connectionId: API_CONNECTION,
+    body: { feedsEnabled: true, feedMode: 'poll', remediationPaused: true, expectedRowVersion: 2 },
+  },
+  ApiModeController_inventorySync_v1: { connectionId: API_CONNECTION },
+  ApiModeController_resyncMailbox_v1: { mailboxId: API_MAILBOX },
+  ApiModeClawbackController_create_v1: {
+    body: {
+      criteria: {
+        messageId: '<campaign-1@fabrikam.example>',
+        from: '2026-11-26T00:00:00.000Z',
+        to: '2026-11-27T00:00:00.000Z',
+      },
+      reason: 'SOC campaign',
+    },
+  },
+  ApiModeClawbackController_submit_v1: {
+    clawbackId: API_CLAWBACK,
+    body: { mode: 'explicit', action: 'move_junk', reason: 'Purge', expectedRowVersion: 4 },
+  },
+  ApiModeClawbackController_approve_v1: {
+    clawbackId: API_CLAWBACK,
+    body: { reason: 'Checked', expectedRowVersion: 4 },
+  },
+  ApiModeClawbackController_deny_v1: {
+    clawbackId: API_CLAWBACK,
+    body: { reason: 'Too broad', expectedRowVersion: 4 },
+  },
+  ApiModeClawbackController_cancel_v1: {
+    clawbackId: API_CLAWBACK,
+    body: { reason: 'Wrong criteria' },
+  },
+  ApiModeClawbackController_restore_v1: {
+    clawbackId: API_CLAWBACK,
+    body: { reason: 'False positive' },
+  },
+  ApiModeReportsController_triage_v1: {
+    reportId: API_REPORT,
+    body: { status: 'resolved', verdict: 'malicious', expectedRowVersion: 3 },
+  },
+  ApiModeReportsController_clawback_v1: {
+    reportId: API_REPORT,
+    body: { expand: { attachments: true }, reason: 'Remove it' },
+  },
+  ApiModeReportsController_addMailbox_v1: {
+    body: { address: 'report-phishing@contoso.example', reason: 'Report mailbox' },
+  },
+  ApiModeReportsController_setMailbox_v1: {
+    mailboxId: API_MAILBOX,
+    body: { enabled: true, reason: 'Report mailbox' },
+  },
+  ApiModeSettingsController_put_v1: {
+    body: { ...API_SETTINGS, autoClawback: 'review', reason: 'Review', expectedRowVersion: 2 },
+  },
+};
+Object.assign(ARGS, API3_ARGS);
+
 const toolOf = (operationId: string) => findOperation(operationId) as OperationTool;
 
 /** What the executor does (D1): snapshot, CAS injection, items; then the summary. */
@@ -1431,7 +1644,7 @@ describe('impact templates (D5)', () => {
       CONFIRMATION_SPECS.map((s) => s.operationId).sort(),
     );
     expect(Object.keys(ARGS).sort()).toEqual(Object.keys(IMPACT_TEMPLATES).sort());
-    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(168);
+    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(188);
     expect(hasImpactTemplate('LegalHoldsController_release_v1')).toBe(false);
   });
 

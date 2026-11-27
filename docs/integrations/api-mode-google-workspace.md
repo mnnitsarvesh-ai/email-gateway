@@ -41,6 +41,28 @@ Notes:
 - Hybrid domains: copies of messages the gateway already delivered inline are never remediated automatically.
 - Remediation shares the connection's Gmail request budget and pauses when Google throttles (`429`, rate-limit `403`, `503` with `Retry-After`). An administrator can **pause remediation** per connection (restores continue). Removing the client ID from domain-wide delegation stops remediation; pending actions fail with `mailbox_access_revoked`.
 
+## What clawback does in your tenant
+
+From step API-3 the gateway can also act on mail that was **already delivered** when a threat becomes known later ([ADR-0103](../architecture/adr/0103-api-mode-clawback-search-and-purge.md)). It searches only the copies it recorded from the "Also deliver to" routing (and the optional history feeds); it never searches mailboxes live and never backfills mail from before onboarding.
+
+- **Automatic clawback.** A later signal (the sandbox finishes and raises a message's risk, a URL is found malicious on dynamic inspection, a new high-confidence threat-intelligence indicator or malware hash matches earlier mail) finds every recorded copy by Message-ID, attachment hash, URL or sender and subject, and decides each copy again through your **remediation policy** with the signal's facts. Detect-only policies only record what would happen, a paused connection waits, and a clawback never weakens or replaces a stronger action (a labelled message can be moved; a quarantined one is left as it is). A copy that an administrator restored after the signal is not touched again. Automatic clawbacks that would reach more than 500 mailboxes (configurable) wait for an administrator.
+- **Search and purge.** Administrators with `remediation:purge` search the recorded copies, review the frozen hit list and purge it to the quarantine label, Spam or Trash. A purge reaching more than **50 mailboxes** (configurable per organization) needs a **second administrator** with `remediation:purge` who did not request it. Hard delete is available only in the admin console with the platform setting `API_MODE_HARD_DELETE_ENABLED` and a second approver; on Google it moves messages to **Trash** (the gateway does not hold the full `https://mail.google.com/` scope).
+- **Internal mail.** Messages between your own users that the routing copies are recorded per recipient and remediated the same way (setting "internal mail", on by default). Messages that only leave the organization are recognised and not recorded.
+- **Restore.** A clawback can be restored in bulk: messages go back to the Inbox (untrashed while still in Trash), labels are removed; quarantine entries that need an approval are left for the quarantine page.
+
+Every clawback uses the same Gmail API calls, delegation (`gmail.modify`) and request budget as remediation; it is audited with per-mailbox results. Report mailboxes are never searched or remediated.
+
+## Report mailbox setup
+
+Users report suspicious mail by forwarding it to a **report mailbox** of your organization; there is **no add-in** to install ([ADR-0104](../architecture/adr/0104-api-mode-internal-mail-and-reported-phishing.md)).
+
+1. Create a dedicated **user mailbox** for reports in Google Workspace, for example `phish-report@example.com` (Google has no shared mailboxes; a Google Group is not a mailbox the gateway can read). Its domain must be linked to this connection with protection mode `api` or `hybrid`.
+2. Keep the mailbox **inside the scope of the "Also deliver to" routing** (section 2: the organizational unit or group the routing setting applies to must include it), so the gateway receives a copy of every report. History feeds (section 4) are optional and only shorten the delay.
+3. Designate it in the admin console (Mailbox protection, report mailboxes; permission `remediation:write`), or through `PUT /api/v1/api-mode/mailboxes/{mailboxId}/report-mailbox` or `POST /api/v1/api-mode/report-mailboxes` with the address. Up to five report mailboxes per organization; aliases of the mailbox are recognised.
+4. Tell users to forward suspicious messages **as an attachment** (Gmail: More → Forward as attachment), which keeps the original headers. A normal (inline) forward also works; the gateway then reads the forwarded `From:`, `Subject:` and date lines.
+
+Only senders on your organization's domains are accepted (no external reports, auto-replies or loops; at most 30 reports per person per hour). Reports are scanned, triaged by your analysts and never remove mail by themselves; an analyst can start a clawback from a report (the approval rules above apply). Reporters receive an acknowledgement and a result e-mail (both can be turned off) that never repeat the reported message's subject or content.
+
 ## The example guide
 
 The block below is generated from the guide generator of `@email-gateway/provider-integrations` (`exampleApiModeGuideInput('google_workspace')`); a test fails when it no longer matches (`packages/provider-integrations/src/guides/api-mode-docs-templates.test.ts`).

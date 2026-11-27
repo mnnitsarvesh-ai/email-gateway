@@ -15,6 +15,8 @@ const BATCH = 5_000;
 const ENTRY_EXPIRY_BATCH = 500;
 /** Terminal remediation actions pruned per statement. */
 const ACTION_PRUNE_BATCH = 1_000;
+/** Terminal clawbacks pruned per statement (their targets cascade, so keep it small). */
+const CLAWBACK_PRUNE_BATCH = 100;
 
 export interface MaintenanceReport {
   dedupeKeys: number;
@@ -27,6 +29,9 @@ export interface MaintenanceReport {
   mailboxEntriesExpired: number;
   /** Step API-2 §3.1: terminal `api_remediation_actions` rows pruned. */
   remediationActions: number;
+  /** Step API-3 §3.4: terminal clawbacks (their targets cascade) and reports pruned. */
+  clawbacks: number;
+  reports: number;
 }
 
 export interface MaintenanceDeps {
@@ -35,7 +40,14 @@ export interface MaintenanceDeps {
   runtime: ProviderRuntime | null;
   logger: Logger;
   now: () => Date;
-  config: { dedupeWindowHours: number; remediationRetentionDays: number };
+  config: {
+    dedupeWindowHours: number;
+    remediationRetentionDays: number;
+    /** `API_MODE_CLAWBACK_RETENTION_DAYS` (§3.4). */
+    clawbackRetentionDays: number;
+    /** `API_MODE_REPORT_RETENTION_DAYS` (§3.4). */
+    reportRetentionDays: number;
+  };
   organizationIds?: readonly bigint[];
 }
 
@@ -71,6 +83,8 @@ export class Maintenance {
       feedsActivated: 0,
       mailboxEntriesExpired: 0,
       remediationActions: 0,
+      clawbacks: 0,
+      reports: 0,
     };
     const prisma = this.deps.prisma;
     const dedupeCutoff = new Date(now.getTime() - this.deps.config.dedupeWindowHours * 3_600_000);
@@ -125,15 +139,37 @@ export class Maintenance {
       report.remediationActions += n;
       if (n < ACTION_PRUNE_BATCH) break;
     }
+    // Step API-3 §3.4: terminal clawbacks (targets cascade) and terminal reports.
+    const clawbackCutoff = new Date(
+      now.getTime() - this.deps.config.clawbackRetentionDays * DAY_MS,
+    );
+    report.clawbacks = await this.drain(
+      () => prisma.$executeRaw`
+        DELETE FROM api_clawbacks
+        WHERE status IN ('completed', 'completed_with_errors', 'no_match', 'too_broad', 'denied',
+                         'expired', 'cancelled', 'failed')
+          AND restore_status NOT IN ('requested', 'running')
+          AND COALESCE(completed_at, updated_at) < ${clawbackCutoff} ${this.orgFilter()}
+        LIMIT ${CLAWBACK_PRUNE_BATCH}`,
+      CLAWBACK_PRUNE_BATCH,
+    );
+    const reportCutoff = new Date(now.getTime() - this.deps.config.reportRetentionDays * DAY_MS);
+    report.reports = await this.drain(
+      () => prisma.$executeRaw`
+        DELETE FROM api_user_reports
+        WHERE status IN ('resolved', 'rejected') AND updated_at < ${reportCutoff}
+          ${this.orgFilter()}
+        LIMIT ${BATCH}`,
+    );
     return report;
   }
 
-  private async drain(statement: () => Promise<number>): Promise<number> {
+  private async drain(statement: () => Promise<number>, batch = BATCH): Promise<number> {
     let total = 0;
     for (let i = 0; i < 100; i++) {
       const n = await statement();
       total += n;
-      if (n < BATCH) break;
+      if (n < batch) break;
     }
     return total;
   }

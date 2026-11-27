@@ -146,6 +146,8 @@ custom issue `unsupported_until_policy_evaluation` (message and `params.code`). 
    match or action `none` → `none`;
 3. verdict authority `inline` (hybrid) → skip `inline_authority`;
 4. domain effective mode not `api`/`hybrid`, or mailbox `disabled`/`deleted` → skip `out_of_scope`;
+   4b. (step API-3, note 37 C8.5) copy `direction: 'internal'` while `context.internalMailEnabled`
+   is `false` → skip `internal_mail_disabled` (both fields optional: absent = `inbound` / `true`);
 5. `hard_delete` without the platform setting → skip `hard_delete_disabled`;
 6. mode `detect_only` → `act` with `simulated: true` (no provider call);
 7. connection paused → skip `remediation_paused`;
@@ -154,11 +156,13 @@ custom issue `unsupported_until_policy_evaluation` (message and `params.code`). 
 
 `resolveEffectivePolicy({ organization, domains }, domainId)` → `{ scope: platform_default |
 organization | domain, policy, publicId, rowVersion }` (domain row → organization row → P1);
-`buildDecisionRecord(effective, input, decision)` → `api-remediation-decision/1` (`{ v, policy: {
+`buildDecisionRecord(effective, input, decision, provenance?)` → `api-remediation-decision/1` (`{ v, policy: {
 scope, publicId, rowVersion, sha256 }, mode, ruleId, inputs: { verdict, riskScore, level,
 hardBlocks ≤ 9, verdictAuthority }, policyOutcome: null, notes }`, schema
 `remediationDecisionRecordSchema`). `remediationActionKey(copyPublicId, action, generation)` = hex
 SHA-256 of `api-remediation/1\0<copyPublicId>\0<action>\0<generation>` (the unique `action_key`).
+A clawback decision (step API-3 C3.2) passes `provenance = { source: 'clawback', clawbackId }`,
+recorded as the notes `source:clawback` and `clawback:<clawbackId>` (the record schema is unchanged).
 
 ### Provider mappings (R3) and helpers
 
@@ -213,6 +217,70 @@ rated from 5 attempts (> warn % → warn, > fail % → fail), oldest pending age
 
 Thresholds are configuration of the caller (`API_MODE_*` keys, design D16), never constants here,
 except the fixed ratios of D11.3 (`FEEDS_INTAKE_MIN_RATIO` 0.9, `FEEDS_ERROR_WARN_RATIO` 0.1).
+
+## Clawback, search and purge (step API-3)
+
+Pure helpers of retroactive clawback ([design note 37](../../docs/plan/steps/37-api-mode-clawback-reporting.md)
+C2–C7, C17; ADR-0103). The api creates admin/campaign/report clawbacks and decides approvals; the
+mailbox-worker's `clawback` role materializes, plans and queues targets as `api_remediation_actions`
+rows (the `remediate` role stays the only action engine). Nothing here touches a database.
+
+| Export                                                                                                                                                                                                                                        | Purpose                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAWBACK_TRIGGERS`, `CLAWBACK_STATUSES` (+ `ACTIVE_`, `CANCELLABLE_`, `RESTORABLE_CLAWBACK_STATUSES`), `CLAWBACK_DECISION_MODES`, `CLAWBACK_ACTIONS`, `CLAWBACK_RESTORE_STATUSES`, `CLAWBACK_APPROVAL_REASONS`, `CLAWBACK_APPROVAL_STATUSES` | Mirrors of the `api_clawbacks` enums                                                                                                                                                                                                                                                                                                                                                    |
+| `CLAWBACK_TARGET_STATUSES`, `CLAWBACK_TARGET_RESTORE_STATUSES`, `CLAWBACK_MATCH_KEYS`, `CLAWBACK_TARGET_REASON_CODES`, `CLAWBACK_RESTORE_REASON_CODES`, `entryStateRestoreCode(state)`                                                        | Target enums and the §5 reason codes (policy outcomes, eligibility and planning skips, `internal_mail_disabled`, every R5 result code; restore `approval_required`, `refused`, `not_reversible`, `entry_<state>`)                                                                                                                                                                       |
+| `CLAWBACK_SIGNAL_KINDS`, `CLAWBACK_HARD_BLOCKS` / `CLAWBACK_HARD_BLOCK_IDS`, `CLAWBACK_STRENGTH_ORDER`, `actionStrength`, `CLAWBACK_ACTION_TRIGGERS`, `API_MODE_ACTION_TRIGGERS`, `REMEDIATION_PURGE_PERMISSION`                              | Signal kinds; synthetic hard blocks `hb.clawback.url`, `hb.clawback.threat_intel`, `hb.clawback.analyst`; `tag < move_junk < move_quarantine < soft_delete < hard_delete`; action triggers `clawback`/`purge` (and the whole `ApiRemediationTrigger` enum); `remediation:purge`                                                                                                         |
+| `clawbackCriteriaSchema`, `parseClawbackCriteria(value, { now, maxWindowDays, fromCampaignSeed? })`, `clawbackWindowIssues`, `normalizeClawbackCriteria`, `canonicalCriteriaSha256`                                                           | `api-clawback-criteria/1` (C4.1): strict; keys `messageIdHashes` ≤ 10, `attachmentSha256` ≤ 20, `urlSha256` ≤ 20, `urlDomains`/`senders`/`senderDomains` ≤ 5 (TI only), `senderSubject { sender, subjectKey ≤ 128 code points }`; ≥ 1 key (OR); window ≤ `maxWindowDays`, `from ≥ now − 186 d`, sender + subject ≤ 7 days unless from a campaign seed; errors carry codes, never values |
+| `clawbackSignalSchema`, `clawbackSignalFactsSchema`, `UNSUPPORTED_UNTIL_ATP4`                                                                                                                                                                 | `api-clawback-signal/1` (§5); `refs.campaignRef` refused with `unsupported_until_atp4`                                                                                                                                                                                                                                                                                                  |
+| `clawbackSignalKey(organizationId, { source: 'late', messageId, receivedAt, kind, revision, urlSha256 } \| { source: 'ti', table, rowId })`                                                                                                   | C2.5 `signal_key`: hex SHA-256 of `api-clawback-signal/1\0<org>\0late\0<messageId>\0<receivedAt ISO>\0<kind>\0<revision ?? urlSha256>` or `…\0ti\0<table>\0<rowId>`                                                                                                                                                                                                                     |
+| `signalFacts(input)`, `tiEligible(indicator, minConfidence, now)`, `signatureEligible(signature, now)`                                                                                                                                        | The C3.1 table (`{ verdict, level, hardBlocks, score? }`); C2.2 eligibility (types `url`/`domain`/`file_sha256`/`email`, never `ip`; severity high/critical; confidence floor; not expired)                                                                                                                                                                                             |
+| `targetEligibility(...)`, `clawbackRemediationInput(...)`, `clawbackPolicyOutcome(decision)`, `planClawbackTarget(...)`                                                                                                                       | C5.2 skips (`no_mailbox_access`, `out_of_scope`, `mailbox_inactive`, `report_mailbox`); the C3.2 `decideRemediation` input (copy authority, `max(score)`); decision → `skip`/`simulate`/`act`; C5.3 escalation-only planning                                                                                                                                                            |
+| `requiresPurgeApproval({ mailboxesEligible, threshold, action, autoCap })`, `decidePurgeApproval({ approver, request, now })`                                                                                                                 | C6: reasons `mailbox_threshold`, `hard_delete`, `auto_cap`; Q14 rules (`api_mode_purge_approval_forbidden` `api_key`/`missing_permission`/`requester`, `api_mode_purge_approval_not_pending` `not_pending`/`expired`; no recipient rule)                                                                                                                                                |
+| `subjectKeyOf(subject)`, `messageIdKeyOf(id)`                                                                                                                                                                                                 | Parity copy of the api's `normalizeSubjectKey` / `normalizeMessageIdKey` (C4.4; same vectors, drift-guard test)                                                                                                                                                                                                                                                                         |
+| `ORG_SETTINGS_DEFAULTS`, `ORG_SETTINGS_BOUNDS`, `orgSettingsSchema`, `resolveOrgSettings(row \| null)`, `AUTO_CLAWBACK_MODES`                                                                                                                 | C17 defaults (internal mail on, `enforce`, cap 500, P2 50, lookback 14 d, TI confidence 80, ack and feedback on); C14 #19 bounds; row or defaults (clamped)                                                                                                                                                                                                                             |
+
+**Planning (C5.3)**, in order: a `hard_delete` in policy mode → `hard_delete_not_allowed` (an explicit
+one with the setting off → `hard_delete_disabled`); copy `pending` → `remediation_in_progress`; copy
+`remediated` with an equal or stronger action (or an unknown one) → `already_remediated`, a weaker
+one → act (escalation, the earlier tag stays); copy `restored` whose restore completed after
+`signal_at` (or at an unknown time) → `restored_after_signal`; otherwise act.
+
+**Signal facts (C3.1):** sandbox revision → its verdict, level (`none` read as `low`) and hard
+blocks; URL dynamic malicious → `phishing`/`critical`/`hb.clawback.url`, suspicious →
+`suspicious`/`high`; TI file hash → `malware`, URL/domain/email by category (`malware`/`c2` →
+`malware`, `phishing`/`scam` → `phishing`, `spam` → `spam`, none/`other` → `suspicious`), level from
+severity, `hb.clawback.threat_intel` when severity `critical` or confidence ≥ 90; malware signature
+→ `malware`, level from severity, treated as confidence 100 (a confirmed hash); report analyst
+`malicious` → the original's `malware`/`phishing`/`bec` else `phishing`, `critical`,
+`hb.clawback.analyst`; admin/campaign → the chosen verdict and level (default `critical`, with
+`hb.clawback.analyst`).
+
+## Reported phishing (step API-3)
+
+Pure helpers of the report mailbox (note 37 C10–C11; ADR-0104). The mailbox-worker's `reports`
+role reads the report copy's EML from S3 and calls them; the per-reporter rate limit stays in the
+worker.
+
+| Export                                                                                                                                                                   | Purpose                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REPORT_STATUSES`, `REPORT_IDENTIFICATIONS`, `REPORT_REJECT_REASONS`, `REPORT_ASSESSMENTS`, `REPORT_ANALYST_VERDICTS`, `REPORT_FEEDBACK_STATES`, `REPORT_FEEDBACK_KINDS` | Mirrors of the `api_user_reports` enums and codes                                                                                                                                                                                                                                                                                  |
+| `extractReportedMessage(bytes, { maxBytes, maxOriginalBytes, maxDepth?, maxParts? })`                                                                                    | Bounded MIME walker (depth ≤ 4, parts ≤ 200): `attachment` (first `message/rfc822`/`message/global`, or `application/octet-stream`/`application/eml` named `*.eml`; transfer-decoded; headers; `extraOriginals`; attachment hashes), `inline`, `unsupported` (`.msg`), `none`; failures `too_large` (with `limit`), `parse_failed` |
+| `parseInlineForward(text)`, `INLINE_FORWARD_SEPARATORS`, `parseForwardDate`, `htmlToText`, `decodeEncodedWords`, `originalAttachmentHashes`, `reportEnvelopeHeaders`     | Inline forward separators (English, German, French, Spanish, Italian, Dutch, Portuguese; Outlook, Gmail, Apple Mail, Thunderbird and the Outlook rule line) followed within 20 lines by `From:`/`Subject:` (optional `Date:`/`Sent:`/`Message-ID:`); client date formats; linear HTML-to-text; RFC 2047                            |
+| `reportOriginalSchema`, `buildReportOriginal({ organizationId, extraction, fallbackAttachmentSha256?, urlSha256? })`, `reportIdentificationOf`                           | `api-report-original/1`: `messageIdHash` (`copyMessageIdHash`), `sender` (lower case), `subjectKey` (`subjectKeyOf`), `date`, `attachmentSha256` ≤ 20, `urlSha256` ≤ 50 (caller fills), `extraOriginals`; never bodies                                                                                                             |
+| `reportGroupKey(original)`, `assessReport(scan)`, `reporterCheck({ reporterAddress, orgDomains, reportMailboxAddresses, headers })`                                      | C11.3 group key (Message-ID hash, else SHA-256 of sender + subject key + date hour, else null); C11.2 hint (`malicious`, `suspicious`, `clean`, `unknown`); C10.1 `external_reporter`, `loop`, `auto_submitted`                                                                                                                    |
+
+The attachment hashes of an attached original follow `@email-gateway/mime-parser`'s rule (every leaf
+except the first `text/plain` and `text/html` bodies; leaves of nested messages included), so they
+match `email_attachments.sha256`. The walker never renders or executes content; failures carry codes
+only (no address, subject or body).
+
+### Health (step API-3, C13)
+
+`API_MODE_HEALTH_CHECK_CODES` gains `clawback.stalled` and `reports.backlog` (15 codes; cap 16),
+evaluated only with the optional input blocks `clawback: { oldestActiveAgeSeconds, thresholds: {
+stalledWarnMinutes, stalledFailMinutes } }` (> warn → warn, > fail → fail) and `reports: {
+hasReportMailbox, oldestPendingTriageAgeSeconds, thresholds: { triageWarnHours } }` (> warn hours →
+warn, never fail) (`evaluateClawbackHealth`, `evaluateReportsHealth`).
 
 ## Testing (`@email-gateway/mailbox-api/testing`)
 

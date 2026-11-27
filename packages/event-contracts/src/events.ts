@@ -2085,6 +2085,12 @@ export const NOTIFICATION_ALERT_KIND_VALUES = [
   // Step API-1 D11.3 (ADR-0100): an API-mode connection became `degraded` or `failing`
   // (mailbox-worker health role).
   'api_mode_unhealthy',
+  // Step API-3 C6 (ADR-0103): a clawback needs a second approver (api at submit; mailbox-worker
+  // `clawback` role when an automatic clawback enters `review_required`).
+  'api_mode_purge_approval',
+  // Step API-3 C13 (ADR-0104): new user reports reached `pending_triage` (mailbox-worker
+  // `reports` role; at most once per organization per API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES).
+  'api_mode_report_received',
 ] as const;
 /** Public event severities (step 6.2 §5). */
 export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
@@ -2099,6 +2105,8 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
   integration_unhealthy: ['webhookEventId', 'connectionId'],
   journal_intake_silent: ['intakeSourceId'],
   api_mode_unhealthy: ['apiModeConnectionId'],
+  api_mode_purge_approval: ['clawbackId'],
+  api_mode_report_received: [],
 };
 
 /**
@@ -2107,7 +2115,9 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * webhook-worker (fanout: `threat_detected`, `domain_dns_failed`; delivery role auto-disable:
  * `webhook_disabled`; step 8.2 integration-worker: `integration_unhealthy`; step 8.6
  * archive-worker intake health loop: `journal_intake_silent`; step API-1 mailbox-worker health
- * role: `api_mode_unhealthy`) through `message_outbox`
+ * role: `api_mode_unhealthy`; step API-3 api and mailbox-worker `clawback` role:
+ * `api_mode_purge_approval`; step API-3 mailbox-worker `reports` role:
+ * `api_mode_report_received`) through `message_outbox`
  * (`aggregate_type = 'organization'`,
  * `aggregate_id` = the decimal organization id); published to `email.policy` and consumed from
  * `email.notifications` by the notification-worker, which reads what it renders at send time.
@@ -2116,7 +2126,8 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * kind carries the refs it needs (threat: the public event id, message id and received time;
  * DNS: the public event id and domain id; webhook disabled: the subscription public id; journal
  * intake silent: the intake source public id; API mode unhealthy: the `api_mode_connections`
- * public id);
+ * public id; purge approval: the `api_clawbacks` public id; report received: no ref, the
+ * notification-worker counts the organization's pending reports at send time);
  * `messageId` and `receivedAt` go together; `window.from` precedes `window.to`.
  */
 export const notificationAlertRequestedV1 = z
@@ -2135,6 +2146,8 @@ export const notificationAlertRequestedV1 = z
       intakeSourceId: z.uuid().optional(),
       /** Step API-1: the API-mode connection public id (`api_mode_unhealthy`). */
       apiModeConnectionId: z.uuid().optional(),
+      /** Step API-3: the clawback public id (`api_mode_purge_approval`). */
+      clawbackId: z.uuid().optional(),
     }),
     window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
     counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),
@@ -2287,6 +2300,137 @@ export const messageCopyScannedV1 = z
   });
 export type MessageCopyScannedV1 = z.infer<typeof messageCopyScannedV1>;
 
+/** `mail.threat.late_signal.v1` kinds (step API-3 C2.1). */
+export const LATE_SIGNAL_KIND_VALUES = ['sandbox_revision', 'url_dynamic'] as const;
+/** Risk levels of a scored round (Prisma `RiskLevel`, step 5.1 R4; ascending). */
+export const LATE_SIGNAL_LEVEL_VALUES = ['none', 'low', 'medium', 'high', 'critical'] as const;
+/** At most this many attachment or URL hashes in one late signal (contracts §38). */
+export const LATE_SIGNAL_MAX_HASHES = 20;
+/** At most this many hard-block ids in one late signal (contracts §38). */
+export const LATE_SIGNAL_MAX_HARD_BLOCKS = 9;
+/**
+ * A hard-block id of the risk model or a signal-synthesized one (`hb.clawback.url`,
+ * `hb.clawback.threat_intel`, `hb.clawback.analyst`; contracts §38).
+ */
+export const HARD_BLOCK_ID_PATTERN = /^[a-z0-9_.:-]{1,64}$/;
+
+const lateSignalSha256 = z.string().regex(/^[0-9a-f]{64}$/, 'Expected a lower-case hex SHA-256');
+
+/**
+ * A late verdict of a message after its round completed (step API-3 C2.1, ADR-0103, contracts
+ * §38): a sandbox risk revision that raised the level or reached a different threat verdict
+ * (`sandbox_revision`, `revision` ≥ 1), or a late URL dynamic-inspection verdict
+ * `malicious` / `suspicious` after the round finished (`url_dynamic`, `revision` null, the
+ * inspected URL's identity hash in `urlSha256`). Written by the email-worker through
+ * `message_outbox` (`aggregate_type = 'message'`, `aggregate_id` = the decimal message id) in the
+ * transaction that stores the revision or the inspection verdict, for every ingest source.
+ * Published to `email.security`; consumed from `email.mailbox` (topology v18) by the
+ * mailbox-worker `copies` role (ledger `mailbox-worker.copies`), which creates at most one
+ * `api_clawbacks` row per organization and signal key for an API-active organization and acks
+ * the rest.
+ *
+ * Strict; ids, the verdict, level, hard-block ids, lower-case hex SHA-256 hashes (attachment
+ * content hashes, URL identity hashes; ≤ 20 each) and times only — never an address, subject,
+ * file name or URL. Consistency: `sandbox_revision` names a revision and carries no URL hash;
+ * `url_dynamic` has no revision, at least one URL hash and no attachment hash; hashes and
+ * hard-block ids are unique.
+ */
+export const threatLateSignalV1 = z
+  .strictObject({
+    kind: z.enum(LATE_SIGNAL_KIND_VALUES),
+    /** Registry id (`message_identities.id`) of the message whose verdict changed. */
+    messageId: decimalIdSchema,
+    receivedAt: z.iso.datetime(),
+    /** `email_scans.id` of the round. */
+    scanId: decimalIdSchema,
+    /** Risk revision (`message_risk_scores.revision`, ≥ 1) of `sandbox_revision`; else null. */
+    revision: z.number().int().min(1).max(255).nullable(),
+    /** The late verdict (Prisma `MessageVerdict`). */
+    verdict: z.enum(MESSAGE_VERDICT_VALUES),
+    level: z.enum(LATE_SIGNAL_LEVEL_VALUES),
+    hardBlocks: z
+      .array(z.string().regex(HARD_BLOCK_ID_PATTERN, 'Expected a hard-block id'))
+      .max(LATE_SIGNAL_MAX_HARD_BLOCKS),
+    attachmentSha256: z.array(lateSignalSha256).max(LATE_SIGNAL_MAX_HASHES),
+    urlSha256: z.array(lateSignalSha256).max(LATE_SIGNAL_MAX_HASHES),
+    signalAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.kind === 'sandbox_revision') {
+      if (payload.revision === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['revision'],
+          message: 'sandbox_revision names the risk revision',
+        });
+      }
+      if (payload.urlSha256.length > 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['urlSha256'],
+          message: 'sandbox_revision carries no URL hash',
+        });
+      }
+    } else {
+      if (payload.revision !== null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['revision'],
+          message: 'url_dynamic has no revision',
+        });
+      }
+      if (payload.urlSha256.length === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['urlSha256'],
+          message: 'url_dynamic names the inspected URL hash',
+        });
+      }
+      if (payload.attachmentSha256.length > 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['attachmentSha256'],
+          message: 'url_dynamic carries no attachment hash',
+        });
+      }
+    }
+    for (const field of ['hardBlocks', 'attachmentSha256', 'urlSha256'] as const) {
+      const seen = new Set<string>();
+      payload[field].forEach((value, index) => {
+        if (seen.has(value)) {
+          ctx.addIssue({ code: 'custom', path: [field, index], message: `Duplicate ${field}` });
+        }
+        seen.add(value);
+      });
+    }
+  });
+export type ThreatLateSignalV1 = z.infer<typeof threatLateSignalV1>;
+
+/** `mail.report.feedback_requested.v1` kinds (step API-3 C12): acknowledgement or result. */
+export const REPORT_FEEDBACK_KIND_VALUES = ['received', 'resolved'] as const;
+
+/**
+ * A feedback e-mail to the reporter of a user report (step API-3 C10.6, C11.4, C12, ADR-0104,
+ * contracts §38): `received` (acknowledgement, written by the mailbox-worker `reports` role in
+ * the transaction that leaves `received`) or `resolved` (result, written by the api triage
+ * transaction). Through `message_outbox` (`aggregate_type = 'organization'`, `aggregate_id` =
+ * the decimal organization id); published to `email.policy` and consumed from
+ * `email.notifications` (topology v18) by the notification-worker (ledger
+ * `notification-worker.report-feedback`), which reads the report at send time and sends only
+ * when it is not rejected, the reporter still resolves to the organization and (for `resolved`)
+ * an analyst verdict is set.
+ *
+ * Strict: the report public id, the kind and the time only — no address, subject, verdict text
+ * or body.
+ */
+export const reportFeedbackRequestedV1 = z.strictObject({
+  /** `api_user_reports.public_id`. */
+  reportId: z.uuid(),
+  kind: z.enum(REPORT_FEEDBACK_KIND_VALUES),
+  requestedAt: z.iso.datetime(),
+});
+export type ReportFeedbackRequestedV1 = z.infer<typeof reportFeedbackRequestedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -2337,4 +2481,10 @@ export const EventTypes = {
   // Step API-1 (docs/plan/steps/35-api-mode-protection.md D8, §5): the detect-mode scan of a
   // non-gateway copy finished (consumer: mailbox-worker copies role, queue email.mailbox, v17).
   MessageCopyScanned: 'mail.message.copy_scanned.v1',
+  // Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C2.1, §5): a late sandbox or
+  // URL verdict (consumer: mailbox-worker copies role, queue email.mailbox, v18).
+  ThreatLateSignal: 'mail.threat.late_signal.v1',
+  // Step API-3 (C12, §5): reporter feedback of a user report (consumer: notification-worker,
+  // queue email.notifications, v18).
+  ReportFeedbackRequested: 'mail.report.feedback_requested.v1',
 } as const;

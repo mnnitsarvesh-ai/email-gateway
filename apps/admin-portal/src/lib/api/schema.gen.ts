@@ -47,6 +47,190 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/api-mode/clawbacks': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List API-mode clawbacks
+     * @description Clawbacks (automatic late-verdict and threat-intelligence signals, campaigns, report and admin searches), newest first: trigger, status, decision mode and action, target and mailbox counts, the approval block (required, status, reasons, expiry) and the restore block. Filters `status`, `trigger`, `approvalStatus`, `from`/`to` (at most 93 days; default the last 30). v1 list (`api_clawbacks`). From the read replica. Needs `remediation:read`.
+     */
+    get: operations['ApiModeClawbackController_list_v1'];
+    put?: never;
+    /**
+     * Search API-mode mailbox copies (create a clawback)
+     * @description `{ criteria: { messageId?, attachmentSha256?, url?, urlSha256?, sender?, subject?, from, to }, seedDetectionId?, expand?: { attachments?, urls?, senderSubjectHours? }, directions?, reason }`. Searches the recorded copies of your organization (never a live provider search; report mailboxes excluded): keys combine with OR; the Message-ID is hashed as the dedupe hash, the subject normalized to the explorer’s subject key (sender + subject together, window ≤ 7 days unless from a campaign seed), a URL reduced to its identity hash; the window spans at most 31 days within the 6-month copy retention. A seed detection alone searches its Message-ID; `expand` adds its attachment and URL hashes and its sender + subject within ± `senderSubjectHours` (a campaign). The mailbox-worker materializes the hit list (`searching` → `ready`, `no_match` or `too_broad` above 20 000 copies); preview it with the targets list, then submit. Invalid criteria → `422 api_mode_clawback_criteria_invalid` (`codes`). Audited `api_mode.clawback_created` (key counts, never the keys). Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an API-mode clawback
+     * @description One clawback with its criteria (hashes truncated; the sender and subject key of a sender + subject search), the signal facts the policy decides on, the counts, the approval (requester, submitter, the second person, reasons, expiry), the restore block and hints (`canSubmit`, `canApprove`, `canCancel`, `canRestore` for the caller). Needs `remediation:read`. Never returns message content: hashes are truncated, sender addresses and subject keys are untrusted data.
+     */
+    get: operations['ApiModeClawbackController_detail_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/approve': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Approve a pending API-mode purge
+     * @description `{ reason, expectedRowVersion }`: the second person approves; the clawback is `queued`. The approver is a user (API keys: `403 api_mode_purge_approval_forbidden` reason `api_key`) holding `remediation:purge` who is neither the requester nor the submitter (reason `requester`); the request must be pending and not expired (`409 api_mode_purge_approval_not_pending`, reason `not_pending` or `expired`). CAS: `expectedRowVersion` (`409 api_mode_clawback_state_conflict` with `currentRowVersion`). Stores the approver and the hash of their permission set. Audited `api_mode.clawback_approved`. Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_approve_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/cancel': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Cancel an API-mode clawback
+     * @description `{ reason }`. `ready`, `review_required` and `pending_approval` are cancelled at once (a pending approval request is cancelled with it); `queued` and `running` clawbacks get a cancel request: the mailbox-worker cancels every pending mailbox action of the clawback and lets running ones finish (a repeated cancel changes nothing). Anything else → `409 api_mode_clawback_not_cancellable` (`status`). Audited `api_mode.clawback_cancelled`. Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_cancel_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/deny': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Deny a pending API-mode purge
+     * @description `{ reason, expectedRowVersion }`: the second person denies; the clawback is `denied` and nothing is removed. The approver is a user (API keys: `403 api_mode_purge_approval_forbidden` reason `api_key`) holding `remediation:purge` who is neither the requester nor the submitter (reason `requester`); the request must be pending and not expired (`409 api_mode_purge_approval_not_pending`, reason `not_pending` or `expired`). CAS: `expectedRowVersion` (`409 api_mode_clawback_state_conflict` with `currentRowVersion`). Audited `api_mode.clawback_denied`. Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_deny_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/restore': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Restore an API-mode clawback (bulk restore)
+     * @description `{ reason }` on a `completed`, `completed_with_errors` or `cancelled` clawback with succeeded targets: the mailbox-worker restores them where the provider allows it (a tag is removed; quarantine-folder, Junk and soft-delete moves go back to the Inbox through the quarantine release check of their mailbox entry; entries needing an approval and hard deletes are skipped with a code). Anything else → `409 api_mode_clawback_not_restorable` (`status`, `restoreStatus`). Audited `api_mode.clawback_restore_requested`. Needs `remediation:purge` and `quarantine:release`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_restore_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/submit': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Submit an API-mode clawback (purge)
+     * @description `{ mode: policy, verdict?, level? } | { mode: explicit, action: move_quarantine | move_junk | soft_delete }` with `reason` and `expectedRowVersion`, from `ready` or `review_required`. `policy` re-decides every target through your remediation policy with the chosen facts (detect-only and pause respected); `explicit` applies the action. A purge whose eligible targets span more than the organization’s approval threshold of distinct mailboxes (default 50), or an automatic clawback held at its cap, waits for a second approver (`pending_approval`, expires after 72 h; alert `api_mode_purge_approval`); otherwise it is `queued` and the mailbox-worker queues the remediation actions. A wrong state or version → `409 api_mode_clawback_state_conflict` (`status`, `currentRowVersion`). Audited `api_mode.clawback_submitted` (+ `api_mode.clawback_approval_requested`). Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_submit_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/submit-hard-delete': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Submit an API-mode clawback as a hard delete (portal only)
+     * @description `{ reason, expectedRowVersion }`, from `ready` or `review_required`. Permanently deletes the eligible copies (irreversible on Microsoft 365; Trash on Google Workspace). Only when the platform setting allows hard delete (else `422 api_mode_hard_delete_disabled`) and always with a second approver (`pending_approval`, reason `hard_delete`; alert severity `high`). Portal only: never an assistant tool. Audited `api_mode.clawback_submitted` and `api_mode.clawback_approval_requested`. Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeClawbackController_submitHardDelete_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/clawbacks/{clawbackId}/targets': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the targets of an API-mode clawback
+     * @description The frozen hit list (one row per matched copy, in materialization order): mailbox, detection, receipt time, the keys that matched, the copy’s remediation state, the target status, planned action, skip or result code, the mailbox action and the restore state. Without `remediation:purge` the mailbox address is masked and the header From and subject are withheld (`null`); with it they are shown as untrusted mail data. Filters `status`, `restoreStatus`, `mailboxId`. v1 list bound to the clawback. Needs `remediation:read`.
+     */
+    get: operations['ApiModeClawbackController_targets_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/api-mode/connections': {
     parameters: {
       query?: never;
@@ -267,6 +451,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/api-mode/mailboxes/{mailboxId}/report-mailbox': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Designate or clear an API-mode report mailbox
+     * @description `{ enabled, reason }`. Designating needs a mailbox of your organization that is `active`, `discovered` or `disabled` (shared mailboxes are often disabled accounts) of an `api` or `hybrid` domain (`409 api_mode_report_mailbox_not_eligible`, `cause`) and fewer than the most report mailboxes (`409 api_mode_report_mailbox_limit`). Clearing is always allowed; an unchanged flag changes nothing. Audited `api_mode.report_mailbox_updated`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ApiModeReportsController_setMailbox_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/api-mode/mailboxes/{mailboxId}/resync': {
     parameters: {
       query?: never;
@@ -364,7 +568,7 @@ export interface paths {
     };
     /**
      * List API-mode remediations
-     * @description Mailbox actions (remediations and reversals), newest first: action, trigger (`policy`, `admin`, `release`, `end_user`, `system`), status, reason or failure code, attempts, the mailbox, connection, detection and quarantine entry, creation and completion times and the latency. Filters `status`, `action`, `trigger`, `mailboxId`, `connectionId`, `detectionId`, `from`/`to` (at most 31 days; default the last 7). v1 list (`api_remediation_actions`). From the read replica. Needs `remediation:read`. Never returns provider message ids (`providerRefs` shows the container and the counts only) or message content.
+     * @description Mailbox actions (remediations and reversals), newest first: action, trigger (`policy`, `admin`, `release`, `end_user`, `system`, and step API-3 `clawback` / `purge` with the `clawbackId`), status, reason or failure code, attempts, the mailbox, connection, detection and quarantine entry, creation and completion times and the latency. Filters `status`, `action`, `trigger`, `mailboxId`, `connectionId`, `detectionId`, `from`/`to` (at most 31 days; default the last 7). v1 list (`api_remediation_actions`). From the read replica. Needs `remediation:read`. Never returns provider message ids (`providerRefs` shows the container and the counts only) or message content.
      */
     get: operations['ApiModeRemediationController_list_v1'];
     put?: never;
@@ -409,6 +613,134 @@ export interface paths {
      * @description A `failed` action goes back to `pending` (due now, attempts reset); anything else → `409 api_mode_remediation_not_retryable` (`cause`: its status, or `use_quarantine_release` for the restore of a quarantine entry, which is released again through the quarantine, or `stale_generation` for an action of an older remediation generation: the detection was restored since). Another queued or running action of the same detection → `409 api_mode_remediation_in_progress`. Audited `api_mode.remediation_retry_requested`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
      */
     post: operations['ApiModeRemediationController_retry_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/report-mailboxes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the API-mode report mailboxes
+     * @description The mailboxes users forward suspicious mail to (no add-in): address, connection, provider, status, coverage, when it was designated and the last report received, plus the most allowed. Their copies are never remediated and never clawed back. Needs `remediation:read`.
+     */
+    get: operations['ApiModeReportsController_listMailboxes_v1'];
+    put?: never;
+    /**
+     * Add an API-mode report mailbox by address
+     * @description `{ address, reason }`: a known API-mode mailbox (primary address or alias) is designated; an address not seen yet is added as a `discovered` mailbox of the API-mode connection of its domain (an `api` or `hybrid` domain linked to a provider connection; else `422 api_mode_report_address_out_of_scope`). At most `API_MODE_REPORT_MAILBOXES_MAX` (default 5; `409 api_mode_report_mailbox_limit`). Audited `api_mode.report_mailbox_updated`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeReportsController_addMailbox_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/reports': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List API-mode user reports
+     * @description Messages users forwarded to a report mailbox, newest first: status, reporter (untrusted), identification of the original, the automatic assessment (a hint; reports never act by themselves), the analyst verdict, the scan facts, the group size (reports of the same original) and the clawback. Filters `status`, `assessment`, `analystVerdict`, `reporter`, `from`/`to` (at most 93 days; default the last 30). v1 list (`api_user_reports`). From the read replica. Needs `remediation:read`.
+     */
+    get: operations['ApiModeReportsController_list_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/reports/{reportId}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get an API-mode user report
+     * @description One report: the reporter and report mailbox, how the original was identified, its keys (Message-ID hash truncated; sender and subject key as untrusted mail data; attachment and URL counts), the original’s detection when it was found in the tenant, the scan facts and assessment, the analyst verdict and note (untrusted), the group members (≤ 50), the triage history (audit rows, ≤ 50) and the reporter feedback states. Never the message content. Needs `remediation:read`.
+     */
+    get: operations['ApiModeReportsController_detail_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/reports/{reportId}/clawback': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Create a clawback from an API-mode user report
+     * @description `{ expand?: { attachments?, urls?, senderSubjectHours? }, reason }`: searches the copies of the reported original (its Message-ID, else its sender + subject key; `expand` adds its attachment and URL hashes and the sender + subject within ± the hours: a campaign) within ± 72 hours (or the given hours) of its date. The clawback is then previewed and submitted like an admin search (approval rules apply). An unidentified original → `409 api_mode_report_original_unknown`; a rejected report → `409 api_mode_report_state_conflict`. Audited `api_mode.report_clawback_requested` and `api_mode.clawback_created`. Needs `remediation:purge`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeReportsController_clawback_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/reports/{reportId}/triage': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Triage an API-mode user report
+     * @description `{ status: in_review | resolved | rejected, verdict? (required for resolved: malicious, phishing_simulation, spam, clean, inconclusive), note?, notifyReporter?, applyToGroup?, expectedRowVersion }` on a `pending_triage` or `in_review` report; a `resolved` report can be reopened to `in_review` once (then `409 api_mode_report_not_reopenable`). `resolved` with `applyToGroup` (default true) also resolves the open reports of the same original; with `notifyReporter` (default: the organization’s report feedback setting) each reporter gets a result e-mail without the reported message’s subject or content (`mail.report.feedback_requested.v1`). A wrong state or version → `409 api_mode_report_state_conflict` (`status`, `currentRowVersion`). Audited `api_mode.report_triaged` per report (never the note text). Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['ApiModeReportsController_triage_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/settings': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the organization’s API-mode settings
+     * @description The effective settings (`source: defaults` when no row exists): internal-mail recording and remediation, automatic clawback (`enforce`, `review`, `off`) and its cap of eligible mailboxes, the purge approval threshold of distinct mailboxes (P2), the clawback lookback, the threat-intelligence confidence floor and the reporter acknowledgement and result e-mails; the defaults, the bounds and the platform facts (`hardDeleteAvailable`, the longest search window, the approval TTL, the most report mailboxes). Needs `remediation:read`.
+     */
+    get: operations['ApiModeSettingsController_get_v1'];
+    /**
+     * Set the organization’s API-mode settings
+     * @description `{ internalMailEnabled, autoClawback, autoMaxMailboxes (1-20000), purgeApprovalMailboxes (1-10000), clawbackLookbackDays (1-60), tiMinConfidence (50-100), reportAckEnabled, reportFeedbackEnabled, reason, expectedRowVersion }` replaces all values. CAS: `expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a mismatch → `409 api_mode_settings_conflict` (`currentRowVersion`). Audited `api_mode.settings_org_updated` with the changed values before and after. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ApiModeSettingsController_put_v1'];
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -8091,6 +8423,2942 @@ export interface operations {
       };
     };
   };
+  ApiModeClawbackController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `pending`, `approved`, `denied`, `expired`, `cancelled`; comma list */
+        approvalStatus?: string;
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Start of the creation window (default `to` − 30 days; at most 93 days) */
+        from?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `-createdAt` (newest first) */
+        sort?: '-createdAt';
+        /** @description `searching`, `ready`, `review_required`, `pending_approval`, `queued`, `running`, `completed`, `completed_with_errors`, `no_match`, `too_broad`, `denied`, `expired`, `cancelled`, `failed`; comma list */
+        status?: string;
+        /** @description End of the creation window (exclusive; default now) */
+        to?: string;
+        /** @description `late_verdict`, `threat_intel`, `campaign`, `report`, `admin`; comma list */
+        trigger?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of clawbacks */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @enum {string|null} */
+              action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+              approval: {
+                /** Format: date-time */
+                decidedAt: string | null;
+                /** Format: date-time */
+                expiresAt: string | null;
+                reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+                /** Format: date-time */
+                requestedAt: string | null;
+                required: boolean;
+                /** @enum {string|null} */
+                status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+              };
+              cancelRequested: boolean;
+              /** Format: date-time */
+              completedAt: string | null;
+              counts: {
+                cancelled: number;
+                failed: number;
+                /** @description Distinct mailboxes of the eligible targets */
+                mailboxesEligible: number;
+                mailboxesTotal: number;
+                queued: number;
+                simulated: number;
+                skipped: number;
+                succeeded: number;
+                targetsEligible: number;
+                targetsTotal: number;
+              };
+              /** Format: date-time */
+              createdAt: string;
+              /** @enum {string|null} */
+              decisionMode: 'policy' | 'explicit' | null;
+              /** Format: uuid */
+              id: string;
+              lastErrorCode: string | null;
+              /**
+               * Format: uuid
+               * @description The report of a report clawback
+               */
+              reportId: string | null;
+              restore: {
+                failed: number;
+                queued: number;
+                skipped: number;
+                /** @enum {string} */
+                status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+                succeeded: number;
+              };
+              /** @description CAS version (send it as `expectedRowVersion`) */
+              rowVersion: number;
+              /** Format: date-time */
+              signalAt: string;
+              /** @enum {string|null} */
+              signalKind:
+                | 'sandbox_revision'
+                | 'url_dynamic'
+                | 'threat_indicator'
+                | 'malware_signature'
+                | 'admin'
+                | 'campaign'
+                | 'report'
+                | null;
+              /** Format: date-time */
+              startedAt: string | null;
+              /** @enum {string} */
+              status:
+                | 'searching'
+                | 'ready'
+                | 'review_required'
+                | 'pending_approval'
+                | 'queued'
+                | 'running'
+                | 'completed'
+                | 'completed_with_errors'
+                | 'no_match'
+                | 'too_broad'
+                | 'denied'
+                | 'expired'
+                | 'cancelled'
+                | 'failed';
+              /** Format: date-time */
+              submittedAt: string | null;
+              /** @enum {string} */
+              trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+              /** Format: date-time */
+              updatedAt: string;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_create_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          criteria?: {
+            /** @description Attachment SHA-256s (1-20) */
+            attachmentSha256?: string[];
+            /**
+             * Format: date-time
+             * @description Window start (with `to`; ≤ 31 days)
+             */
+            from?: string;
+            /** @description Internet Message-ID (with or without angle brackets) */
+            messageId?: string;
+            /** @description Sender address (with `subject`) */
+            sender?: string;
+            /** @description Subject (with `sender`) */
+            subject?: string;
+            /**
+             * Format: date-time
+             * @description Window end
+             */
+            to?: string;
+            /** @description A URL (normalized to its identity) */
+            url?: string;
+            /** @description URL identity SHA-256s (1-20) */
+            urlSha256?: string[];
+          };
+          /** @description Copy directions searched (default both) */
+          directions?: ('inbound' | 'internal')[];
+          /** @description Campaign expansion of a seed (C2.4) */
+          expand?: {
+            /** @description Add the seed's attachment SHA-256s (≤ 20) */
+            attachments?: boolean;
+            /** @description Add the seed's sender + subject key within ± this many hours (1-168) */
+            senderSubjectHours?: number;
+            /** @description Add the seed's URL identity hashes (≤ 20) */
+            urls?: boolean;
+          };
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+          /**
+           * Format: uuid
+           * @description A detection (copy) to seed the search from (alone: its Message-ID)
+           */
+          seedDetectionId?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Searching */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            id: string;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'searching';
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown detection, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_detection_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description The same key is still running. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_clawback_criteria_invalid` (`codes`); `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_detail_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The clawback */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string|null} */
+            action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+            approval: {
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+              reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+              /** Format: date-time */
+              requestedAt: string | null;
+              required: boolean;
+              /** @enum {string|null} */
+              status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+            };
+            approvalDecision: {
+              /**
+               * Format: uuid
+               * @description The second person (approver or denier)
+               */
+              decidedBy: string | null;
+              /** @description Operator-typed (untrusted) */
+              reason: string | null;
+            };
+            cancelRequested: boolean;
+            /** Format: date-time */
+            completedAt: string | null;
+            counts: {
+              cancelled: number;
+              failed: number;
+              /** @description Distinct mailboxes of the eligible targets */
+              mailboxesEligible: number;
+              mailboxesTotal: number;
+              queued: number;
+              simulated: number;
+              skipped: number;
+              succeeded: number;
+              targetsEligible: number;
+              targetsTotal: number;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            criteria: {
+              directions: ('inbound' | 'internal')[];
+              keys: {
+                /** @description Attachment SHA-256s (truncated) */
+                attachmentSha256: string[];
+                /** @description Dedupe Message-ID hashes (truncated) */
+                messageIdHashes: string[];
+                senderDomains: string[];
+                /** @description Sender addresses (untrusted) */
+                senders: string[];
+                senderSubject: {
+                  /** @description Untrusted */
+                  sender: string;
+                  /** @description Normalized subject key (untrusted) */
+                  subjectKey: string;
+                } | null;
+                urlDomains: string[];
+                /** @description URL identity hashes (truncated) */
+                urlSha256: string[];
+              };
+              window: {
+                /** Format: date-time */
+                from: string;
+                /** Format: date-time */
+                to: string;
+              };
+            };
+            /** @enum {string|null} */
+            decisionMode: 'policy' | 'explicit' | null;
+            hints: {
+              /** @description The caller may approve or deny (a pending request; not the requester/submitter) */
+              canApprove: boolean;
+              canCancel: boolean;
+              /** @description Also needs `quarantine:release` */
+              canRestore: boolean;
+              canSubmit: boolean;
+            };
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            /**
+             * Format: uuid
+             * @description The report of a report clawback
+             */
+            reportId: string | null;
+            requestedBy: {
+              /** @enum {string} */
+              type: 'system' | 'user' | 'api_key';
+              /** Format: uuid */
+              userId: string | null;
+            };
+            /** @description Operator-typed (untrusted) */
+            requestReason: string | null;
+            restore: {
+              failed: number;
+              queued: number;
+              skipped: number;
+              /** @enum {string} */
+              status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+              succeeded: number;
+            };
+            /** @description CAS version (send it as `expectedRowVersion`) */
+            rowVersion: number;
+            signal: {
+              hardBlocks: string[];
+              /** @enum {string|null} */
+              kind:
+                | 'sandbox_revision'
+                | 'url_dynamic'
+                | 'threat_indicator'
+                | 'malware_signature'
+                | 'admin'
+                | 'campaign'
+                | 'report'
+                | null;
+              /** @enum {string|null} */
+              level: 'low' | 'medium' | 'high' | 'critical' | null;
+              /** Format: uuid */
+              seedDetectionId: string | null;
+              /**
+               * @description The facts the policy decides on (C3)
+               * @enum {string|null}
+               */
+              verdict:
+                | 'clean'
+                | 'spam'
+                | 'bulk'
+                | 'phishing'
+                | 'malware'
+                | 'bec'
+                | 'dlp_violation'
+                | 'suspicious'
+                | 'unknown'
+                | null;
+            };
+            /** Format: date-time */
+            signalAt: string;
+            /** @enum {string|null} */
+            signalKind:
+              | 'sandbox_revision'
+              | 'url_dynamic'
+              | 'threat_indicator'
+              | 'malware_signature'
+              | 'admin'
+              | 'campaign'
+              | 'report'
+              | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'searching'
+              | 'ready'
+              | 'review_required'
+              | 'pending_approval'
+              | 'queued'
+              | 'running'
+              | 'completed'
+              | 'completed_with_errors'
+              | 'no_match'
+              | 'too_broad'
+              | 'denied'
+              | 'expired'
+              | 'cancelled'
+              | 'failed';
+            /** Format: date-time */
+            submittedAt: string | null;
+            /**
+             * Format: uuid
+             * @description The user who submitted it
+             */
+            submittedBy: string | null;
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_approve_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+          expectedRowVersion: number;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Approved (queued) */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string|null} */
+            action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+            approval: {
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+              reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+              /** Format: date-time */
+              requestedAt: string | null;
+              required: boolean;
+              /** @enum {string|null} */
+              status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+            };
+            cancelRequested: boolean;
+            /** Format: date-time */
+            completedAt: string | null;
+            counts: {
+              cancelled: number;
+              failed: number;
+              /** @description Distinct mailboxes of the eligible targets */
+              mailboxesEligible: number;
+              mailboxesTotal: number;
+              queued: number;
+              simulated: number;
+              skipped: number;
+              succeeded: number;
+              targetsEligible: number;
+              targetsTotal: number;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string|null} */
+            decisionMode: 'policy' | 'explicit' | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            /**
+             * Format: uuid
+             * @description The report of a report clawback
+             */
+            reportId: string | null;
+            restore: {
+              failed: number;
+              queued: number;
+              skipped: number;
+              /** @enum {string} */
+              status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+              succeeded: number;
+            };
+            /** @description CAS version (send it as `expectedRowVersion`) */
+            rowVersion: number;
+            /** Format: date-time */
+            signalAt: string;
+            /** @enum {string|null} */
+            signalKind:
+              | 'sandbox_revision'
+              | 'url_dynamic'
+              | 'threat_indicator'
+              | 'malware_signature'
+              | 'admin'
+              | 'campaign'
+              | 'report'
+              | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'searching'
+              | 'ready'
+              | 'review_required'
+              | 'pending_approval'
+              | 'queued'
+              | 'running'
+              | 'completed'
+              | 'completed_with_errors'
+              | 'no_match'
+              | 'too_broad'
+              | 'denied'
+              | 'expired'
+              | 'cancelled'
+              | 'failed';
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), `api_mode_purge_approval_forbidden` (`reason`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'api_mode_purge_approval_forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_purge_approval_not_pending` (`reason`), `api_mode_clawback_state_conflict`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_purge_approval_not_pending'
+              | 'api_mode_clawback_state_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_cancel_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Cancelled or cancel requested */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string|null} */
+            action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+            approval: {
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+              reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+              /** Format: date-time */
+              requestedAt: string | null;
+              required: boolean;
+              /** @enum {string|null} */
+              status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+            };
+            cancelRequested: boolean;
+            /** Format: date-time */
+            completedAt: string | null;
+            counts: {
+              cancelled: number;
+              failed: number;
+              /** @description Distinct mailboxes of the eligible targets */
+              mailboxesEligible: number;
+              mailboxesTotal: number;
+              queued: number;
+              simulated: number;
+              skipped: number;
+              succeeded: number;
+              targetsEligible: number;
+              targetsTotal: number;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string|null} */
+            decisionMode: 'policy' | 'explicit' | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            /**
+             * Format: uuid
+             * @description The report of a report clawback
+             */
+            reportId: string | null;
+            restore: {
+              failed: number;
+              queued: number;
+              skipped: number;
+              /** @enum {string} */
+              status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+              succeeded: number;
+            };
+            /** @description CAS version (send it as `expectedRowVersion`) */
+            rowVersion: number;
+            /** Format: date-time */
+            signalAt: string;
+            /** @enum {string|null} */
+            signalKind:
+              | 'sandbox_revision'
+              | 'url_dynamic'
+              | 'threat_indicator'
+              | 'malware_signature'
+              | 'admin'
+              | 'campaign'
+              | 'report'
+              | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'searching'
+              | 'ready'
+              | 'review_required'
+              | 'pending_approval'
+              | 'queued'
+              | 'running'
+              | 'completed'
+              | 'completed_with_errors'
+              | 'no_match'
+              | 'too_broad'
+              | 'denied'
+              | 'expired'
+              | 'cancelled'
+              | 'failed';
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_clawback_not_cancellable` (`status`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_clawback_not_cancellable'
+              | 'api_mode_clawback_state_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_deny_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+          expectedRowVersion: number;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Denied */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string|null} */
+            action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+            approval: {
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+              reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+              /** Format: date-time */
+              requestedAt: string | null;
+              required: boolean;
+              /** @enum {string|null} */
+              status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+            };
+            cancelRequested: boolean;
+            /** Format: date-time */
+            completedAt: string | null;
+            counts: {
+              cancelled: number;
+              failed: number;
+              /** @description Distinct mailboxes of the eligible targets */
+              mailboxesEligible: number;
+              mailboxesTotal: number;
+              queued: number;
+              simulated: number;
+              skipped: number;
+              succeeded: number;
+              targetsEligible: number;
+              targetsTotal: number;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string|null} */
+            decisionMode: 'policy' | 'explicit' | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            /**
+             * Format: uuid
+             * @description The report of a report clawback
+             */
+            reportId: string | null;
+            restore: {
+              failed: number;
+              queued: number;
+              skipped: number;
+              /** @enum {string} */
+              status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+              succeeded: number;
+            };
+            /** @description CAS version (send it as `expectedRowVersion`) */
+            rowVersion: number;
+            /** Format: date-time */
+            signalAt: string;
+            /** @enum {string|null} */
+            signalKind:
+              | 'sandbox_revision'
+              | 'url_dynamic'
+              | 'threat_indicator'
+              | 'malware_signature'
+              | 'admin'
+              | 'campaign'
+              | 'report'
+              | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'searching'
+              | 'ready'
+              | 'review_required'
+              | 'pending_approval'
+              | 'queued'
+              | 'running'
+              | 'completed'
+              | 'completed_with_errors'
+              | 'no_match'
+              | 'too_broad'
+              | 'denied'
+              | 'expired'
+              | 'cancelled'
+              | 'failed';
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`), `api_mode_purge_approval_forbidden` (`reason`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden' | 'api_mode_purge_approval_forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_purge_approval_not_pending` (`reason`), `api_mode_clawback_state_conflict`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_purge_approval_not_pending'
+              | 'api_mode_clawback_state_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            reason?: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_restore_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Restore requested */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string|null} */
+            action: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'hard_delete' | null;
+            approval: {
+              /** Format: date-time */
+              decidedAt: string | null;
+              /** Format: date-time */
+              expiresAt: string | null;
+              reasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+              /** Format: date-time */
+              requestedAt: string | null;
+              required: boolean;
+              /** @enum {string|null} */
+              status: 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled' | null;
+            };
+            cancelRequested: boolean;
+            /** Format: date-time */
+            completedAt: string | null;
+            counts: {
+              cancelled: number;
+              failed: number;
+              /** @description Distinct mailboxes of the eligible targets */
+              mailboxesEligible: number;
+              mailboxesTotal: number;
+              queued: number;
+              simulated: number;
+              skipped: number;
+              succeeded: number;
+              targetsEligible: number;
+              targetsTotal: number;
+            };
+            /** Format: date-time */
+            createdAt: string;
+            /** @enum {string|null} */
+            decisionMode: 'policy' | 'explicit' | null;
+            /** Format: uuid */
+            id: string;
+            lastErrorCode: string | null;
+            /**
+             * Format: uuid
+             * @description The report of a report clawback
+             */
+            reportId: string | null;
+            restore: {
+              failed: number;
+              queued: number;
+              skipped: number;
+              /** @enum {string} */
+              status: 'none' | 'requested' | 'running' | 'completed' | 'completed_with_errors';
+              succeeded: number;
+            };
+            /** @description CAS version (send it as `expectedRowVersion`) */
+            rowVersion: number;
+            /** Format: date-time */
+            signalAt: string;
+            /** @enum {string|null} */
+            signalKind:
+              | 'sandbox_revision'
+              | 'url_dynamic'
+              | 'threat_indicator'
+              | 'malware_signature'
+              | 'admin'
+              | 'campaign'
+              | 'report'
+              | null;
+            /** Format: date-time */
+            startedAt: string | null;
+            /** @enum {string} */
+            status:
+              | 'searching'
+              | 'ready'
+              | 'review_required'
+              | 'pending_approval'
+              | 'queued'
+              | 'running'
+              | 'completed'
+              | 'completed_with_errors'
+              | 'no_match'
+              | 'too_broad'
+              | 'denied'
+              | 'expired'
+              | 'cancelled'
+              | 'failed';
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** @enum {string} */
+            trigger: 'late_verdict' | 'threat_intel' | 'campaign' | 'report' | 'admin';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_clawback_not_restorable` (`status`, `restoreStatus`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_clawback_not_restorable'
+              | 'api_mode_clawback_state_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            restoreStatus?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_submit_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json':
+          | {
+              /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+              expectedRowVersion: number;
+              /**
+               * @description Default `critical`
+               * @enum {string}
+               */
+              level?: 'low' | 'medium' | 'high' | 'critical';
+              /** @enum {string} */
+              mode: 'policy';
+              /** @description Why (1-500 characters; stored with the request and in the audit row) */
+              reason: string;
+              /**
+               * @description The verdict the policy decides on (default: the signal’s facts, else phishing)
+               * @enum {string}
+               */
+              verdict?: 'malware' | 'phishing' | 'bec' | 'suspicious' | 'spam';
+            }
+          | {
+              /**
+               * @description Hard delete is a separate portal-only operation
+               * @enum {string}
+               */
+              action: 'move_quarantine' | 'move_junk' | 'soft_delete';
+              /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+              expectedRowVersion: number;
+              /** @enum {string} */
+              mode: 'explicit';
+              /** @description Why (1-500 characters; stored with the request and in the audit row) */
+              reason: string;
+            };
+      };
+    };
+    responses: {
+      /** @description Queued or pending approval */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            approvalExpiresAt: string | null;
+            approvalReasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+            /** Format: uuid */
+            id: string;
+            requiresApproval: boolean;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'queued' | 'pending_approval';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_clawback_state_conflict` (`status`, `currentRowVersion`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_state_conflict' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_submitHardDelete_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+          expectedRowVersion: number;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Pending approval */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: date-time */
+            approvalExpiresAt: string | null;
+            approvalReasons: ('mailbox_threshold' | 'hard_delete' | 'auto_cap')[];
+            /** Format: uuid */
+            id: string;
+            requiresApproval: boolean;
+            rowVersion: number;
+            /** @enum {string} */
+            status: 'queued' | 'pending_approval';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_clawback_state_conflict` (`status`, `currentRowVersion`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_state_conflict' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_hard_delete_disabled`; `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeClawbackController_targets_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description A mailbox public id */
+        mailboxId?: string;
+        /** @description `none`, `queued`, `succeeded`, `failed`, `skipped` */
+        restoreStatus?: string;
+        /** @description `id` (materialization order) */
+        sort?: 'id';
+        /** @description `matched`, `skipped`, `simulated`, `queued`, `succeeded`, `failed`, `cancelled` */
+        status?: string;
+      };
+      header?: never;
+      path: {
+        /** @description Clawback public id (UUID) */
+        clawbackId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of targets */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** Format: uuid */
+              connectionId: string;
+              /** @enum {string|null} */
+              copyRemediationState:
+                | 'none'
+                | 'pending'
+                | 'simulated'
+                | 'remediated'
+                | 'restored'
+                | 'failed'
+                | 'skipped'
+                | null;
+              /**
+               * Format: uuid
+               * @description null once the copy is past its retention
+               */
+              detectionId: string | null;
+              /** @description Header From of the copy (untrusted; only with `remediation:purge`) */
+              headerFrom: string | null;
+              mailbox: {
+                /** @description The mailbox address (local part masked without `remediation:purge`) */
+                address: string;
+                /** Format: uuid */
+                id: string;
+              };
+              matchKeys: (
+                | 'message_id'
+                | 'attachment'
+                | 'url'
+                | 'url_domain'
+                | 'sender_subject'
+                | 'sender'
+                | 'sender_domain'
+              )[];
+              /** @enum {string|null} */
+              plannedAction:
+                'move_quarantine' | 'move_junk' | 'tag' | 'soft_delete' | 'hard_delete' | null;
+              /** @description Skip or result code (codes only) */
+              reasonCode: string | null;
+              /** Format: date-time */
+              receivedAt: string;
+              /**
+               * Format: uuid
+               * @description The mailbox action of the target
+               */
+              remediationId: string | null;
+              restoreReasonCode: string | null;
+              /** @enum {string} */
+              restoreStatus: 'none' | 'queued' | 'succeeded' | 'failed' | 'skipped';
+              /** @enum {string} */
+              status:
+                | 'matched'
+                | 'skipped'
+                | 'simulated'
+                | 'queued'
+                | 'succeeded'
+                | 'failed'
+                | 'cancelled';
+              /** @description Subject of the copy (untrusted; only with `remediation:purge`) */
+              subject: string | null;
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown clawback, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_clawback_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   ApiModeController_listConnections_v1: {
     parameters: {
       query?: never;
@@ -9388,6 +12656,8 @@ export interface operations {
         connectionId?: string;
         /** @description `nextCursor` of the previous page */
         cursor?: string;
+        /** @description `inbound`, `internal` (east-west mail, step API-3); comma list */
+        direction?: string;
         /** @description Start of the receipt window (default `to` − 7 days; at most 31 days) */
         from?: string;
         /** @description Page size, 1-100 (default 25) */
@@ -9430,8 +12700,15 @@ export interface operations {
         content: {
           'application/json': {
             data: {
+              /** @description Step API-3: clawbacks that targeted this copy (newest first, ≤ 5) */
+              clawbacks: string[];
               /** Format: uuid */
               connectionId: string;
+              /**
+               * @description Step API-3: `internal` = east-west mail
+               * @enum {string}
+               */
+              direction: 'inbound' | 'internal';
               /** @description The header From address, local part masked (ADR-0062) */
               headerFrom: string | null;
               /** Format: uuid */
@@ -9496,6 +12773,8 @@ export interface operations {
               verdictAt: string | null;
               /** @enum {string} */
               verdictAuthority: 'copy' | 'inline';
+              /** @description Step API-3: late signals that raised the stored verdict (0 = the first scan) */
+              verdictRevision: number;
             }[];
             nextCursor: string | null;
           };
@@ -9644,12 +12923,17 @@ export interface operations {
         };
         content: {
           'application/json': {
+            /** @description Step API-3: clawbacks that targeted this copy (newest first, ≤ 5) */
+            clawbacks: string[];
             /** Format: uuid */
             connectionId: string;
             /** @enum {string|null} */
             deliveredBasis:
               'received_header' | 'graph_received' | 'gmail_internal' | 'ingest' | null;
-            /** @enum {string} */
+            /**
+             * @description Step API-3: `internal` = east-west mail
+             * @enum {string}
+             */
             direction: 'inbound' | 'internal';
             /** @description The header From address, local part masked (ADR-0062) */
             headerFrom: string | null;
@@ -9717,6 +13001,8 @@ export interface operations {
             verdictAt: string | null;
             /** @enum {string} */
             verdictAuthority: 'copy' | 'inline';
+            /** @description Step API-3: late signals that raised the stored verdict (0 = the first scan) */
+            verdictRevision: number;
           };
         };
       };
@@ -9918,6 +13204,11 @@ export interface operations {
                 | 'restore_inbox'
                 | 'remove_tag';
               attempts: number;
+              /**
+               * Format: uuid
+               * @description Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)
+               */
+              clawbackId: string | null;
               /** Format: date-time */
               completedAt: string | null;
               /**
@@ -9960,7 +13251,8 @@ export interface operations {
                 | 'simulated'
                 | 'cancelled';
               /** @enum {string} */
-              trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+              trigger:
+                'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
             };
           };
         };
@@ -10262,6 +13554,11 @@ export interface operations {
                 | 'restore_inbox'
                 | 'remove_tag';
               attempts: number;
+              /**
+               * Format: uuid
+               * @description Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)
+               */
+              clawbackId: string | null;
               /** Format: date-time */
               completedAt: string | null;
               /**
@@ -10304,7 +13601,8 @@ export interface operations {
                 | 'simulated'
                 | 'cancelled';
               /** @enum {string} */
-              trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+              trigger:
+                'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
             } | null;
             /**
              * @description `mailbox_action`: a `remove_tag` row; `quarantine_release`: the entry’s release
@@ -10771,8 +14069,15 @@ export interface operations {
             };
             /** @description Its last 20 copies, newest first */
             recentDetections: {
+              /** @description Step API-3: clawbacks that targeted this copy (newest first, ≤ 5) */
+              clawbacks: string[];
               /** Format: uuid */
               connectionId: string;
+              /**
+               * @description Step API-3: `internal` = east-west mail
+               * @enum {string}
+               */
+              direction: 'inbound' | 'internal';
               /** @description The header From address, local part masked (ADR-0062) */
               headerFrom: string | null;
               /** Format: uuid */
@@ -10837,6 +14142,8 @@ export interface operations {
               verdictAt: string | null;
               /** @enum {string} */
               verdictAuthority: 'copy' | 'inline';
+              /** @description Step API-3: late signals that raised the stored verdict (0 = the first scan) */
+              verdictRevision: number;
             }[];
             /** @enum {string} */
             status: 'active' | 'discovered' | 'disabled' | 'deleted';
@@ -10926,6 +14233,268 @@ export interface operations {
             requestId?: string;
             /** @enum {integer} */
             statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_setMailbox_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Mailbox public id (UUID) */
+        mailboxId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          enabled: boolean;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Stored */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            changed: boolean;
+            /** @description A mailbox row was created for the address (status `discovered`) */
+            created: boolean;
+            mailbox: {
+              address: string;
+              /** Format: uuid */
+              connectionId: string;
+              /** @enum {string} */
+              coverage: 'covered' | 'gap' | 'out_of_scope';
+              domain: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+              } | null;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              lastReportAt: string | null;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              reportMailbox: boolean;
+              /** Format: date-time */
+              reportMailboxAt: string | null;
+              /** @enum {string} */
+              status: 'active' | 'discovered' | 'disabled' | 'deleted';
+            };
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown mailbox, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_mailbox_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_report_mailbox_limit` (`max`), `api_mode_report_mailbox_not_eligible` (`cause`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            cause?: string;
+            /** @enum {string} */
+            code:
+              | 'api_mode_report_mailbox_limit'
+              | 'api_mode_report_mailbox_not_eligible'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            max?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
           };
         };
       };
@@ -11235,7 +14804,23 @@ export interface operations {
         content: {
           'application/json': {
             active: boolean;
+            /** @description Step API-3: clawbacks, search and purge */
+            clawback: {
+              /** @description Clawbacks not yet final (searching … running) */
+              active: number;
+              completed24h: number;
+              oldestActiveAgeSeconds: number | null;
+              pendingApproval: number;
+              reviewRequired: number;
+              targetsFailed24h: number;
+              targetsSucceeded24h: number;
+            };
             connections: {
+              clawback: {
+                targetsFailed24h: number;
+                targetsQueued24h: number;
+                targetsSucceeded24h: number;
+              };
               copiesToday: number;
               coverage: {
                 covered: number;
@@ -11256,6 +14841,12 @@ export interface operations {
               health: 'unknown' | 'healthy' | 'degraded' | 'failing';
               /** Format: uuid */
               id: string;
+              internal: {
+                /** @description Internal copies recorded in the last 24 hours */
+                copies24h: number;
+                /** @description The organization records and remediates internal mail */
+                enabled: boolean;
+              };
               /** @enum {string} */
               inventoryStatus: 'never' | 'ok' | 'failed' | 'unavailable';
               lag: {
@@ -11299,6 +14890,14 @@ export interface operations {
                 succeeded24h: number;
                 throttled24h: number;
               };
+              reports: {
+                inReview: number;
+                oldestPendingAgeSeconds: number | null;
+                pendingTriage: number;
+                received24h: number;
+                reportMailboxes: number;
+                resolved24h: number;
+              };
               /** Format: date-time */
               throttledUntil: string | null;
               throttling: {
@@ -11332,6 +14931,13 @@ export interface operations {
             entitled: boolean;
             /** Format: date-time */
             generatedAt: string;
+            /** @description Step API-3: internal (east-west) mail */
+            internal: {
+              /** @description Internal copies recorded in the last 24 hours */
+              copies24h: number;
+              /** @description The organization records and remediates internal mail */
+              enabled: boolean;
+            };
             lag: {
               p50Seconds1h: number | null;
               p50Seconds24h: number | null;
@@ -11373,6 +14979,15 @@ export interface operations {
               succeeded1h: number;
               succeeded24h: number;
               throttled24h: number;
+            };
+            /** @description Step API-3: user-reported phishing */
+            reports: {
+              inReview: number;
+              oldestPendingAgeSeconds: number | null;
+              pendingTriage: number;
+              received24h: number;
+              reportMailboxes: number;
+              resolved24h: number;
             };
             throttling: {
               /** @description 429 and 503 answers in the last hour */
@@ -12603,7 +16218,7 @@ export interface operations {
         status?: string;
         /** @description End of the creation window (exclusive; default now) */
         to?: string;
-        /** @description `policy`, `admin`, `release`, `end_user`, `system`; comma list */
+        /** @description `policy`, `admin`, `release`, `end_user`, `system`, `clawback` (automatic clawback), `purge` (admin, report or campaign purge); comma list */
         trigger?: string;
       };
       header?: never;
@@ -12637,6 +16252,11 @@ export interface operations {
                 | 'restore_inbox'
                 | 'remove_tag';
               attempts: number;
+              /**
+               * Format: uuid
+               * @description Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)
+               */
+              clawbackId: string | null;
               /** Format: date-time */
               completedAt: string | null;
               /**
@@ -12679,7 +16299,8 @@ export interface operations {
                 | 'simulated'
                 | 'cancelled';
               /** @enum {string} */
-              trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+              trigger:
+                'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
             }[];
             nextCursor: string | null;
           };
@@ -12838,6 +16459,11 @@ export interface operations {
               | 'restore_inbox'
               | 'remove_tag';
             attempts: number;
+            /**
+             * Format: uuid
+             * @description Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)
+             */
+            clawbackId: string | null;
             /** Format: date-time */
             completedAt: string | null;
             /**
@@ -12959,7 +16585,7 @@ export interface operations {
               | 'simulated'
               | 'cancelled';
             /** @enum {string} */
-            trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+            trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
             /** Format: date-time */
             updatedAt: string;
             /** Format: date-time */
@@ -13149,6 +16775,11 @@ export interface operations {
               | 'restore_inbox'
               | 'remove_tag';
             attempts: number;
+            /**
+             * Format: uuid
+             * @description Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)
+             */
+            clawbackId: string | null;
             /** Format: date-time */
             completedAt: string | null;
             /**
@@ -13191,7 +16822,7 @@ export interface operations {
               | 'simulated'
               | 'cancelled';
             /** @enum {string} */
-            trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system';
+            trigger: 'policy' | 'admin' | 'release' | 'end_user' | 'system' | 'clawback' | 'purge';
           };
         };
       };
@@ -13300,6 +16931,1915 @@ export interface operations {
               | 'api_mode_remediation_in_progress'
               | 'idempotency_request_in_progress';
             correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_listMailboxes_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The report mailboxes */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              address: string;
+              /** Format: uuid */
+              connectionId: string;
+              /** @enum {string} */
+              coverage: 'covered' | 'gap' | 'out_of_scope';
+              domain: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+              } | null;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              lastReportAt: string | null;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              reportMailbox: boolean;
+              /** Format: date-time */
+              reportMailboxAt: string | null;
+              /** @enum {string} */
+              status: 'active' | 'discovered' | 'disabled' | 'deleted';
+            }[];
+            /** @description Most report mailboxes allowed (API_MODE_REPORT_MAILBOXES_MAX) */
+            max: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_addMailbox_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The mailbox address (primary or alias) */
+          address: string;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Designated */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            changed: boolean;
+            /** @description A mailbox row was created for the address (status `discovered`) */
+            created: boolean;
+            mailbox: {
+              address: string;
+              /** Format: uuid */
+              connectionId: string;
+              /** @enum {string} */
+              coverage: 'covered' | 'gap' | 'out_of_scope';
+              domain: {
+                /** Format: uuid */
+                id: string;
+                name: string;
+              } | null;
+              /** Format: uuid */
+              id: string;
+              /** Format: date-time */
+              lastReportAt: string | null;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              reportMailbox: boolean;
+              /** Format: date-time */
+              reportMailboxAt: string | null;
+              /** @enum {string} */
+              status: 'active' | 'discovered' | 'disabled' | 'deleted';
+            };
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description `api_mode_report_mailbox_limit` (`max`), `api_mode_report_mailbox_not_eligible` (`cause`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            cause?: string;
+            /** @enum {string} */
+            code:
+              | 'api_mode_report_mailbox_limit'
+              | 'api_mode_report_mailbox_not_eligible'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            max?: number;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_report_address_out_of_scope`; `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_list_v1: {
+    parameters: {
+      query?: {
+        /** @description `malicious`, `phishing_simulation`, `spam`, `clean`, `inconclusive`; comma list */
+        analystVerdict?: string;
+        /** @description `malicious`, `suspicious`, `clean`, `unknown`; comma list */
+        assessment?: string;
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description Start of the report window (default `to` − 30 days; at most 93 days) */
+        from?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description The reporter address (exact, case-insensitive) */
+        reporter?: string;
+        /** @description `-reportedAt` (newest first) */
+        sort?: '-reportedAt';
+        /** @description `received`, `parsing`, `scanning`, `pending_triage`, `in_review`, `resolved`, `rejected`; comma list */
+        status?: string;
+        /** @description End of the report window (exclusive; default now) */
+        to?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description One page of reports */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            data: {
+              /** @enum {string|null} */
+              analystVerdict:
+                'malicious' | 'phishing_simulation' | 'spam' | 'clean' | 'inconclusive' | null;
+              /**
+               * @description Automatic pre-triage hint
+               * @enum {string|null}
+               */
+              assessment: 'malicious' | 'suspicious' | 'clean' | 'unknown' | null;
+              /** Format: uuid */
+              clawbackId: string | null;
+              /** @description Reports of the same original (1 when ungrouped) */
+              groupSize: number;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string|null} */
+              identification: 'attachment' | 'inline' | 'none' | 'unsupported' | null;
+              rejectReason: string | null;
+              /** Format: date-time */
+              reportedAt: string;
+              /** @description The reporter (untrusted) */
+              reporterAddress: string;
+              rowVersion: number;
+              scan: {
+                /** @enum {string|null} */
+                level: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
+                riskScore: number | null;
+                /** @enum {string|null} */
+                verdict:
+                  | 'clean'
+                  | 'spam'
+                  | 'bulk'
+                  | 'phishing'
+                  | 'malware'
+                  | 'bec'
+                  | 'dlp_violation'
+                  | 'suspicious'
+                  | 'unknown'
+                  | null;
+              };
+              /** @enum {string} */
+              status:
+                | 'received'
+                | 'parsing'
+                | 'scanning'
+                | 'pending_triage'
+                | 'in_review'
+                | 'resolved'
+                | 'rejected';
+            }[];
+            nextCursor: string | null;
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_detail_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description User report public id (UUID) */
+        reportId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The report */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            analyst: {
+              /** @description Operator-typed (untrusted) */
+              note: string | null;
+              /** Format: date-time */
+              triagedAt: string | null;
+              /** Format: uuid */
+              triagedBy: string | null;
+              /** @enum {string|null} */
+              verdict:
+                'malicious' | 'phishing_simulation' | 'spam' | 'clean' | 'inconclusive' | null;
+            };
+            /** @enum {string|null} */
+            analystVerdict:
+              'malicious' | 'phishing_simulation' | 'spam' | 'clean' | 'inconclusive' | null;
+            /**
+             * @description Automatic pre-triage hint
+             * @enum {string|null}
+             */
+            assessment: 'malicious' | 'suspicious' | 'clean' | 'unknown' | null;
+            /** Format: uuid */
+            clawbackId: string | null;
+            feedback: {
+              /** @enum {string} */
+              acknowledgement: 'none' | 'queued' | 'skipped';
+              /** @enum {string} */
+              result: 'none' | 'queued' | 'skipped';
+            };
+            group: {
+              /** @description Other reports of the same original (≤ 50) */
+              members: {
+                /** Format: uuid */
+                id: string;
+                /** Format: date-time */
+                reportedAt: string;
+                /** @description Untrusted */
+                reporterAddress: string;
+                /** @enum {string} */
+                status:
+                  | 'received'
+                  | 'parsing'
+                  | 'scanning'
+                  | 'pending_triage'
+                  | 'in_review'
+                  | 'resolved'
+                  | 'rejected';
+              }[];
+              size: number;
+            };
+            /** @description Reports of the same original (1 when ungrouped) */
+            groupSize: number;
+            /** @description Triage history (from the audit rows, newest first, ≤ 50) */
+            history: {
+              actor: {
+                /** @enum {string} */
+                type: 'system' | 'user' | 'api_key';
+                /** Format: uuid */
+                userId: string | null;
+              };
+              /** Format: date-time */
+              at: string;
+              from: string | null;
+              reopened: boolean;
+              to: string | null;
+              verdict: string | null;
+            }[];
+            /** Format: uuid */
+            id: string;
+            /** @enum {string|null} */
+            identification: 'attachment' | 'inline' | 'none' | 'unsupported' | null;
+            original: {
+              attachmentCount: number;
+              /** Format: date-time */
+              date: string | null;
+              extraOriginals: number;
+              /** @description Dedupe Message-ID hash (truncated) */
+              messageIdHash: string | null;
+              /** @description The original’s From (untrusted) */
+              sender: string | null;
+              /** @description The original’s subject key (untrusted) */
+              subjectKey: string | null;
+              urlCount: number;
+            } | null;
+            /**
+             * Format: uuid
+             * @description The original’s copy in the tenant (a detection), when found
+             */
+            originalDetectionId: string | null;
+            /** @description The attached original was ingested and scanned */
+            originalIngested: boolean;
+            rejectReason: string | null;
+            /** Format: date-time */
+            reportedAt: string;
+            reporter: {
+              /** @description Untrusted */
+              address: string;
+              /** Format: uuid */
+              mailboxId: string | null;
+              /** Format: uuid */
+              userId: string | null;
+            };
+            /** @description The reporter (untrusted) */
+            reporterAddress: string;
+            reportMailbox: {
+              address: string;
+              /** Format: uuid */
+              id: string;
+            };
+            rowVersion: number;
+            scan: {
+              /** @enum {string|null} */
+              level: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
+              riskScore: number | null;
+              /** @enum {string|null} */
+              verdict:
+                | 'clean'
+                | 'spam'
+                | 'bulk'
+                | 'phishing'
+                | 'malware'
+                | 'bec'
+                | 'dlp_violation'
+                | 'suspicious'
+                | 'unknown'
+                | null;
+            };
+            /** @enum {string} */
+            status:
+              | 'received'
+              | 'parsing'
+              | 'scanning'
+              | 'pending_triage'
+              | 'in_review'
+              | 'resolved'
+              | 'rejected';
+            /** Format: date-time */
+            updatedAt: string;
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown report, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_report_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_clawback_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description User report public id (UUID) */
+        reportId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description Campaign expansion of a seed (C2.4) */
+          expand?: {
+            /** @description Add the seed's attachment SHA-256s (≤ 20) */
+            attachments?: boolean;
+            /** @description Add the seed's sender + subject key within ± this many hours (1-168) */
+            senderSubjectHours?: number;
+            /** @description Add the seed's URL identity hashes (≤ 20) */
+            urls?: boolean;
+          };
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Searching */
+      202: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** Format: uuid */
+            clawbackId: string;
+            /** Format: uuid */
+            reportId: string;
+            /** @enum {string} */
+            status: 'searching';
+            /** @enum {string} */
+            trigger: 'report' | 'campaign';
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown report, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_report_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_report_original_unknown`, `api_mode_report_state_conflict`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_report_original_unknown'
+              | 'api_mode_report_state_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_clawback_criteria_invalid` (`codes`: e.g. the original is older than the copy retention); `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeReportsController_triage_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description User report public id (UUID) */
+        reportId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description A resolve also resolves the open reports of the same original (default true) */
+          applyToGroup?: boolean;
+          /** @description The `rowVersion` read (CAS; a mismatch is `409`) */
+          expectedRowVersion: number;
+          /** @description Analyst note (≤ 1000; untrusted; never in the audit row) */
+          note?: string;
+          /** @description Send the result e-mail (default: the organization’s report feedback setting) */
+          notifyReporter?: boolean;
+          /** @enum {string} */
+          status: 'in_review' | 'resolved' | 'rejected';
+          /**
+           * @description Required for `resolved`; not allowed otherwise
+           * @enum {string}
+           */
+          verdict?: 'malicious' | 'phishing_simulation' | 'spam' | 'clean' | 'inconclusive';
+        };
+      };
+    };
+    responses: {
+      /** @description Triaged */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description Result e-mails requested */
+            feedbackQueued: number;
+            /** @description Other reports of the group resolved with it */
+            groupResolved: number;
+            report: {
+              /** @enum {string|null} */
+              analystVerdict:
+                'malicious' | 'phishing_simulation' | 'spam' | 'clean' | 'inconclusive' | null;
+              /**
+               * @description Automatic pre-triage hint
+               * @enum {string|null}
+               */
+              assessment: 'malicious' | 'suspicious' | 'clean' | 'unknown' | null;
+              /** Format: uuid */
+              clawbackId: string | null;
+              /** @description Reports of the same original (1 when ungrouped) */
+              groupSize: number;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string|null} */
+              identification: 'attachment' | 'inline' | 'none' | 'unsupported' | null;
+              rejectReason: string | null;
+              /** Format: date-time */
+              reportedAt: string;
+              /** @description The reporter (untrusted) */
+              reporterAddress: string;
+              rowVersion: number;
+              scan: {
+                /** @enum {string|null} */
+                level: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
+                riskScore: number | null;
+                /** @enum {string|null} */
+                verdict:
+                  | 'clean'
+                  | 'spam'
+                  | 'bulk'
+                  | 'phishing'
+                  | 'malware'
+                  | 'bec'
+                  | 'dlp_violation'
+                  | 'suspicious'
+                  | 'unknown'
+                  | null;
+              };
+              /** @enum {string} */
+              status:
+                | 'received'
+                | 'parsing'
+                | 'scanning'
+                | 'pending_triage'
+                | 'in_review'
+                | 'resolved'
+                | 'rejected';
+            };
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown report, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_report_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_report_state_conflict` (`status`, `currentRowVersion`), `api_mode_report_not_reopenable`. `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_report_state_conflict'
+              | 'api_mode_report_not_reopenable'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            status?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description) */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeSettingsController_get_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The settings */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            bounds: {
+              autoMaxMailboxes: {
+                max: number;
+                min: number;
+              };
+              clawbackLookbackDays: {
+                max: number;
+                min: number;
+              };
+              purgeApprovalMailboxes: {
+                max: number;
+                min: number;
+              };
+              tiMinConfidence: {
+                max: number;
+                min: number;
+              };
+            };
+            defaults: {
+              /** @enum {string} */
+              autoClawback: 'enforce' | 'review' | 'off';
+              autoMaxMailboxes: number;
+              clawbackLookbackDays: number;
+              internalMailEnabled: boolean;
+              purgeApprovalMailboxes: number;
+              reportAckEnabled: boolean;
+              reportFeedbackEnabled: boolean;
+              tiMinConfidence: number;
+            };
+            platform: {
+              clawbackMaxWindowDays: number;
+              /** @description API_MODE_HARD_DELETE_ENABLED */
+              hardDeleteAvailable: boolean;
+              purgeApprovalTtlHours: number;
+              reportMailboxesMax: number;
+            };
+            /** @description CAS version (null: no row; send `expectedRowVersion: null` to create it) */
+            rowVersion: number | null;
+            settings: {
+              /** @enum {string} */
+              autoClawback: 'enforce' | 'review' | 'off';
+              autoMaxMailboxes: number;
+              clawbackLookbackDays: number;
+              internalMailEnabled: boolean;
+              purgeApprovalMailboxes: number;
+              reportAckEnabled: boolean;
+              reportFeedbackEnabled: boolean;
+              tiMinConfidence: number;
+            };
+            /**
+             * @description `defaults`: no settings row yet
+             * @enum {string}
+             */
+            source: 'row' | 'defaults';
+            /** Format: date-time */
+            updatedAt: string | null;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeSettingsController_put_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @enum {string} */
+          autoClawback: 'enforce' | 'review' | 'off';
+          autoMaxMailboxes: number;
+          clawbackLookbackDays: number;
+          /** @description The `rowVersion` read (null when no settings row exists: the PUT creates it) */
+          expectedRowVersion: number | null;
+          internalMailEnabled: boolean;
+          purgeApprovalMailboxes: number;
+          /** @description Why (1-500 characters; stored with the request and in the audit row) */
+          reason: string;
+          reportAckEnabled: boolean;
+          reportFeedbackEnabled: boolean;
+          tiMinConfidence: number;
+        };
+      };
+    };
+    responses: {
+      /** @description The stored settings */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            bounds: {
+              autoMaxMailboxes: {
+                max: number;
+                min: number;
+              };
+              clawbackLookbackDays: {
+                max: number;
+                min: number;
+              };
+              purgeApprovalMailboxes: {
+                max: number;
+                min: number;
+              };
+              tiMinConfidence: {
+                max: number;
+                min: number;
+              };
+            };
+            /** @description The settings that changed */
+            changed: string[];
+            created: boolean;
+            defaults: {
+              /** @enum {string} */
+              autoClawback: 'enforce' | 'review' | 'off';
+              autoMaxMailboxes: number;
+              clawbackLookbackDays: number;
+              internalMailEnabled: boolean;
+              purgeApprovalMailboxes: number;
+              reportAckEnabled: boolean;
+              reportFeedbackEnabled: boolean;
+              tiMinConfidence: number;
+            };
+            platform: {
+              clawbackMaxWindowDays: number;
+              /** @description API_MODE_HARD_DELETE_ENABLED */
+              hardDeleteAvailable: boolean;
+              purgeApprovalTtlHours: number;
+              reportMailboxesMax: number;
+            };
+            /** @description CAS version (null: no row; send `expectedRowVersion: null` to create it) */
+            rowVersion: number | null;
+            settings: {
+              /** @enum {string} */
+              autoClawback: 'enforce' | 'review' | 'off';
+              autoMaxMailboxes: number;
+              clawbackLookbackDays: number;
+              internalMailEnabled: boolean;
+              purgeApprovalMailboxes: number;
+              reportAckEnabled: boolean;
+              reportFeedbackEnabled: boolean;
+              tiMinConfidence: number;
+            };
+            /**
+             * @description `defaults`: no settings row yet
+             * @enum {string}
+             */
+            source: 'row' | 'defaults';
+            /** Format: date-time */
+            updatedAt: string | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description `api_mode_settings_conflict` (`currentRowVersion`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'api_mode_settings_conflict' | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
             error: string;
             message: string;
             /** Format: uuid */
@@ -20640,7 +26180,8 @@ export interface operations {
                       | 'processing'
                       | 'url_clicks'
                       | 'quarantine'
-                      | 'ato';
+                      | 'ato'
+                      | 'api_mode';
                   }[];
                   period: {
                     /** @enum {string|null} */
@@ -20667,6 +26208,7 @@ export interface operations {
                     | 'url_clicks'
                     | 'quarantine'
                     | 'ato'
+                    | 'api_mode'
                   )[];
                   sizeBytes: number;
                   /**
@@ -22027,7 +27569,8 @@ export interface operations {
                         | 'processing'
                         | 'url_clicks'
                         | 'quarantine'
-                        | 'ato';
+                        | 'ato'
+                        | 'api_mode';
                     }[];
                     period: {
                       /** @enum {string|null} */
@@ -22054,6 +27597,7 @@ export interface operations {
                       | 'url_clicks'
                       | 'quarantine'
                       | 'ato'
+                      | 'api_mode'
                     )[];
                     sizeBytes: number;
                     /**
@@ -22569,7 +28113,8 @@ export interface operations {
                       | 'processing'
                       | 'url_clicks'
                       | 'quarantine'
-                      | 'ato';
+                      | 'ato'
+                      | 'api_mode';
                   }[];
                   period: {
                     /** @enum {string|null} */
@@ -22596,6 +28141,7 @@ export interface operations {
                     | 'url_clicks'
                     | 'quarantine'
                     | 'ato'
+                    | 'api_mode'
                   )[];
                   sizeBytes: number;
                   /**
@@ -23079,7 +28625,8 @@ export interface operations {
                     | 'processing'
                     | 'url_clicks'
                     | 'quarantine'
-                    | 'ato';
+                    | 'ato'
+                    | 'api_mode';
                 }[];
                 period: {
                   /** @enum {string|null} */
@@ -23106,6 +28653,7 @@ export interface operations {
                   | 'url_clicks'
                   | 'quarantine'
                   | 'ato'
+                  | 'api_mode'
                 )[];
                 sizeBytes: number;
                 /**
@@ -23476,7 +29024,8 @@ export interface operations {
                     | 'processing'
                     | 'url_clicks'
                     | 'quarantine'
-                    | 'ato';
+                    | 'ato'
+                    | 'api_mode';
                 }[];
                 period: {
                   /** @enum {string|null} */
@@ -23503,6 +29052,7 @@ export interface operations {
                   | 'url_clicks'
                   | 'quarantine'
                   | 'ato'
+                  | 'api_mode'
                 )[];
                 sizeBytes: number;
                 /**
@@ -24287,7 +29837,8 @@ export interface operations {
                   | 'processing'
                   | 'url_clicks'
                   | 'quarantine'
-                  | 'ato';
+                  | 'ato'
+                  | 'api_mode';
               }[];
               period: {
                 /**
@@ -24312,6 +29863,7 @@ export interface operations {
                 | 'url_clicks'
                 | 'quarantine'
                 | 'ato'
+                | 'api_mode'
               )[];
               /** @description SHA-256 (hex) of the stored HTML */
               sha256: string | null;

@@ -102,6 +102,9 @@ flowchart LR
     api_mode_counters[api_mode_counters, api_copy_dedupe_keys]
     api_remediation_policies
     api_remediation_actions
+    api_clawbacks[api_clawbacks, api_clawback_targets]
+    api_user_reports
+    api_mode_org_settings[api_mode_org_settings, api_mode_cursors]
   end
   subgraph assistant[AI assistant]
     ai_chat_settings
@@ -184,6 +187,13 @@ flowchart LR
   api_mailboxes --> api_remediation_actions
   api_message_copies -.-> api_remediation_actions
   api_remediation_actions -.-> quarantine_messages
+  organizations --> api_clawbacks
+  api_clawbacks -.-> api_remediation_actions
+  api_message_copies -.-> api_clawbacks
+  organizations --> api_user_reports
+  api_mode_connections --> api_user_reports
+  api_mailboxes --> api_user_reports
+  organizations --> api_mode_org_settings
   organizations --> archive_encryption_keys
   organizations --> ediscovery_cases
   email_messages -.-> message_outbox
@@ -1531,6 +1541,78 @@ erDiagram
     enum location "gateway, mailbox"
     enum mailbox_container "quarantine_folder, junk, deleted_items"
     smallint lifecycle_round "mailbox: remediation generation"
+  }
+```
+
+### API-mode clawback and reports
+
+Step API-3 ([design §3](../plan/steps/37-api-mode-clawback-reporting.md#3-data-model-one-forward-migration-utc-timestamp_api_mode_clawback_reporting-wp1), ADR-0103, ADR-0104). Solid lines are foreign keys (RESTRICT, except the CASCADE from a clawback to its targets); dotted lines are logical references without a foreign key. A clawback's targets are the frozen hit list; each queued target points at the `api_remediation_actions` row (trigger `clawback` or `purge`, `clawback_id` set) that the `remediate` role executes. A report mailbox is an `api_mailboxes` row with `report_mailbox = 1`; its copies create `api_user_reports`. `api_mode_cursors` (platform, no tenant data) holds the threat-intelligence sweep positions over `threat_indicators` and `malware_signatures` (`(created_at, id)` indexes).
+
+```mermaid
+erDiagram
+  organizations ||--o{ api_clawbacks : "RESTRICT"
+  api_clawbacks ||--o{ api_clawback_targets : "CASCADE"
+  api_message_copies ||..o{ api_clawback_targets : "copy_id + copy_received_at"
+  api_mailboxes ||..o{ api_clawback_targets : "mailbox_id"
+  api_clawback_targets |o..o| api_remediation_actions : "action_id / restore_action_id"
+  api_clawbacks ||..o{ api_remediation_actions : "clawback_id (trigger clawback, purge)"
+  organizations ||--o{ api_user_reports : "RESTRICT"
+  api_mode_connections ||--o{ api_user_reports : "RESTRICT"
+  api_mailboxes ||--o{ api_user_reports : "report_mailbox_id, RESTRICT"
+  api_message_copies ||..o| api_user_reports : "report_copy_id + report_copy_received_at (UQ)"
+  api_user_reports |o..o| api_clawbacks : "clawback_id / report_id"
+  organizations ||--o| api_mode_org_settings : "1:1, RESTRICT"
+  api_clawbacks {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK "UQ with signal_key"
+    enum trigger "late_verdict, threat_intel, campaign, report, admin"
+    char signal_key "automatic signals only"
+    json signal "api-clawback-signal/1"
+    json criteria "api-clawback-criteria/1"
+    enum decision_mode "policy, explicit"
+    enum status "searching … completed, 14 states"
+    enum approval_status "pending, approved, denied, expired, cancelled"
+    enum restore_status
+    int row_version
+  }
+  api_clawback_targets {
+    bigint id PK
+    bigint clawback_id FK "UQ with copy_id, copy_received_at"
+    bigint mailbox_id
+    bigint copy_id
+    datetime copy_received_at
+    json match_keys
+    enum status "matched, skipped, simulated, queued, succeeded, failed, cancelled"
+    enum planned_action
+    bigint action_id
+    enum restore_status
+  }
+  api_user_reports {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint api_connection_id FK
+    bigint report_mailbox_id FK
+    bigint report_copy_id "UQ with report_copy_received_at"
+    varchar reporter_address
+    enum status "received … resolved, rejected"
+    json original "api-report-original/1"
+    char group_key
+    enum assessment
+    enum analyst_verdict
+    bigint clawback_id
+  }
+  api_mode_org_settings {
+    bigint organization_id PK
+    bool internal_mail_enabled
+    enum auto_clawback "enforce, review, off"
+    int purge_approval_mailboxes "P2: 50"
+    int row_version
+  }
+  api_mode_cursors {
+    varchar name PK
+    json position "createdAt, id"
   }
 ```
 

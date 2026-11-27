@@ -57,6 +57,8 @@ export interface RemediationRow {
   connectionPublicId: string;
   detectionPublicId: string | null;
   quarantineEntryPublicId: string | null;
+  /** Step API-3: public id of `clawback_id`. */
+  clawbackPublicId: string | null;
   createdAt: Date;
   nextAttemptAt: Date | null;
   verdictAt: Date | null;
@@ -295,7 +297,8 @@ export class ApiRemediationRepository {
              a.last_error_code AS lastErrorCode, a.last_http_status AS lastHttpStatus,
              a.generation, mb.public_id AS mailboxPublicId, mb.primary_address AS mailboxAddress,
              pc.public_id AS connectionPublicId, c.public_id AS detectionPublicId,
-             q.public_id AS quarantineEntryPublicId, a.created_at AS createdAt,
+             q.public_id AS quarantineEntryPublicId, k.public_id AS clawbackPublicId,
+             a.created_at AS createdAt,
              a.next_attempt_at AS nextAttemptAt, a.verdict_at AS verdictAt,
              a.started_at AS startedAt, a.completed_at AS completedAt, a.updated_at AS updatedAt
       FROM api_remediation_actions a
@@ -309,6 +312,7 @@ export class ApiRemediationRepository {
        AND c.organization_id = a.organization_id
       LEFT JOIN quarantine_messages q
         ON q.id = a.quarantine_entry_id AND q.organization_id = a.organization_id
+      LEFT JOIN api_clawbacks k ON k.id = a.clawback_id AND k.organization_id = a.organization_id
       WHERE a.organization_id = ${scope.organizationId} AND ${where}
       ORDER BY a.created_at DESC, a.id DESC
       LIMIT ${limit}`;
@@ -332,6 +336,7 @@ export class ApiRemediationRepository {
       connectionPublicId: r.connectionPublicId as string,
       detectionPublicId: (r.detectionPublicId as string | null) ?? null,
       quarantineEntryPublicId: (r.quarantineEntryPublicId as string | null) ?? null,
+      clawbackPublicId: (r.clawbackPublicId as string | null) ?? null,
       createdAt: r.createdAt as Date,
       nextAttemptAt: (r.nextAttemptAt as Date | null) ?? null,
       verdictAt: (r.verdictAt as Date | null) ?? null,

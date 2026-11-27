@@ -24,7 +24,7 @@ import { stack } from './support/env';
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
  * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26;
  * v13: step 8.4 §4.1; v14: step 8.2 D12; v15: step AI-R D8; v16: step AI-6 D5; v17: step API-1
- * D7): checks through the management API. The prune case adds one stray binding to the dormant
+ * D7; v18: step API-3 C2.1, C12): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -48,9 +48,11 @@ import { stack } from './support/env';
  * exchange bindings). v16 (step AI-6 D5): assistant.reports adds two
  * (assistant.report.generate_requested.v1 + its retry binding): 76 (71 queue + 5 exchange
  * bindings). v17 (step API-1 D7): email.mailbox adds two (mail.message.copy_scanned.v1 + its
- * retry binding): 78 (73 queue + 5 exchange bindings).
+ * retry binding): 78 (73 queue + 5 exchange bindings). v18 (step API-3 C2.1, C12): email.mailbox
+ * adds mail.threat.late_signal.v1 and email.notifications mail.report.feedback_requested.v1: 80
+ * (75 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 78;
+const TOPOLOGY_BINDINGS = 80;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -154,10 +156,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v17: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R, AI-6, API-1)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(17);
+  it('is topology v18: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R, AI-6, API-1, API-3)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(18);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v17');
+    expect(info.description).toBe('email-gateway topology v18');
     const rescan = bindings
       .filter(
         (b) =>
@@ -582,6 +584,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.security [org.*.ato.notification.requested.v1]',
         // v15 (step AI-R D8): assistant report emails.
         'email.policy [org.*.assistant.report.email_requested.v1]',
+        // v18 (step API-3 C12): reporter feedback of API-mode user reports.
+        'email.policy [org.*.mail.report.feedback_requested.v1]',
         'email.policy [retry.email.notifications.#]',
       ].sort(),
     );
@@ -910,7 +914,7 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     for (const user of await consumerUsers('assistant.reports')) expect(user).toBe(worker);
   });
 
-  it('has the email.mailbox queue of v17 (step API-1 D7) for the mailbox-worker copies role (eg-mailbox) only', async () => {
+  it('has the email.mailbox queue of v17 (step API-1 D7; v18 step API-3 C2.1 late signals) for the mailbox-worker copies role (eg-mailbox) only', async () => {
     expect(queueDefinition('email.mailbox')).toMatchObject({
       role: 'work',
       homeExchange: 'email.security',
@@ -918,6 +922,7 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     });
     expect(bindingsOf('email.mailbox')).toEqual([
       'email.security [org.*.mail.message.copy_scanned.v1]',
+      'email.security [org.*.mail.threat.late_signal.v1]',
       'email.security [retry.email.mailbox.#]',
     ]);
     // A copy event is never dropped (work, reject-publish).
@@ -942,6 +947,18 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(reached('email.events', `dead-letter.email.mailbox.org.42.${type}`)).toEqual([
       'queue:email.dead-letter',
     ]);
+    // v18 (step API-3 C2.1): late signals take the same route; reporter feedback reaches only
+    // email.notifications (and the firehose), never the copies queue.
+    expect(reached('email.security', 'org.42.mail.threat.late_signal.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.mailbox',
+    ]);
+    expect(reached('email.policy', 'org.42.mail.report.feedback_requested.v1')).toEqual(
+      reached('email.policy', 'org.42.mail.quarantine.notification_requested.v1'),
+    );
+    expect(reached('email.policy', 'org.42.mail.report.feedback_requested.v1')).toContain(
+      'queue:email.notifications',
+    );
     // Consumers (from WP3 on): the eg-mailbox user only.
     const worker = process.env.RABBITMQ_MAILBOX_USER || 'eg-mailbox';
     for (const user of await consumerUsers('email.mailbox')) expect(user).toBe(worker);

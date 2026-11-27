@@ -514,6 +514,11 @@ export class Fixtures {
         // approval requests, then remediation actions (RESTRICT on mailboxes and connections)
         // and policies (RESTRICT on domains).
         await this.prisma.messageOutbox.deleteMany({ where });
+        // Step API-3 (§3.4 purge order): clawback targets (cascade with their clawbacks),
+        // clawbacks and user reports before remediation actions, mailboxes and connections.
+        await this.prisma.apiClawbackTarget.deleteMany({ where });
+        await this.prisma.apiClawback.deleteMany({ where });
+        await this.prisma.apiUserReport.deleteMany({ where });
         await this.prisma.quarantineApprovalRequest.deleteMany({ where });
         await this.prisma.quarantineReleaseLog.deleteMany({ where });
         await this.prisma.quarantineAction.deleteMany({ where });
@@ -551,6 +556,11 @@ export class Fixtures {
         await this.prisma.domainMxRecord.deleteMany({ where });
         await this.prisma.domain.deleteMany({ where });
         await this.prisma.organizationFeature.deleteMany({ where });
+        await this.prisma.apiModeOrgSetting.deleteMany({ where });
+        // The live policy-engine's digest scheduler may have planned a digest for held entries.
+        await this.prisma.quarantineDigest.deleteMany({ where });
+        await this.prisma.quarantineDigestRun.deleteMany({ where });
+        await this.prisma.messageOutbox.deleteMany({ where });
         await this.prisma.organization.deleteMany({ where: { id: { in: ids } } });
       }
       if (this.eventIds.length > 0) {
@@ -561,6 +571,10 @@ export class Fixtures {
       if (this.planId !== undefined) {
         await this.prisma.organizationPlan.deleteMany({ where: { id: this.planId } });
       }
+      // Step API-3: the suite's TI sweep cursors (prefixed with the run's lock prefix).
+      await this.prisma.apiModeCursor.deleteMany({
+        where: { name: { startsWith: `it-${this.suffix}:` } },
+      });
       for (const id of ids) await this.deleteObjects(`org/${id.toString()}/`);
       await this.deleteRedisKeys();
     } finally {
@@ -590,6 +604,8 @@ export class Fixtures {
       `mbx:throttle:${id}:*`,
     ]);
     patterns.push(...this.apiConnectionIds.map((id) => `mbx:cnt:${id}:*`));
+    // Step API-3 C10.1: per-reporter rate-limit keys of the suite's organizations.
+    patterns.push(...this.organizationIds.map((id) => `mbx:rpt:${id.toString()}:*`));
     for (const pattern of patterns) {
       let cursor = '0';
       do {

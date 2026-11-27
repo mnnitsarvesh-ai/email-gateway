@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { API_GLOBAL_PREFIX } from '../http/configure-api-app';
 import { AtoAccountsController } from '../modules/ato/controllers/ato-accounts.controller';
 import { AtoOverviewController } from '../modules/ato/controllers/ato-overview.controller';
+import { ApiModeController } from '../modules/api-mode/controllers/api-mode.controller';
 import { QuarantineToolsController } from '../modules/quarantine/controllers/quarantine-tools.controller';
 import { ReportsController } from '../modules/reports/reports.controller';
 import { ASSISTANT_JOB_ROUTES, isAssistantJobRoute, registryPathOf } from './assistant-job-routes';
@@ -32,6 +33,8 @@ describe('ASSISTANT_JOB_ROUTES (step AI-6 D5, ADR-0096, I26)', () => {
   it('is exactly the package’s report source route list (single source)', () => {
     expect([...ASSISTANT_JOB_ROUTES].sort()).toEqual([...reportJobRoutePaths()].sort());
     expect([...ASSISTANT_JOB_ROUTES].sort()).toEqual([
+      // Step API-3 C16: the API-mode overview of the report's `api_mode` section.
+      '/api/v1/api-mode/overview',
       '/api/v1/ato/accounts',
       '/api/v1/ato/overview',
       '/api/v1/quarantine/summary',
@@ -51,6 +54,7 @@ describe('ASSISTANT_JOB_ROUTES (step AI-6 D5, ADR-0096, I26)', () => {
         QuarantineToolsController,
         AtoOverviewController,
         AtoAccountsController,
+        ApiModeController,
       ].flatMap((c) => getRoutes(c)),
     );
     for (const path of ASSISTANT_JOB_ROUTES) expect(served).toContain(path);
@@ -59,6 +63,8 @@ describe('ASSISTANT_JOB_ROUTES (step AI-6 D5, ADR-0096, I26)', () => {
   it('allows GET on those templates only', () => {
     expect(isAssistantJobRoute('GET', '/api/v1/reports/traffic')).toBe(true);
     expect(isAssistantJobRoute('get', '/api/v1/ato/accounts')).toBe(true);
+    expect(isAssistantJobRoute('GET', '/api/v1/api-mode/overview')).toBe(true);
+    expect(isAssistantJobRoute('GET', '/api/v1/api-mode/clawbacks')).toBe(false);
     expect(isAssistantJobRoute('POST', '/api/v1/reports/traffic')).toBe(false);
     expect(isAssistantJobRoute('HEAD', '/api/v1/reports/traffic')).toBe(false);
     expect(isAssistantJobRoute('GET', '/api/v1/ato/accounts/:accountId')).toBe(false);

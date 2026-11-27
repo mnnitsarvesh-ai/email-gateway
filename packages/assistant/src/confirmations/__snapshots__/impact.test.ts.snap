@@ -58,6 +58,1026 @@ exports[`impact templates (D5) > ApiKeysController_revoke_v1 1`] = `
 }
 `;
 
+exports[`impact templates (D5) > ApiModeClawbackController_approve_v1 1`] = `
+{
+  "action": "Approves another administrator’s purge; the mailbox-worker then removes the messages.",
+  "changes": [
+    {
+      "after": "approved",
+      "before": "pending",
+      "label": "Approval",
+    },
+    {
+      "after": "Checked",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The purge runs across every eligible mailbox of the clawback.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks/0193aaaa-0000-7000-8000-000000000125/approve",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Clawback",
+      "value": "0193aaaa-0000-7000-8000-000000000125",
+    },
+    {
+      "label": "Trigger",
+      "value": "admin",
+    },
+    {
+      "label": "Status",
+      "value": "pending_approval",
+    },
+    {
+      "label": "Eligible copies",
+      "value": "62",
+    },
+    {
+      "label": "Distinct mailboxes",
+      "value": "60",
+    },
+    {
+      "label": "Approval reasons",
+      "value": "["mailbox_threshold"]",
+    },
+    {
+      "label": "Expires at",
+      "value": "2026-11-30T09:00:00.000Z",
+    },
+    {
+      "label": "Action",
+      "value": "move_junk",
+    },
+  ],
+  "title": "Approve purge",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "You are the second person of this purge: approve only what you checked.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeClawbackController_cancel_v1 1`] = `
+{
+  "action": "Cancels the clawback: queued mailbox actions are cancelled, running ones finish, nothing new starts.",
+  "changes": [
+    {
+      "after": "cancelled or cancel requested",
+      "before": "pending_approval",
+      "label": "Status",
+    },
+    {
+      "after": "Wrong criteria",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Messages already removed stay removed; restore them in bulk afterwards if needed.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks/0193aaaa-0000-7000-8000-000000000125/cancel",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Clawback",
+      "value": "0193aaaa-0000-7000-8000-000000000125",
+    },
+    {
+      "label": "Trigger",
+      "value": "admin",
+    },
+    {
+      "label": "Status",
+      "value": "pending_approval",
+    },
+    {
+      "label": "Eligible copies",
+      "value": "62",
+    },
+    {
+      "label": "Distinct mailboxes",
+      "value": "60",
+    },
+  ],
+  "title": "Cancel clawback",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeClawbackController_create_v1 1`] = `
+{
+  "action": "Creates a clawback search over the recorded copies of your organization. Nothing in mailboxes changes until it is submitted.",
+  "changes": [
+    {
+      "after": "SOC campaign",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker lists the matching copies; preview them before submitting a purge.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Keys",
+      "value": "Message-ID",
+    },
+    {
+      "label": "Window from",
+      "value": "2026-11-26T00:00:00.000Z",
+    },
+    {
+      "label": "Window to",
+      "value": "2026-11-27T00:00:00.000Z",
+    },
+  ],
+  "title": "Search API-mode mailboxes",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeClawbackController_deny_v1 1`] = `
+{
+  "action": "Denies another administrator’s purge; nothing is removed.",
+  "changes": [
+    {
+      "after": "denied",
+      "before": "pending",
+      "label": "Approval",
+    },
+    {
+      "after": "Too broad",
+      "label": "Reason",
+    },
+  ],
+  "impact": [],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks/0193aaaa-0000-7000-8000-000000000125/deny",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Clawback",
+      "value": "0193aaaa-0000-7000-8000-000000000125",
+    },
+    {
+      "label": "Trigger",
+      "value": "admin",
+    },
+    {
+      "label": "Status",
+      "value": "pending_approval",
+    },
+    {
+      "label": "Eligible copies",
+      "value": "62",
+    },
+    {
+      "label": "Distinct mailboxes",
+      "value": "60",
+    },
+  ],
+  "title": "Deny purge",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeClawbackController_restore_v1 1`] = `
+{
+  "action": "Puts the messages this clawback removed back where the provider allows it (Inbox; tags removed).",
+  "changes": [
+    {
+      "after": "requested",
+      "before": "none",
+      "label": "Restore",
+    },
+    {
+      "after": "False positive",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Entries that need an approval and hard-deleted messages are skipped and listed with a code.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks/0193aaaa-0000-7000-8000-000000000125/restore",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Clawback",
+      "value": "0193aaaa-0000-7000-8000-000000000125",
+    },
+    {
+      "label": "Trigger",
+      "value": "admin",
+    },
+    {
+      "label": "Status",
+      "value": "pending_approval",
+    },
+    {
+      "label": "Eligible copies",
+      "value": "62",
+    },
+    {
+      "label": "Distinct mailboxes",
+      "value": "60",
+    },
+    {
+      "label": "Succeeded copies",
+      "value": "4",
+    },
+  ],
+  "title": "Restore purged messages",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "Restored messages reach the users’ Inboxes again, threats included.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeClawbackController_submit_v1 1`] = `
+{
+  "action": "Purges the eligible copies of this clawback: move to Junk.",
+  "changes": [
+    {
+      "after": "queued or pending approval",
+      "before": "pending_approval",
+      "label": "Status",
+    },
+    {
+      "after": "explicit",
+      "label": "Mode",
+    },
+    {
+      "after": "move_junk",
+      "label": "Action",
+    },
+    {
+      "after": "Purge",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Messages are removed from every listed mailbox by the mailbox-worker.",
+    "Above the organization’s approval threshold of distinct mailboxes a second administrator must approve first.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/clawbacks/0193aaaa-0000-7000-8000-000000000125/submit",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Clawback",
+      "value": "0193aaaa-0000-7000-8000-000000000125",
+    },
+    {
+      "label": "Trigger",
+      "value": "admin",
+    },
+    {
+      "label": "Status",
+      "value": "pending_approval",
+    },
+    {
+      "label": "Eligible copies",
+      "value": "62",
+    },
+    {
+      "label": "Distinct mailboxes",
+      "value": "60",
+    },
+  ],
+  "title": "Submit purge",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A purge removes the message from many mailboxes at once; check the target list first.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeController_inventorySync_v1 1`] = `
+{
+  "action": "Requests a mailbox inventory sync of this connection.",
+  "changes": [
+    {
+      "after": "sync requested",
+      "before": "ok",
+      "label": "Inventory",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker reads the provider’s mailbox list; coverage updates when it is done.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/connections/0193aaaa-0000-7000-8000-000000000121/inventory-sync",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Connection",
+      "untrusted": true,
+      "value": "Contoso Microsoft 365",
+    },
+    {
+      "label": "Inventory",
+      "value": "ok",
+    },
+  ],
+  "title": "Sync mailbox inventory",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeController_resyncMailbox_v1 1`] = `
+{
+  "action": "Restarts the change feed of this mailbox (no backfill of older mail).",
+  "changes": [
+    {
+      "after": "resync requested",
+      "before": "active",
+      "label": "Feed",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker re-initializes the feed cursor of the mailbox.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/mailboxes/0193aaaa-0000-7000-8000-000000000122/resync",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Mailbox",
+      "untrusted": true,
+      "value": "report-phishing@contoso.example",
+    },
+    {
+      "label": "Feed",
+      "value": "active",
+    },
+    {
+      "label": "Coverage",
+      "value": "covered",
+    },
+  ],
+  "title": "Resync mailbox",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeController_updateSettings_v1 1`] = `
+{
+  "action": "Changes the change-feed settings and the remediation pause of this connection.",
+  "changes": [
+    {
+      "after": "on",
+      "before": "on",
+      "label": "Change feeds",
+    },
+    {
+      "after": "poll",
+      "before": "poll",
+      "label": "Feed mode",
+    },
+    {
+      "after": "yes",
+      "before": "no",
+      "label": "Remediation paused",
+    },
+  ],
+  "impact": [
+    "Pausing remediation stops automatic mailbox actions of this connection (admin and release actions still run).",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/connections/0193aaaa-0000-7000-8000-000000000121/settings",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Connection",
+      "untrusted": true,
+      "value": "Contoso Microsoft 365",
+    },
+    {
+      "label": "Provider",
+      "value": "microsoft_365",
+    },
+  ],
+  "title": "Update API-mode connection settings",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A paused connection leaves detected threats in mailboxes until it is resumed.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_deleteDomainPolicy_v1 1`] = `
+{
+  "action": "Removes the domain’s policy override; the domain inherits the organization policy.",
+  "changes": [
+    {
+      "after": "removed (inherits the organization)",
+      "before": "detect_only",
+      "label": "Override",
+    },
+  ],
+  "impact": [
+    "New verdicts of the domain’s mailboxes follow the organization policy.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "DELETE",
+    "path": "/api/v1/api-mode/remediation-policy/domains/0193aaaa-0000-7000-8000-000000000124",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Domain",
+      "untrusted": true,
+      "value": "contoso.example",
+    },
+    {
+      "label": "Override mode",
+      "value": "detect_only",
+    },
+  ],
+  "title": "Remove domain remediation policy",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A removed override cannot be restored; set it again to bring it back.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_putDomainPolicy_v1 1`] = `
+{
+  "action": "Sets the remediation policy override of the domain (mode enforce).",
+  "changes": [
+    {
+      "after": "enforce",
+      "before": "detect_only",
+      "label": "Mode",
+    },
+    {
+      "after": "p1-high-confidence-malware-phishing → move to the hidden quarantine folder, p1-suspicious → tag as suspicious",
+      "label": "Rules",
+    },
+    {
+      "after": "Pilot",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "New verdicts of the domain’s mailboxes are decided with this override.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/remediation-policy/domains/0193aaaa-0000-7000-8000-000000000124",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Domain",
+      "untrusted": true,
+      "value": "contoso.example",
+    },
+    {
+      "label": "Current mode",
+      "value": "detect_only",
+    },
+  ],
+  "title": "Set domain remediation policy",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A weaker policy stops removing threats from mailboxes; detect-only records decisions without acting.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_putPolicy_v1 1`] = `
+{
+  "action": "Replaces the organization’s remediation policy (mode enforce).",
+  "changes": [
+    {
+      "after": "enforce",
+      "before": "enforce",
+      "label": "Mode",
+    },
+    {
+      "after": "p1-high-confidence-malware-phishing → move to the hidden quarantine folder, p1-suspicious → tag as suspicious",
+      "label": "Rules",
+    },
+    {
+      "after": "Pilot",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "New verdicts of every API-mode mailbox are decided with this policy.",
+    "Domains with their own override keep it.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/remediation-policy",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Current source",
+      "value": "organization",
+    },
+    {
+      "label": "Current mode",
+      "value": "enforce",
+    },
+    {
+      "label": "Hard delete allowed on this platform",
+      "value": "no",
+    },
+  ],
+  "title": "Set API-mode remediation policy",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A weaker policy stops removing threats from mailboxes; detect-only records decisions without acting.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_remediate_v1 1`] = `
+{
+  "action": "Queues the mailbox action: move to the hidden quarantine folder.",
+  "changes": [
+    {
+      "after": "move_quarantine",
+      "before": "tag",
+      "label": "Remediation",
+    },
+    {
+      "after": "Confirmed phishing",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker moves the message in the user’s mailbox within seconds.",
+    "Quarantine-folder, Junk and deleted-items moves create a mailbox quarantine entry that can be restored.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/detections/0193aaaa-0000-7000-8000-000000000120/remediate",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Detection",
+      "value": "0193aaaa-0000-7000-8000-000000000120",
+    },
+    {
+      "label": "Mailbox",
+      "untrusted": true,
+      "value": "alex@contoso.example",
+    },
+    {
+      "label": "Sender",
+      "untrusted": true,
+      "value": "b***@fabrikam.example",
+    },
+    {
+      "label": "Verdict",
+      "value": "phishing",
+    },
+    {
+      "label": "Risk score",
+      "value": "910",
+    },
+    {
+      "label": "Verdict authority",
+      "value": "copy",
+    },
+  ],
+  "title": "Remediate mailbox copy",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_restore_v1 1`] = `
+{
+  "action": "Puts the remediated message back: a tag is removed; a moved message returns to the Inbox through the quarantine release of its entry.",
+  "changes": [
+    {
+      "after": "restore requested",
+      "before": "remediated",
+      "label": "Remediation",
+    },
+    {
+      "after": "False positive",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The message is visible to the user again.",
+    "A hard-blocked entry may need a second approver under the quarantine rules.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/detections/0193aaaa-0000-7000-8000-000000000120/restore",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Detection",
+      "value": "0193aaaa-0000-7000-8000-000000000120",
+    },
+    {
+      "label": "Mailbox",
+      "untrusted": true,
+      "value": "alex@contoso.example",
+    },
+    {
+      "label": "Sender",
+      "untrusted": true,
+      "value": "b***@fabrikam.example",
+    },
+    {
+      "label": "Verdict",
+      "value": "phishing",
+    },
+    {
+      "label": "Risk score",
+      "value": "910",
+    },
+    {
+      "label": "Verdict authority",
+      "value": "copy",
+    },
+    {
+      "label": "Remediation in effect",
+      "value": "tag",
+    },
+  ],
+  "title": "Restore mailbox copy",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "A restored threat reaches the user’s Inbox again.",
+  ],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeRemediationController_retry_v1 1`] = `
+{
+  "action": "Runs the failed mailbox action (move to Junk) again.",
+  "changes": [
+    {
+      "after": "pending",
+      "before": "failed",
+      "label": "Status",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker retries the action with fresh attempts.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/remediations/0193aaaa-0000-7000-8000-000000000123/retry",
+  },
+  "reversible": false,
+  "target": [
+    {
+      "label": "Remediation",
+      "value": "0193aaaa-0000-7000-8000-000000000123",
+    },
+    {
+      "label": "Mailbox",
+      "untrusted": true,
+      "value": "alex@contoso.example",
+    },
+    {
+      "label": "Trigger",
+      "value": "policy",
+    },
+    {
+      "label": "Attempts",
+      "value": "8",
+    },
+  ],
+  "title": "Retry mailbox action",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeReportsController_addMailbox_v1 1`] = `
+{
+  "action": "Makes the address a report mailbox: users forward suspicious mail to it and each forward becomes a report.",
+  "changes": [
+    {
+      "after": "on",
+      "label": "Report mailbox",
+    },
+    {
+      "after": "Report mailbox",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Copies in a report mailbox are never remediated or clawed back.",
+    "An address not known yet is added as a discovered mailbox of its domain’s connection.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/report-mailboxes",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Address",
+      "untrusted": true,
+      "value": "report-phishing@contoso.example",
+    },
+  ],
+  "title": "Add report mailbox",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeReportsController_clawback_v1 1`] = `
+{
+  "action": "Creates a clawback search for the reported message across your mailboxes. Nothing changes until it is submitted.",
+  "changes": [
+    {
+      "after": "attachments",
+      "label": "Campaign expansion",
+    },
+    {
+      "after": "Remove it",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker lists the matching copies; preview and submit the purge afterwards.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/reports/0193aaaa-0000-7000-8000-000000000126/clawback",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Report",
+      "value": "0193aaaa-0000-7000-8000-000000000126",
+    },
+    {
+      "label": "Reporter",
+      "untrusted": true,
+      "value": "sam@contoso.example",
+    },
+    {
+      "label": "Status",
+      "value": "pending_triage",
+    },
+    {
+      "label": "Assessment",
+      "value": "malicious",
+    },
+    {
+      "label": "Scan verdict",
+      "value": "phishing",
+    },
+    {
+      "label": "Original sender",
+      "untrusted": true,
+      "value": "billing@fabrikam.example",
+    },
+    {
+      "label": "Reports of the same message",
+      "value": "2",
+    },
+  ],
+  "title": "Clawback from report",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeReportsController_setMailbox_v1 1`] = `
+{
+  "action": "Makes this mailbox a report mailbox (no add-in needed).",
+  "changes": [
+    {
+      "after": "on",
+      "label": "Report mailbox",
+    },
+    {
+      "after": "Report mailbox",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Forwards to it become reports; its copies are never remediated.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/mailboxes/0193aaaa-0000-7000-8000-000000000122/report-mailbox",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Mailbox",
+      "untrusted": true,
+      "value": "report-phishing@contoso.example",
+    },
+    {
+      "label": "Status",
+      "value": "disabled",
+    },
+    {
+      "label": "Domain",
+      "untrusted": true,
+      "value": "contoso.example",
+    },
+  ],
+  "title": "Designate report mailbox",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeReportsController_triage_v1 1`] = `
+{
+  "action": "Sets the report to resolved (malicious).",
+  "changes": [
+    {
+      "after": "resolved",
+      "before": "pending_triage",
+      "label": "Status",
+    },
+    {
+      "after": "malicious",
+      "label": "Verdict",
+    },
+  ],
+  "impact": [
+    "A resolve also resolves the open reports of the same message unless applyToGroup is false.",
+    "Reporters get a result e-mail without the reported message’s subject or content when notified.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/api-mode/reports/0193aaaa-0000-7000-8000-000000000126/triage",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Report",
+      "value": "0193aaaa-0000-7000-8000-000000000126",
+    },
+    {
+      "label": "Reporter",
+      "untrusted": true,
+      "value": "sam@contoso.example",
+    },
+    {
+      "label": "Status",
+      "value": "pending_triage",
+    },
+    {
+      "label": "Assessment",
+      "value": "malicious",
+    },
+    {
+      "label": "Scan verdict",
+      "value": "phishing",
+    },
+    {
+      "label": "Original sender",
+      "untrusted": true,
+      "value": "billing@fabrikam.example",
+    },
+    {
+      "label": "Reports of the same message",
+      "value": "2",
+    },
+  ],
+  "title": "Triage user report",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > ApiModeSettingsController_put_v1 1`] = `
+{
+  "action": "Replaces the organization's API-mode settings with the values shown.",
+  "changes": [
+    {
+      "after": "on",
+      "before": "on",
+      "label": "Internal mail",
+    },
+    {
+      "after": "review",
+      "before": "enforce",
+      "label": "Automatic clawback",
+    },
+    {
+      "after": "500",
+      "before": "500",
+      "label": "Automatic cap (mailboxes)",
+    },
+    {
+      "after": "50",
+      "before": "50",
+      "label": "Approval threshold (mailboxes)",
+    },
+    {
+      "after": "14",
+      "before": "14",
+      "label": "Lookback (days)",
+    },
+    {
+      "after": "80",
+      "before": "80",
+      "label": "Threat-intel confidence",
+    },
+    {
+      "after": "on",
+      "before": "on",
+      "label": "Report acknowledgement",
+    },
+    {
+      "after": "on",
+      "before": "on",
+      "label": "Report result e-mail",
+    },
+    {
+      "after": "Review",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "Automatic clawbacks, the purge approval threshold and reporter e-mails follow the new values.",
+  ],
+  "portalRoute": "/api-mode",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/settings",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Current source",
+      "value": "row",
+    },
+  ],
+  "title": "Update API-mode settings",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "Turning automatic clawback off or raising the approval threshold weakens post-delivery protection.",
+  ],
+}
+`;
+
 exports[`impact templates (D5) > ArchiveAdminController_retry_v1 1`] = `
 {
   "action": "The archive retries capturing this message now.",

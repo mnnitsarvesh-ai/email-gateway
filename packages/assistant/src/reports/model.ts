@@ -84,6 +84,7 @@ export const SECTION_TITLES: Readonly<Record<ReportSection, string>> = {
   url_clicks: 'URL clicks',
   quarantine: 'Quarantine',
   ato: 'Account takeover',
+  api_mode: 'Mailbox protection (API mode)',
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -748,6 +749,120 @@ function atoSection(
   };
 }
 
+const HEALTH_COLORS: Readonly<Record<'healthy' | 'degraded' | 'failing' | 'unknown', SeriesColor>> =
+  {
+    healthy: 'good',
+    degraded: 'warning',
+    failing: 'critical',
+    unknown: 'unknown',
+  };
+
+/** The fixed note of the `api_mode` section (C16): what its figures cover. */
+export const API_MODE_SCOPE_NOTE =
+  'Current state of mailbox protection; activity figures are counters of the last 24 hours (independent of the report period).';
+/** C16: the section is skipped (a note, not an omission) without the permission… */
+export const API_MODE_SKIPPED_PERMISSION =
+  'Skipped: mailbox protection (API mode) needs the permission remediation:read.';
+/** …or without an API-mode connection. */
+export const API_MODE_SKIPPED_NO_CONNECTION =
+  'Skipped: the organization has no API-mode (mailbox protection) connection.';
+
+function skippedApiModeSection(note: string): ReportSectionModel {
+  return {
+    section: 'api_mode',
+    skipped: true,
+    title: SECTION_TITLES.api_mode,
+    cards: [],
+    charts: [],
+    tables: [],
+    notes: [note],
+  };
+}
+
+const seconds = (value: number | null): string =>
+  value === null ? 'n/a' : fmtDuration(finite(value) * 1000);
+
+/** Step API-3 C16: coverage, health, intake lag, remediation, clawbacks and reports. */
+function apiModeSection(o: ReportSourceBodies['api_mode_overview']): ReportSectionModel {
+  const coverage =
+    o.coverage.percent === null
+      ? 'n/a'
+      : `${(Math.round(o.coverage.percent * 10) / 10).toFixed(1)}%`;
+  const health = (['healthy', 'degraded', 'failing', 'unknown'] as const).map((h) => ({
+    label: humanize(h),
+    value: finite(o.connectionsByHealth[h]),
+    color: HEALTH_COLORS[h],
+  }));
+  const activity: Array<[string, number]> = [
+    ['Remediations succeeded', o.remediation.succeeded24h],
+    ['Remediations failed', o.remediation.failed24h],
+    ['Restores', o.remediation.restores24h],
+    ['Clawback targets succeeded', o.clawback.targetsSucceeded24h],
+    ['Clawback targets failed', o.clawback.targetsFailed24h],
+    ['Reports received', o.reports.received24h],
+    ['Reports resolved', o.reports.resolved24h],
+  ];
+  return {
+    section: 'api_mode',
+    title: SECTION_TITLES.api_mode,
+    cards: [
+      { label: 'Mailbox coverage', value: coverage },
+      {
+        label: 'Mailboxes covered',
+        value: fmtNumber(o.coverage.covered),
+        ...(o.coverage.total !== null ? { hint: `of ${fmtNumber(o.coverage.total)}` } : {}),
+      },
+      {
+        label: 'Connections healthy',
+        value: fmtNumber(o.connectionsByHealth.healthy),
+        hint: `of ${fmtNumber(o.connections.length)}`,
+      },
+      { label: 'p95 intake lag (24 h)', value: seconds(o.lag.p95Seconds24h), hint: 'upper bound' },
+      { label: 'Remediations (24 h)', value: fmtNumber(o.remediation.succeeded24h) },
+      { label: 'Remediation failures (24 h)', value: fmtNumber(o.remediation.failed24h) },
+      { label: 'Restores (24 h)', value: fmtNumber(o.remediation.restores24h) },
+      { label: 'Throttling events (24 h)', value: fmtNumber(o.throttling.events24h) },
+      { label: 'Active clawbacks', value: fmtNumber(o.clawback.active) },
+      { label: 'Purges awaiting approval', value: fmtNumber(o.clawback.pendingApproval) },
+      { label: 'Clawbacks completed (24 h)', value: fmtNumber(o.clawback.completed24h) },
+      { label: 'Reports awaiting triage', value: fmtNumber(o.reports.pendingTriage) },
+      { label: 'Reports resolved (24 h)', value: fmtNumber(o.reports.resolved24h) },
+      { label: 'Internal copies (24 h)', value: fmtNumber(o.internal.copies24h) },
+    ],
+    charts: [
+      donutOf('chart-api-mode-health', 'Connections by health', health),
+      {
+        kind: 'bar',
+        id: 'chart-api-mode-activity',
+        title: 'Mailbox actions, clawbacks and reports (last 24 hours)',
+        unit: 'count',
+        segments: [],
+        bars: activity.map(([label, value]) => ({ label, value: finite(value) })),
+      },
+    ],
+    tables: [
+      {
+        id: 'table-api-mode-connections',
+        title: 'API-mode connections',
+        columns: ['Connection', 'Provider', 'Health', 'Coverage', 'p95 intake lag (24 h)'],
+        numeric: [false, false, false, true, true],
+        rows: o.connections
+          .slice(0, BAR_MAX)
+          .map((c) => [
+            dataText(c.displayName, DATA_CAPS.displayName),
+            humanize(dataText(c.provider, DATA_CAPS.token)),
+            humanize(c.health),
+            c.coverage.percent === null
+              ? 'n/a'
+              : `${(Math.round(c.coverage.percent * 10) / 10).toFixed(1)}%`,
+            seconds(c.lag.p95Seconds24h),
+          ]),
+      },
+    ],
+    notes: [API_MODE_SCOPE_NOTE],
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Summary
 // ---------------------------------------------------------------------------------------------
@@ -894,6 +1009,13 @@ export function buildReportModel(
     }
     const required = REPORT_SOURCES[section].filter((key) => !REPORT_SOURCE_DEFS[key].after);
     const failure = required.map((key) => failed.get(key)).find(Boolean);
+    // Step API-3 C16: without remediation:read or an API-mode connection the section is skipped
+    // with a note (not an omission).
+    if (section === 'api_mode' && failure?.reason === 'permission') {
+      included.push(section);
+      body.push(skippedApiModeSection(API_MODE_SKIPPED_PERMISSION));
+      continue;
+    }
     if (failure) {
       omitted.push({ section, ...failure });
       continue;
@@ -935,6 +1057,15 @@ export function buildReportModel(
         body.push(atoSection(parsed.ato_overview!, parsed.ato_accounts ?? null, note, w));
         break;
       }
+      case 'api_mode': {
+        const overview = parsed.api_mode_overview!;
+        body.push(
+          overview.connections.length === 0
+            ? skippedApiModeSection(API_MODE_SKIPPED_NO_CONNECTION)
+            : apiModeSection(overview),
+        );
+        break;
+      }
     }
   }
 
@@ -956,15 +1087,17 @@ export function buildReportModel(
 }
 
 /**
- * Design D2 step 7: true when every requested non-summary section is omitted (the execution
- * fails `503 assistant_report_sources_unavailable`); a summary-only request has no data when the
- * summary itself is omitted.
+ * Design D2 step 7: true when every requested non-summary section is omitted (or, step API-3
+ * C16, only a skipped note; the execution fails `503 assistant_report_sources_unavailable`); a
+ * summary-only request has no data when the summary itself is omitted.
  */
 export function reportHasNoData(model: ReportModel): boolean {
   const requested = [...model.sections, ...model.omitted.map((o) => o.section)];
   const nonSummary = requested.filter((s) => s !== 'summary');
   if (nonSummary.length === 0) return !model.sections.includes('summary');
-  return !model.sections.some((s) => s !== 'summary');
+  // Step API-3 C16: a skipped section (a note) is not data.
+  const skipped = new Set(model.body.filter((b) => b.skipped).map((b) => b.section));
+  return !model.sections.some((s) => s !== 'summary' && !skipped.has(s));
 }
 
 /** What the card, the envelope and the report row carry (design D2 steps 10–11). */

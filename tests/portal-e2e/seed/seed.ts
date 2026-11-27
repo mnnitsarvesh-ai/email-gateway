@@ -59,6 +59,7 @@ import {
 import {
   ZETA,
   ZETA_DETECTIONS,
+  ZETA_CLAWBACK_COPIES,
   ZETA_REMEDIATION_COPIES,
   ZETA_DOMAINS,
   ZETA_GOOGLE_NAME,
@@ -816,6 +817,12 @@ export async function seed(): Promise<SeedSummary> {
       },
     });
     users.zetaApprover.totpSecret = zetaApproverSecret;
+    // Step API-3: zetaAdmin requested the seeded searches (seed/api-mode.ts seedClawback); the
+    // approver (zetaApprover) is another purge holder (C6 separation of duties).
+    await p.apiClawback.updateMany({
+      where: { organizationId: zeta.id, trigger: 'admin', requestedByType: 'user' },
+      data: { requestedByUserId: userIds.get(spec.zetaAdmin.email)! },
+    });
     const auditorSecret = base32Encode(randomBytes(20));
     const auditorId = userIds.get(spec.alphaAuditorMfa.email)!;
     await p.user.update({
@@ -1281,7 +1288,7 @@ export async function seed(): Promise<SeedSummary> {
         deltaRetention === 2 &&
         deltaHolds === 1 &&
         zetaMailboxes === ZETA_MAILBOXES.length &&
-        zetaCopies === ZETA_DETECTIONS + ZETA_REMEDIATION_COPIES &&
+        zetaCopies === ZETA_DETECTIONS + ZETA_REMEDIATION_COPIES + ZETA_CLAWBACK_COPIES &&
         zetaUsers === 3
       );
     }, `alpha rows (last message ${lastAlpha.publicId})`);

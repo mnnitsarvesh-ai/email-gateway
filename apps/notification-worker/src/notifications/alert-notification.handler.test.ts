@@ -24,6 +24,7 @@ const CONNECTION = WEBHOOK_EXAMPLE_DATA['integration.health_changed'].connection
 const RECEIVED = '2026-11-13T09:14:02.481Z';
 const INTAKE_SOURCE = '0192f0c4-bbbb-7ccc-8ddd-000000000086';
 const API_CONNECTION = '0192f0c4-cccc-7ddd-8eee-0000000000a1';
+const CLAWBACK = '0192f0c4-dddd-7eee-8fff-0000000000c1';
 const WINDOW = { from: '2026-11-13T09:00:00.000Z', to: '2026-11-13T10:00:00.000Z' };
 
 let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
@@ -56,7 +57,11 @@ function alert(
             ? { intakeSourceId: INTAKE_SOURCE }
             : kind === 'api_mode_unhealthy'
               ? { apiModeConnectionId: API_CONNECTION }
-              : { subscriptionId: SUBSCRIPTION };
+              : kind === 'api_mode_purge_approval'
+                ? { clawbackId: CLAWBACK }
+                : kind === 'api_mode_report_received'
+                  ? {}
+                  : { subscriptionId: SUBSCRIPTION };
   return {
     eventId: EVENT_ID,
     eventType: 'notification.alert_requested.v1',
@@ -68,7 +73,9 @@ function alert(
       severity:
         kind === 'webhook_disabled' ||
         kind === 'journal_intake_silent' ||
-        kind === 'api_mode_unhealthy'
+        kind === 'api_mode_unhealthy' ||
+        kind === 'api_mode_purge_approval' ||
+        kind === 'api_mode_report_received'
           ? 'medium'
           : 'high',
       refs,
@@ -162,6 +169,8 @@ const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
     { id: 17n, email: 'analyst@acme.example' },
     { id: 18n, email: 'optout@acme.example' },
   ],
+  'remediation:purge': [{ id: 19n, email: 'approver@acme.example' }],
+  'remediation:write': [{ id: 20n, email: 'triage@acme.example' }],
 };
 
 function setup(options: SetupOptions = {}) {
@@ -246,6 +255,31 @@ function setup(options: SetupOptions = {}) {
             }
           : null,
       ),
+    ),
+    clawback: vi.fn((_tx: unknown, _org: bigint, publicId: string) =>
+      Promise.resolve(
+        publicId === CLAWBACK
+          ? {
+              publicId: CLAWBACK,
+              trigger: 'admin',
+              status: 'pending_approval',
+              action: 'move_quarantine',
+              mailboxesEligible: 120,
+              targetsEligible: 131,
+              approvalStatus: 'pending',
+              approvalReasons: ['mailbox_threshold'],
+              approvalExpiresAt: new Date('2026-11-16T09:14:03.000Z'),
+            }
+          : null,
+      ),
+    ),
+    reportCounts: vi.fn(() =>
+      Promise.resolve({
+        pendingTriage: 4,
+        inReview: 1,
+        receivedInWindow: 3,
+        oldestPendingAt: '2026-11-13T07:30:00.000Z',
+      }),
     ),
     providerConnection: vi.fn(
       (_tx: unknown, _org: bigint, publicId: string) =>
@@ -465,6 +499,117 @@ describe('AlertNotificationHandler api_mode_unhealthy (step API-1 D11.3)', () =>
   it('no remediation:read holder and no contact: no_recipients', async () => {
     const s = setup({ holders: {}, contact: null });
     expect(await s.handler.handle(alert('api_mode_unhealthy'), tx)).toBe('no_recipients');
+  });
+});
+
+describe('AlertNotificationHandler api_mode_purge_approval (step API-3 C6)', () => {
+  it('remediation:purge holders + contact, clawback facts, purge link, no address or subject', async () => {
+    const s = setup();
+    expect(await s.handler.handle(alert('api_mode_purge_approval'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'remediation:purge', 50, null);
+    expect(s.reads.clawback).toHaveBeenCalledWith(tx, 7n, CLAWBACK);
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['approver@acme.example', 'secops@acme.example']);
+    expect(mail.subject).toBe(
+      '[Email Gateway] Security alert (medium): clawback approval requested',
+    );
+    expect(mail.text).toContain('A security alert was raised for Acme.');
+    expect(mail.text).toContain('Alert: API-mode clawback needs a second approver');
+    expect(mail.text).toContain(`Clawback: ${CLAWBACK}`);
+    expect(mail.text).toContain('Trigger: administrator search');
+    expect(mail.text).toContain('Status now: pending_approval');
+    expect(mail.text).toContain('Requested action: move_quarantine');
+    expect(mail.text).toContain('Eligible mailboxes: 120 (131 message copies)');
+    expect(mail.text).toContain(
+      'Approval needed because: more mailboxes than the approval threshold',
+    );
+    expect(mail.text).toContain('Approval status: pending');
+    expect(mail.text).toContain('Approval expires: 2026-11-16T09:14:03.000Z');
+    expect(mail.text).toContain(
+      `Review: https://portal.example/api-mode?tab=purge&clawback=${CLAWBACK}`,
+    );
+    expect(mail.text).not.toContain('@');
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'api_mode_purge_approval',
+      CLAWBACK,
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'api_mode_purge_approval', result: 'sent' }]);
+  });
+
+  it('is sent even when every tenant-configurable alert kind is switched off', async () => {
+    const s = setup({
+      settings: {
+        alerts: {
+          threatDetected: { enabled: false },
+          domainDnsFailed: { enabled: false },
+          webhookDisabled: { enabled: false },
+        },
+      },
+      contact: null,
+    });
+    expect(await s.handler.handle(alert('api_mode_purge_approval'), tx)).toBe('sent');
+    expect(s.sent[0]!.recipients).toEqual(['approver@acme.example']);
+  });
+
+  it('a missing or foreign clawback dead-letters; no mail', async () => {
+    const s = setup();
+    await expect(
+      s.handler.handle(alert('api_mode_purge_approval', { refs: {} }), tx),
+    ).rejects.toThrow('alert_refs_missing');
+    await expect(
+      s.handler.handle(
+        alert('api_mode_purge_approval', {
+          refs: { clawbackId: '0192f0c4-dddd-7eee-8fff-0000000000ff' },
+        }),
+        tx,
+      ),
+    ).rejects.toThrow('clawback_not_found');
+    expect(s.sent).toEqual([]);
+  });
+
+  it('no remediation:purge holder and no contact: no_recipients', async () => {
+    const s = setup({
+      holders: { 'remediation:read': HOLDERS['remediation:read']! },
+      contact: null,
+    });
+    expect(await s.handler.handle(alert('api_mode_purge_approval'), tx)).toBe('no_recipients');
+  });
+});
+
+describe('AlertNotificationHandler api_mode_report_received (step API-3 C13)', () => {
+  it('remediation:write holders + contact, report counts, reports link, no address', async () => {
+    const s = setup();
+    expect(await s.handler.handle(alert('api_mode_report_received'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'remediation:write', 50, null);
+    expect(s.reads.reportCounts).toHaveBeenCalledWith(tx, 7n, new Date(WINDOW.from));
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['triage@acme.example', 'secops@acme.example']);
+    expect(mail.subject).toBe(
+      '[Email Gateway] Security alert (medium): reported messages need triage',
+    );
+    expect(mail.text).toContain('Alert: API-mode user reports waiting for triage');
+    expect(mail.text).toContain('Reports waiting for triage: 4');
+    expect(mail.text).toContain('Reports in review: 1');
+    expect(mail.text).toContain('Reports received in this window: 3');
+    expect(mail.text).toContain('Oldest report waiting since: 2026-11-13T07:30:00.000Z');
+    expect(mail.text).toContain('Review: https://portal.example/api-mode?tab=reports');
+    expect(mail.text).not.toContain('@');
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'api_mode_report_received',
+      '-',
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'api_mode_report_received', result: 'sent' }]);
+  });
+
+  it('no remediation:write holder and no contact: no_recipients', async () => {
+    const s = setup({ holders: {}, contact: null });
+    expect(await s.handler.handle(alert('api_mode_report_received'), tx)).toBe('no_recipients');
   });
 });
 

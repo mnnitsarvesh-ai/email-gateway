@@ -8,6 +8,7 @@ import {
   AI3_WRITES_TESTED_BY,
   AI4_WRITES_TESTED_BY,
   AI5_WRITES_TESTED_BY,
+  API_MODE_WRITES_TESTED_BY,
   CREDENTIAL_KEY_EXCEPTIONS,
 } from '../registry/manifest';
 import { ALL_TOOLS, compileValidator, findOperation, findTool } from '../registry/registry';
@@ -36,8 +37,9 @@ const spec = (operationId: string): ConfirmationSpec => confirmationSpecOf(opera
 const POLICY = '0193aaaa-0000-7000-8000-000000000002';
 
 describe('confirmation specs (D4)', () => {
-  it('one spec per AI-2, AI-3, native AI-R, AI-4 and AI-5 write, every one an enabled write of the registry', () => {
-    expect(CONFIRMATION_SPECS).toHaveLength(168);
+  it('one spec per AI-2, AI-3, native AI-R, AI-4, AI-5 and API-3 write, every one an enabled write of the registry', () => {
+    expect(CONFIRMATION_SPECS).toHaveLength(188);
+    expect(Object.keys(API_MODE_WRITES_TESTED_BY)).toHaveLength(20);
     expect(Object.keys(AI4_WRITES_TESTED_BY)).toHaveLength(64);
     expect(Object.keys(AI5_WRITES_TESTED_BY)).toHaveLength(25);
     expect(CONFIRMATION_SPECS.map((s) => s.operationId).sort()).toEqual(
@@ -47,6 +49,7 @@ describe('confirmation specs (D4)', () => {
         'AssistantNative_reportSendEmail',
         ...Object.keys(AI4_WRITES_TESTED_BY),
         ...Object.keys(AI5_WRITES_TESTED_BY),
+        ...Object.keys(API_MODE_WRITES_TESTED_BY),
       ].sort(),
     );
     expect(confirmationSpecOf('AssistantNative_reportSendEmail')).toEqual({
@@ -1075,10 +1078,10 @@ describe('AI-4 specs (design 32 D5)', () => {
   const AI4 = CONFIRMATION_SPECS.filter((s) => s.operationId in AI4_WRITES_TESTED_BY);
   const nameOf = (operationId: string) => (findOperation(operationId) as OperationTool).name;
 
-  it('covers the 64 AI-4 writes; 168 enabled writes have one spec each', () => {
+  it('covers the 64 AI-4 writes; 188 enabled writes (168 + 20 of step API-3) have one spec each', () => {
     expect(AI4).toHaveLength(64);
     const enabledWrites = ALL_TOOLS.filter((t) => t.enabled && t.access === 'write');
-    expect(enabledWrites).toHaveLength(168);
+    expect(enabledWrites).toHaveLength(188);
     for (const write of enabledWrites)
       expect(confirmationSpecOf(write.operationId), write.name).toBeDefined();
   });

@@ -8,11 +8,17 @@ type Tx = Prisma.TransactionClient;
 
 /**
  * A kind the filter applies: the shared preference kinds plus `journal_intake_silent` (step 8.6
- * D9) and `api_mode_unhealthy` (step API-1 D11.3), which no stored preference document can opt
- * out of yet (the shared `PREFERENCE_KINDS` vocabulary does not list them), so they filter nobody
- * until the vocabulary gains them.
+ * D9), `api_mode_unhealthy` (step API-1 D11.3) and the step API-3 (C6, C13)
+ * `api_mode_purge_approval` / `api_mode_report_received`, which no stored preference document can
+ * opt out of yet (the shared `PREFERENCE_KINDS` vocabulary does not list them), so they filter
+ * nobody until the vocabulary gains them.
  */
-export type FilterKind = PreferenceKind | 'journal_intake_silent' | 'api_mode_unhealthy';
+export type FilterKind =
+  | PreferenceKind
+  | 'journal_intake_silent'
+  | 'api_mode_unhealthy'
+  | 'api_mode_purge_approval'
+  | 'api_mode_report_received';
 
 /** Loads one page of candidate users sorted by id: after `afterId` (exclusive), ≤ `take`. */
 export type CandidatePage = (afterId: bigint | null, take: number) => Promise<NoticeUser[]>;

@@ -23,13 +23,18 @@ const optionalText = (max: number) =>
 const url = (fallback: string) =>
   z.preprocess(blankToUndefined, z.url().max(512).default(fallback));
 
-/** Roles of one mailbox-worker process (design D5; step API-2 R1 adds `remediate`). */
+/**
+ * Roles of one mailbox-worker process (design D5; step API-2 R1 adds `remediate`; step API-3 C1
+ * adds `clawback` and `reports`, neither of which calls a provider).
+ */
 export const MAILBOX_WORKER_ROLES = [
   'copies',
   'feeds',
   'inventory',
   'health',
   'remediate',
+  'clawback',
+  'reports',
 ] as const;
 export type MailboxWorkerRole = (typeof MAILBOX_WORKER_ROLES)[number];
 
@@ -37,7 +42,7 @@ const roles = list.transform((entries, ctx): MailboxWorkerRole[] => {
   if (entries.length === 0) {
     ctx.addIssue({
       code: 'custom',
-      message: 'must list at least one of copies, feeds, inventory, health, remediate',
+      message: `must list at least one of ${MAILBOX_WORKER_ROLES.join(', ')}`,
     });
     return z.NEVER;
   }
@@ -45,7 +50,7 @@ const roles = list.transform((entries, ctx): MailboxWorkerRole[] => {
     if (!(MAILBOX_WORKER_ROLES as readonly string[]).includes(entry)) {
       ctx.addIssue({
         code: 'custom',
-        message: 'may only list copies, feeds, inventory, health and remediate',
+        message: `may only list ${MAILBOX_WORKER_ROLES.join(', ')}`,
       });
       return z.NEVER;
     }
@@ -202,6 +207,27 @@ export const configSchema = baseConfigSchema
      */
     QUARANTINE_MAX_HOLD_DAYS: int(7, 80).default(60),
     QUARANTINE_MAX_REVIEW_DAYS: int(1, 13).default(13),
+
+    // Step API-3 clawback, search and purge, reports (note 37 C17; ADR-0103, ADR-0104).
+    API_MODE_CLAWBACK_TICK_MS: int(200, 600_000).default(5000),
+    API_MODE_CLAWBACK_LEASE_SECONDS: int(30, 3600).default(120),
+    API_MODE_CLAWBACK_MAX_TARGETS: int(1, 200_000).default(20_000),
+    API_MODE_CLAWBACK_QUEUE_BATCH: int(1, 10_000).default(500),
+    API_MODE_CLAWBACK_MAX_PENDING_PER_CONNECTION: int(1, 100_000).default(1000),
+    API_MODE_CLAWBACK_MAX_WINDOW_DAYS: int(1, 186).default(31),
+    API_MODE_CLAWBACK_TI_INTERVAL_SECONDS: int(5, 86_400).default(60),
+    API_MODE_CLAWBACK_TI_BATCH: int(1, 1000).default(100),
+    API_MODE_PURGE_APPROVAL_TTL_HOURS: int(1, 720).default(72),
+    API_MODE_CLAWBACK_STALLED_WARN_MINUTES: int(1, 10_080).default(60),
+    API_MODE_CLAWBACK_STALLED_FAIL_MINUTES: int(1, 10_080).default(240),
+    API_MODE_CLAWBACK_RETENTION_DAYS: int(30, 3650).default(400),
+    API_MODE_REPORT_RETENTION_DAYS: int(30, 3650).default(400),
+    API_MODE_REPORTS_TICK_MS: int(200, 600_000).default(5000),
+    API_MODE_REPORT_MAX_BYTES: int(65_536, 157_286_400).default(26_214_400),
+    API_MODE_REPORTS_PER_REPORTER_PER_HOUR: int(1, 10_000).default(30),
+    API_MODE_REPORT_TRIAGE_WARN_HOURS: int(1, 720).default(24),
+    API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES: int(1, 10_080).default(60),
+    API_MODE_REPORT_SCAN_TIMEOUT_MINUTES: int(5, 10_080).default(60),
   })
   .superRefine((cfg, ctx) => {
     const testEnv = TEST_ENVIRONMENTS.includes(cfg.APP_ENV);
@@ -292,6 +318,15 @@ export const configSchema = baseConfigSchema
         'API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION',
         'must not exceed API_MODE_REMEDIATION_CONCURRENCY',
       );
+    }
+    if (cfg.API_MODE_CLAWBACK_STALLED_FAIL_MINUTES < cfg.API_MODE_CLAWBACK_STALLED_WARN_MINUTES) {
+      refuse(
+        'API_MODE_CLAWBACK_STALLED_FAIL_MINUTES',
+        'must not be below API_MODE_CLAWBACK_STALLED_WARN_MINUTES',
+      );
+    }
+    if (cfg.API_MODE_CLAWBACK_QUEUE_BATCH > cfg.API_MODE_CLAWBACK_MAX_TARGETS) {
+      refuse('API_MODE_CLAWBACK_QUEUE_BATCH', 'must not exceed API_MODE_CLAWBACK_MAX_TARGETS');
     }
     if (cfg.API_MODE_SUBSCRIPTION_RENEW_BEFORE_MINUTES >= cfg.API_MODE_GRAPH_SUBSCRIPTION_MINUTES) {
       refuse(

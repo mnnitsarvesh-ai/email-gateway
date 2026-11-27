@@ -43,7 +43,7 @@ async function partitionNames(table: string): Promise<string[]> {
 }
 
 describe('partition maintenance', () => {
-  it('manages the 42 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2, 8.1, 8.4, 8.6 and API-1 tables (none added by 5.3 or API-2)', () => {
+  it('manages the 42 partitioned tables, including the step 2.3, 3.1, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 6.2, 8.1, 8.4, 8.6 and API-1 tables (none added by 5.3, API-2 or API-3)', () => {
     // Step 4.6 §3 adds sandbox_analyses and sandbox_artifacts unpartitioned; step 5.1 §3 adds
     // message_risk_scores (partitioned) and the unpartitioned risk_scoring_profiles and
     // risk_scoring_profile_versions.
@@ -51,6 +51,21 @@ describe('partition maintenance', () => {
     // Step API-1 §3.2: the per-mailbox API-mode copy records (core, 6 months like
     // email_messages); the five other API-mode tables are unpartitioned. Step API-2 §3.1 adds
     // api_remediation_policies and api_remediation_actions unpartitioned (registry unchanged).
+    // Step API-3 §3.1 adds five unpartitioned tables (registry unchanged): clawbacks and reports
+    // are low-volume operator / analyst work items with foreign keys, unique keys and a
+    // 400-day row retention, not time-series data.
+    for (const table of [
+      'api_clawbacks',
+      'api_clawback_targets',
+      'api_user_reports',
+      'api_mode_org_settings',
+      'api_mode_cursors',
+    ]) {
+      expect(
+        PARTITION_REGISTRY.map((s) => s.table),
+        table,
+      ).not.toContain(table);
+    }
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain('api_remediation_actions');
     expect(PARTITION_REGISTRY.map((s) => s.table)).not.toContain('api_remediation_policies');
     expect(PARTITION_REGISTRY.find((s) => s.table === 'api_message_copies')).toEqual({

@@ -30,15 +30,19 @@ export type AlertKind = NotificationAlertRequestedV1['kind'];
 
 /**
  * Permission a user must hold to receive an alert kind (N3): the shared map plus the step 8.6
- * `journal_intake_silent` → `journal:manage` (the users who can fix a journal rule or source)
- * and the step API-1 `api_mode_unhealthy` → `remediation:read` (D11.3: the users who see the
- * API-mode coverage and health page).
+ * `journal_intake_silent` → `journal:manage` (the users who can fix a journal rule or source),
+ * the step API-1 `api_mode_unhealthy` → `remediation:read` (D11.3: the users who see the
+ * API-mode coverage and health page) and the step API-3 `api_mode_purge_approval` →
+ * `remediation:purge` (C6: the users who may approve a purge) and `api_mode_report_received` →
+ * `remediation:write` (C13: the users who triage reports).
  */
 export const SECURITY_ALERT_RECIPIENT_PERMISSION: Readonly<Record<SecurityAlertKind, string>> =
   Object.freeze({
     ...ALERT_RECIPIENT_PERMISSION,
     journal_intake_silent: 'journal:manage',
     api_mode_unhealthy: 'remediation:read',
+    api_mode_purge_approval: 'remediation:purge',
+    api_mode_report_received: 'remediation:write',
   });
 
 export interface AlertNotificationOptions {
@@ -161,8 +165,16 @@ export class AlertNotificationHandler {
   ): boolean {
     // Step 8.6 D9: `journal_intake_silent` has no tenant setting (always on, like
     // `integration_unhealthy`; throttled per source by the producer). Step API-1 D11.3: nor has
-    // `api_mode_unhealthy` (throttled per API-mode connection by the mailbox-worker).
-    if (p.kind === 'journal_intake_silent' || p.kind === 'api_mode_unhealthy') return true;
+    // `api_mode_unhealthy` (throttled per API-mode connection by the mailbox-worker), nor the
+    // step API-3 kinds (C6, C13).
+    if (
+      p.kind === 'journal_intake_silent' ||
+      p.kind === 'api_mode_unhealthy' ||
+      p.kind === 'api_mode_purge_approval' ||
+      p.kind === 'api_mode_report_received'
+    ) {
+      return true;
+    }
     if (!alertKindSettings(settings, p.kind).enabled) return false;
     if (p.kind === 'threat_detected') {
       return severityRank(p.severity) >= severityRank(settings.alerts.threatDetected.minSeverity);
@@ -342,6 +354,42 @@ export class AlertNotificationHandler {
               failingChecks: connection.failingChecks,
             },
           },
+        };
+      }
+      case 'api_mode_purge_approval': {
+        // Step API-3 C6: the clawback at send time (trigger, status, eligible mailboxes, the
+        // approval state and expiry); never an address, subject or criteria value.
+        const { clawbackId } = p.refs;
+        if (!clawbackId) return this.deadLetter(p.kind, 'alert_refs_missing');
+        const clawback = await this.reads.clawback(tx, organizationId, clawbackId);
+        if (clawback === null) return this.deadLetter(p.kind, 'clawback_not_found');
+        return {
+          scopeKey: alertScopeKey(p.kind, { clawbackPublicId: clawback.publicId }),
+          facts: {
+            kind: p.kind,
+            severity: p.severity,
+            ...counts,
+            clawback: {
+              clawbackPublicId: clawback.publicId,
+              trigger: clawback.trigger,
+              status: clawback.status,
+              action: clawback.action,
+              mailboxesEligible: clawback.mailboxesEligible,
+              targetsEligible: clawback.targetsEligible,
+              approvalStatus: clawback.approvalStatus,
+              approvalReasons: clawback.approvalReasons,
+              approvalExpiresAt: clawback.approvalExpiresAt?.toISOString() ?? null,
+            },
+          },
+        };
+      }
+      case 'api_mode_report_received': {
+        // Step API-3 C13: the organization's report counts at send time; never a reporter
+        // address, subject or sender.
+        const reportCounts = await this.reads.reportCounts(tx, organizationId, window.from);
+        return {
+          scopeKey: alertScopeKey(p.kind, {}),
+          facts: { kind: p.kind, severity: p.severity, ...counts, reports: reportCounts },
         };
       }
       case 'webhook_disabled': {

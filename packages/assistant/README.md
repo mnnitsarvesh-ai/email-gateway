@@ -172,9 +172,8 @@ protection mode, API-mode overview, connections, connection detail, setup guide,
 detections, detection detail) are ordinary enabled `read` tools (phase AI-1) covered by the read sweep
 (`READ_TOOLS_TESTED_BY`), with display hints and `untrustedFields` (mailbox addresses and aliases, the masked sender
 and withheld subject of copies, tenant-authored connection and source names, health evidence, guide sections); the
-5 writes (organization and domain protection mode, change-feed settings, inventory sync, mailbox resync) are
-`not_applicable` through `API_MODE_DEFERRED_WRITES` with `NOT_APPLICABLE_REASONS.apiModeDeferred` ("API-mode write:
-assistant tool planned for step API-3 (portal only until then)"); the public Graph callbacks (tag
+5 writes (organization and domain protection mode, change-feed settings, inventory sync, mailbox resync) were
+`not_applicable` until step API-3 (see below); the public Graph callbacks (tag
 `provider-notifications`) are in `NOT_APPLICABLE_TAGS` ("provider callback (no user principal)").
 `DomainsController_create_v1` omits `body.protectionMode` (a chat-created domain inherits the organization's mode).
 Totals after API-1: 455 operations, 363 operation tools (all enabled) + 2 native = 365 enabled tools (197 reads,
@@ -183,11 +182,30 @@ Totals after API-1: 455 operations, 363 operation tools (all enabled) + 2 native
 Step API-2 (docs/plan/steps/36-api-mode-remediation.md R16) adds the 9 remediation operations: the 3 reads (remediation
 policy, remediation history list and detail) are enabled `read` tools (phase AI-1, read sweep), with `untrustedFields`
 (mailbox addresses, policy rule ids and domain names, the operator-typed request reason and the whole `decision`); the 6
-writes (organization and domain policy, domain policy removal, retry, remediate, restore) join `API_MODE_DEFERRED_WRITES`
-(11 in all, reason `apiModeDeferred`). The existing quarantine write tools also act on mailbox-located entries (same
+writes (organization and domain policy, domain policy removal, retry, remediate, restore) were deferred to API-3 as
+well. The existing quarantine write tools also act on mailbox-located entries (same
 operations, confirmation and risk; a release is a restore to the Inbox). Phase `AI-6` and the prompt are unchanged.
-Totals: **464 operations, 366 operation tools (all enabled) + 2 native = 368 enabled tools (200 reads, 168 writes),
-98 not applicable, `MISSING` 0**.
+Totals after API-2: 464 operations, 366 operation tools (all enabled) + 2 native = 368 enabled tools (200 reads,
+168 writes), 98 not applicable, `MISSING` 0.
+
+Step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15, C16) adds 19 operations and turns the API-mode
+writes into confirmed write tools: `MODULE_WRITE_PHASE['api-mode'] = 'AI-6'`; the 20 writes of
+`API_MODE_WRITES_TESTED_BY` (remediate `medium`, restore `high`, retry `low`, organization and domain policy put and
+domain policy delete `high`, connection settings `high` (the remediation pause), inventory sync and mailbox resync
+`low`; clawback create `medium`, submit `high`, approve `high`, deny `low`, cancel `medium`, restore `high`; report
+triage, clawback from a report, report mailbox add and set `medium`; organization settings `high`) each have a
+confirmation spec, an impact template and the suite `apps/api/integration/assistant-writes-api-mode.test.ts`; `high`
+means password + TOTP in the card. Approve and deny carry the four-eyes guards (`not_self_field` on the requester and the
+submitter, `require_read_value` on `hints.canApprove`; message `api_mode_purge_four_eyes`). The hard-delete purge
+(`ApiModeClawbackController_submitHardDelete_v1`) is a `CRITICAL_OPERATIONS` entry (portal only, risk `critical`). The two
+protection-mode writes stay portal only (`API_MODE_PORTAL_ONLY_WRITES`, reason `apiModePortalOnly`: "API-mode protection
+mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)"); `apiModeDeferred` is gone. The 7
+new reads (clawbacks list, detail, targets; reports list, detail; report mailboxes; settings) are enabled read tools with
+`untrustedFields` (target senders and subjects, report originals' senders and subject keys, analyst notes, reasons,
+mailbox and reporter addresses). The AI report gains the section `api_mode` ("Mailbox protection (API mode)", source
+`api_mode_overview`, no window arguments; skipped with a note without `remediation:read` or without an API-mode
+connection). Phase `AI-6` and the prompt `assistant-system/7` are unchanged. Totals: **483 operations, 393 operation
+tools (all enabled) + 2 native = 395 enabled tools (207 reads, 188 writes), 90 not applicable, `MISSING` 0**.
 
 ## Meta tools
 

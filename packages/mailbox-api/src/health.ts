@@ -26,6 +26,9 @@ export const API_MODE_HEALTH_CHECK_CODES = [
   'remediation.backlog',
   'remediation.access',
   'remediation.paused',
+  // Step API-3 (note 37 C13): evaluated only with the `clawback` / `reports` inputs.
+  'clawback.stalled',
+  'reports.backlog',
 ] as const;
 export type ApiModeHealthCheckCode = (typeof API_MODE_HEALTH_CHECK_CODES)[number];
 
@@ -94,6 +97,74 @@ export interface ApiModeHealthInput {
    * unchanged; without it the four `remediation.*` checks are not evaluated (not in the result).
    */
   remediation?: ApiModeRemediationHealthInput;
+  /**
+   * Step API-3 (C13): clawback facts of the connection. Optional; without it `clawback.stalled`
+   * is not evaluated (not in the result).
+   */
+  clawback?: ApiModeClawbackHealthInput;
+  /**
+   * Step API-3 (C13): report facts of the connection. Optional; without it `reports.backlog` is
+   * not evaluated (not in the result).
+   */
+  reports?: ApiModeReportsHealthInput;
+}
+
+/** C13 `clawback.stalled` facts (ages only). */
+export interface ApiModeClawbackHealthInput {
+  /**
+   * Age of the oldest `queued`/`running` clawback of the connection's organization that has
+   * targets on this connection; null when there is none.
+   */
+  oldestActiveAgeSeconds: number | null;
+  thresholds: {
+    /** `API_MODE_CLAWBACK_STALLED_WARN_MINUTES` (60). */
+    stalledWarnMinutes: number;
+    /** `API_MODE_CLAWBACK_STALLED_FAIL_MINUTES` (240). */
+    stalledFailMinutes: number;
+  };
+}
+
+/** C13 `reports.backlog` facts (ages and flags only). */
+export interface ApiModeReportsHealthInput {
+  /** The connection owns at least one report mailbox. */
+  hasReportMailbox: boolean;
+  /** Age of the oldest `pending_triage` report of those mailboxes; null when there is none. */
+  oldestPendingTriageAgeSeconds: number | null;
+  thresholds: {
+    /** `API_MODE_REPORT_TRIAGE_WARN_HOURS` (24). */
+    triageWarnHours: number;
+  };
+}
+
+/** C13 `clawback.stalled`: older than the warn minutes → warn, the fail minutes → fail. */
+export function evaluateClawbackHealth(input: ApiModeClawbackHealthInput): ApiModeHealthCheck {
+  const age = input.oldestActiveAgeSeconds;
+  if (age === null) return check('clawback.stalled', 'pass', 'no queued or running clawback');
+  const seconds = Math.max(0, age);
+  const minutes = seconds / 60;
+  const t = input.thresholds;
+  const status: ApiModeCheckStatus =
+    minutes > t.stalledFailMinutes ? 'fail' : minutes > t.stalledWarnMinutes ? 'warn' : 'pass';
+  return check(
+    'clawback.stalled',
+    status,
+    `oldest queued or running clawback ${Math.floor(seconds)} s old`,
+  );
+}
+
+/** C13 `reports.backlog`: oldest pending triage older than the warn hours → warn (never fail). */
+export function evaluateReportsHealth(input: ApiModeReportsHealthInput): ApiModeHealthCheck {
+  if (!input.hasReportMailbox) {
+    return check('reports.backlog', 'pass', 'no report mailbox on this connection');
+  }
+  const age = input.oldestPendingTriageAgeSeconds;
+  if (age === null) return check('reports.backlog', 'pass', 'no report pending triage');
+  const seconds = Math.max(0, age);
+  return check(
+    'reports.backlog',
+    seconds / 3600 > input.thresholds.triageWarnHours ? 'warn' : 'pass',
+    `oldest report pending triage ${Math.floor(seconds)} s old`,
+  );
 }
 
 /** Remediation facts of one connection for the R14 checks (counts, ages and flags only). */
@@ -356,6 +427,8 @@ export function evaluateApiModeHealth(
   );
 
   if (input.remediation) checks.push(...evaluateRemediationHealth(input.remediation));
+  if (input.clawback) checks.push(evaluateClawbackHealth(input.clawback));
+  if (input.reports) checks.push(evaluateReportsHealth(input.reports));
 
   const status: ApiModeHealthStatus = checks.some((c) => c.status === 'fail')
     ? 'failing'

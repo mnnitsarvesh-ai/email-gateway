@@ -156,10 +156,10 @@ describe('renderReportHtml (design D4)', () => {
     expect(html).toContain('<h2>Sources</h2>');
     expect(html).toContain('<h2>Not included</h2><p>Every requested section is included.</p>');
     expect(html).toContain('<h2>Data appendix</h2>');
-    // One appendix table per chart (18 charts in the full report).
+    // One appendix table per chart (20 charts in the full report: 18 + the 2 of step API-3).
     const appendix = html.slice(html.indexOf('id="section-appendix"'), html.indexOf('<footer'));
-    expect([...appendix.matchAll(/<table>/g)]).toHaveLength(18);
-    expect([...html.matchAll(/<svg /g)]).toHaveLength(18);
+    expect([...appendix.matchAll(/<table>/g)]).toHaveLength(20);
+    expect([...html.matchAll(/<svg /g)]).toHaveLength(20);
   });
 
   it('every fixture report passes the parse5 allow-list walk', () => {

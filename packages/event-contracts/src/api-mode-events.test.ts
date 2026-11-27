@@ -53,12 +53,12 @@ describe('mail.message.copy_scanned.v1 (D8, §5)', () => {
     expect(EVENT_REGISTRY[type].exchange).toBe('email.security');
   });
 
-  it('routes only to email.mailbox and the firehose (topology v17)', () => {
+  it('routes only to email.mailbox and the firehose (topology v17; v18 adds late_signal.v1 to the queue)', () => {
     expect(routeMessage('email.security', eventRoutingKey('42', type))).toEqual([
       'email.analytics',
       'email.mailbox',
     ]);
-    expect(eventTypesBoundTo('email.mailbox')).toEqual([type]);
+    expect(eventTypesBoundTo('email.mailbox')).toEqual([type, 'mail.threat.late_signal.v1']);
     // Never the policy engine, the webhook fanout or the ATO mail feed (N1).
     for (const queue of ['email.policy.evaluate', 'email.webhooks', 'ato.mail'] as const) {
       expect(eventTypesBoundTo(queue), queue).not.toContain(type);

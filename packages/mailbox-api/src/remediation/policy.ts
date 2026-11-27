@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import type { CopyDirection } from '../classify';
 import {
   REMEDIABLE_VERDICTS,
   REMEDIATION_MODES,
@@ -219,6 +220,11 @@ export interface RemediationInput {
     verdict: MessageVerdict | null;
     riskScore: number | null;
     verdictAuthority: VerdictAuthority;
+    /**
+     * Step API-3 (C8.5): `api_message_copies.direction`. Optional so API-2 callers compile;
+     * absent means `inbound`.
+     */
+    direction?: CopyDirection;
   };
   /** The scan round's latest revision row (`message_risk_scores`); null when missing. */
   risk: { level: RiskLevel | null; hardBlocks: readonly string[] } | null;
@@ -231,6 +237,11 @@ export interface RemediationInput {
     remediationPaused: boolean;
     domainEffectiveMode: DomainEffectiveMode | null;
     mailboxStatus: ApiMailboxStatus;
+    /**
+     * Step API-3 (C8.5): `api_mode_org_settings.internal_mail_enabled` (row or default). Optional
+     * so API-2 callers compile; absent means `true` (the C17 default).
+     */
+    internalMailEnabled?: boolean;
   };
 }
 
@@ -292,7 +303,8 @@ export function firstMatchingRule(
 /**
  * R2.2, in this order: (1) not scanned or verdict clean/unknown/null → none; (2) first matching
  * rule (none or action `none` → none); (3) inline verdict authority → skip; (4) domain not
- * api/hybrid or mailbox disabled/deleted → skip out_of_scope; (5) hard delete without the
+ * api/hybrid or mailbox disabled/deleted → skip out_of_scope; (4b, step API-3 C8.5) an internal
+ * copy while the organization's internal mail is off → skip internal_mail_disabled; (5) hard delete without the
  * platform setting → skip; (6) detect-only → act simulated; (7) paused → skip; (8) no active
  * grant → skip no_mailbox_access; (9) act.
  */
@@ -323,6 +335,9 @@ export function decideRemediation(
     ctx.mailboxStatus === 'deleted'
   ) {
     return skip('out_of_scope');
+  }
+  if ((input.copy.direction ?? 'inbound') === 'internal' && ctx.internalMailEnabled === false) {
+    return skip('internal_mail_disabled');
   }
   if (action === 'hard_delete' && !options.hardDeleteEnabled) return skip('hard_delete_disabled');
   const notes: RemediationDecisionNote[] =
@@ -448,12 +463,37 @@ export const remediationDecisionRecordSchema = z.strictObject({
 });
 export type RemediationDecisionRecord = z.infer<typeof remediationDecisionRecordSchema>;
 
+/**
+ * Step API-3 (C3.2): provenance of a decision taken by a clawback. Recorded as two `notes`
+ * entries (`source:clawback`, `clawback:<clawbackId>`) so the stored record keeps its strict
+ * `api-remediation-decision/1` shape.
+ */
+export interface DecisionRecordProvenance {
+  source: 'clawback';
+  /** `api_clawbacks.public_id` (or its numeric id as a string). */
+  clawbackId: string;
+}
+
+const CLAWBACK_REF = /^[0-9A-Za-z-]{1,48}$/;
+
+/** The `notes` entries of a clawback provenance (C3.2). */
+export function provenanceNotes(provenance: DecisionRecordProvenance): string[] {
+  if (provenance.source !== 'clawback') throw new RangeError('decision_provenance_invalid');
+  if (!CLAWBACK_REF.test(provenance.clawbackId)) {
+    throw new RangeError('decision_provenance_invalid_clawback_id');
+  }
+  return [`source:${provenance.source}`, `clawback:${provenance.clawbackId}`];
+}
+
 /** Builds the R2.4 record of a decision taken under an effective policy. */
 export function buildDecisionRecord(
   effective: EffectiveRemediationPolicy,
   input: RemediationInput,
   decision: RemediationDecision,
+  provenance?: DecisionRecordProvenance,
 ): RemediationDecisionRecord {
+  const notes: string[] = decision.outcome === 'act' ? [...decision.notes] : [];
+  if (provenance !== undefined) notes.push(...provenanceNotes(provenance));
   return {
     v: REMEDIATION_DECISION_SCHEMA_VERSION,
     policy: {
@@ -472,6 +512,6 @@ export function buildDecisionRecord(
       verdictAuthority: input.copy.verdictAuthority,
     },
     policyOutcome: null,
-    notes: decision.outcome === 'act' ? [...decision.notes] : [],
+    notes,
   };
 }

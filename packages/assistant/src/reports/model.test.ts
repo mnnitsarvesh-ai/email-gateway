@@ -3,6 +3,7 @@ import {
   FIXTURE_GENERATED_AT,
   FIXTURE_ORGANIZATION,
   WINDOW_7D,
+  apiModeOverviewBody,
   atoAccountsBody,
   atoOverviewBody,
   okResults,
@@ -10,6 +11,9 @@ import {
   trafficBody,
 } from './fixtures.test-support';
 import {
+  API_MODE_SCOPE_NOTE,
+  API_MODE_SKIPPED_NO_CONNECTION,
+  API_MODE_SKIPPED_PERMISSION,
   buildReportModel,
   donutOf,
   histogramOf,
@@ -72,11 +76,13 @@ describe('buildReportModel (design D3)', () => {
       url_clicks: ['timeseries:chart-url-clicks', 'donut:chart-url-decisions'],
       quarantine: ['donut:chart-quarantine-states'],
       ato: ['timeseries:chart-ato-incidents', 'bar:chart-ato-accounts'],
+      // Step API-3 C16.
+      api_mode: ['donut:chart-api-mode-health', 'bar:chart-api-mode-activity'],
     });
     const all = model.body.flatMap((s) => s.charts);
     expect(all.filter((c) => c.kind === 'timeseries')).toHaveLength(6);
-    expect(all.filter((c) => c.kind === 'donut')).toHaveLength(5);
-    expect(all.filter((c) => c.kind === 'bar' || c.kind === 'histogram')).toHaveLength(7);
+    expect(all.filter((c) => c.kind === 'donut')).toHaveLength(6);
+    expect(all.filter((c) => c.kind === 'bar' || c.kind === 'histogram')).toHaveLength(8);
     expect(model.summary.map((c) => c.label)).toEqual([
       'Messages',
       'Inbound',
@@ -111,8 +117,54 @@ describe('buildReportModel (design D3)', () => {
       ['quarantine_tools_summary', 'ok'],
       ['ato_overview_overview', 'ok'],
       ['ato_accounts_list', 'ok'],
+      ['api_mode_overview', 'ok'],
     ]);
     expect(reportHasNoData(model)).toBe(false);
+  });
+
+  it('step API-3 C16: the api_mode section (cards, connection table, scope note); skipped notes', () => {
+    const model = build(okResults(), ['api_mode']);
+    expect(model.sections).toEqual(['api_mode']);
+    const section = model.body[0]!;
+    expect(section.title).toBe('Mailbox protection (API mode)');
+    expect(section.cards.map((c) => [c.label, c.value])).toEqual(
+      expect.arrayContaining([
+        ['Mailbox coverage', '98.3%'],
+        ['Mailboxes covered', '118'],
+        ['Remediations (24 h)', '14'],
+        ['Active clawbacks', '1'],
+        ['Reports awaiting triage', '3'],
+        ['Reports resolved (24 h)', '5'],
+      ]),
+    );
+    expect(section.tables[0]!.rows[0]![0]).toBe('Example <Test> M365');
+    expect(section.notes).toEqual([API_MODE_SCOPE_NOTE]);
+    // Without remediation:read: a note, not an omission.
+    const denied = build({ ...okResults(), api_mode_overview: { status: 'permission' } }, [
+      'api_mode',
+    ]);
+    expect(denied.omitted).toEqual([]);
+    expect(denied.body[0]!.notes).toEqual([API_MODE_SKIPPED_PERMISSION]);
+    expect(denied.body[0]!.skipped).toBe(true);
+    // A skipped note alone is no data (the execution answers 503 like an all-omitted report).
+    expect(reportHasNoData(denied)).toBe(true);
+    expect(reportHasNoData(build(okResults(), ['api_mode']))).toBe(false);
+    expect(denied.sources).toEqual([
+      expect.objectContaining({ tool: 'api_mode_overview', outcome: 'omitted_permission' }),
+    ]);
+    // No API-mode connection: a note.
+    const none = build(okResults({ api_mode_overview: apiModeOverviewBody(0) }), ['api_mode']);
+    expect(none.body[0]!).toMatchObject({
+      cards: [],
+      charts: [],
+      notes: [API_MODE_SKIPPED_NO_CONNECTION],
+    });
+    // A failing source still omits the section with its code.
+    const failing = build(
+      { ...okResults(), api_mode_overview: { status: 'unavailable', httpStatus: 503, code: 'x' } },
+      ['api_mode'],
+    );
+    expect(failing.omitted).toEqual([{ section: 'api_mode', reason: 'unavailable', code: 'x' }]);
   });
 
   it('threats are the top-domains threat set (spam + phishing + malware + bec + suspicious); percentages and bounds', () => {

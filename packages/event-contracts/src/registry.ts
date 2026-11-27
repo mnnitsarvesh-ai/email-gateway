@@ -41,8 +41,10 @@ import {
   policyNotificationRequestedV1,
   quarantineNotificationRequestedV1,
   quarantineReleaseRequestedV1,
+  reportFeedbackRequestedV1,
   sandboxTaskCompletedV1,
   sandboxTaskRequestedV1,
+  threatLateSignalV1,
   urlClickedV1,
   urlInspectionCompletedV1,
   urlInspectionRequestedV1,
@@ -432,6 +434,25 @@ export const EVENT_REGISTRY = {
     'email.security',
     messageCopyScannedV1,
     'message',
+  ),
+  // Step API-3 C2.1 (§5, ADR-0103): producer email-worker (sandbox risk revision / late URL
+  // dynamic verdict transaction) through the outbox, on the exchange of
+  // mail.message.copy_scanned.v1; bound to email.mailbox (consumer: mailbox-worker copies role,
+  // topology v18).
+  [EventTypes.ThreatLateSignal]: define(
+    EventTypes.ThreatLateSignal,
+    'email.security',
+    threatLateSignalV1,
+    'message',
+  ),
+  // Step API-3 C12 (§5, ADR-0104): producers api (triage) and mailbox-worker (reports role)
+  // through the outbox, on the exchange of the quarantine notifications; bound to
+  // email.notifications (consumer: notification-worker, topology v18).
+  [EventTypes.ReportFeedbackRequested]: define(
+    EventTypes.ReportFeedbackRequested,
+    'email.policy',
+    reportFeedbackRequestedV1,
+    'organization',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

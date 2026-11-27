@@ -4,7 +4,8 @@ import { reportJobRoutePaths } from '@email-gateway/assistant';
  * The routes an assistant report job token may call (step AI-6 D5, ADR-0096, I26): `GET` on the
  * path templates of the report source tools, derived from the package's report source plan
  * (`reportJobRoutePaths()`: `/api/v1/reports/{traffic,threats,url-clicks,delivery,processing,
- * top-domains}`, `/api/v1/quarantine/summary`, `/api/v1/ato/overview`, `/api/v1/ato/accounts`).
+ * top-domains}`, `/api/v1/quarantine/summary`, `/api/v1/ato/overview`, `/api/v1/ato/accounts`
+ * and, since step API-3 C16, `/api/v1/api-mode/overview`).
  * Anything else answers `401` (the authentication guard).
  */
 export const ASSISTANT_JOB_ROUTES: ReadonlySet<string> = new Set(reportJobRoutePaths());

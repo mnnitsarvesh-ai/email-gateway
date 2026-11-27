@@ -281,3 +281,104 @@ tests:
                 minutes: the remediate role is down, cannot reach the provider or the database, or
                 every connection is throttled.
               runbook_url: docs/runbooks/api-mode.md#apimoderemediationstalled
+  # Step API-3 (C13).
+  - name: clawback stalled (active, no target progress for 60 minutes)
+    interval: 1m
+    input_series:
+      - series: api_mode_clawback_active{job="mailbox-worker",instance="a",status="running"}
+        values: 1x150
+      - series: api_mode_clawback_active{job="mailbox-worker",instance="b",status="running"}
+        values: 0x150
+      # Targets complete for 30 minutes, then nothing.
+      - series: api_mode_clawback_targets_total{job="mailbox-worker",instance="a",result="succeeded"}
+        values: 0+3x30 90x120
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ApiModeClawbackStalled
+        exp_alerts: []
+      - eval_time: 105m
+        alertname: ApiModeClawbackStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: API-mode clawbacks are not progressing
+              description: >-
+                1 clawback(s) are queued or running and no clawback target was queued or completed
+                in the last 60 minutes: the clawback or remediate role is down, the connections are
+                paused or throttled, or the per-connection pending cap is exhausted. See the
+                clawback.stalled connection check.
+              runbook_url: docs/runbooks/api-mode.md#apimodeclawbackstalled
+  - name: clawback quiet while targets progress
+    interval: 1m
+    input_series:
+      - series: api_mode_clawback_active{job="mailbox-worker",instance="a",status="queued"}
+        values: 2x150
+      - series: api_mode_clawback_targets_total{job="mailbox-worker",instance="a",result="queued"}
+        values: 0+1x150
+    alert_rule_test:
+      - eval_time: 140m
+        alertname: ApiModeClawbackStalled
+        exp_alerts: []
+  - name: clawback target failures above 20 % for 30 minutes
+    interval: 1m
+    input_series:
+      - series: api_mode_clawback_targets_total{job="mailbox-worker",instance="a",result="succeeded"}
+        values: 0+4x120
+      # Failures start after 30 minutes at 1 per minute (20 % of 5 → not above), then 3 per minute.
+      - series: api_mode_clawback_targets_total{job="mailbox-worker",instance="a",result="failed"}
+        values: 0x30 0+1x30 30+3x60
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: ApiModeClawbackFailures
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: ApiModeClawbackFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: API-mode clawback targets are failing
+              description: >-
+                More than 20 % of the clawback targets completed in the last 30 minutes failed
+                (revoked mailbox access, provider refusals, messages not found or retries
+                exhausted): clawed-back threats stay in mailboxes. See the failed targets on the
+                clawback detail.
+              runbook_url: docs/runbooks/api-mode.md#apimodeclawbackfailures
+  - name: reports untriaged for more than 24 hours
+    interval: 1m
+    input_series:
+      - series: api_mode_reports_pending{job="mailbox-worker",instance="a"}
+        values: 3x60
+      - series: api_mode_reports_pending{job="mailbox-worker",instance="b"}
+        values: 0x60
+      # The oldest pending report crosses 24 h after 20 minutes.
+      - series: api_mode_reports_oldest_pending_seconds{job="mailbox-worker",instance="a"}
+        values: 85200+60x60
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ApiModeReportsUntriaged
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: ApiModeReportsUntriaged
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: User-reported messages are waiting for triage
+              description: >-
+                User reports are pending triage and the oldest has waited more than 24 hours: no
+                analyst is triaging the report mailbox queue. See the reports.backlog connection
+                check and the Reports tab.
+              runbook_url: docs/runbooks/api-mode.md#apimodereportsuntriaged
+  - name: reports quiet without a backlog
+    interval: 1m
+    input_series:
+      - series: api_mode_reports_pending{job="mailbox-worker",instance="a"}
+        values: 0x60
+      - series: api_mode_reports_oldest_pending_seconds{job="mailbox-worker",instance="a"}
+        values: 0x60
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ApiModeReportsUntriaged
+        exp_alerts: []

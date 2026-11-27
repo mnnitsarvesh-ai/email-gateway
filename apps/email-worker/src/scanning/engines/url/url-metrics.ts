@@ -9,6 +9,7 @@ import {
   IMPLEMENTED_PROVIDERS,
   REWRITE_SKIP_REASONS,
 } from '@email-gateway/url-security';
+import { LateSignalMetrics } from '../../late-signal';
 
 /**
  * The URL engine's series of the email-worker (step 4.3 U18; a contract for
@@ -70,6 +71,8 @@ export class UrlMetrics {
   readonly rewrittenLinks: Counter<'part'>;
   readonly dynamicInspections: Counter<'status'>;
   readonly inconsistentReads: Counter<'read'>;
+  /** Step API-3 C2.1 (`scan_late_signals_total`, shared with the risk metrics). */
+  readonly lateSignals: LateSignalMetrics;
 
   /** One instance per registry (the engine, the results consumer and the sweeper share it). */
   static for(registry: MetricsService): UrlMetrics {
@@ -154,6 +157,7 @@ export class UrlMetrics {
       'Writer reads of the url engine and its results consumer whose rows did not belong to the request (retried), by read',
       ['read'],
     );
+    this.lateSignals = LateSignalMetrics.for(registry);
     // Zero series so the alert rules see them before the first event.
     for (const read of URL_READS) this.inconsistentReads.inc({ read }, 0);
     for (const status of DYNAMIC_STATUSES) this.dynamicInspections.inc({ status }, 0);

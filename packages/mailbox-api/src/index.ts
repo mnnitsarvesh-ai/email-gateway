@@ -30,3 +30,15 @@ export * from './remediation/policy';
 export * from './remediation/keys';
 export * from './remediation/provider-actions';
 export * from './remediation/errors';
+// Step API-3 (note 37 C2–C6, C8.5, C10, C11, C13, C17; ADR-0103/0104): clawback, search and
+// purge, organization settings and user-reported phishing.
+export * from './settings';
+export * from './clawback/vocabulary';
+export * from './clawback/criteria';
+export * from './clawback/signal';
+export * from './clawback/targets';
+export * from './clawback/approval';
+export * from './clawback/search-keys';
+export * from './reports/vocabulary';
+export * from './reports/extract';
+export * from './reports/original';

@@ -23,6 +23,12 @@ import {
   type UrlVerdict,
 } from '@email-gateway/url-security';
 import { classifyScanFailure } from '../../engine-consumer';
+import {
+  InconsistentLateSignalReadError,
+  readRoundStatus,
+  urlDynamicSignal,
+  writeLateSignalOutbox,
+} from '../../late-signal';
 import type { UrlMetrics } from './url-metrics';
 import { InconsistentUrlReadError } from './url-store';
 
@@ -95,6 +101,8 @@ type Applied =
       urlSha256: string;
       cache: DynamicCacheValue;
       status: 'completed' | 'failed';
+      /** Step API-3 C2.1: the late-signal kind written in the transaction, if any. */
+      lateSignal: 'url_dynamic' | null;
     };
 
 export interface UrlResultsServiceOptions {
@@ -108,6 +116,8 @@ export interface UrlResultsServiceOptions {
   highScore: number;
   /** Ledger consumer (default `email-worker.scan.url.results`; tests use a per-run name). */
   consumer?: string;
+  /** Clock of the late signal's `signalAt` (tests). */
+  now?: () => Date;
 }
 
 /**
@@ -119,14 +129,21 @@ export interface UrlResultsServiceOptions {
  * longer `pending` (duplicate), else updates it `WHERE status = 'pending'` to `completed` /
  * `failed` with the signals and the dynamic verdict (M5/S9/U3 with the stored lookalike
  * confidence), and afterwards writes the dynamic cache entry `eg:url:dyn:v1:<url sha256>`.
+ *
+ * Step API-3 C2.1: after an update to `malicious` / `suspicious`, the round (`email_scans` of the
+ * row's scan, read `FOR SHARE`) is checked; when it is no longer `running`, one
+ * `mail.threat.late_signal.v1` outbox row (kind `url_dynamic`) is written in the same
+ * `processOnce` transaction (a redelivery is a ledger duplicate and writes nothing).
  */
 export class UrlResultsService {
   readonly consumer: string;
   private readonly txPrisma: PrismaClient;
   private readonly logger: Logger;
+  private readonly now: () => Date;
 
   constructor(private readonly options: UrlResultsServiceOptions) {
     this.consumer = options.consumer ?? URL_RESULTS_CONSUMER;
+    this.now = options.now ?? (() => new Date());
     this.txPrisma = withTransactionDefaults(options.prisma, { timeoutMs: options.txTimeoutMs });
     this.logger = options.logger.child({ component: 'url-results' });
   }
@@ -140,12 +157,15 @@ export class UrlResultsService {
     let applied: Applied;
     try {
       const result = await processOnce(this.txPrisma, this.consumer, event.eventId, (tx) =>
-        this.apply(tx, organizationId, payload),
+        this.apply(tx, organizationId, payload, event.correlationId),
       );
       if (result.status === 'duplicate') return 'duplicate';
       applied = result.result;
     } catch (error) {
       if (error instanceof InconsistentUrlReadError) this.options.metrics.inconsistent(error.read);
+      if (error instanceof InconsistentLateSignalReadError) {
+        this.options.metrics.inconsistent('inspection');
+      }
       throw error;
     }
     switch (applied.kind) {
@@ -160,6 +180,13 @@ export class UrlResultsService {
         return 'handled';
       case 'updated':
         this.options.metrics.dynamic(applied.status);
+        if (applied.lateSignal !== null) {
+          this.options.metrics.lateSignals.signal(applied.lateSignal);
+          this.logger.info(
+            { ...ids, verdict: applied.cache.verdict },
+            'late url verdict after the round finished: late signal written',
+          );
+        }
         if (this.options.cache) {
           await this.options.cache.setDynamic(applied.urlSha256, applied.cache);
         }
@@ -171,6 +198,7 @@ export class UrlResultsService {
     tx: Prisma.TransactionClient,
     organizationId: bigint,
     payload: UrlInspectionCompletedV1,
+    correlationId: string,
   ): Promise<Applied> {
     const id = BigInt(payload.inspectionId);
     const receivedAt = new Date(payload.receivedAt);
@@ -241,8 +269,41 @@ export class UrlResultsService {
       },
     });
     if (updated.count === 0) return { kind: 'noop' };
+    let lateSignal: 'url_dynamic' | null = null;
+    if (verdict === 'malicious' || verdict === 'suspicious') {
+      // Lock order: the inspection row (updated) → its round row (`FOR SHARE`, latest committed:
+      // waits for a completion holding it). Nothing locks them the other way round.
+      const roundStatus = await readRoundStatus(tx, {
+        scanId: row.scanId,
+        receivedAt: row.receivedAt,
+        organizationId: row.organizationId,
+        messageId: row.messageId,
+      });
+      const signal =
+        roundStatus === null
+          ? null
+          : urlDynamicSignal({
+              messageId: row.messageId,
+              receivedAt: row.receivedAt,
+              scanId: row.scanId,
+              verdict,
+              reasonCodes,
+              urlSha256: row.urlSha256,
+              roundStatus,
+              signalAt: this.now(),
+            });
+      if (signal !== null) {
+        await writeLateSignalOutbox(tx, {
+          organizationId: row.organizationId,
+          payload: signal,
+          correlationId,
+        });
+        lateSignal = 'url_dynamic';
+      }
+    }
     return {
       kind: 'updated',
+      lateSignal,
       status: payload.status,
       urlSha256: row.urlSha256,
       cache: {

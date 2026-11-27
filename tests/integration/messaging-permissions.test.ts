@@ -518,6 +518,9 @@ describe('RabbitMQ role permissions on the real vhost', () => {
     expect(securityWrite.test('retry.email.mailbox.org.1.mail.message.copy_scanned.v1')).toBe(true);
     expect(securityWrite.test('org.1.mail.message.copy_scanned.v1')).toBe(false);
     expect(securityWrite.test('retry.email.mailboxes.org.1.x.v1')).toBe(false);
+    // v18 (step API-3 C2.1): replay of late signals on email.mailbox, never their event key.
+    expect(securityWrite.test('retry.email.mailbox.org.1.mail.threat.late_signal.v1')).toBe(true);
+    expect(securityWrite.test('org.1.mail.threat.late_signal.v1')).toBe(false);
     const opsPermission = await api.get<{ write: string }>(
       `/permissions/${encodeURIComponent(stack.rabbitmqVhost())}/${encodeURIComponent(userOf('ops'))}`,
     );

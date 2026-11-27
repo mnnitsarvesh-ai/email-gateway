@@ -944,10 +944,11 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step API-1 protection-mode and API-mode routes (+ step API-2 remediation routes): exact permissions, keys, classes, cursors; the callbacks are public (D12, R13)', () => {
+  it('the step API-1 protection-mode and API-mode routes (+ step API-2 remediation and step API-3 clawback, report and settings routes): exact permissions, keys, classes, cursors; the callbacks are public (D12, R13, C14)', () => {
     type Flags = { any?: boolean; cls?: string; cursor?: boolean };
     const READ = 'remediation:read';
     const WRITE = 'remediation:write';
+    const PURGE = 'remediation:purge';
     const expected: Record<string, [string[], Flags?]> = {
       'get /api/v1/organizations/:id/protection-mode': [
         ['organization:read', 'platform:organizations'],
@@ -986,6 +987,34 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'post /api/v1/api-mode/remediations/:remediationId/retry': [[WRITE], { cls: 'sensitive' }],
       'post /api/v1/api-mode/detections/:detectionId/remediate': [[WRITE], { cls: 'sensitive' }],
       'post /api/v1/api-mode/detections/:detectionId/restore': [[WRITE], { cls: 'sensitive' }],
+      // Step API-3 C14 (docs/plan/steps/37-api-mode-clawback-reporting.md): clawbacks need
+      // `remediation:purge` (restore also `quarantine:release`), triage and report mailboxes
+      // `remediation:write`, settings read/write.
+      'post /api/v1/api-mode/clawbacks': [[PURGE], { cls: 'sensitive' }],
+      'get /api/v1/api-mode/clawbacks': [[READ], { cursor: true }],
+      'get /api/v1/api-mode/clawbacks/:clawbackId': [[READ]],
+      'get /api/v1/api-mode/clawbacks/:clawbackId/targets': [[READ], { cursor: true }],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/submit': [[PURGE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/submit-hard-delete': [
+        [PURGE],
+        { cls: 'sensitive' },
+      ],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/approve': [[PURGE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/deny': [[PURGE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/cancel': [[PURGE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/clawbacks/:clawbackId/restore': [
+        [PURGE, 'quarantine:release'],
+        { cls: 'sensitive' },
+      ],
+      'get /api/v1/api-mode/reports': [[READ], { cursor: true }],
+      'get /api/v1/api-mode/reports/:reportId': [[READ]],
+      'post /api/v1/api-mode/reports/:reportId/triage': [[WRITE], { cls: 'sensitive' }],
+      'post /api/v1/api-mode/reports/:reportId/clawback': [[PURGE], { cls: 'sensitive' }],
+      'get /api/v1/api-mode/report-mailboxes': [[READ]],
+      'post /api/v1/api-mode/report-mailboxes': [[WRITE], { cls: 'sensitive' }],
+      'put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox': [[WRITE], { cls: 'sensitive' }],
+      'get /api/v1/api-mode/settings': [[READ]],
+      'put /api/v1/api-mode/settings': [[WRITE], { cls: 'sensitive' }],
     };
     const apiMode = routes.filter(
       (r) => /^\/api\/v1\/api-mode(\/|$)/.test(r.path) || /\/protection-mode$/.test(r.path),

@@ -1,10 +1,10 @@
 import {
+  API_MODE_ACTION_TRIGGERS,
   REMEDIATION_ACTION_KINDS,
   REMEDIATION_ACTIONS,
   REMEDIATION_MODES,
   REMEDIATION_RULE_ACTIONS,
   REMEDIATION_STATUSES,
-  REMEDIATION_TRIGGERS,
   REMEDIABLE_VERDICTS,
   RULE_LEVELS,
 } from '@email-gateway/mailbox-api';
@@ -159,7 +159,8 @@ export const RemediationListQuerySchema = defineListQuery({
   filters: {
     status: { type: 'enum', values: REMEDIATION_STATUSES, maxValues: 7 },
     action: { type: 'enum', values: REMEDIATION_ACTION_KINDS, maxValues: 7 },
-    trigger: { type: 'enum', values: REMEDIATION_TRIGGERS, maxValues: 5 },
+    // Step API-3 §3.2: `clawback` and `purge` appended (C14 additive change).
+    trigger: { type: 'enum', values: API_MODE_ACTION_TRIGGERS, maxValues: 7 },
     mailboxId: { type: 'publicId', maxValues: 1 },
     connectionId: { type: 'publicId', maxValues: 1 },
     detectionId: { type: 'publicId', maxValues: 1 },
@@ -177,7 +178,9 @@ export const REMEDIATION_LIST_PARAMETERS: Record<string, string> = {
   action:
     '`move_quarantine`, `move_junk`, `tag`, `soft_delete`, `hard_delete`, `restore_inbox`, ' +
     '`remove_tag`; comma list',
-  trigger: '`policy`, `admin`, `release`, `end_user`, `system`; comma list',
+  trigger:
+    '`policy`, `admin`, `release`, `end_user`, `system`, `clawback` (automatic clawback), ' +
+    '`purge` (admin, report or campaign purge); comma list',
   mailboxId: 'A mailbox public id',
   connectionId: 'The 8.2 provider connection public id',
   detectionId: 'A detection (copy) public id',
@@ -191,7 +194,7 @@ export const REMEDIATION_LIST_PARAMETERS: Record<string, string> = {
 export const RemediationSchema = z.object({
   id: PublicIdSchema,
   action: z.enum(REMEDIATION_ACTION_KINDS),
-  trigger: z.enum(REMEDIATION_TRIGGERS),
+  trigger: z.enum(API_MODE_ACTION_TRIGGERS),
   status: z.enum(REMEDIATION_STATUSES),
   reasonCode: z.string().nullable().describe('Skip, failure or result code (codes only)'),
   attempts: z.number().int(),
@@ -204,6 +207,9 @@ export const RemediationSchema = z.object({
   connectionId: PublicIdSchema.describe('The 8.2 provider connection public id'),
   detectionId: PublicIdSchema.nullable().describe('null once the copy is past its retention'),
   quarantineEntryId: PublicIdSchema.nullable(),
+  clawbackId: PublicIdSchema.nullable().describe(
+    'Step API-3: the clawback this action belongs to (`clawback` / `purge` triggers)',
+  ),
   createdAt: isoInstant,
   nextAttemptAt: nullableInstant,
   completedAt: nullableInstant,
@@ -358,6 +364,7 @@ const remediation = {
   connectionId: CONNECTION,
   detectionId: DETECTION,
   quarantineEntryId: ENTRY,
+  clawbackId: null,
   createdAt: T,
   nextAttemptAt: null,
   completedAt: '2026-11-26T09:00:04.000Z',

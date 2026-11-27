@@ -221,6 +221,8 @@ export interface CopyRow {
   remediationId: string | null;
   /** Public id of the copy's latest mailbox-located quarantine entry. */
   quarantineEntryId: string | null;
+  /** Step API-3 §3.2: late signals that raised the stored verdict. */
+  verdictRevision: number;
 }
 
 export interface CopyFilter {
@@ -231,6 +233,8 @@ export interface CopyFilter {
   connectionPublicId?: string;
   minRiskScore?: number;
   remediationState?: ApiCopyRemediationState[];
+  /** Step API-3 C8.6. */
+  direction?: ApiCopyDirection[];
 }
 
 /** The mailbox a Graph subscription id selects (public callback; no tenant input). */
@@ -981,7 +985,7 @@ export class ApiModeRepository {
              c.seen_journal AS seenJournal, c.seen_api AS seenApi, c.direction, c.status,
              c.verdict, c.risk_score AS riskScore, c.verdict_authority AS verdictAuthority,
              c.provider_delivered_at AS providerDeliveredAt, c.delivered_basis AS deliveredBasis,
-             c.verdict_at AS verdictAt, c.lag_ms AS lagMs,
+             c.verdict_at AS verdictAt, c.lag_ms AS lagMs, c.verdict_revision AS verdictRevision,
              m.subject, m.header_from AS headerFrom,
              c.remediation_state AS remediationState, c.remediation_action AS remediationAction,
              la.public_id AS remediationId,
@@ -1033,6 +1037,7 @@ export class ApiModeRepository {
       remediationAction: (r.remediationAction as ApiCopyRemediationAction | null) ?? null,
       remediationId: (r.remediationId as string | null) ?? null,
       quarantineEntryId: (r.quarantineEntryId as string | null) ?? null,
+      verdictRevision: Number(r.verdictRevision ?? 0),
     }));
   }
 
@@ -1062,6 +1067,7 @@ export class ApiModeRepository {
     if (filter.remediationState) {
       terms.push(Prisma.sql`c.remediation_state IN (${Prisma.join(filter.remediationState)})`);
     }
+    if (filter.direction) terms.push(Prisma.sql`c.direction IN (${Prisma.join(filter.direction)})`);
     if (page.before !== undefined) {
       terms.push(
         Prisma.sql`(c.received_at < ${page.before.at} OR (c.received_at = ${page.before.at} AND c.id < ${page.before.id}))`,

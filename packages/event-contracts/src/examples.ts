@@ -617,6 +617,27 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     riskScore: 870,
     completedAt: '2026-11-01T10:15:31.456Z',
   },
+  // Step API-3 C2.1: ids, verdict, level, hard-block ids, hashes and times only (no address,
+  // subject, file name or URL).
+  'mail.threat.late_signal.v1': {
+    kind: 'sandbox_revision',
+    messageId,
+    receivedAt,
+    scanId: '11',
+    revision: 1,
+    verdict: 'malware',
+    level: 'critical',
+    hardBlocks: ['hb.sandbox.malicious'],
+    attachmentSha256: ['3a7bd3e2360a3d29eea436fcfb7e44c735d117c42d1c1835420b6b9942dd4f1b'],
+    urlSha256: [],
+    signalAt: '2026-11-01T10:25:00.000Z',
+  },
+  // Step API-3 C12: the report public id, kind and time only (no address or text).
+  'mail.report.feedback_requested.v1': {
+    reportId: '01890a5d-ac96-774b-bcce-b302099a80e0',
+    kind: 'received',
+    requestedAt: '2026-11-27T08:00:00.000Z',
+  },
 };
 
 /**
@@ -630,6 +651,32 @@ export const EXAMPLE_API_MODE_UNHEALTHY_ALERT_PAYLOAD = Object.freeze({
   window: { from: '2026-11-26T08:00:00.000Z', to: '2026-11-27T08:00:00.000Z' },
   counts: { suppressedBefore: 0 },
   requestedAt: '2026-11-26T08:00:01.000Z',
+});
+
+/**
+ * Step API-3 (C6): the `api_mode_purge_approval` variant of `notification.alert_requested.v1` (a
+ * clawback needs a second approver; refs name the clawback only).
+ */
+export const EXAMPLE_API_MODE_PURGE_APPROVAL_ALERT_PAYLOAD = Object.freeze({
+  kind: 'api_mode_purge_approval',
+  severity: 'medium',
+  refs: { clawbackId: '01890a5d-ac96-774b-bcce-b302099a80e1' },
+  window: { from: '2026-11-27T08:00:00.000Z', to: '2026-11-28T08:00:00.000Z' },
+  counts: { suppressedBefore: 0 },
+  requestedAt: '2026-11-27T08:00:01.000Z',
+});
+
+/**
+ * Step API-3 (C13): the `api_mode_report_received` variant of `notification.alert_requested.v1`
+ * (new user reports await triage; no refs: the notification-worker counts them at send time).
+ */
+export const EXAMPLE_API_MODE_REPORT_RECEIVED_ALERT_PAYLOAD = Object.freeze({
+  kind: 'api_mode_report_received',
+  severity: 'low',
+  refs: {},
+  window: { from: '2026-11-27T08:00:00.000Z', to: '2026-11-27T09:00:00.000Z' },
+  counts: { suppressedBefore: 2 },
+  requestedAt: '2026-11-27T08:00:01.000Z',
 });
 
 /**

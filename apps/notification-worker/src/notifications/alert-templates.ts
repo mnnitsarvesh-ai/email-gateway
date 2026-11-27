@@ -20,7 +20,11 @@ import { type RenderedNotice, safeText } from './templates';
  * connection unhealthy (step API-1 D11.3) → the provider, the connection name (sanitized, ≤ 80),
  * whether it is degraded (medium) or failing (high), its health now, the titles of the checks
  * failing now (`api-mode-health/1` codes) and `/api-mode?connection=<id>` (never a mailbox
- * address).
+ * address); API-mode purge approval (step API-3 C6) → the clawback public id, trigger, status,
+ * action, eligible mailbox and copy counts, approval reasons, approval state and expiry and
+ * `/api-mode?tab=purge&clawback=<id>`; API-mode report received (step API-3 C13) → the counts of
+ * reports waiting for triage, in review and received in the window, the oldest waiting time and
+ * `/api-mode?tab=reports` (never a reporter address, subject or sender).
  *
  * **Never** a subject, a body, a sender or recipient address, a URL found in mail, a file name,
  * an endpoint URL or a secret. Free text from the database (organization and subscription names)
@@ -126,21 +130,61 @@ export interface ApiModeAlertFacts extends AlertCommonFacts {
   };
 }
 
+export interface PurgeApprovalAlertFacts extends AlertCommonFacts {
+  kind: 'api_mode_purge_approval';
+  clawback: {
+    /** `api_clawbacks.public_id`. */
+    clawbackPublicId: string;
+    /** `api_clawbacks.trigger` (`late_verdict`, `threat_intel`, `campaign`, `report`, `admin`). */
+    trigger: string;
+    /** `api_clawbacks.status` when the alert is sent. */
+    status: string;
+    /** Explicit action of an admin purge, or null (policy mode). */
+    action: string | null;
+    mailboxesEligible: number;
+    targetsEligible: number;
+    /** `api_clawbacks.approval_status` when the alert is sent (null: none requested). */
+    approvalStatus: string | null;
+    /** `mailbox_threshold`, `hard_delete`, `auto_cap`. */
+    approvalReasons: string[];
+    approvalExpiresAt: string | null;
+  };
+}
+
+export interface ReportReceivedAlertFacts extends AlertCommonFacts {
+  kind: 'api_mode_report_received';
+  reports: {
+    pendingTriage: number;
+    inReview: number;
+    receivedInWindow: number;
+    oldestPendingAt: string | null;
+  };
+}
+
 export type AlertFacts =
   | ThreatAlertFacts
   | DnsAlertFacts
   | WebhookDisabledAlertFacts
   | IntegrationAlertFacts
   | JournalIntakeAlertFacts
-  | ApiModeAlertFacts;
+  | ApiModeAlertFacts
+  | PurgeApprovalAlertFacts
+  | ReportReceivedAlertFacts;
 
 /**
  * Alert kinds this worker renders: the `@email-gateway/webhooks` kinds plus the step 8.6
- * `journal_intake_silent` (requested by the archive-worker's intake health loop) and the step
- * API-1 `api_mode_unhealthy` (requested by the mailbox-worker's health role); the event contract
- * carries both, the shared webhooks vocabulary does not yet.
+ * `journal_intake_silent` (requested by the archive-worker's intake health loop), the step
+ * API-1 `api_mode_unhealthy` (requested by the mailbox-worker's health role) and the step API-3
+ * `api_mode_purge_approval` (api submit, mailbox-worker `clawback` role) and
+ * `api_mode_report_received` (mailbox-worker `reports` role); the event contract carries them,
+ * the shared webhooks vocabulary does not yet.
  */
-export type SecurityAlertKind = AlertKind | 'journal_intake_silent' | 'api_mode_unhealthy';
+export type SecurityAlertKind =
+  | AlertKind
+  | 'journal_intake_silent'
+  | 'api_mode_unhealthy'
+  | 'api_mode_purge_approval'
+  | 'api_mode_report_received';
 
 /**
  * Titles of the `api-mode-health/1` check codes (step API-1 D11.3; the codes of
@@ -157,6 +201,9 @@ export const API_MODE_CHECK_TITLES: Readonly<Record<string, string>> = Object.fr
   'throttling.1h': 'Provider throttling (last hour)',
   'feeds.errors': 'Mailbox feed errors',
   'domains.api_mode_mx': 'API-mode domains without gateway MX',
+  // Step API-3 (C13).
+  'clawback.stalled': 'Clawback without progress',
+  'reports.backlog': 'User reports waiting for triage',
 });
 
 const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
@@ -166,6 +213,8 @@ const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
   integration_unhealthy: 'Microsoft 365 / Google Workspace connection unhealthy',
   journal_intake_silent: 'Journal intake source silent or failing',
   api_mode_unhealthy: 'API-mode protection connection degraded or failing',
+  api_mode_purge_approval: 'API-mode clawback needs a second approver',
+  api_mode_report_received: 'API-mode user reports waiting for triage',
 };
 
 const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
@@ -175,6 +224,24 @@ const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
   integration_unhealthy: 'mail platform connection unhealthy',
   journal_intake_silent: 'journal intake source needs attention',
   api_mode_unhealthy: 'API-mode protection needs attention',
+  api_mode_purge_approval: 'clawback approval requested',
+  api_mode_report_received: 'reported messages need triage',
+};
+
+/** Display text of the clawback triggers (step API-3 C2). */
+const CLAWBACK_TRIGGER_NAMES: Readonly<Record<string, string>> = {
+  late_verdict: 'late verdict (sandbox or URL inspection)',
+  threat_intel: 'threat intelligence',
+  campaign: 'campaign',
+  report: 'user report',
+  admin: 'administrator search',
+};
+
+/** Display text of the approval reasons (step API-3 C6). */
+const APPROVAL_REASON_TEXT: Readonly<Record<string, string>> = {
+  mailbox_threshold: 'more mailboxes than the approval threshold',
+  hard_delete: 'permanent deletion requested',
+  auto_cap: 'automatic clawback above the mailbox cap',
 };
 
 /** Display names of the journal intake source kinds (step 8.6 D1). */
@@ -346,6 +413,40 @@ function body(facts: AlertFacts): string[] {
         '',
         'Mail flow is never changed by API mode: review the checks, the journal rule and the mailbox access grant.',
         ...(id ? [`Details: ${facts.portalUrl}/api-mode?connection=${id}`] : []),
+      ];
+    }
+    case 'api_mode_purge_approval': {
+      const c = facts.clawback;
+      const id = publicId(c.clawbackPublicId);
+      const reasons = [...new Set(c.approvalReasons)].filter((r) => r in APPROVAL_REASON_TEXT);
+      return [
+        `Clawback: ${id || 'unknown'}`,
+        `Trigger: ${CLAWBACK_TRIGGER_NAMES[c.trigger] ?? 'unknown'}`,
+        `Status now: ${code(c.status)}`,
+        ...(c.action !== null ? [`Requested action: ${code(c.action)}`] : []),
+        `Eligible mailboxes: ${String(c.mailboxesEligible)} (${String(c.targetsEligible)} message copies)`,
+        `Approval needed because: ${
+          reasons.length === 0
+            ? 'review required'
+            : reasons.map((r) => APPROVAL_REASON_TEXT[r]).join('; ')
+        }`,
+        `Approval status: ${c.approvalStatus === null ? 'not requested' : code(c.approvalStatus)}`,
+        `Approval expires: ${instant(c.approvalExpiresAt)}`,
+        '',
+        'A second administrator holding the purge permission must approve or deny it; the requester cannot approve their own request.',
+        ...(id ? [`Review: ${facts.portalUrl}/api-mode?tab=purge&clawback=${id}`] : []),
+      ];
+    }
+    case 'api_mode_report_received': {
+      const r = facts.reports;
+      return [
+        `Reports waiting for triage: ${String(r.pendingTriage)}`,
+        `Reports in review: ${String(r.inReview)}`,
+        `Reports received in this window: ${String(r.receivedInWindow)}`,
+        `Oldest report waiting since: ${r.oldestPendingAt === null ? 'none waiting' : instant(r.oldestPendingAt)}`,
+        '',
+        'Users reported messages as suspicious. Triage them to give the reporters feedback and to remove dangerous messages.',
+        `Review: ${facts.portalUrl}/api-mode?tab=reports`,
       ];
     }
   }

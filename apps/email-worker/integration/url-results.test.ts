@@ -5,7 +5,7 @@ import {
   createMessagingMetrics,
   uuidv7,
 } from '@email-gateway/common';
-import type { EventEnvelope } from '@email-gateway/event-contracts';
+import { type EventEnvelope, EventTypes, threatLateSignalV1 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InspectionSweeper } from '../src/scanning/engines/url/inspection-sweeper';
 import { createUrlJobs } from '../src/scanning/scanning.module';
@@ -223,6 +223,100 @@ describe('results consumer (U15)', () => {
       await connection.close();
       await broker.close();
     }
+  });
+});
+
+/** The `mail.threat.late_signal.v1` outbox rows of a message (step API-3 C2.1). */
+const lateSignals = (message: ScanMessage) =>
+  fx.prisma.messageOutbox.findMany({
+    where: {
+      organizationId: message.organizationId,
+      aggregateId: message.messageId.toString(),
+      eventType: EventTypes.ThreatLateSignal,
+    },
+    orderBy: { id: 'asc' },
+  });
+
+const phishingSignals = {
+  passwordFields: 1,
+  forms: 1,
+  crossOriginFormAction: true,
+  formActionHosts: ['collector-site.test'],
+  downloadAttempted: false,
+  blockedRequests: 0,
+  requests: 3,
+  bytes: 2048,
+  titleBrandMatches: [],
+  jsRedirect: false,
+  dialogs: 0,
+};
+
+describe('late url verdicts (step API-3 C2.1)', () => {
+  it('malicious after the round completed: exactly one late_signal.v1 row with the update, none on redelivery', async () => {
+    const { org, message, inspection } = await inspected(
+      'late-url-done',
+      'http://examplebank-secure.test/late',
+    );
+    const state = await ufx.state(message);
+    expect(state.scans[0]!.status).not.toBe('running');
+    const service = pipeline.results(fx);
+    const event = ufx.completed(org, {
+      ...base(message, inspection),
+      signals: phishingSignals,
+    });
+    expect(await service.handle(event)).toBe('handled');
+    expect(await service.handle(event)).toBe('duplicate');
+    // The inspection update, the ledger row and the outbox row committed together.
+    expect((await ufx.state(message)).inspections[0]).toMatchObject({ verdict: 'malicious' });
+    const ledger = await fx.prisma.messageIdempotency.findUnique({
+      where: { consumer_eventId: { consumer: service.consumer, eventId: event.eventId } },
+    });
+    expect(ledger).not.toBeNull();
+    const rows = await lateSignals(message);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      aggregateType: 'message',
+      correlationId: event.correlationId,
+    });
+    const payload = threatLateSignalV1.parse(rows[0]!.payload);
+    expect(payload).toMatchObject({
+      kind: 'url_dynamic',
+      messageId: message.messageId.toString(),
+      receivedAt: message.receivedAt.toISOString(),
+      scanId: state.scans[0]!.id.toString(),
+      revision: null,
+      verdict: 'phishing',
+      level: 'critical',
+      hardBlocks: ['hb.clawback.url'],
+      attachmentSha256: [],
+      urlSha256: [inspection.urlSha256],
+    });
+  });
+
+  it('a round still running writes no late signal; a clean verdict never does', async () => {
+    const running = await inspected('late-url-running', 'http://examplebank-secure.test/running');
+    const scan = (await ufx.state(running.message)).scans[0]!;
+    // Simulates a round still open (another required engine pending) on this synthetic row.
+    await fx.prisma.emailScan.updateMany({
+      where: { id: scan.id, receivedAt: scan.receivedAt },
+      data: { status: 'running' },
+    });
+    const service = pipeline.results(fx);
+    await service.handle(
+      ufx.completed(running.org, {
+        ...base(running.message, running.inspection),
+        signals: phishingSignals,
+      }),
+    );
+    expect((await ufx.state(running.message)).inspections[0]).toMatchObject({
+      verdict: 'malicious',
+    });
+    expect(await lateSignals(running.message)).toEqual([]);
+
+    const clean = await inspected('late-url-clean', 'http://new-domain.test/late-clean');
+    await service.handle(ufx.completed(clean.org, base(clean.message, clean.inspection)));
+    expect((await ufx.state(clean.message)).inspections[0]).toMatchObject({ verdict: 'clean' });
+    expect(await lateSignals(clean.message)).toEqual([]);
   });
 });
 

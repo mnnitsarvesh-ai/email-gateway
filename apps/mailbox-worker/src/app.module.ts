@@ -67,10 +67,12 @@ export class MailboxRuntime implements OnApplicationBootstrap, OnModuleDestroy {
 
 /**
  * mailbox-worker (step API-1 D5, ADR-0100; step API-2 ADR-0101/0102;
- * docs/deployment/mailbox-worker.md). Roles (`MAILBOX_WORKER_ROLES`, default
- * `copies,feeds,inventory,health,remediate`): `copies` consumes `email.mailbox` as `eg-mailbox`
- * (ledger `mailbox-worker.copies`, reconciled: retry and dead-letter hops are recorded) and takes
- * the remediation decision in the same transaction, `feeds`, `inventory` and `remediate` call
+ * docs/deployment/mailbox-worker.md; step API-3 ADR-0103/0104). Roles (`MAILBOX_WORKER_ROLES`,
+ * default `copies,feeds,inventory,health,remediate,clawback,reports`): `copies` consumes
+ * `email.mailbox` as `eg-mailbox` (`mail.message.copy_scanned.v1` and, since step API-3,
+ * `mail.threat.late_signal.v1`; ledger `mailbox-worker.copies`, reconciled: retry and dead-letter
+ * hops are recorded) and takes the remediation decision in the same transaction, `clawback` and
+ * `reports` work from MySQL only (no broker, no provider call), `feeds`, `inventory` and `remediate` call
  * provider mailbox APIs with the decrypted `*.mailbox_remediation` grants (`remediate` claims
  * `api_remediation_actions` from MySQL; no broker), `health` is leader-locked. Readiness is the
  * same for every role: MySQL writer, Redis and S3 (plus the broker with `copies`). HTTP

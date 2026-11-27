@@ -34,8 +34,73 @@ export const COPY_RESULTS = [
   'too_large',
   'ingested',
   'already_ingested',
+  // Step API-3 (C8, C9.2, C10.4).
+  'recorded_internal',
+  'outbound_only',
+  'report_received',
+  'report_scanned',
 ] as const;
 export type CopyResult = (typeof COPY_RESULTS)[number];
+
+/** `api_mode_report_triage_seconds` buckets (step API-3 C13). */
+export const REPORT_TRIAGE_BUCKETS = [300, 3600, 14_400, 86_400, 259_200];
+
+/** `result` values of `api_mode_late_signals_total` (C2.1). */
+export const LATE_SIGNAL_RESULTS = [
+  'created',
+  'duplicate',
+  'not_active',
+  'skipped_off',
+  'no_message',
+] as const;
+export type LateSignalResult = (typeof LATE_SIGNAL_RESULTS)[number];
+
+/** `result` values of `api_mode_clawbacks_total` (C13): the state a clawback reached. */
+export const CLAWBACK_RESULTS = [
+  'created',
+  'no_match',
+  'too_broad',
+  'ready',
+  'review_required',
+  'queued',
+  'completed',
+  'completed_with_errors',
+  'cancelled',
+  'expired',
+  'failed',
+  'restore_completed',
+  'restore_completed_with_errors',
+] as const;
+export type ClawbackResult = (typeof CLAWBACK_RESULTS)[number];
+
+/** `result` values of `api_mode_clawback_targets_total` (C13). */
+export const CLAWBACK_TARGET_RESULTS = [
+  'matched',
+  'skipped',
+  'simulated',
+  'queued',
+  'succeeded',
+  'failed',
+  'cancelled',
+  'restore_queued',
+  'restore_succeeded',
+  'restore_failed',
+  'restore_skipped',
+] as const;
+export type ClawbackTargetResult = (typeof CLAWBACK_TARGET_RESULTS)[number];
+
+/** `result` values of `api_mode_reports_total` (C13). */
+export const REPORT_RESULTS = [
+  'received',
+  'rejected',
+  'matched',
+  'ingested',
+  'no_original',
+  'pending_triage',
+  'scan_timeout',
+  'failed',
+] as const;
+export type ReportResult = (typeof REPORT_RESULTS)[number];
 
 /** Bounded label value: a lower-case code, else `other` (labels never carry free text). */
 export const label = (value: string, max = 48): string =>
@@ -69,6 +134,14 @@ export class MailboxMetrics implements IdpMetricsSink {
   readonly remediationBacklog: Gauge<'provider'>;
   readonly remediationOldestPending: Gauge<'provider'>;
   readonly remediationAttempts: Counter<'provider' | 'outcome'>;
+  readonly lateSignals: Counter<'kind' | 'result'>;
+  readonly clawbacks: Counter<'trigger' | 'result'>;
+  readonly clawbackTargets: Counter<'result'>;
+  readonly clawbackActive: Gauge<'status'>;
+  readonly reports: Counter<'result'>;
+  readonly reportsPending: Gauge;
+  readonly reportsOldestPending: Gauge;
+  readonly reportTriage: Histogram;
 
   constructor(metrics: MetricsService) {
     this.copies = metrics.counter(
@@ -173,6 +246,45 @@ export class MailboxMetrics implements IdpMetricsSink {
       'Executions of API-mode remediation actions by provider and outcome (ok, throttled, retry, error)',
       ['provider', 'outcome'],
     );
+    this.lateSignals = metrics.counter(
+      'api_mode_late_signals_total',
+      'Late sandbox/URL verdict signals consumed by the copies role, by kind (sandbox_revision, url_dynamic) and result (created, duplicate, not_active, skipped_off, no_message)',
+      ['kind', 'result'],
+    );
+    this.clawbacks = metrics.counter(
+      'api_mode_clawbacks_total',
+      'API-mode clawbacks by trigger (late_verdict, threat_intel, campaign, report, admin) and the state reached',
+      ['trigger', 'result'],
+    );
+    this.clawbackTargets = metrics.counter(
+      'api_mode_clawback_targets_total',
+      'API-mode clawback targets by result (matched, skipped, simulated, queued, succeeded, failed, cancelled, restore_*)',
+      ['result'],
+    );
+    this.clawbackActive = metrics.gauge(
+      'api_mode_clawback_active',
+      'Active API-mode clawbacks by status (searching, ready, review_required, pending_approval, queued, running; health leader)',
+      ['status'],
+    );
+    this.reports = metrics.counter(
+      'api_mode_reports_total',
+      'User reports handled by the reports role, by result (received, rejected, matched, ingested, no_original, pending_triage, scan_timeout, failed)',
+      ['result'],
+    );
+    this.reportsPending = metrics.gauge(
+      'api_mode_reports_pending',
+      'User reports pending triage (health leader)',
+    );
+    this.reportsOldestPending = metrics.gauge(
+      'api_mode_reports_oldest_pending_seconds',
+      'Age of the oldest user report pending triage (health leader; 0 when none)',
+    );
+    this.reportTriage = metrics.histogram(
+      'api_mode_report_triage_seconds',
+      'Time from a user report to the end of its automatic processing (pending_triage)',
+      [],
+      REPORT_TRIAGE_BUCKETS,
+    );
   }
 
   // ------------------------------------------------------------------ IdpMetricsSink
@@ -209,6 +321,23 @@ export class MailboxMetrics implements IdpMetricsSink {
     if (count > 0) {
       this.remediations.inc({ provider: label(provider), action: label(action), result }, count);
     }
+  }
+
+  /** One late signal (no organization label). */
+  lateSignal(kind: string, result: LateSignalResult): void {
+    this.lateSignals.inc({ kind: label(kind), result });
+  }
+
+  clawback(trigger: string, result: ClawbackResult, count = 1): void {
+    if (count > 0) this.clawbacks.inc({ trigger: label(trigger), result }, count);
+  }
+
+  clawbackTarget(result: ClawbackTargetResult, count = 1): void {
+    if (count > 0) this.clawbackTargets.inc({ result }, count);
+  }
+
+  report(result: ReportResult, count = 1): void {
+    if (count > 0) this.reports.inc({ result }, count);
   }
 
   /** One execution attempt of a remediation action. */

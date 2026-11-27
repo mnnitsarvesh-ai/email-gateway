@@ -15,11 +15,20 @@ import type { TenantScope } from '../../auth-contracts/tenant-scope';
  * the mailboxes and the API-mode connections with RESTRICT; `organization_id` has no FK) and the
  * remediation policies with them (they reference `domains` and `organizations` with RESTRICT, so
  * this purge also runs BEFORE the domain purge). Mailbox-located quarantine entries carry no FK
- * to these tables and go with the quarantine purge.
+ * to these tables and go with the quarantine purge. Step API-3 §3.4
+ * (docs/plan/steps/37-api-mode-clawback-reporting.md): the clawback targets (CASCADE with their
+ * clawback; deleted first so each statement stays short), the clawbacks and the user reports
+ * (they reference the API-mode connections and the report mailboxes with RESTRICT) go before the
+ * remediation actions, mailboxes and connections; the organization's API-mode settings
+ * (`api_mode_org_settings`, FK to organizations RESTRICT) go before the organization.
  */
 export const API_MODE_PURGE_ORDER = [
+  'api_clawback_targets',
+  'api_clawbacks',
+  'api_user_reports',
   'api_remediation_actions',
   'api_remediation_policies',
+  'api_mode_org_settings',
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mailbox_addresses',
@@ -71,6 +80,18 @@ export class ApiModeTenantDataRepository {
     batch: number,
   ): Promise<number> {
     switch (table) {
+      case 'api_clawback_targets':
+        // Index (organization_id, copy_id, copy_received_at); FK to api_clawbacks (CASCADE).
+        return this.prisma.$executeRaw`DELETE FROM api_clawback_targets
+          WHERE organization_id = ${organizationId} ORDER BY id LIMIT ${batch}`;
+      case 'api_clawbacks':
+        // Index (organization_id, created_at, id); FK to organizations (RESTRICT).
+        return this.prisma.$executeRaw`DELETE FROM api_clawbacks
+          WHERE organization_id = ${organizationId} ORDER BY created_at, id LIMIT ${batch}`;
+      case 'api_user_reports':
+        // Index (organization_id, reported_at, id); FKs to connections and mailboxes (RESTRICT).
+        return this.prisma.$executeRaw`DELETE FROM api_user_reports
+          WHERE organization_id = ${organizationId} ORDER BY reported_at, id LIMIT ${batch}`;
       case 'api_remediation_actions':
         // Index (organization_id, created_at, id); FKs to mailboxes and connections (RESTRICT).
         return this.prisma.$executeRaw`DELETE FROM api_remediation_actions
@@ -79,6 +100,10 @@ export class ApiModeTenantDataRepository {
         // Unique (organization_id, scope_key); FKs to organizations and domains (RESTRICT).
         return this.prisma.$executeRaw`DELETE FROM api_remediation_policies
           WHERE organization_id = ${organizationId} ORDER BY scope_key, id LIMIT ${batch}`;
+      case 'api_mode_org_settings':
+        // Primary key organization_id; FK to organizations (RESTRICT).
+        return this.prisma.$executeRaw`DELETE FROM api_mode_org_settings
+          WHERE organization_id = ${organizationId} ORDER BY organization_id LIMIT ${batch}`;
       case 'api_message_copies':
         // Index (organization_id, received_at, id); partitioned by received_at, no FK.
         return this.prisma.$executeRaw`DELETE FROM api_message_copies

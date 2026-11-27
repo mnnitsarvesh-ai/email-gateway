@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// RabbitMQ provisioning for topology v17 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
+// RabbitMQ provisioning for topology v18 (step 3.2 Q5, Q10, ADR-0024; v2: step 3.3 L7; v3: step
 // 4.1 S2, ADR-0026; v4: step 4.2 A2, ADR-0028; v5: step 4.3 U2, ADR-0029; v6: step 4.4 B3,
 // ADR-0033; v7: step 4.5 D2, ADR-0036; v8: step 4.6 X11, ADR-0040; v9: step 5.2 P15, ADR-0044;
 // v10: step 5.3 Q27, ADR-0046; v11: step 6.2 §4.3, ADR-0055; v12: step 8.1 A26, ADR-0064; v13:
 // step 8.4 §4.1, ADR-0070; v14: step 8.2 D12, ADR-0079; v15: step AI-R D8, ADR-0095; v16: step
-// AI-6 D5, ADR-0096; v17: step API-1 D7, D8, ADR-0100).
+// AI-6 D5, ADR-0096; v17: step API-1 D7, D8, ADR-0100; v18: step API-3 C2.1, C12, ADR-0103,
+// ADR-0104).
 // The only code that declares broker objects: services verify passively and their users cannot
 // configure.
 //
@@ -171,6 +172,14 @@ const topic = (exchange, write) => ({ exchange, write, read: '^$' });
  * no other queue name starts with `email.mailbox`, so the prefix cannot reach another queue's
  * hops. Reconciled (RECONCILE_QUEUES gains email.mailbox; the worker records its retry and
  * dead-letter hops).
+ *
+ * Topology v18 (step API-3 C2.1, C12, §5, ADR-0103, ADR-0104) adds two event bindings to
+ * existing queues only: `org.*.mail.threat.late_signal.v1` on email.security → email.mailbox
+ * (the `copies` role) and `org.*.mail.report.feedback_requested.v1` on email.policy →
+ * email.notifications (the notification-worker). No queue, policy or role user is added and no
+ * permission changes: the relay already publishes every `org.` event key (EVENT_KEYS), eg-mailbox
+ * and the notification-worker user already read their queues, and the import adds the two
+ * bindings (nothing to prune).
  */
 const SCANNER_QUEUES =
   '(spam|attachment|url|url\\.results|bec|dlp|sandbox\\.submissions|sandbox\\.results)';

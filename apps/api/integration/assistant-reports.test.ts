@@ -339,7 +339,8 @@ describe('report_generate on the real stack (D2, D3, I15, I16)', () => {
     // The sources were read through the loopback with the user's bearer (GETs under /api/v1),
     // each with its own correlation id `<base>.<seq>.<n>`.
     const sources = recorder.calls.filter((c) => c.path !== '/api/v1/auth/me');
-    expect(sources.length).toBe(9);
+    // Nine report sources plus the step API-3 API-mode overview (the `api_mode` section).
+    expect(sources.length).toBe(10);
     expect(sources.every((c) => c.method === 'GET' && c.path.startsWith('/api/v1/'))).toBe(true);
     for (const path of [
       '/api/v1/reports/traffic',
@@ -351,6 +352,7 @@ describe('report_generate on the real stack (D2, D3, I15, I16)', () => {
       '/api/v1/quarantine/summary',
       '/api/v1/ato/overview',
       '/api/v1/ato/accounts',
+      '/api/v1/api-mode/overview',
     ]) {
       expect(
         sources.some((c) => c.path.startsWith(path)),
@@ -414,6 +416,8 @@ describe('report_generate on the real stack (D2, D3, I15, I16)', () => {
     const audited = meta.sources as Array<{ tool: string; outcome: string; httpStatus: number }>;
     expect(audited.map((s) => s.tool).sort()).toEqual(
       [
+        // Step API-3 C16 (the organization has no API-mode connection: a skipped note).
+        'api_mode_overview',
         'ato_accounts_list',
         'ato_overview_overview',
         'quarantine_tools_summary',

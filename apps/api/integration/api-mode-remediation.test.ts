@@ -892,12 +892,12 @@ describe('organization purge of the remediation tables (§3.4)', () => {
       Object.values(
         await ctx.get(ApiModeTenantDataRepository).purgeOrganization(systemScope(orgB.id)),
       ),
-    ).toEqual(Array(8).fill(0));
+    ).toEqual(Array(12).fill(0));
   });
 });
 
-describe('assistant registry (R16)', () => {
-  it('the three remediation reads are enabled read tools; the six writes are not tools', () => {
+describe('assistant registry (R16; step API-3 C15)', () => {
+  it('the three remediation reads are enabled read tools; since API-3 the six writes are confirmed write tools', () => {
     const byId = new Map(OPERATION_TOOLS.map((t) => [t.operationId, t]));
     for (const id of [
       'ApiModeRemediationController_getPolicy_v1',
@@ -906,12 +906,12 @@ describe('assistant registry (R16)', () => {
     ]) {
       expect(byId.get(id), id).toMatchObject({ enabled: true, access: 'read' });
     }
-    for (const id of [
-      'ApiModeRemediationController_putPolicy_v1',
-      'ApiModeRemediationController_remediate_v1',
-      'ApiModeRemediationController_restore_v1',
-    ]) {
-      expect(byId.has(id), id).toBe(false);
+    for (const [id, risk] of [
+      ['ApiModeRemediationController_putPolicy_v1', 'high'],
+      ['ApiModeRemediationController_remediate_v1', 'medium'],
+      ['ApiModeRemediationController_restore_v1', 'high'],
+    ] as const) {
+      expect(byId.get(id), id).toMatchObject({ enabled: true, access: 'write', risk });
     }
   });
 });

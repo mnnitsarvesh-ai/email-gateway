@@ -211,6 +211,14 @@ export interface E2eState {
       taggedDetectionId: string;
       remediableDetectionId: string;
     };
+    /** Step API-3 (seed/api-mode.ts seedClawback). */
+    clawback: {
+      searchMessageId: string;
+      approvalClawbackId: string;
+      cancelClawbackId: string;
+      reportIds: [string, string];
+      reportMailbox: string;
+    };
   };
   archive: {
     custodian: string;

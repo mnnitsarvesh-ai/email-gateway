@@ -149,11 +149,20 @@ describe('copies role: journal copies (D7)', () => {
     expect(await copiesOf(message.id)).toHaveLength(1);
   });
 
-  it('skips internal recipients (counter only, API-3 hook)', async () => {
+  it('skips internal recipients when the organization turned internal mail off (ADR-0104)', async () => {
+    // Step API-3 C8.1: internal recipients are recorded by default (internal-mail.test.ts); with
+    // `internal_mail_enabled = 0` they keep the API-1 behaviour (counter only, no discovery).
+    await fx.prisma.apiModeOrgSetting.create({
+      data: { organizationId: org.id, internalMailEnabled: false },
+    });
     const message = await journal([`erin@${API}`], { from: `frank@${HYBRID}` });
-    expect(
-      await comps.copies.handle(fx.copyScanned(org.id, message, { completedAt: clock.now() })),
-    ).toBe('handled');
+    try {
+      expect(
+        await comps.copies.handle(fx.copyScanned(org.id, message, { completedAt: clock.now() })),
+      ).toBe('handled');
+    } finally {
+      await fx.prisma.apiModeOrgSetting.delete({ where: { organizationId: org.id } });
+    }
     expect(await copiesOf(message.id)).toHaveLength(0);
     await comps.counters.flush(fx.organizationIds);
     const counters = await fx.prisma.apiModeCounter.findMany({

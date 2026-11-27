@@ -542,7 +542,7 @@ class FakeTx implements SandboxTx {
     return Promise.resolve(true);
   }
 
-  scoreRiskRevision(scan: ScanLockRow): Promise<void> {
+  scoreRiskRevision(scan: ScanLockRow, _ctx: { now: Date; correlationId: string }): Promise<void> {
     const key = scanKey(scan.scanId, scan.receivedAt);
     const current = this.s.scans.get(key);
     if (!current || current.status === 'running') return Promise.resolve();

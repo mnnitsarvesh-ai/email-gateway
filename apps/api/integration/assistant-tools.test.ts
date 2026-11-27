@@ -124,7 +124,8 @@ import { bearer, uniqueIp } from './support/http';
 
 /**
  * Step API-1 (design 35 D15): the nine enabled API-mode read tools; step API-2 (design 36 R16):
- * the three remediation reads (policy, history list and detail).
+ * the three remediation reads (policy, history list and detail); step API-3 (design note 37 C15):
+ * the clawback, report and settings reads.
  */
 const API_MODE_READS = [
   'protection_mode_get_organization',
@@ -139,6 +140,13 @@ const API_MODE_READS = [
   'api_mode_remediation_get_policy',
   'api_mode_remediation_list',
   'api_mode_remediation_detail',
+  'api_mode_clawback_list',
+  'api_mode_clawback_detail',
+  'api_mode_clawback_targets',
+  'api_mode_reports_list',
+  'api_mode_reports_detail',
+  'api_mode_reports_list_mailboxes',
+  'api_mode_settings_get',
 ];
 
 /** Turns per conversation (keeps each replayed segment small). */
@@ -295,10 +303,11 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
     // 188 reads + 168 writes (every planned tool of the program); step API-1 (design 35 D15):
     // 365 = 197 reads (the 9 API-mode reads) + 168 writes (its 5 writes are deferred to API-3);
     // step API-2 (design 36 R16): 368 = 200 reads (+ the 3 remediation reads) + 168 writes (its
-    // 6 writes are deferred to API-3 too).
-    expect(ENABLED_READS).toHaveLength(200);
-    expect(ENABLED_WRITES).toHaveLength(168);
-    expect(ENABLED_TOOLS).toHaveLength(368);
+    // 6 writes are deferred to API-3 too); step API-3 (design note 37 C15): 395 = 207 reads (+ the
+    // 7 clawback, report and settings reads) + 188 writes (the 20 API-mode writes).
+    expect(ENABLED_READS).toHaveLength(207);
+    expect(ENABLED_WRITES).toHaveLength(188);
+    expect(ENABLED_TOOLS).toHaveLength(395);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -382,6 +391,10 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
       'protection_mode_get_organization',
       'api_mode_remediation_get_policy',
       'api_mode_remediation_list',
+      'api_mode_clawback_list',
+      'api_mode_reports_list',
+      'api_mode_reports_list_mailboxes',
+      'api_mode_settings_get',
     ]) {
       expect(swept.find((r) => r.tool === name)?.status, name).toBe('succeeded');
     }
@@ -846,6 +859,87 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
   provider_grants_verify: () => ({ id: unknown(), profile: 'm365.mail_flow', body: {} }),
   provider_health_check_now: () => ({ id: unknown() }),
   provider_mail_flow_apply: () => ({ id: unknown(), body: { change: { kind: 'suspend' } } }),
+  // --- step API-3 (design note 37 C15): the API-mode writes ---
+  api_mode_remediation_remediate: () => ({
+    detectionId: unknown(),
+    body: { action: 'tag', reason: sweepReason },
+  }),
+  api_mode_remediation_restore: () => ({ detectionId: unknown(), body: { reason: sweepReason } }),
+  api_mode_remediation_retry: () => ({ remediationId: unknown() }),
+  api_mode_remediation_put_policy: () => ({
+    body: {
+      mode: 'detect_only',
+      document: { v: 1, rules: [{ id: 'sweep', when: { verdicts: ['malware'] }, action: 'tag' }] },
+      reason: sweepReason,
+      expectedRowVersion: null,
+    },
+  }),
+  api_mode_remediation_put_domain_policy: () => ({
+    domainId: unknown(),
+    body: {
+      mode: 'detect_only',
+      document: { v: 1, rules: [{ id: 'sweep', when: { verdicts: ['malware'] }, action: 'tag' }] },
+      reason: sweepReason,
+      expectedRowVersion: null,
+    },
+  }),
+  api_mode_remediation_delete_domain_policy: () => ({ domainId: unknown() }),
+  api_mode_update_settings: () => ({
+    connectionId: unknown(),
+    body: { feedsEnabled: false, feedMode: 'poll', expectedRowVersion: 1 },
+  }),
+  api_mode_inventory_sync: () => ({ connectionId: unknown() }),
+  api_mode_resync_mailbox: () => ({ mailboxId: unknown() }),
+  api_mode_clawback_create: () => ({
+    body: {
+      criteria: {
+        messageId: `<sweep-${tag()}@tools-it.test>`,
+        from: new Date(Date.now() - 86_400_000).toISOString(),
+        to: new Date().toISOString(),
+      },
+      reason: sweepReason,
+    },
+  }),
+  api_mode_clawback_submit: () => ({
+    clawbackId: unknown(),
+    body: { mode: 'policy', reason: sweepReason, expectedRowVersion: 1 },
+  }),
+  api_mode_clawback_approve: () => ({
+    clawbackId: unknown(),
+    body: { reason: sweepReason, expectedRowVersion: 1 },
+  }),
+  api_mode_clawback_deny: () => ({
+    clawbackId: unknown(),
+    body: { reason: sweepReason, expectedRowVersion: 1 },
+  }),
+  api_mode_clawback_cancel: () => ({ clawbackId: unknown(), body: { reason: sweepReason } }),
+  api_mode_clawback_restore: () => ({ clawbackId: unknown(), body: { reason: sweepReason } }),
+  api_mode_reports_triage: () => ({
+    reportId: unknown(),
+    body: { status: 'in_review', expectedRowVersion: 1 },
+  }),
+  api_mode_reports_clawback: () => ({ reportId: unknown(), body: { reason: sweepReason } }),
+  api_mode_reports_add_mailbox: () => ({
+    body: { address: `sweep-${tag()}@tools-it.test`, reason: sweepReason },
+  }),
+  api_mode_reports_set_mailbox: () => ({
+    mailboxId: unknown(),
+    body: { enabled: true, reason: sweepReason },
+  }),
+  api_mode_settings_put: () => ({
+    body: {
+      internalMailEnabled: true,
+      autoClawback: 'review',
+      autoMaxMailboxes: 500,
+      purgeApprovalMailboxes: 50,
+      clawbackLookbackDays: 14,
+      tiMinConfidence: 80,
+      reportAckEnabled: true,
+      reportFeedbackEnabled: true,
+      reason: sweepReason,
+      expectedRowVersion: null,
+    },
+  }),
 };
 
 /** Checksums of the tables an enabled write could change, for the sweep's organization. */
@@ -956,6 +1050,13 @@ async function writeTargets(): Promise<Record<string, string>> {
     providerConnections: sha(await p.providerConnection.findMany({ where, orderBy })),
     providerGrants: sha(await p.providerConnectionGrant.findMany({ where, orderBy })),
     providerDomains: sha(await p.providerConnectionDomain.findMany({ where, orderBy })),
+    // Step API-3: the API-mode writes.
+    apiRemediationPolicies: sha(await p.apiRemediationPolicy.findMany({ where, orderBy })),
+    apiRemediationActions: sha(await p.apiRemediationAction.findMany({ where, orderBy })),
+    apiClawbacks: sha(await p.apiClawback.findMany({ where, orderBy })),
+    apiUserReports: sha(await p.apiUserReport.findMany({ where, orderBy })),
+    apiModeSettings: sha(await p.apiModeOrgSetting.findMany({ where })),
+    apiMailboxes: sha(await p.apiMailbox.findMany({ where, orderBy })),
   };
 }
 

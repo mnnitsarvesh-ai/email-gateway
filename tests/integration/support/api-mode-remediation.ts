@@ -140,7 +140,8 @@ export async function remediationCounterSums(prisma: PrismaClient, apiConnection
 
 /**
  * Removes the step API-2 rows of the organizations in the api purge's order (§3.4,
- * `API_MODE_PURGE_ORDER`): remediation actions (RESTRICT keys to mailboxes and connections) and
+ * `API_MODE_PURGE_ORDER`), preceded since step API-3 by the clawback targets, clawbacks and user
+ * reports (note 37 §3.4): remediation actions (RESTRICT keys to mailboxes and connections) and
  * remediation policies (RESTRICT keys to domains and organizations). Run it before
  * `purgeApiModeRows` (mailboxes, connections) and the fixture cleanup (domains, organizations).
  * Mailbox-located quarantine entries carry no key to these tables; the quarantine purge of the
@@ -152,6 +153,11 @@ export async function purgeRemediationRows(
 ): Promise<void> {
   if (organizationIds.length === 0) return;
   const where = { organizationId: { in: [...organizationIds] } };
+  // Step API-3 (note 37 §3.4): clawback targets, clawbacks and user reports first (a clawback of
+  // the live mailbox-worker may target the suite's copies; reports reference mailboxes).
+  await prisma.apiClawbackTarget.deleteMany({ where });
+  await prisma.apiClawback.deleteMany({ where });
+  await prisma.apiUserReport.deleteMany({ where });
   await prisma.apiRemediationAction.deleteMany({ where });
   await prisma.apiRemediationPolicy.deleteMany({ where });
 }

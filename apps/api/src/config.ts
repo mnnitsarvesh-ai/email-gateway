@@ -1462,6 +1462,14 @@ export const apiModeApiConfigShape = {
    * reads the same key before executing one.
    */
   API_MODE_HARD_DELETE_ENABLED: bool.default(false),
+  /**
+   * Step API-3 C4.1, C14, C17 (docs/plan/steps/37-api-mode-clawback-reporting.md): the longest
+   * search window of a clawback (days; the mailbox-worker reads the same key), the TTL of a purge
+   * approval request (hours) and the most report mailboxes per organization.
+   */
+  API_MODE_CLAWBACK_MAX_WINDOW_DAYS: int(1, 186).default(31),
+  API_MODE_PURGE_APPROVAL_TTL_HOURS: int(1, 720).default(72),
+  API_MODE_REPORT_MAILBOXES_MAX: int(1, 50).default(5),
 };
 
 export type ApiModeApiConfigKeys = {

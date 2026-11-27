@@ -20,7 +20,9 @@ export type AlertSuppressionReason = 'opt_out' | 'disabled' | 'invalid_contact';
  * `notification_alert_messages_total{kind,result}` and
  * `notification_alerts_suppressed_total{kind,reason}`; step 8.4 D16 adds
  * `notification_ato_messages_total{kind,audience,result}`; step AI-R D8 adds
- * `notification_assistant_report_emails_total{result}`. Bounded labels; never a tenant or address.
+ * `notification_assistant_report_emails_total{result}`; step API-3 C12 adds
+ * `notification_report_feedback_messages_total{kind,result}`. Bounded labels; never a tenant or
+ * address.
  */
 export class NotificationMetrics {
   readonly messages: Counter<'kind' | 'result'>;
@@ -29,6 +31,7 @@ export class NotificationMetrics {
   readonly alertsSuppressed: Counter<'kind' | 'reason'>;
   readonly atoMessages: Counter<'kind' | 'audience' | 'result'>;
   readonly assistantReportEmails: Counter<'result'>;
+  readonly reportFeedback: Counter<'kind' | 'result'>;
   readonly sendDuration: Histogram<'kind'>;
 
   constructor(metrics: MetricsService) {
@@ -62,9 +65,14 @@ export class NotificationMetrics {
       'Assistant report email events handled (step AI-R D8), by result (sent, failed, not_applicable, skipped)',
       ['result'],
     );
+    this.reportFeedback = metrics.counter(
+      'notification_report_feedback_messages_total',
+      'Reporter feedback events handled (step API-3 C12), by kind (report_feedback_received, report_feedback_resolved) and result (sent, duplicate, report_missing, rejected, no_verdict, external_reporter, reporter_unresolved, disabled, failed)',
+      ['kind', 'result'],
+    );
     this.sendDuration = metrics.histogram(
       'notification_send_duration_seconds',
-      'Duration of one SMTP submission of a policy, quarantine, security alert, ATO notice or assistant report email to the relay, by kind',
+      'Duration of one SMTP submission of a policy, quarantine, security alert, ATO notice, assistant report email or reporter feedback to the relay, by kind',
       ['kind'],
       [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20],
     );

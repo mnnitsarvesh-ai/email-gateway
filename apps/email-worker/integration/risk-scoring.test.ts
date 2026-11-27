@@ -1,5 +1,6 @@
 import { MetricsService, uuidv7 } from '@email-gateway/common';
 import type { MessageRiskScore, Prisma } from '@email-gateway/database';
+import { EventTypes, threatLateSignalV1 } from '@email-gateway/event-contracts';
 import { canonicalJson, resolveProfile, sha256Hex } from '@email-gateway/risk-scoring';
 import type { AuthResults, EngineOutcome } from '@email-gateway/security-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -228,6 +229,17 @@ const series = async (name: string, labels: Record<string, string>): Promise<num
   return total;
 };
 
+/** The `mail.threat.late_signal.v1` outbox rows of a message (step API-3 C2.1). */
+const lateSignals = (organizationId: bigint, messageId: bigint) =>
+  fx.prisma.messageOutbox.findMany({
+    where: {
+      organizationId,
+      aggregateId: messageId.toString(),
+      eventType: EventTypes.ThreatLateSignal,
+    },
+    orderBy: { id: 'asc' },
+  });
+
 describe('risk scoring in the round completion (step 5.1 R13)', () => {
   it('revision 0 with the platform default: the row, the round columns, before scanned.v1', async () => {
     const org = await fx.organization('platform');
@@ -450,6 +462,8 @@ describe('risk revision 1 from the sandbox (step 5.1 R13 (a)/(b))', () => {
     });
     expect(again).toEqual({ changed: 0, finals: [] });
     expect(await rows(round.scan.scanId, round.scan.receivedAt)).toHaveLength(2);
+    // Step API-3 C2.1: both revisions are part of the round's own decision: no late signal.
+    expect(await lateSignals(org, round.message.messageId)).toEqual([]);
   });
 
   it('sandbox final after completion: the sandbox transaction writes revision 1, exactly once', async () => {
@@ -484,5 +498,84 @@ describe('risk revision 1 from the sandbox (step 5.1 R13 (a)/(b))', () => {
     expect(await rows(round.scan.scanId, round.scan.receivedAt)).toHaveLength(2);
     // The round row still carries revision 0.
     expect(await sfx.scanRow(round)).toMatchObject({ riskScore: written[0]!.score });
+  });
+
+  it('step API-3 C2.1: a raising revision 1 writes exactly one late_signal.v1 in its transaction; a duplicate writes none', async () => {
+    const org = await sfx.tenant('sbx-late');
+    const round = await sfx.round(org, benignScript('risk-late'));
+    const before = await series('scan_late_signals_total', { kind: 'sandbox_revision' });
+    await sandboxMalicious(round);
+    const written = await rows(round.scan.scanId, round.scan.receivedAt);
+    expect(written.map((r) => r.revision)).toEqual([0, 1]);
+    expect(written[0]!.level).not.toBe('critical');
+    const signals = await lateSignals(org, round.message.messageId);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      aggregateType: 'message',
+      correlationId: `it-risk-${fx.suffix}`,
+    });
+    const submission = await sfx.submission(round);
+    expect(threatLateSignalV1.parse(signals[0]!.payload)).toMatchObject({
+      kind: 'sandbox_revision',
+      messageId: round.message.messageId.toString(),
+      receivedAt: round.scan.receivedAt.toISOString(),
+      scanId: round.scan.scanId.toString(),
+      revision: 1,
+      verdict: 'malware',
+      level: 'critical',
+      hardBlocks: ['hb.malware_sandbox'],
+      attachmentSha256: [submission.sha256],
+      urlSha256: [],
+    });
+    expect(await series('scan_late_signals_total', { kind: 'sandbox_revision' })).toBe(before + 1);
+
+    // A repeated revision through the store (a concurrent or repeated finisher under the scan
+    // lock) is a duplicate: no second row.
+    const ctx = { now: new Date(), correlationId: `it-risk-${fx.suffix}` };
+    await sandboxStore().transaction(async (tx) => {
+      const scans = await tx.lockScans([
+        { scanId: round.scan.scanId, receivedAt: round.scan.receivedAt },
+      ]);
+      const scan = [...scans.values()][0]!;
+      await tx.scoreRiskRevision(scan, ctx);
+    });
+    expect(await rows(round.scan.scanId, round.scan.receivedAt)).toHaveLength(2);
+    expect(await lateSignals(org, round.message.messageId)).toHaveLength(1);
+  });
+
+  it('step API-3 C2.1: a revision 1 that does not raise the round writes no late signal', async () => {
+    const org = await sfx.tenant('sbx-late-none');
+    const round = await sfx.round(org, benignScript('risk-late-none'));
+    const store = sandboxStore();
+    const submission = await sfx.submission(round);
+    await store.transaction(async (tx) => {
+      const row = await tx.loadSubmission({ id: submission.id, receivedAt: submission.receivedAt });
+      return finishSubmissions(
+        tx,
+        [
+          {
+            submission: row!,
+            outcome: {
+              status: 'completed',
+              verdict: 'clean',
+              reasonCodes: [],
+              executed: true,
+              isolation: 'vm',
+              analysisPublicId: null,
+            },
+          },
+        ],
+        {
+          now: new Date(),
+          correlationId: `it-risk-${fx.suffix}`,
+          metrics: SandboxMetrics.for(registry),
+        },
+      );
+    });
+    const written = await rows(round.scan.scanId, round.scan.receivedAt);
+    expect(written.map((r) => r.revision)).toEqual([0, 1]);
+    expect(written[1]!.level).toBe(written[0]!.level);
+    expect(written[1]!.verdict).toBe(written[0]!.verdict);
+    expect(await lateSignals(org, round.message.messageId)).toEqual([]);
   });
 });

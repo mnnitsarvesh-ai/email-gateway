@@ -115,6 +115,17 @@ import {
   RemediateBodySchema,
   RestoreBodySchema,
 } from '../src/modules/api-mode/dto/api-mode-remediation.schemas';
+import {
+  AddReportMailboxBodySchema,
+  CreateClawbackBodySchema,
+  DecisionBodySchema,
+  PutOrgSettingsBodySchema,
+  ReasonBodySchema,
+  ReportClawbackBodySchema,
+  SetReportMailboxBodySchema,
+  SubmitClawbackBodySchema,
+  TriageBodySchema,
+} from '../src/modules/api-mode/dto/api-mode-clawback.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
 import { COVERAGE, COVERAGE_BY_AREA, type RouteCoverage } from './route-coverage';
@@ -253,6 +264,19 @@ const SENSITIVE_TRANSACTIONAL = [
   'post /api/v1/api-mode/remediations/:remediationId/retry',
   'post /api/v1/api-mode/detections/:detectionId/remediate',
   'post /api/v1/api-mode/detections/:detectionId/restore',
+  // Step API-3 C14 (the keyed clawback, report and settings mutations).
+  'post /api/v1/api-mode/clawbacks',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/submit',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/submit-hard-delete',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/approve',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/deny',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/cancel',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/restore',
+  'post /api/v1/api-mode/reports/:reportId/triage',
+  'post /api/v1/api-mode/reports/:reportId/clawback',
+  'post /api/v1/api-mode/report-mailboxes',
+  'put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox',
+  'put /api/v1/api-mode/settings',
   'post /api/v1/messages/:messageId/rescan',
   'post /api/v1/messages/:messageId/release',
   'post /api/v1/quarantine/bulk',
@@ -652,6 +676,33 @@ const NEW_IN_API_2 = [
 ];
 
 /**
+ * Step API-3 C14 (docs/plan/steps/37-api-mode-clawback-reporting.md): the 19 clawback, report and
+ * settings operations (examples required; in the api-mode manifest): twelve keyed `sensitive`
+ * mutations and three v1 lists (clawbacks, clawback targets, reports).
+ */
+const NEW_IN_API_3 = [
+  'post /api/v1/api-mode/clawbacks',
+  'get /api/v1/api-mode/clawbacks',
+  'get /api/v1/api-mode/clawbacks/:clawbackId',
+  'get /api/v1/api-mode/clawbacks/:clawbackId/targets',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/submit',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/submit-hard-delete',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/approve',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/deny',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/cancel',
+  'post /api/v1/api-mode/clawbacks/:clawbackId/restore',
+  'get /api/v1/api-mode/reports',
+  'get /api/v1/api-mode/reports/:reportId',
+  'post /api/v1/api-mode/reports/:reportId/triage',
+  'post /api/v1/api-mode/reports/:reportId/clawback',
+  'get /api/v1/api-mode/report-mailboxes',
+  'post /api/v1/api-mode/report-mailboxes',
+  'put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox',
+  'get /api/v1/api-mode/settings',
+  'put /api/v1/api-mode/settings',
+];
+
+/**
  * Step AI-6 D7, I27: request bodies that carry a write-only secret and therefore no example (an
  * example would be a key-shaped value in the published document); the schema describes it.
  */
@@ -782,6 +833,19 @@ const BODY_PARSED_IN_SERVICE = new Map<string, z.ZodType>([
   ['ApiModeRemediationController.putDomainPolicy', PutRemediationPolicyBodySchema],
   ['ApiModeRemediationController.remediate', RemediateBodySchema],
   ['ApiModeRemediationController.restore', RestoreBodySchema],
+  // Step API-3: the keyed clawback, report and settings mutations parse after the key checks.
+  ['ApiModeClawbackController.create', CreateClawbackBodySchema],
+  ['ApiModeClawbackController.submit', SubmitClawbackBodySchema],
+  ['ApiModeClawbackController.submitHardDelete', DecisionBodySchema],
+  ['ApiModeClawbackController.approve', DecisionBodySchema],
+  ['ApiModeClawbackController.deny', DecisionBodySchema],
+  ['ApiModeClawbackController.cancel', ReasonBodySchema],
+  ['ApiModeClawbackController.restore', ReasonBodySchema],
+  ['ApiModeReportsController.triage', TriageBodySchema],
+  ['ApiModeReportsController.clawback', ReportClawbackBodySchema],
+  ['ApiModeReportsController.addMailbox', AddReportMailboxBodySchema],
+  ['ApiModeReportsController.setMailbox', SetReportMailboxBodySchema],
+  ['ApiModeSettingsController.put', PutOrgSettingsBodySchema],
   ['ProviderNotificationsController.graph', graphNotificationSchema],
   ['ProviderNotificationsController.lifecycle', graphNotificationSchema],
 ]);
@@ -916,7 +980,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     await api?.close();
   });
 
-  it('discovers every route once (464 operations under /api/v1 plus the 3 internal endpoints)', () => {
+  it('discovers every route once (483 operations under /api/v1 plus the 3 internal endpoints)', () => {
     expect(facts.length).toBe(byKey.size);
     // 249 after step 6.1, plus the 17 routes of step 6.2, plus the 3 reports of step 7.1, plus
     // the 5 saved views routes (WP1) and the headers and two reveal routes (WP2) of step 7.2,
@@ -930,8 +994,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // the capture-issue read of step AI-5 (D8), plus the 11 hardening operations of step AI-6
     // (§4.1, contracts §35.6), plus the 16 operations of step API-1 (D12: 14 API-mode and
     // protection-mode operations and the 2 public Graph callbacks), plus the 9 remediation
-    // operations of step API-2 (R13).
-    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(464);
+    // operations of step API-2 (R13), plus the 19 clawback, report and settings operations of
+    // step API-3 (C14).
+    expect(facts.filter((f) => f.key.includes(' /api/v1/')).length).toBe(483);
     expect(
       facts
         .filter((f) => isInternal(f.key))
@@ -1047,6 +1112,7 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       ...NEW_IN_AI_6,
       ...NEW_IN_API_1,
       ...NEW_IN_API_2,
+      ...NEW_IN_API_3,
     ]) {
       const op = operation(key);
       if (!op) {
@@ -1128,13 +1194,14 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
       [...NEW_IN_8_5].sort(),
     );
     expect(NEW_IN_8_5).toHaveLength(13);
-    // NEW_IN_API_1 + PROVIDER_CALLBACKS + NEW_IN_API_2 is exactly the api-mode manifest (16
-    // operations of step API-1, 9 of step API-2).
+    // NEW_IN_API_1 + PROVIDER_CALLBACKS + NEW_IN_API_2 + NEW_IN_API_3 is exactly the api-mode
+    // manifest (16 operations of step API-1, 9 of step API-2, 19 of step API-3).
     expect(COVERAGE_BY_AREA['api-mode'].map((c) => c.route).sort()).toEqual(
-      [...NEW_IN_API_1, ...PROVIDER_CALLBACKS, ...NEW_IN_API_2].sort(),
+      [...NEW_IN_API_1, ...PROVIDER_CALLBACKS, ...NEW_IN_API_2, ...NEW_IN_API_3].sort(),
     );
     expect(NEW_IN_API_1).toHaveLength(14);
     expect(NEW_IN_API_2).toHaveLength(9);
+    expect(NEW_IN_API_3).toHaveLength(19);
     // NEW_IN_8_6 is exactly the step 8.6 journaling manifest (12 operations).
     expect(COVERAGE_BY_AREA.journaling.map((c) => c.route).sort()).toEqual([...NEW_IN_8_6].sort());
     expect(NEW_IN_8_6).toHaveLength(12);
@@ -1237,7 +1304,8 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
           NEW_IN_AI_5.includes(key) ||
           NEW_IN_AI_6.includes(key) ||
           NEW_IN_API_1.includes(key) ||
-          NEW_IN_API_2.includes(key)) &&
+          NEW_IN_API_2.includes(key) ||
+          NEW_IN_API_3.includes(key)) &&
         route.cursor === 'v0'
       )
         failures.push(`${key}: 6.1/6.2/7.1/7.2/7.3/8.1/8.4/8.2 list on v0`);
@@ -1253,8 +1321,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // of 8.4 (8 ato, 3 incidents) and the 2 of 8.2 (connections, validation runs) and the intake
     // sources list of 8.6 and the 2 of AI-1 (conversations, messages) and the 5 of AI-6 (search,
     // usage per user, admin feedback, audit conversations and executions) and the 2 of API-1
-    // (mailboxes, detections) and the remediation history of API-2 are signed v1.
-    expect(counts).toEqual({ v0: 33, v1: 46 });
+    // (mailboxes, detections) and the remediation history of API-2 and the 3 of API-3
+    // (clawbacks, clawback targets, reports) are signed v1.
+    expect(counts).toEqual({ v0: 33, v1: 49 });
   });
 
   it('every body and query schema of every route is strict at every object node (D1)', () => {
@@ -1331,8 +1400,9 @@ describe('route inventory (step 6.1, e2e, dependencies stubbed)', () => {
     // mutations of step 8.2, plus the 8 keyed identity-provider and mailbox state mutations of
     // step 8.5, plus the 4 keyed journaling mutations of step 8.6, plus the 5 keyed
     // protection-mode and API-mode mutations of step API-1, plus the 6 keyed remediation
-    // mutations of step API-2.
-    expect(operations).toHaveLength(106);
+    // mutations of step API-2, plus the 12 keyed clawback, report and settings mutations of step
+    // API-3.
+    expect(operations).toHaveLength(118);
   });
 
   it('no route is both @Idempotent() and @ReturnsSecret(); secret-bearing and expensive routes carry their class (D8, D9, ADR-0057)', () => {

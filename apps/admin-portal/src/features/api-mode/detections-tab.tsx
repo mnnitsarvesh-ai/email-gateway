@@ -15,20 +15,25 @@ import type { QueryParams } from '@/lib/api/types';
 import { useCan } from '@/lib/auth/me';
 import { humanize } from '@/lib/format';
 import { FilterSelect } from '@/features/domains/kit';
+import { ClawBackSimilarDialog } from './clawback-dialogs';
 import {
   DetectionDrawer,
   RemediateDialog,
   RestoreDialog,
   RestoreResultNotice,
+  canBeClawedBack,
   canBeRemediated,
   canBeRestored,
   type DetectionRef,
 } from './detection-actions';
 import {
+  DETECTION_DIRECTIONS,
   DETECTION_SOURCES,
   DETECTION_STATUSES,
   DETECTION_VERDICTS,
+  DIRECTION_LABEL,
   SOURCE_LABEL,
+  VerdictRevisionBadge,
   formatLagMs,
   type Detection,
 } from './model';
@@ -46,6 +51,8 @@ const URL_SHAPE = {
   source: z.enum(DETECTION_SOURCES).optional().catch(undefined),
   connection: z.string().uuid().optional().catch(undefined),
   remediationState: z.enum(COPY_REMEDIATION_STATES).optional().catch(undefined),
+  /** Step API-3 C8: inbound or internal (east-west) copies. */
+  direction: z.enum(DETECTION_DIRECTIONS).optional().catch(undefined),
   /** The detection whose detail drawer is open (link target of entries and history). */
   detection: z.string().uuid().optional().catch(undefined),
 };
@@ -58,6 +65,7 @@ export function detectionQuery(
     source?: string;
     connection?: string;
     remediationState?: string;
+    direction?: string;
   },
   range: { from: string; to: string },
 ): QueryParams<'ApiModeController_listDetections_v1'> {
@@ -69,6 +77,7 @@ export function detectionQuery(
     ...(filters.source ? { source: filters.source } : {}),
     ...(filters.connection ? { connectionId: filters.connection } : {}),
     ...(filters.remediationState ? { remediationState: filters.remediationState } : {}),
+    ...(filters.direction ? { direction: filters.direction } : {}),
   };
 }
 
@@ -84,8 +93,9 @@ function SubjectCell({ detection }: { detection: Detection }) {
 }
 
 /**
- * Tab "Detections" (D14; step API-2 R15): copies with their verdicts, masked subject and sender,
- * lag and remediation state; row actions Remediate… and Restore; the detail drawer.
+ * Tab "Detections" (D14; step API-2 R15; step API-3 C8, C14): copies with their verdicts (and a
+ * revision badge when a late verdict revised them), direction, masked subject and sender, lag and
+ * remediation state; row actions Remediate…, Restore and Claw back similar…; the detail drawer.
  */
 export function DetectionsTab() {
   const [filters, setFilters] = useUrlState(URL_SHAPE);
@@ -93,14 +103,20 @@ export function DetectionsTab() {
   const connections = useApiQuery('ApiModeController_listConnections_v1');
   const canRemediate = useCan('ApiModeRemediationController_remediate_v1');
   const canRestore = useCan('ApiModeRemediationController_restore_v1');
+  const canClawback = useCan('ApiModeClawbackController_create_v1');
+  const [clawing, setClawing] = useState<DetectionRef | null>(null);
   const [remediating, setRemediating] = useState<DetectionRef | null>(null);
   const [restoring, setRestoring] = useState<DetectionRef | null>(null);
   const [restored, setRestored] = useState<RestoreResult | null>(null);
   const { from, to } = range;
-  const { verdict, status, source, connection, remediationState } = filters;
+  const { verdict, status, source, connection, remediationState, direction } = filters;
   const query = useMemo(
-    () => detectionQuery({ verdict, status, source, connection, remediationState }, { from, to }),
-    [verdict, status, source, connection, remediationState, from, to],
+    () =>
+      detectionQuery(
+        { verdict, status, source, connection, remediationState, direction },
+        { from, to },
+      ),
+    [verdict, status, source, connection, remediationState, direction, from, to],
   );
   const list = useCursorList('ApiModeController_listDetections_v1', query);
 
@@ -127,11 +143,19 @@ export function DetectionsTab() {
         cell: ({ row }) => (
           <span className="inline-flex flex-wrap items-center gap-1">
             <VerdictBadge verdict={row.original.verdict} />
+            <VerdictRevisionBadge revision={row.original.verdictRevision} />
             {row.original.verdictAuthority === 'inline' ? (
               <span className="text-xs text-muted-foreground">inline verdict</span>
             ) : null}
           </span>
         ),
+      },
+      {
+        id: 'direction',
+        header: 'Direction',
+        meta: { label: 'Direction' },
+        cell: ({ row }) =>
+          DIRECTION_LABEL[row.original.direction] ?? humanize(row.original.direction),
       },
       {
         id: 'riskScore',
@@ -261,6 +285,19 @@ export function DetectionsTab() {
                 label: STATE_LABEL[value],
               }))}
             />
+            <FilterSelect
+              label="Direction"
+              value={filters.direction}
+              onChange={(value) =>
+                setFilters({
+                  direction: value as (typeof DETECTION_DIRECTIONS)[number] | undefined,
+                })
+              }
+              options={DETECTION_DIRECTIONS.map((value) => ({
+                value,
+                label: DIRECTION_LABEL[value],
+              }))}
+            />
             {connectionOptions.length > 1 ? (
               <FilterSelect
                 label="Connection"
@@ -271,7 +308,9 @@ export function DetectionsTab() {
             ) : null}
           </>
         }
-        isFiltered={Boolean(verdict || status || source || connection || remediationState)}
+        isFiltered={Boolean(
+          verdict || status || source || connection || remediationState || direction,
+        )}
         onClearFilters={() =>
           setFilters({
             verdict: undefined,
@@ -279,6 +318,7 @@ export function DetectionsTab() {
             source: undefined,
             connection: undefined,
             remediationState: undefined,
+            direction: undefined,
           })
         }
         rowActions={(row) => [
@@ -298,6 +338,15 @@ export function DetectionsTab() {
                   label: row.remediationAction === 'tag' ? 'Remove tag' : 'Restore',
                   onSelect: () => setRestoring(row),
                   disabled: !canBeRestored(row),
+                },
+              ]
+            : []),
+          ...(canClawback
+            ? [
+                {
+                  label: 'Claw back similar…',
+                  onSelect: () => setClawing(row),
+                  disabled: !canBeClawedBack(row),
                 },
               ]
             : []),
@@ -325,6 +374,11 @@ export function DetectionsTab() {
         onClose={() => setFilters({ detection: undefined })}
         onRemediate={setRemediating}
         onRestore={setRestoring}
+        onClawback={setClawing}
+      />
+      <ClawBackSimilarDialog
+        detection={clawing}
+        onOpenChange={(open) => !open && setClawing(null)}
       />
       <RemediateDialog
         detection={remediating}

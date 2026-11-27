@@ -131,7 +131,7 @@ export function ApiModeHealthBadge({ health }: { health: ApiModeHealth }) {
   return <ToneBadge tone={HEALTH_TONE[health] ?? 'neutral'}>{HEALTH_LABEL[health]}</ToneBadge>;
 }
 
-/** Titles of the health checks of `api-mode-health/1` (D11.3; step API-2 R14). */
+/** Titles of the health checks of `api-mode-health/1` (D11.3; step API-2 R14; step API-3 C13). */
 export const CHECK_TITLE: Record<string, string> = {
   'connection.active': 'Provider connection active and bound',
   'intake.present': 'Journal copy or mailbox feeds present',
@@ -147,6 +147,9 @@ export const CHECK_TITLE: Record<string, string> = {
   'remediation.backlog': 'Remediation backlog',
   'remediation.access': 'Remediation possible (mailbox access for an enforcing policy)',
   'remediation.paused': 'Remediation paused',
+  // Step API-3 C13.
+  'clawback.stalled': 'Clawback stalled (queued or running without progress)',
+  'reports.backlog': 'Reported messages waiting for triage',
 };
 
 export function checkTitle(code: string): string {
@@ -212,6 +215,25 @@ export const DETECTION_STATUSES = [
   'too_large',
 ] as const;
 export const DETECTION_SOURCES = ['journal', 'graph', 'gmail'] as const;
+/** Step API-3 C8: inbound copies and internal (east-west) copies. */
+export const DETECTION_DIRECTIONS = ['inbound', 'internal'] as const;
+
+export const DIRECTION_LABEL: Record<Detection['direction'], string> = {
+  inbound: 'Inbound',
+  internal: 'Internal',
+};
+
+/** A late verdict (sandbox or URL inspection after delivery) revised the copy's verdict (C2). */
+export function VerdictRevisionBadge({ revision }: { revision: number }) {
+  if (revision <= 0) return null;
+  return (
+    <ToneBadge tone="orange">
+      <span title="A late verdict (sandbox or URL inspection after delivery) revised this verdict">
+        Revised{revision > 1 ? ` ×${revision}` : ''}
+      </span>
+    </ToneBadge>
+  );
+}
 
 export const SOURCE_LABEL: Record<Detection['source'], string> = {
   journal: 'Journal copy',

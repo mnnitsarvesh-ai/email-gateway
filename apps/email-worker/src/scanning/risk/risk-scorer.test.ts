@@ -223,10 +223,16 @@ describe('RiskScorer (step 5.1 R13)', () => {
     });
     expect(db.riskRows[0]).toMatchObject({ revision: 1, level: 'critical', verdict: 'malware' });
     expect(db.scanUpdates).toEqual([]);
+    // Step API-3 C2.1: the record carries the verdict the late-signal comparison needs.
+    expect(record).toMatchObject({ kind: 'written', revision: 1, verdict: 'malware' });
     scorer.record([record]);
     expect(
       await series(registry, 'scan_risk_hard_blocks_total', { indicator: 'hb.malware_sandbox' }),
     ).toBe(1);
+    expect(await series(registry, 'scan_late_signals_total', { kind: 'sandbox_revision' })).toBe(0);
+    // A record whose transaction wrote a late signal counts it after the commit.
+    scorer.record([{ ...record, lateSignal: true } as typeof record]);
+    expect(await series(registry, 'scan_late_signals_total', { kind: 'sandbox_revision' })).toBe(1);
   });
 
   it('a missing message row writes nothing and is counted as skipped', async () => {

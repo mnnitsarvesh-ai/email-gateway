@@ -172,6 +172,7 @@ export class RemediationActionsService {
       connectionId: row.connectionPublicId,
       detectionId: row.detectionPublicId,
       quarantineEntryId: row.quarantineEntryPublicId,
+      clawbackId: row.clawbackPublicId,
       createdAt: row.createdAt.toISOString(),
       nextAttemptAt: row.status === 'pending' ? iso(row.nextAttemptAt) : null,
       completedAt: iso(row.completedAt),

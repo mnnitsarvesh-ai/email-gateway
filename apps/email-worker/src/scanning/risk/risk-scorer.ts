@@ -55,6 +55,8 @@ export type RiskScoreRecord =
       status: RiskResult['status'];
       score: number;
       level: string;
+      /** The revision's risk verdict (step API-3 C2.1 compares it with revision 0's). */
+      verdict: string;
       action: string;
       hardBlocks: string[];
       failures: Array<{ engine: string; status: string }>;
@@ -63,6 +65,8 @@ export type RiskScoreRecord =
       errorReason: ScoringErrorReason | null;
       unmappedEngines: string[];
       durationUs: number;
+      /** Step API-3 C2.1: this revision wrote a `mail.threat.late_signal.v1` row. */
+      lateSignal?: boolean;
     };
 
 /** The fallback label of a resolution (`base_profile_retired` is an invalid version). */
@@ -219,6 +223,7 @@ export class RiskScorer {
       status: row.status,
       score: row.score,
       level: row.level,
+      verdict: row.verdict,
       action: row.recommendedAction,
       hardBlocks: row.hardBlocks.map((h) => h.id),
       failures: row.failures.map((f) => ({ engine: f.engine, status: f.status })),
@@ -271,6 +276,7 @@ export class RiskScorer {
         continue;
       }
       metrics.written({ ...record, durationSeconds: record.durationUs / 1e6 });
+      if (record.lateSignal === true) metrics.lateSignal('sandbox_revision');
       if (record.errorReason !== null) {
         logger.error(
           { ...record.ids, revision: record.revision, reason: record.errorReason },

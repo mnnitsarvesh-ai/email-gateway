@@ -27,6 +27,8 @@ describe('mailbox-worker configuration (D16)', () => {
       'inventory',
       'health',
       'remediate',
+      'clawback',
+      'reports',
     ]);
     expect(cfg.API_MODE_GRAPH_URL).toBe('https://graph.microsoft.com');
     expect(cfg.API_MODE_FEED_TICK_MS).toBe(5000);
@@ -201,6 +203,56 @@ describe('mailbox-worker configuration (D16)', () => {
         API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION: '4',
       },
       'API_MODE_REMEDIATION_CONCURRENCY_PER_CONNECTION',
+    );
+  });
+
+  it('step API-3: clawback and reports keys (C17), defaults and bounds', () => {
+    const cfg = loadWorkerConfig(base);
+    expect(cfg.API_MODE_CLAWBACK_TICK_MS).toBe(5000);
+    expect(cfg.API_MODE_CLAWBACK_LEASE_SECONDS).toBe(120);
+    expect(cfg.API_MODE_CLAWBACK_MAX_TARGETS).toBe(20_000);
+    expect(cfg.API_MODE_CLAWBACK_QUEUE_BATCH).toBe(500);
+    expect(cfg.API_MODE_CLAWBACK_MAX_PENDING_PER_CONNECTION).toBe(1000);
+    expect(cfg.API_MODE_CLAWBACK_MAX_WINDOW_DAYS).toBe(31);
+    expect(cfg.API_MODE_CLAWBACK_TI_INTERVAL_SECONDS).toBe(60);
+    expect(cfg.API_MODE_CLAWBACK_TI_BATCH).toBe(100);
+    expect(cfg.API_MODE_PURGE_APPROVAL_TTL_HOURS).toBe(72);
+    expect(cfg.API_MODE_CLAWBACK_STALLED_WARN_MINUTES).toBe(60);
+    expect(cfg.API_MODE_CLAWBACK_STALLED_FAIL_MINUTES).toBe(240);
+    expect(cfg.API_MODE_CLAWBACK_RETENTION_DAYS).toBe(400);
+    expect(cfg.API_MODE_REPORT_RETENTION_DAYS).toBe(400);
+    expect(cfg.API_MODE_REPORTS_TICK_MS).toBe(5000);
+    expect(cfg.API_MODE_REPORT_MAX_BYTES).toBe(26_214_400);
+    expect(cfg.API_MODE_REPORTS_PER_REPORTER_PER_HOUR).toBe(30);
+    expect(cfg.API_MODE_REPORT_TRIAGE_WARN_HOURS).toBe(24);
+    expect(cfg.API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES).toBe(60);
+    expect(cfg.API_MODE_REPORT_SCAN_TIMEOUT_MINUTES).toBe(60);
+    fails({ ...base, API_MODE_CLAWBACK_MAX_TARGETS: '0' }, 'API_MODE_CLAWBACK_MAX_TARGETS');
+    fails({ ...base, API_MODE_CLAWBACK_TI_BATCH: '1001' }, 'API_MODE_CLAWBACK_TI_BATCH');
+    fails(
+      { ...base, API_MODE_REPORT_SCAN_TIMEOUT_MINUTES: '4' },
+      'API_MODE_REPORT_SCAN_TIMEOUT_MINUTES',
+    );
+    fails({ ...base, API_MODE_REPORT_MAX_BYTES: '1024' }, 'API_MODE_REPORT_MAX_BYTES');
+    fails({ ...base, API_MODE_CLAWBACK_RETENTION_DAYS: '7' }, 'API_MODE_CLAWBACK_RETENTION_DAYS');
+    fails(
+      { ...base, API_MODE_CLAWBACK_STALLED_FAIL_MINUTES: '30' },
+      'API_MODE_CLAWBACK_STALLED_FAIL_MINUTES',
+    );
+    fails(
+      { ...base, API_MODE_CLAWBACK_MAX_TARGETS: '100', API_MODE_CLAWBACK_QUEUE_BATCH: '500' },
+      'API_MODE_CLAWBACK_QUEUE_BATCH',
+    );
+  });
+
+  it('step API-3: clawback and reports are not provider-calling roles (no credential key)', () => {
+    const { PROVIDER_CREDENTIAL_ENCRYPTION_KEY: _key, ...noKey } = base;
+    const cfg = loadWorkerConfig({ ...noKey, MAILBOX_WORKER_ROLES: 'clawback,reports' });
+    expect(cfg.MAILBOX_WORKER_ROLES).toEqual(['clawback', 'reports']);
+    expect(hasRole(cfg, 'clawback')).toBe(true);
+    fails(
+      { ...noKey, MAILBOX_WORKER_ROLES: 'clawback,remediate' },
+      'PROVIDER_CREDENTIAL_ENCRYPTION_KEY',
     );
   });
 
