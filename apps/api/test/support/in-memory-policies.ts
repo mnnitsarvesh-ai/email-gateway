@@ -817,6 +817,13 @@ export class InMemoryPolicies {
     );
   }
 
+  /** Step API-4 (B6): API-mode scopes of kind `departments` (domain public id → departments). */
+  readonly apiModeScopes: Array<{
+    organizationId: bigint;
+    domainPublicId: string;
+    departmentIds: string[];
+  }> = [];
+
   readonly departments: DepartmentsRepository = {
     list: (scope: TenantScope, page: { take: number; beforeId?: bigint }) =>
       Promise.resolve(
@@ -974,6 +981,18 @@ export class InMemoryPolicies {
       if (index !== -1) this.state.departments.splice(index, 1);
       return Promise.resolve({ deleted: index !== -1, members });
     },
+    // Step API-4 (B6): domains whose API-mode scope lists the department (`apiModeScopes`).
+    apiModeScopesReferencing: (_tx: unknown, scope: TenantScope, departmentPublicId: string) =>
+      Promise.resolve(
+        this.apiModeScopes
+          .filter(
+            (s) =>
+              s.organizationId === scope.organizationId &&
+              s.departmentIds.includes(departmentPublicId),
+          )
+          .map((s) => s.domainPublicId)
+          .sort(),
+      ),
     createMember: (
       _tx: unknown,
       scope: TenantScope,

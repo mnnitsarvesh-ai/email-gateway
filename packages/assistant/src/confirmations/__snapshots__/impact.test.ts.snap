@@ -504,6 +504,60 @@ exports[`impact templates (D5) > ApiModeController_updateSettings_v1 1`] = `
 }
 `;
 
+exports[`impact templates (D5) > ApiModeOnboardingController_putScope_v1 1`] = `
+{
+  "action": "Sets which mailboxes of the domain API mode protects (departments).",
+  "changes": [
+    {
+      "after": "departments",
+      "before": "all",
+      "label": "Scope",
+    },
+    {
+      "after": "2",
+      "label": "Departments",
+    },
+    {
+      "after": "Pilot with finance and legal first",
+      "label": "Reason",
+    },
+  ],
+  "impact": [
+    "The mailbox-worker re-evaluates the domain’s mailboxes on its next run.",
+    "Excluded mailboxes keep their copies recorded but get no remediation, change feed or clawback.",
+  ],
+  "portalRoute": "/domains/0193aaaa-0000-7000-8000-000000000025",
+  "request": {
+    "method": "PUT",
+    "path": "/api/v1/api-mode/domains/0193aaaa-0000-7000-8000-000000000025/scope",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Domain id",
+      "value": "0193aaaa-0000-7000-8000-000000000025",
+    },
+    {
+      "label": "Current scope",
+      "value": "all",
+    },
+    {
+      "label": "Mailboxes in scope",
+      "value": "250",
+    },
+    {
+      "label": "Mailboxes excluded",
+      "value": "0",
+    },
+  ],
+  "title": "Set mailbox scope",
+  "version": "assistant-confirmation/1",
+  "warnings": [
+    "Narrowing the scope removes protection from every mailbox left out.",
+  ],
+}
+`;
+
 exports[`impact templates (D5) > ApiModeRemediationController_deleteDomainPolicy_v1 1`] = `
 {
   "action": "Removes the domain’s policy override; the domain inherits the organization policy.",
@@ -4706,6 +4760,52 @@ exports[`impact templates (D5) > DomainsController_create_v1 1`] = `
     },
   ],
   "title": "Add domain",
+  "version": "assistant-confirmation/1",
+  "warnings": [],
+}
+`;
+
+exports[`impact templates (D5) > DomainsController_providerOwnershipCheck_v1 1`] = `
+{
+  "action": "Asks the organization’s bound Microsoft 365 / Google Workspace tenant whether it lists "mail.example.net" as verified.",
+  "changes": [
+    {
+      "after": "through the bound provider tenant",
+      "label": "Ownership check",
+    },
+    {
+      "after": "0193aaaa-0000-7000-8000-000000000093",
+      "label": "Connection",
+    },
+  ],
+  "impact": [
+    "The integration-worker checks the domain in the provider tenant; a verified listing verifies the domain (first to verify wins), any other answer leaves it pending.",
+  ],
+  "portalRoute": "/domains/0193aaaa-0000-7000-8000-000000000025",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/domains/0193aaaa-0000-7000-8000-000000000025/ownership/provider-check",
+  },
+  "reversible": true,
+  "target": [
+    {
+      "label": "Domain",
+      "value": "mail.example.net",
+    },
+    {
+      "label": "Domain id",
+      "value": "0193aaaa-0000-7000-8000-000000000025",
+    },
+    {
+      "label": "Status",
+      "value": "active",
+    },
+    {
+      "label": "Provider check available",
+      "value": "yes",
+    },
+  ],
+  "title": "Verify domain ownership through the provider",
   "version": "assistant-confirmation/1",
   "warnings": [],
 }

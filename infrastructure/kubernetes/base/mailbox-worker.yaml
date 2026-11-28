@@ -82,6 +82,8 @@ spec:
                 value: 'copies,feeds,inventory,health,remediate,clawback,reports',
               }
             - { name: INGEST_HEADER_MAX_BYTES, value: '65536' }
+            # Step API-4 A2: compiled policy snapshots kept per process (detect evaluation of copies).
+            - { name: POLICY_SNAPSHOT_CACHE_MAX_ENTRIES, value: '1000' }
             - { name: DATABASE_URL_FILE, value: /var/run/secrets/gateway/database-url }
             - { name: REDIS_URL_FILE, value: /var/run/secrets/gateway/redis-url }
             - {

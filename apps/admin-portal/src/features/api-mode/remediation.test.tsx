@@ -62,6 +62,13 @@ const STRICT: Document = {
   ],
 };
 
+const MAPPING = {
+  quarantine: 'move_quarantine',
+  require_approval: 'move_quarantine',
+  reject: 'move_quarantine',
+  allow_tagged: 'tag',
+} as const;
+
 const policy = (over: Partial<Policy> = {}): Policy => ({
   organization: {
     source: 'platform_default',
@@ -71,6 +78,8 @@ const policy = (over: Partial<Policy> = {}): Policy => ({
     sha256: SHA,
     rowVersion: null,
     updatedAt: null,
+    effectivePolicyMapping: MAPPING,
+    detectOnly: null,
   },
   domains: [],
   presets: {
@@ -157,6 +166,9 @@ const overview = (failingChecks: string[] = []): Overview => ({
     oldestPendingAgeSeconds: null,
     reportMailboxes: 0,
   },
+  policy: { enabled: true, evaluated24h: 0, errors24h: 0 },
+  outbound: { detections24h: 0, enabled: true },
+  scope: { excluded: 0 },
   connections: [
     {
       id: CONN,
@@ -213,10 +225,16 @@ const detection = (over: Partial<Detection> = {}): Detection => ({
   remediationId: ACTION,
   quarantineEntryId: ENTRY,
   direction: 'inbound',
+  policyState: 'none',
+  policyDisposition: null,
+  policyTagged: false,
+  dlpAction: null,
   verdictRevision: 0,
   clawbacks: [],
   deliveredBasis: 'received_header',
   reasonCodes: ['url.reputation_malicious'],
+  policy: null,
+  dlp: null,
   ...over,
 });
 const listRow = (d: Detection) => {
@@ -408,6 +426,8 @@ describe('/api-mode Remediation tab (R15)', () => {
               sha256: SHA,
               rowVersion: reads === 1 ? 2 : 3,
               updatedAt: T,
+              effectivePolicyMapping: MAPPING,
+              detectOnly: null,
             },
           }),
         );
@@ -427,6 +447,8 @@ describe('/api-mode Remediation tab (R15)', () => {
               sha256: SHA,
               rowVersion: 4,
               updatedAt: T,
+              effectivePolicyMapping: MAPPING,
+              detectOnly: null,
               created: false,
             });
       },
@@ -456,6 +478,8 @@ describe('/api-mode Remediation tab (R15)', () => {
       sha256: SHA,
       rowVersion: 2,
       updatedAt: T,
+      effectivePolicyMapping: MAPPING,
+      detectOnly: null,
     };
     const domain = { ...domainSummary(1), id: '0193fe00-0000-7000-8000-000000000009' };
     base({
@@ -472,6 +496,8 @@ describe('/api-mode Remediation tab (R15)', () => {
           sha256: SHA,
           rowVersion: 3,
           updatedAt: T,
+          effectivePolicyMapping: MAPPING,
+          detectOnly: null,
           created: false,
         });
       },
@@ -859,5 +885,335 @@ describe('/api-mode remediation for read-only users', () => {
     await user.click(screen.getByRole('tab', { name: 'Coverage' }));
     await screen.findByRole('list', { name: 'Remediation summary' });
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+  });
+});
+
+// ---- step API-4 (A4.4, A12, B7): policy evaluation, DLP, outbound, mapping, detect-only ------
+
+describe('Step API-4 parity on /api-mode', () => {
+  const evaluation = {
+    evaluationId: '7001',
+    evaluationMode: 'detect' as const,
+    disposition: 'reject' as const,
+    decisionSource: 'tenant_rule' as const,
+    decisiveRuleRef: 'pol-1#3/blocked‮senders',
+    overrideApplied: false,
+    matchedRules: [{ ruleRef: 'pol-1#3/blocked‮senders', actions: ['REJECT'] }],
+    actions: [{ type: 'REJECT', status: 'requested', reason: 'mapped_to_mailbox_action' }],
+    explanation: 'Rule <b>blocked</b> matched',
+    postDelivery: [
+      { type: 'REJECT', status: 'requested', reason: 'mapped_to_mailbox_action' },
+      { type: 'SENDER_NOTICE', status: 'not_applicable', reason: 'post_delivery_no_bounce' },
+    ],
+    evaluatedAt: T,
+  };
+
+  it('Detections: policy and DLP columns and filters; outbound is never remediable', async () => {
+    const queries: URLSearchParams[] = [];
+    const outbound = detection({
+      id: '0193fa00-0000-7000-8000-0000000000aa',
+      direction: 'outbound',
+      remediationState: 'skipped',
+      remediationAction: null,
+      remediationId: null,
+      quarantineEntryId: null,
+      policyState: 'evaluated',
+      policyDisposition: 'reject',
+      dlpAction: 'block',
+      policy: {
+        ...evaluation,
+        actions: [{ type: 'REJECT', status: 'not_applicable', reason: 'outbound_already_sent' }],
+      },
+      dlp: { action: 'block', verdict: 'violation', categories: ['payment_card'] },
+    });
+    base({
+      ApiModeController_listDetections_v1: ({ url }) => {
+        queries.push(url.searchParams);
+        return okJson({
+          data: [
+            listRow(
+              detection({
+                policyState: 'evaluated',
+                policyDisposition: 'quarantine',
+                policyTagged: true,
+              }),
+            ),
+            listRow(outbound),
+          ],
+          nextCursor: null,
+        });
+      },
+      ApiModeController_getDetection_v1: () => okJson(outbound),
+    });
+    const { user, container } = renderWithProviders(<ApiModePage />, {
+      route: '/api-mode?tab=detections',
+    });
+    const table = await screen.findByRole('table', { name: 'Detections of API-mode copies' });
+    expect(await within(table).findByText('DLP Block')).toBeInTheDocument();
+    expect(within(table).getByText('Quarantine')).toBeInTheDocument();
+    expect(within(table).getByText('Tagged')).toBeInTheDocument();
+    expect(within(table).getByText('Not remediable — already sent')).toBeInTheDocument();
+    await expectNoAxeViolations(container);
+
+    await user.click(screen.getByRole('combobox', { name: 'DLP action' }));
+    await user.click(await screen.findByRole('option', { name: 'Block' }));
+    await waitFor(() => expect(queries.at(-1)?.get('dlpAction')).toBe('block'));
+    await user.click(screen.getByRole('combobox', { name: 'Policy disposition' }));
+    await user.click(await screen.findByRole('option', { name: 'Reject' }));
+    await waitFor(() => expect(queries.at(-1)?.get('policyDisposition')).toBe('reject'));
+    await user.click(screen.getByRole('combobox', { name: 'Direction' }));
+    await user.click(await screen.findByRole('option', { name: 'Outbound' }));
+    await waitFor(() => expect(queries.at(-1)?.get('direction')).toBe('outbound'));
+  });
+
+  it('Detection detail: the policy evaluation (untrusted text) and the DLP block', async () => {
+    const outbound = detection({
+      direction: 'outbound',
+      remediationState: 'skipped',
+      remediationAction: null,
+      remediationId: null,
+      quarantineEntryId: null,
+      policyState: 'evaluated',
+      policyDisposition: 'reject',
+      dlpAction: 'block',
+      policy: evaluation,
+      dlp: { action: 'block', verdict: 'violation', categories: ['payment_card', 'iban'] },
+    });
+    base({
+      ApiModeController_listDetections_v1: () => okJson({ data: [], nextCursor: null }),
+      ApiModeController_getDetection_v1: () => okJson(outbound),
+    });
+    const { container } = renderWithProviders(<ApiModePage />, {
+      route: `/api-mode?tab=detections&detection=${DETECTION}`,
+    });
+    const drawer = await screen.findByRole('dialog', { name: 'Detection' });
+    const policyBlock = await within(drawer).findByRole('region', { name: 'Policy evaluation' });
+    expect(within(policyBlock).getByText('Reject')).toBeInTheDocument();
+    expect(within(policyBlock).getByText('Your policy rule')).toBeInTheDocument();
+    expect(
+      within(policyBlock).getByText(/No bounce or sender notice after delivery/),
+    ).toBeInTheDocument();
+    // The explanation is untrusted text: rendered, never as HTML.
+    expect(within(policyBlock).getByText('Rule <b>blocked</b> matched')).toBeInTheDocument();
+    expect(policyBlock.querySelector('b')).toBeNull();
+    const dlp = within(drawer).getByRole('region', { name: 'Data loss prevention' });
+    expect(within(dlp).getByText('payment_card')).toBeInTheDocument();
+    expect(
+      within(drawer).getByText(/Outbound · Not remediable — already sent/),
+    ).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: 'Remediate…' })).toBeDisabled();
+    await expectNoAxeViolations(container);
+  });
+
+  it('History detail: decision v2 lanes with the policy outcome', async () => {
+    const v2 = action({
+      status: 'succeeded',
+      decision: {
+        v: 2,
+        policy: { scope: 'organization', publicId: null, rowVersion: 3, sha256: SHA },
+        mode: 'enforce',
+        ruleId: 'policy-mapping:reject',
+        inputs: {
+          verdict: 'clean',
+          riskScore: 10,
+          level: 'low',
+          hardBlocks: [],
+          verdictAuthority: 'copy',
+        },
+        policyOutcome: {
+          disposition: 'reject',
+          tagged: false,
+          overrideApplied: false,
+          decisionSource: 'tenant_rule',
+          decisiveRuleRef: 'pol-1#3/blocked',
+          floorReasons: [],
+          dlpAction: null,
+          actionTypes: ['REJECT'],
+        },
+        notes: [],
+        lanes: {
+          verdict: null,
+          policy: { key: 'reject', action: 'move_quarantine' },
+          winner: 'policy',
+          suppressedBy: null,
+        },
+        postDelivery: [
+          { type: 'SENDER_NOTICE', status: 'not_applicable', reason: 'post_delivery_no_bounce' },
+        ],
+      },
+    });
+    base({
+      ApiModeRemediationController_list_v1: () =>
+        okJson({ data: [actionRow(v2)], nextCursor: null }),
+      ApiModeRemediationController_detail_v1: () => okJson(v2),
+    });
+    renderWithProviders(<ApiModePage />, {
+      route: `/api-mode?tab=history&remediation=${ACTION}`,
+    });
+    const drawer = await screen.findByRole('dialog', { name: 'Mailbox action' });
+    const lanes = await within(drawer).findByLabelText('Decision lanes');
+    expect(lanes).toHaveTextContent('Verdict lane: no action');
+    expect(lanes).toHaveTextContent(
+      'Policy lane: Policy disposition Reject → Move to quarantine folder (decided)',
+    );
+    expect(lanes).toHaveTextContent(/No bounce or sender notice after delivery/);
+  });
+
+  it('Remediation: policy mapping and the detect-only period are sent; hard delete is never offered', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    base({
+      ApiModeRemediationController_getPolicy_v1: () => okJson(policy()),
+      ApiModeRemediationController_putPolicy_v1: ({ body }) => {
+        bodies.push(body as Record<string, unknown>);
+        return apiErrorJson(422, 'api_mode_detect_only_invalid', 'invalid', {
+          extra: { reason: 'until_too_late' },
+        });
+      },
+    });
+    const { user, container } = renderWithProviders(<ApiModePage />, {
+      route: '/api-mode?tab=remediation',
+    });
+    const form = await screen.findByRole('form', { name: 'Remediation policy: organization' });
+    const reject = within(form).getByRole('combobox', { name: 'Policy disposition Reject' });
+    await user.click(reject);
+    expect(screen.queryByRole('option', { name: /Hard delete/ })).toBeNull();
+    await user.click(await screen.findByRole('option', { name: 'Move to Junk' }));
+    await user.click(within(form).getByRole('radio', { name: 'Detect only' }));
+    const days = within(form).getByLabelText('Detect only for (days)');
+    await user.type(days, '40');
+    await user.type(within(form).getByLabelText('Reason (required)'), 'Start slowly');
+    await user.click(within(form).getByRole('button', { name: 'Save policy' }));
+    expect(
+      await within(form).findByText(/The detect-only period is 1 to 30 days/),
+    ).toBeInTheDocument();
+    expect(bodies).toHaveLength(0);
+    await user.clear(days);
+    await user.type(days, '7');
+    await user.click(within(form).getByRole('radio', { name: 'Switch to enforce automatically' }));
+    await user.click(within(form).getByRole('button', { name: 'Save policy' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    const body = bodies[0]!;
+    expect(body).toMatchObject({
+      mode: 'detect_only',
+      document: { policyMapping: { reject: 'move_junk', quarantine: 'move_quarantine' } },
+      detectOnly: { then: 'enforce' },
+    });
+    expectRequestMatchesContract('ApiModeRemediationController_putPolicy_v1', body);
+    await expectNoAxeViolations(container);
+  });
+
+  it('Remediation: the ended-period banner reviews, switches to enforce or extends 7 days', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const ended = policy({
+      organization: {
+        source: 'organization',
+        id: '0193ff00-0000-7000-8000-000000000001',
+        mode: 'detect_only',
+        document: P1,
+        sha256: SHA,
+        rowVersion: 5,
+        updatedAt: T,
+        effectivePolicyMapping: MAPPING,
+        detectOnly: {
+          until: '2026-11-20T09:00:00.000Z',
+          then: 'remind',
+          startedAt: '2026-11-13T09:00:00.000Z',
+          ended: true,
+          simulatedSinceStart: 12,
+        },
+      },
+    });
+    base({
+      ApiModeRemediationController_getPolicy_v1: () => okJson(ended),
+      ApiModeRemediationController_putPolicy_v1: ({ body }) => {
+        bodies.push(body as Record<string, unknown>);
+        return apiErrorJson(409, 'api_mode_remediation_policy_conflict', 'stale');
+      },
+    });
+    const { user, container } = renderWithProviders(<ApiModePage />, {
+      route: '/api-mode?tab=remediation',
+    });
+    const banner = await screen.findByRole('status', {
+      name: 'Detect-only period ended: the organization policy',
+    });
+    expect(banner).toHaveTextContent('12 actions would have been taken');
+    expect(within(banner).getByRole('link', { name: 'Review simulated actions' })).toHaveAttribute(
+      'href',
+      '/api-mode?tab=history&status=simulated',
+    );
+    await expectNoAxeViolations(container);
+    await user.click(within(banner).getByRole('button', { name: 'Switch to enforce' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({ mode: 'enforce', expectedRowVersion: 5 });
+    expect(bodies[0]).not.toHaveProperty('detectOnly');
+    expectRequestMatchesContract('ApiModeRemediationController_putPolicy_v1', bodies[0]);
+    await user.click(within(banner).getByRole('button', { name: 'Extend 7 days' }));
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toMatchObject({ mode: 'detect_only', detectOnly: { then: 'remind' } });
+    expect(await within(banner).findByText(/changed by someone else/)).toBeInTheDocument();
+  });
+
+  it('Settings and Coverage: the two toggles and the policy and outbound tiles', async () => {
+    base({
+      ApiModeSettingsController_get_v1: () =>
+        okJson({
+          settings: {
+            internalMailEnabled: true,
+            autoClawback: 'enforce',
+            autoMaxMailboxes: 500,
+            purgeApprovalMailboxes: 50,
+            clawbackLookbackDays: 14,
+            tiMinConfidence: 80,
+            reportAckEnabled: true,
+            reportFeedbackEnabled: true,
+            policyEvaluationEnabled: true,
+            outboundDetectionEnabled: false,
+          },
+          source: 'row',
+          rowVersion: 2,
+          updatedAt: T,
+          defaults: {
+            internalMailEnabled: true,
+            autoClawback: 'enforce',
+            autoMaxMailboxes: 500,
+            purgeApprovalMailboxes: 50,
+            clawbackLookbackDays: 14,
+            tiMinConfidence: 80,
+            reportAckEnabled: true,
+            reportFeedbackEnabled: true,
+            policyEvaluationEnabled: true,
+            outboundDetectionEnabled: true,
+          },
+          bounds: {
+            autoMaxMailboxes: { min: 1, max: 20_000 },
+            purgeApprovalMailboxes: { min: 1, max: 10_000 },
+            clawbackLookbackDays: { min: 1, max: 60 },
+            tiMinConfidence: { min: 0, max: 100 },
+          },
+          platform: {
+            hardDeleteAvailable: false,
+            clawbackMaxWindowDays: 30,
+            purgeApprovalTtlHours: 24,
+            reportMailboxesMax: 20,
+          },
+        }),
+      ApiModeReportsController_listMailboxes_v1: () => okJson({ data: [], nextCursor: null }),
+    });
+    const { user } = renderWithProviders(<ApiModePage />, { route: '/api-mode?tab=settings' });
+    const form = await screen.findByRole('form', { name: 'Organization settings' });
+    expect(
+      within(form).getByRole('switch', { name: 'Evaluate tenant policies on copies' }),
+    ).toBeChecked();
+    expect(
+      within(form).getByRole('switch', { name: 'Detect outbound mail (DLP)' }),
+    ).not.toBeChecked();
+    await user.click(screen.getByRole('tab', { name: 'Coverage' }));
+    const tiles = await screen.findByRole('list', { name: 'Policy and outbound summary' });
+    expect(within(tiles).getByText('Policy evaluations, last 24 hours')).toBeInTheDocument();
+    expect(within(tiles).getByText('Mailboxes excluded by scope')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Protection by mode' })).toHaveAttribute(
+      'href',
+      '/protection-by-mode',
+    );
   });
 });

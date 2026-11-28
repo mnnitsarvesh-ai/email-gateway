@@ -30,6 +30,7 @@ import {
 import type { ApiError } from '@/lib/api/errors';
 import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
 import type { OperationId } from '@/lib/api/types';
+import { Can } from '@/lib/auth/can';
 import { useCan } from '@/lib/auth/me';
 import { formatDuration, formatNumber, humanize } from '@/lib/format';
 import { MutationError, Section } from '@/features/domains/kit';
@@ -235,6 +236,50 @@ export function ClawbackTiles({ overview }: { overview: Overview }) {
           label="Reports resolved, last 24 hours"
           value={formatNumber(reports.resolved24h)}
           detail={`${formatNumber(reports.received24h)} received · ${formatNumber(reports.reportMailboxes)} report mailbox${reports.reportMailboxes === 1 ? '' : 'es'}`}
+        />
+      </li>
+    </ul>
+  );
+}
+
+/**
+ * Step API-4 A12: policy evaluation of copies, outbound detections and mailboxes excluded by a
+ * domain's scope (organization block of the overview).
+ */
+export function ParityTiles({ overview }: { overview: Overview }) {
+  const { policy, outbound, scope } = overview;
+  return (
+    <ul
+      className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+      aria-label="Policy and outbound summary"
+    >
+      <li>
+        <Tile
+          label="Policy evaluations, last 24 hours"
+          value={policy.enabled ? formatNumber(policy.evaluated24h) : 'Off'}
+          detail={
+            policy.enabled
+              ? `${formatNumber(policy.errors24h)} failed (the verdict rules decided those)`
+              : 'Your policies are not evaluated on copies (Settings tab).'
+          }
+        />
+      </li>
+      <li>
+        <Tile
+          label="Outbound detections, last 24 hours"
+          value={outbound.enabled ? formatNumber(outbound.detections24h) : 'Off'}
+          detail={
+            outbound.enabled
+              ? 'Detected after sending and alerted; never remediated.'
+              : 'Outbound journal copies are not evaluated (Settings tab).'
+          }
+        />
+      </li>
+      <li>
+        <Tile
+          label="Mailboxes excluded by scope"
+          value={formatNumber(scope.excluded)}
+          detail="Recorded for visibility, never remediated or fed (Which mailboxes, per domain)."
         />
       </li>
     </ul>
@@ -568,6 +613,15 @@ export function CoverageTab() {
       <CoverageTiles overview={overview.data} />
       <RemediationTiles summary={overview.data.remediation} />
       <ClawbackTiles overview={overview.data} />
+      <ParityTiles overview={overview.data} />
+      <Can op="ApiModeOnboardingController_protectionCoverage_v1">
+        <p className="text-sm">
+          <Link href="/protection-by-mode" className="text-primary underline underline-offset-2">
+            Protection by mode
+          </Link>{' '}
+          compares what Inline, API and Hybrid cover and shows each domain&apos;s gaps.
+        </p>
+      </Can>
       <p className="text-xs text-muted-foreground">
         Updated <DateTime value={overview.data.generatedAt} />. Lag is measured from the
         provider&apos;s delivery to the verdict; coverage counts in-scope mailboxes of domains in

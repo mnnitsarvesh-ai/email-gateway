@@ -147,6 +147,10 @@ const API_MODE_READS = [
   'api_mode_reports_detail',
   'api_mode_reports_list_mailboxes',
   'api_mode_settings_get',
+  // Step API-4 (design note 38 B10): protection by mode, the onboarding state and the scope.
+  'api_mode_onboarding_protection_coverage',
+  'api_mode_onboarding_domain_onboarding',
+  'api_mode_onboarding_get_scope',
 ];
 
 /** Turns per conversation (keeps each replayed segment small). */
@@ -304,10 +308,12 @@ describe('tool sweep over every enabled read (§9 item 4)', () => {
     // 365 = 197 reads (the 9 API-mode reads) + 168 writes (its 5 writes are deferred to API-3);
     // step API-2 (design 36 R16): 368 = 200 reads (+ the 3 remediation reads) + 168 writes (its
     // 6 writes are deferred to API-3 too); step API-3 (design note 37 C15): 395 = 207 reads (+ the
-    // 7 clawback, report and settings reads) + 188 writes (the 20 API-mode writes).
-    expect(ENABLED_READS).toHaveLength(207);
-    expect(ENABLED_WRITES).toHaveLength(188);
-    expect(ENABLED_TOOLS).toHaveLength(395);
+    // 7 clawback, report and settings reads) + 188 writes (the 20 API-mode writes); step API-4
+    // (design note 38 B10): 400 = 210 reads (+ the 3 onboarding reads) + 190 writes (+ the
+    // scope put and the provider ownership check).
+    expect(ENABLED_READS).toHaveLength(210);
+    expect(ENABLED_WRITES).toHaveLength(190);
+    expect(ENABLED_TOOLS).toHaveLength(400);
     expect(ENABLED_TOOLS.filter((t) => t.native).map((t) => [t.name, t.access])).toEqual([
       ['report_generate', 'read'],
       ['report_send_email', 'write'],
@@ -940,6 +946,12 @@ const WRITE_SAMPLES: Readonly<Record<string, () => Record<string, unknown>>> = {
       expectedRowVersion: null,
     },
   }),
+  // Step API-4 (design note 38 B10): the scope put and the provider ownership check.
+  api_mode_onboarding_put_scope: () => ({
+    domainId: unknown(),
+    body: { scope: { kind: 'all' }, reason: sweepReason, expectedRowVersion: null },
+  }),
+  domains_provider_ownership_check: () => ({ domainId: unknown(), body: {} }),
 };
 
 /** Checksums of the tables an enabled write could change, for the sweep's organization. */

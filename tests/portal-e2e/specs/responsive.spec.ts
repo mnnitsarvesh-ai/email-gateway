@@ -324,3 +324,33 @@ test('account takeover and incident pages fit the viewport (step 8.4)', async ({
   }
   expect(offenders, `account takeover pages wider than the ${layout} viewport`).toEqual([]);
 });
+
+test('API-mode onboarding pages fit the viewport (step API-4)', async ({ page }, testInfo) => {
+  test.setTimeout(240_000);
+  const layout = layoutOf(testInfo);
+  const s = readState().onboarding;
+  await signIn(page, 'etaAdmin', { next: '/protection-by-mode' });
+  const offenders: string[] = [];
+  const wizard = `/domains/onboarding?domainId=${s.domains.bound}`;
+  for (const path of [
+    '/protection-by-mode',
+    `/domains/${s.domains.bound}`,
+    `/domains/${s.domains.inline}`,
+    `${wizard}&step=ownership`,
+    `${wizard}&step=connect`,
+    `${wizard}&step=intake`,
+    `${wizard}&step=mailboxes`,
+    `${wizard}&step=action`,
+    `${wizard}&step=review`,
+    '/api-mode?tab=remediation',
+    '/api-mode?tab=detections',
+  ]) {
+    await page.goto(path);
+    await expect(page.locator('main h1').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+    const overflow = await horizontalOverflow(page);
+    if (overflow > 1) offenders.push(`${path}: ${overflow}px`);
+    await expectNoSeriousA11yViolations(page, `${path} (${layout})`);
+  }
+  expect(offenders, `onboarding pages wider than the ${layout} viewport`).toEqual([]);
+});

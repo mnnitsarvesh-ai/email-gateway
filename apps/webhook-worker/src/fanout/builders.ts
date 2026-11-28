@@ -7,6 +7,7 @@ import type {
   DomainStatusChangedV1,
   EventEnvelope,
   IntegrationHealthChangedV1,
+  MessageCopyDetectedV1,
   MessageReceivedV1,
   MessageScannedV1,
   MessageStateChangedV1,
@@ -19,11 +20,13 @@ import {
   eventSeverity,
   type MatchableEvent,
   type Severity,
+  type WebhookDirection,
   type WebhookEventType,
 } from '@email-gateway/webhooks';
 import type { ScanVerdict } from '@email-gateway/security-contracts';
 import {
   type AtoAccountKind,
+  type CopyDetectionFacts,
   type DomainFacts,
   type ExecutionLogFacts,
   type MessageFacts,
@@ -34,7 +37,13 @@ import {
   reasonCodes,
   snakeCodeOrNull,
 } from './facts';
-import { type Candidate, failingRecords, rejectionOf, threatVerdictOf } from './projection';
+import {
+  type Candidate,
+  failingRecords,
+  mailboxDlpActionOf,
+  rejectionOf,
+  threatVerdictOf,
+} from './projection';
 
 /**
  * Builds the `data` of each candidate public event from the writer facts (step 6.2 W3, §5). A
@@ -62,6 +71,10 @@ export interface FactsSource {
   domain(organizationId: bigint, domainId: bigint, publicId: string): Promise<DomainFacts>;
   /** Step 8.4: the kind of a monitored ATO account of the organization (by public id). */
   atoAccountKind(organizationId: bigint, accountPublicId: string): Promise<AtoAccountKind>;
+  /** Step API-4: reason codes of a copy's detect scan (latest round-0 risk row; none → []). */
+  riskReasonCodes(key: MessageKey): Promise<string[]>;
+  /** Step API-4: the counted copies of a copy message (sandbox stage); none → null. */
+  copyDetections(key: MessageKey): Promise<CopyDetectionFacts | null>;
 }
 
 /** One public event ready for the envelope (W4) and the stored row. */
@@ -131,6 +144,18 @@ function quarantineObject(
   };
 }
 
+/**
+ * The remediation states of a copy detection's counted copies (A9.1; `none` is not public). An
+ * outbound detection is never remediated (P-I5): null.
+ */
+function copyRemediation(
+  p: MessageCopyDetectedV1,
+): { pending: number; simulated: number; skipped: number } | null {
+  if (p.direction === 'outbound') return null;
+  const r = p.copies.remediation;
+  return { pending: r.pending, simulated: r.simulated, skipped: r.skipped };
+}
+
 const messageKeyOf = (
   event: EventEnvelope<unknown>,
   payload: { messageId: string; receivedAt: string },
@@ -165,6 +190,8 @@ export async function buildPublicEvents(
       domainPublicId?: string | null;
       verdict?: ScanVerdict;
       connectionPublicId?: string;
+      /** Step API-4: the detection's direction (the copy payload's), matched instead of the row's. */
+      direction?: WebhookDirection;
     },
   ): void => {
     const severity = eventSeverity(candidate.type, data as never);
@@ -172,7 +199,9 @@ export async function buildPublicEvents(
     const matchable: MatchableEvent = {
       type: candidate.type,
       severity,
-      ...(m !== null ? { direction: m.direction, domainPublicId: m.domainPublicId } : {}),
+      ...(m !== null
+        ? { direction: attributes.direction ?? m.direction, domainPublicId: m.domainPublicId }
+        : {}),
       ...(m === null && attributes.domainPublicId !== undefined
         ? { domainPublicId: attributes.domainPublicId }
         : {}),
@@ -364,10 +393,10 @@ export async function buildPublicEvents(
       case 'threat_sandbox': {
         const p = event.payload as AttachmentSandboxCompletedV1;
         const key = messageKeyOf(event, p);
-        const [m, submission] = await Promise.all([
-          messageOf(key),
-          facts.sandboxSubmission(key, BigInt(p.submissionId)),
-        ]);
+        const m = await messageOf(key);
+        // Step API-4 A9.1 (ADR-0106): a copy's sandbox verdict is never `email.threat.detected`.
+        if (m.ingestSource !== 'gateway') break;
+        const submission = await facts.sandboxSubmission(key, BigInt(p.submissionId));
         push(
           candidate,
           {
@@ -387,6 +416,99 @@ export async function buildPublicEvents(
             },
           },
           { message: m, verdict: 'malicious' },
+        );
+        break;
+      }
+      case 'mailbox_threat_sandbox': {
+        // Step API-4 A9.1: the sandbox verdict of an API-mode copy message (read on the writer).
+        const p = event.payload as AttachmentSandboxCompletedV1;
+        const key = messageKeyOf(event, p);
+        const m = await messageOf(key);
+        if (m.ingestSource === 'gateway') break;
+        const copies = await facts.copyDetections(key);
+        if (copies === null) break; // no counted copy (inline authority or out of scope)
+        const submission = await facts.sandboxSubmission(key, BigInt(p.submissionId));
+        push(
+          candidate,
+          {
+            message: messageObject(m),
+            detection: {
+              stage: 'sandbox',
+              verdict: 'malicious',
+              riskScore: null,
+              reasonCodes: reasonCodes(p.reasonCodes),
+              protectionMode: copies.protectionMode,
+              direction: copies.direction,
+              copySource: copies.copySource,
+              policyDisposition: copies.policyDisposition,
+              mailboxCount: copies.mailboxCount,
+              remediation: null,
+              attachment: {
+                partIndex: p.partIndex,
+                sha256: p.sha256.toLowerCase(),
+                detectedType: submission.detectedType,
+              },
+              detectionIds: copies.detectionIds,
+              decidedAt: p.completedAt,
+            },
+          },
+          { message: m, verdict: 'malicious', direction: copies.direction },
+        );
+        break;
+      }
+      case 'mailbox_threat_scan': {
+        const p = event.payload as MessageCopyDetectedV1;
+        const verdict = p.verdict === null ? null : threatVerdictOf(p.verdict);
+        if (verdict === null) break;
+        const key = messageKeyOf(event, p);
+        const [m, codes] = await Promise.all([messageOf(key), facts.riskReasonCodes(key)]);
+        push(
+          candidate,
+          {
+            message: messageObject(m),
+            detection: {
+              stage: 'scan',
+              verdict,
+              riskScore: p.riskScore,
+              reasonCodes: codes,
+              protectionMode: p.protectionMode,
+              direction: p.direction,
+              copySource: p.copySource,
+              policyDisposition: p.policy.disposition,
+              mailboxCount: p.copies.counted,
+              remediation: copyRemediation(p),
+              attachment: null,
+              detectionIds: p.detectionIds,
+              decidedAt: p.decidedAt,
+            },
+          },
+          { message: m, verdict, direction: p.direction },
+        );
+        break;
+      }
+      case 'mailbox_dlp': {
+        const p = event.payload as MessageCopyDetectedV1;
+        const action = mailboxDlpActionOf(p.dlp);
+        if (action === null || p.dlp === null) break;
+        const m = await messageOf(messageKeyOf(event, p));
+        push(
+          candidate,
+          {
+            message: messageObject(m),
+            dlp: {
+              action,
+              verdict: p.dlp.verdict,
+              categories: [...new Set(p.dlp.categories)].slice(0, 8),
+              protectionMode: p.protectionMode,
+              direction: p.direction,
+              policyDisposition: p.policy.disposition,
+              mailboxCount: p.copies.counted,
+              remediation: copyRemediation(p),
+              detectionIds: p.detectionIds,
+              decidedAt: p.decidedAt,
+            },
+          },
+          { message: m, direction: p.direction },
         );
         break;
       }

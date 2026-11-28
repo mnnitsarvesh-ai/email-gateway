@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { InconsistentReadError } from '../shared/errors';
 import {
   fakeFacts,
+  messageFacts,
   ORG_ID,
   ORG_PUBLIC_ID,
   type SeenSql,
@@ -127,6 +128,8 @@ function harness(
     recipientOutcomes: (_tx: unknown, k: never) => facts.recipientOutcomes(k),
     sandboxSubmission: (_tx: unknown, k: never, id: never) => facts.sandboxSubmission(k, id),
     domain: (_tx: unknown, o: never, id: never, p: never) => facts.domain(o, id, p),
+    riskReasonCodes: (_tx: unknown, k: never) => facts.riskReasonCodes(k),
+    copyDetections: (_tx: unknown, k: never) => facts.copyDetections(k),
   } as unknown as FanoutReads;
   const index = {
     get: (organizationId: bigint) => {
@@ -313,6 +316,107 @@ describe('FanoutService (W1, W3, W5, N2)', () => {
     const dns = harness({ index: orgIndex({ subscriptions: [], settings }) });
     await dns.service.handle(sourceEvent(EventTypes.DomainDnsRecordsChanged));
     expect(dns.transactions).toBe(0);
+  });
+
+  it('API-mode DLP detection requests dlp_detected (message refs, no scope, its own throttle)', async () => {
+    const settings = structuredClone(
+      NOTIFICATION_SETTINGS_DEFAULTS,
+    ) as ResolvedNotificationSettings;
+    settings.alerts.dlpDetected.throttleMinutes = 15;
+    const facts = fakeFacts({
+      message: () => Promise.resolve(messageFacts({ ingestSource: 'journal_intake' })),
+    });
+    const h = harness({ index: orgIndex({ subscriptions: [], settings }), facts });
+    const event = sourceEvent(EventTypes.MessageCopyDetected, {
+      verdict: 'clean',
+      dlp: { action: 'quarantine', verdict: 'suspicious', categories: ['payment_card'] },
+    });
+    await h.service.handle(event);
+    const [window] = inserts(h, 'notification_alert_windows');
+    expect(window?.values).toEqual(expect.arrayContaining([ORG_ID, 'dlp_detected', '-']));
+    const alert = notificationAlertRequestedV1.parse(h.outbox[0]!.payload);
+    expect(h.outbox[0]!.eventId).toBe(webhookEventId(event.eventId, 'alert:dlp_detected'));
+    expect(alert).toMatchObject({
+      kind: 'dlp_detected',
+      severity: 'high',
+      refs: {
+        webhookEventId: webhookEventId(event.eventId, 'mailbox.dlp.detected', 'dlp'),
+        messageId: '9001',
+        receivedAt: '2026-11-01T10:15:30.123Z',
+      },
+      window: { from: '2026-11-01T10:15:00.000Z', to: '2026-11-01T10:30:00.000Z' },
+    });
+    expect(await counter(h, 'webhook_alert_requests_total')).toContain(
+      'kind="dlp_detected",result="requested"',
+    );
+  });
+
+  it('API-mode threat detection requests threat_detected; DLP under its minimum severity does not', async () => {
+    const facts = fakeFacts({
+      message: () => Promise.resolve(messageFacts({ ingestSource: 'journal_intake' })),
+    });
+    const h = harness({ index: orgIndex({ subscriptions: [] }), facts });
+    const event = sourceEvent(EventTypes.MessageCopyDetected, {
+      dlp: { action: 'alert', verdict: 'suspicious', categories: [] },
+    });
+    await h.service.handle(event);
+    // phishing → high threat alert; DLP `alert` is low, under the default `medium` minimum.
+    expect(h.outbox).toHaveLength(1);
+    expect(notificationAlertRequestedV1.parse(h.outbox[0]!.payload)).toMatchObject({
+      kind: 'threat_detected',
+      refs: { webhookEventId: webhookEventId(event.eventId, 'mailbox.threat.detected', 'scan') },
+    });
+    expect(inserts(h, 'webhook_events')).toHaveLength(1);
+    expect(await counter(h, 'webhook_alert_requests_total')).not.toContain('dlp_detected');
+  });
+
+  it('delivers mailbox.* events to subscribers by type, direction and verdict filters', async () => {
+    const facts = () =>
+      fakeFacts({
+        message: () => Promise.resolve(messageFacts({ ingestSource: 'mailbox_api' })),
+      });
+    const subscribed = harness({
+      index: orgIndex({
+        subscriptions: [
+          SUB({
+            eventTypes: ['mailbox.threat.detected', 'mailbox.dlp.detected'],
+            filters: { directions: ['outbound'] },
+          }),
+        ],
+      }),
+      facts: facts(),
+    });
+    const outbound = sourceEvent(EventTypes.MessageCopyDetected, {
+      direction: 'outbound',
+      dlp: { action: 'block', verdict: 'suspicious', categories: ['payment_card'] },
+      copies: { counted: 1, remediation: { pending: 0, simulated: 0, skipped: 1, none: 0 } },
+      detectionIds: ['01890a5d-ac96-774b-bcce-b302099a80f2'],
+    });
+    await subscribed.service.handle(outbound);
+    expect(inserts(subscribed, 'webhook_deliveries')).toHaveLength(2);
+
+    // An inbound detection does not match a directions = [outbound] filter; a verdicts filter
+    // applies to the threat type only.
+    const filtered = harness({
+      index: orgIndex({
+        subscriptions: [
+          SUB({ eventTypes: ['mailbox.threat.detected'], filters: { directions: ['outbound'] } }),
+          SUB({
+            id: 502n,
+            eventTypes: ['mailbox.threat.detected'],
+            filters: { verdicts: ['spam'] },
+          }),
+        ],
+        settings: (() => {
+          const s = structuredClone(NOTIFICATION_SETTINGS_DEFAULTS) as ResolvedNotificationSettings;
+          s.alerts.threatDetected.enabled = false;
+          return s;
+        })(),
+      }),
+      facts: facts(),
+    });
+    await filtered.service.handle(sourceEvent(EventTypes.MessageCopyDetected));
+    expect(filtered.transactions).toBe(0);
   });
 
   it('a DNS failure alert is scoped to the domain', async () => {

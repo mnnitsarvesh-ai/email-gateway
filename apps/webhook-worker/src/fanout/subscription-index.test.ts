@@ -285,4 +285,17 @@ describe('matching and alert settings', () => {
     s.alerts.webhookDisabled.enabled = false;
     expect(alertEnabled(s, 'webhook_disabled', 'high')).toBe(false);
   });
+
+  it('alertEnabled: dlp_detected follows alerts.dlpDetected (step API-4 A9.2; default medium)', () => {
+    const s = structuredClone(NOTIFICATION_SETTINGS_DEFAULTS) as OrganizationIndex['settings'];
+    expect(alertEnabled(s, 'dlp_detected', 'high')).toBe(true);
+    expect(alertEnabled(s, 'dlp_detected', 'medium')).toBe(true);
+    expect(alertEnabled(s, 'dlp_detected', 'low')).toBe(false);
+    s.alerts.dlpDetected.minSeverity = 'low';
+    expect(alertEnabled(s, 'dlp_detected', 'low')).toBe(true);
+    s.alerts.dlpDetected.minSeverity = 'high';
+    expect(alertEnabled(s, 'dlp_detected', 'medium')).toBe(false);
+    s.alerts.dlpDetected.enabled = false;
+    expect(alertEnabled(s, 'dlp_detected', 'high')).toBe(false);
+  });
 });

@@ -55,6 +55,7 @@ import type {
   VerificationsRepository,
   VerificationWrite,
 } from '../../../src/modules/domains/repositories/verifications.repository';
+import type { ProviderVerificationsRepository } from '../../../src/modules/domains/repositories/provider-verifications.repository';
 import {
   type DomainDnsRecordsChangedV1,
   domainDnsRecordsChangedV1,
@@ -136,6 +137,7 @@ export class InMemoryDomainStore {
       checkFailures: 0,
       protectionMode: null,
       protectionModeChangedAt: null,
+      ownershipMethod: null,
       organization: { protectionMode: this.organizationModes.get(organizationId) ?? 'inline' },
       createdAt: now,
       updatedAt: now,
@@ -308,7 +310,12 @@ export class InMemoryDomainStore {
         Promise.resolve(
           clone(
             this.verifications
-              .filter((v) => v.organizationId === scope.organizationId && v.domainId === domainId)
+              .filter(
+                (v) =>
+                  v.organizationId === scope.organizationId &&
+                  v.domainId === domainId &&
+                  v.method === 'dns_txt',
+              )
               .sort((a, b) => (a.id > b.id ? -1 : 1))[0] ?? null,
           ),
         ),
@@ -524,6 +531,159 @@ export class InMemoryDomainStore {
         return Promise.resolve();
       },
     } as unknown as MxObservationsRepository;
+  }
+
+  /**
+   * Step API-4 (B3): `provider_tenant` rows live in `verifications` next to the TXT rows (as in
+   * MySQL); `providerRows` holds their provider columns.
+   */
+  readonly providerRows = new Map<
+    bigint,
+    {
+      providerConnectionId: bigint | null;
+      providerResult: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+      providerCheckedAt: Date | null;
+      providerErrorCode: string | null;
+    }
+  >();
+  /** Step API-4 (B3): the provider connections (public ids) of each organization. */
+  readonly providerConnections = new Map<bigint, Array<{ id: bigint; publicId: string }>>();
+
+  /** Step API-4: the `ProviderVerificationsRepository` double (provider rows only). */
+  providerVerificationsRepository(): ProviderVerificationsRepository {
+    const view = (v: StoredVerification) => {
+      const p = this.providerRows.get(v.id)!;
+      return clone({
+        id: v.id,
+        domainId: v.domainId,
+        status: v.status,
+        providerConnectionId: p.providerConnectionId,
+        providerResult: p.providerResult,
+        providerCheckedAt: p.providerCheckedAt,
+        providerErrorCode: p.providerErrorCode,
+        expiresAt: v.expiresAt,
+        createdAt: v.createdAt,
+      });
+    };
+    const rowsOf = (scope: TenantScope, domainId: bigint) =>
+      this.verifications
+        .filter(
+          (v) =>
+            v.organizationId === scope.organizationId &&
+            v.domainId === domainId &&
+            v.method === 'provider_tenant',
+        )
+        .sort((a, b) => (a.id > b.id ? -1 : 1));
+    const publicIdOf = (scope: TenantScope, id: bigint | null) =>
+      (this.providerConnections.get(scope.organizationId) ?? []).find((c) => c.id === id)
+        ?.publicId ?? null;
+    return {
+      latest: (scope: TenantScope, domainId: bigint) => {
+        const row = rowsOf(scope, domainId)[0];
+        if (!row) return Promise.resolve(null);
+        const v = view(row);
+        return Promise.resolve({
+          ...v,
+          connectionPublicId: publicIdOf(scope, v.providerConnectionId),
+        });
+      },
+      lockPending: (_tx: unknown, scope: TenantScope, domainId: bigint) => {
+        const row = rowsOf(scope, domainId).find((v) => v.status === 'pending');
+        return Promise.resolve(row ? view(row) : null);
+      },
+      lock: (_tx: unknown, scope: TenantScope, id: bigint) => {
+        const row = this.verifications.find(
+          (v) =>
+            v.organizationId === scope.organizationId &&
+            v.id === id &&
+            v.method === 'provider_tenant',
+        );
+        return Promise.resolve(row ? view(row) : null);
+      },
+      create: (
+        _tx: unknown,
+        scope: TenantScope,
+        data: { domainId: bigint; providerConnectionId: bigint; expiresAt: Date },
+      ) => {
+        const row: StoredVerification = {
+          id: this.nextId(),
+          organizationId: scope.organizationId,
+          domainId: data.domainId,
+          method: 'provider_tenant',
+          token: 'provider-tenant',
+          status: 'pending',
+          attempts: 0,
+          nextCheckAt: null,
+          lastCheckedAt: null,
+          lastError: null,
+          lastOutcome: null,
+          verifiedAt: null,
+          expiresAt: data.expiresAt,
+          createdAt: new Date(),
+          evidence: null,
+        };
+        this.verifications.push(row);
+        this.providerRows.set(row.id, {
+          providerConnectionId: data.providerConnectionId,
+          providerResult: null,
+          providerCheckedAt: null,
+          providerErrorCode: null,
+        });
+        return Promise.resolve(view(row));
+      },
+      finish: (
+        _tx: unknown,
+        scope: TenantScope,
+        id: bigint,
+        data: {
+          status: StoredVerification['status'];
+          lastError?: string | null;
+          verifiedAt?: Date;
+          now: Date;
+        },
+      ) => {
+        const row = this.verifications.find(
+          (v) =>
+            v.organizationId === scope.organizationId &&
+            v.id === id &&
+            v.method === 'provider_tenant' &&
+            v.status === 'pending',
+        );
+        if (!row) return Promise.resolve(false);
+        Object.assign(row, {
+          status: data.status,
+          lastError: data.lastError ?? null,
+          lastCheckedAt: data.now,
+          nextCheckAt: null,
+          ...(data.verifiedAt && { verifiedAt: data.verifiedAt }),
+        });
+        return Promise.resolve(true);
+      },
+      connectionId: (_tx: unknown, scope: TenantScope, publicId: string) =>
+        Promise.resolve(
+          (this.providerConnections.get(scope.organizationId) ?? []).find(
+            (c) => c.publicId === publicId.toLowerCase(),
+          )?.id ?? null,
+        ),
+      connectionPublicId: (_tx: unknown, scope: TenantScope, id: bigint) =>
+        Promise.resolve(publicIdOf(scope, id)),
+      due: (now: Date, limit: number) =>
+        Promise.resolve(
+          this.verifications
+            .filter((v) => {
+              const p = this.providerRows.get(v.id);
+              return (
+                v.method === 'provider_tenant' &&
+                v.status === 'pending' &&
+                p !== undefined &&
+                (p.providerCheckedAt !== null || v.expiresAt.getTime() <= now.getTime())
+              );
+            })
+            .sort((a, b) => (a.id < b.id ? -1 : 1))
+            .slice(0, limit)
+            .map((v) => ({ id: v.id, organizationId: v.organizationId, domainId: v.domainId })),
+        ),
+    } as unknown as ProviderVerificationsRepository;
   }
 
   ownershipRepository(): DomainOwnershipRepository {

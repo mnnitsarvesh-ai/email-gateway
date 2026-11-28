@@ -319,6 +319,9 @@ describe('db:seed', () => {
     expect(domain?.liveName).toBe(DEMO.domain);
     // Scheduled for the api's domain-check job, which materializes its configuration (D11, D12).
     expect(domain?.nextCheckAt).toBeInstanceOf(Date);
+    // Step API-4 (B3, ADR-0107): DNS-TXT ownership, set by the seed on a fresh database and by
+    // migration 47's backfill on an existing one; never NULL for an owned domain.
+    expect(domain?.ownershipMethod).toBe('dns_txt');
   });
 
   it('moves a demo domain seeded before step 2.1 (verified) to active, keeping its row', async () => {

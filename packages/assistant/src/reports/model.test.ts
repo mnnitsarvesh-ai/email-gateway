@@ -167,6 +167,37 @@ describe('buildReportModel (design D3)', () => {
     expect(failing.omitted).toEqual([{ section: 'api_mode', reason: 'unavailable', code: 'x' }]);
   });
 
+  it('step API-4 A12: the api_mode section shows policy evaluations and outbound detections when present', () => {
+    const cards = (body: unknown) =>
+      build(okResults({ api_mode_overview: body }), ['api_mode']).body[0]!.cards.map((c) => [
+        c.label,
+        c.value,
+        c.hint ?? null,
+      ]);
+    expect(cards(apiModeOverviewBody())).toEqual(
+      expect.arrayContaining([
+        ['Policy evaluations (24 h)', '120', '2 failed'],
+        ['Outbound detections (24 h)', '4', null],
+      ]),
+    );
+    const off = {
+      ...apiModeOverviewBody(),
+      policy: { enabled: false, evaluated24h: 0, errors24h: 0 },
+      outbound: { detections24h: 0, enabled: false },
+    };
+    expect(cards(off)).toEqual(
+      expect.arrayContaining([
+        ['Policy evaluations (24 h)', 'off', null],
+        ['Outbound detections (24 h)', 'off', null],
+      ]),
+    );
+    // An api answer without the step API-4 blocks renders without the two cards.
+    const { policy: _p, outbound: _o, ...older } = apiModeOverviewBody();
+    const labels = cards(older).map(([label]) => label);
+    expect(labels).not.toContain('Policy evaluations (24 h)');
+    expect(labels).not.toContain('Outbound detections (24 h)');
+  });
+
   it('threats are the top-domains threat set (spam + phishing + malware + bec + suspicious); percentages and bounds', () => {
     const traffic = trafficBody();
     const v = traffic.totals.verdicts as Record<string, number>;

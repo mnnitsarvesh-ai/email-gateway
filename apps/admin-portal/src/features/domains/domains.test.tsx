@@ -387,6 +387,24 @@ describe('DomainDetailPage', () => {
     expect(await screen.findByRole('button', { name: 'Edit destinations' })).toBeInTheDocument();
   });
 
+  it('saves a provider preset without server rows (step API-4 inline regression finding)', async () => {
+    const bodies: unknown[] = [];
+    mockDetail({
+      DomainDestinationsController_replace_v1: ({ body }) => {
+        bodies.push(body);
+        return okJson(destinations());
+      },
+    });
+    const { user } = renderWithProviders(<DomainDetailPage domainId={DOMAIN_ID} />, {
+      route: `/domains/${DOMAIN_ID}?tab=destinations`,
+    });
+    await user.click(await screen.findByRole('button', { name: 'Edit destinations' }));
+    await user.click(screen.getByRole('radio', { name: /Google Workspace/ }));
+    await user.click(screen.getByRole('button', { name: 'Save destinations' }));
+    await waitFor(() => expect(bodies).toEqual([{ provider: 'google_workspace' }]));
+    expectRequestMatchesContract('DomainDestinationsController_replace_v1', bodies[0]);
+  });
+
   it('hides destination editing without domain:routing_manage', async () => {
     mockDetail();
     renderWithProviders(<DomainDetailPage domainId={DOMAIN_ID} />, {

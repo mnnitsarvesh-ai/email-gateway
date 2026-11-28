@@ -376,6 +376,157 @@ describe('RemediationPolicyService (R13 #1-#4)', () => {
   });
 });
 
+describe('RemediationPolicyService: policyMapping and the detect-only period (step API-4 A4.2, B7)', () => {
+  const inDays = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+
+  it('accepts policyMapping (hard_delete refused) and shows the effective mapping', async () => {
+    const doc = { ...P1, policyMapping: { reject: 'tag', allow_tagged: 'none' } };
+    const out = await t.policies.putOrganization(
+      user(),
+      scope,
+      { idempotencyKey: 'pm1', body: putBody({ document: doc }) },
+      null,
+    );
+    expect(out.body.effectivePolicyMapping).toEqual({
+      quarantine: 'move_quarantine',
+      require_approval: 'move_quarantine',
+      reject: 'tag',
+      allow_tagged: 'none',
+    });
+    const meta = t.q.audits.at(-1)!.metadata as { to: { policyMappingSha256: string } };
+    expect(meta.to.policyMappingSha256).toMatch(/^[0-9a-f]{64}$/);
+    const view = await t.policies.get(scope);
+    expect(view.organization.effectivePolicyMapping.reject).toBe('tag');
+    expect(
+      await failure(
+        t.policies.putOrganization(
+          user(),
+          scope,
+          {
+            idempotencyKey: 'pm2',
+            body: putBody({
+              document: { ...P1, policyMapping: { quarantine: 'hard_delete' } },
+              expectedRowVersion: 1,
+            }),
+          },
+          null,
+        ),
+      ),
+    ).toMatchObject({ status: 400 });
+    // The reserved rule key is refused with the API-4 issue code.
+    const refused = await failure(
+      t.policies.putOrganization(
+        user(),
+        scope,
+        {
+          idempotencyKey: 'pm3',
+          body: putBody({
+            document: {
+              v: 1,
+              rules: [
+                {
+                  id: 'r',
+                  when: { verdicts: ['spam'], policyDispositions: ['reject'] },
+                  action: 'tag',
+                },
+              ],
+            },
+            expectedRowVersion: 1,
+          }),
+        },
+        null,
+      ),
+    );
+    expect(JSON.stringify(refused)).toContain('use_policy_mapping');
+  });
+
+  it('detectOnly only with detect_only and a 1 h … 30 d end (422 api_mode_detect_only_invalid)', async () => {
+    for (const [body, reason] of [
+      [
+        putBody({ mode: 'enforce', detectOnly: { until: inDays(7), then: 'remind' } }),
+        'mode_not_detect_only',
+      ],
+      [
+        putBody({ mode: 'detect_only', detectOnly: { until: inDays(0.01), then: 'remind' } }),
+        'until_too_soon',
+      ],
+      [
+        putBody({ mode: 'detect_only', detectOnly: { until: inDays(31), then: 'enforce' } }),
+        'until_too_late',
+      ],
+    ] as const) {
+      expect(
+        await failure(
+          t.policies.putOrganization(user(), scope, { idempotencyKey: `d-${reason}`, body }, null),
+        ),
+      ).toMatchObject({
+        status: 422,
+        code: 'api_mode_detect_only_invalid',
+        details: { reason },
+      });
+    }
+  });
+
+  it('stores a period (started now, not notified), keeps it without detectOnly, enforce clears it', async () => {
+    const until = inDays(7);
+    const created = await t.policies.putDomain(
+      user(),
+      scope,
+      {
+        domainId: t.domain.publicId,
+        idempotencyKey: 'do1',
+        body: putBody({ mode: 'detect_only', detectOnly: { until, then: 'remind' } }),
+      },
+      null,
+    );
+    expect(created.body.detectOnly).toMatchObject({
+      until,
+      then: 'remind',
+      ended: false,
+      simulatedSinceStart: 0,
+    });
+    const stored = t.world.policies.find((p) => p.domainId === t.domain.id)!;
+    expect(stored).toMatchObject({ detectOnlyThen: 'remind', detectOnlyNotifiedAt: null });
+    expect(stored.detectOnlyStartedAt).not.toBeNull();
+    expect(t.q.audits.at(-1)!.metadata).toMatchObject({ detectOnly: { until, then: 'remind' } });
+    // Simulated actions of the domain's mailboxes since the start are counted.
+    const copy = t.world.addCopy(t.mailbox);
+    t.world.addAction(copy, { status: 'simulated', trigger: 'policy', createdAt: new Date() });
+    // A simulated action before the period started does not count.
+    t.world.addAction(copy, {
+      status: 'simulated',
+      action: 'tag',
+      createdAt: new Date(Date.now() - 3_600_000),
+    });
+    const view = await t.policies.get(scope);
+    expect(view.domains[0]!.detectOnly).toMatchObject({ until, simulatedSinceStart: 1 });
+    // An API-2 style body (no detectOnly) keeps the period.
+    const kept = await t.policies.putDomain(
+      user(),
+      scope,
+      {
+        domainId: t.domain.publicId,
+        idempotencyKey: 'do2',
+        body: putBody({ mode: 'detect_only', expectedRowVersion: 1 }),
+      },
+      null,
+    );
+    expect(kept.body.detectOnly).toMatchObject({ until, simulatedSinceStart: 1 });
+    const enforced = await t.policies.putDomain(
+      user(),
+      scope,
+      {
+        domainId: t.domain.publicId,
+        idempotencyKey: 'do3',
+        body: putBody({ mode: 'enforce', expectedRowVersion: 2 }),
+      },
+      null,
+    );
+    expect(enforced.body.detectOnly).toBeNull();
+    expect(t.world.policies.find((p) => p.domainId === t.domain.id)!.detectOnlyUntil).toBeNull();
+  });
+});
+
 describe('RemediationActionsService (R12, R13 #5-#9)', () => {
   const copyOf = (patch: Partial<StoredCopy> = {}) =>
     t.world.addCopy(t.mailbox, { verdict: 'phishing', riskScore: 900, ...patch });

@@ -575,6 +575,12 @@ export const OrgSettingsValuesSchema = z.object({
   tiMinConfidence: z.number().int(),
   reportAckEnabled: z.boolean(),
   reportFeedbackEnabled: z.boolean(),
+  policyEvaluationEnabled: z
+    .boolean()
+    .describe('Step API-4: tenant policies are evaluated on API-mode copies (detect mode)'),
+  outboundDetectionEnabled: z
+    .boolean()
+    .describe('Step API-4: outbound journal messages are evaluated (detect + alert only)'),
 });
 
 const bound = z.object({ min: z.number().int(), max: z.number().int() });
@@ -713,6 +719,8 @@ const settings = {
   tiMinConfidence: 80,
   reportAckEnabled: true,
   reportFeedbackEnabled: true,
+  policyEvaluationEnabled: true,
+  outboundDetectionEnabled: true,
 };
 
 const settingsView = {

@@ -1,5 +1,5 @@
 {
-  "topology_version": 18,
+  "topology_version": 19,
   "exchanges": [
     {
       "name": "email.ingestion",
@@ -739,6 +739,14 @@
       "destination": "email.webhooks",
       "destination_type": "queue",
       "routing_key": "org.*.mail.attachment.sandbox_completed.v1",
+      "arguments": {}
+    },
+    {
+      "source": "email.security",
+      "vhost": "email-gateway",
+      "destination": "email.webhooks",
+      "destination_type": "queue",
+      "routing_key": "org.*.mail.message.copy_detected.v1",
       "arguments": {}
     },
     {

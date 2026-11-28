@@ -1,4 +1,4 @@
-import type { Prisma } from '@email-gateway/database';
+import { Prisma } from '@email-gateway/database';
 import {
   ALERT_SCOPE_NONE,
   parseStoredEnvelope,
@@ -115,6 +115,24 @@ export interface AlertReportCounts {
 
 /** Bounded live counts of the report alert (C13: counters capped at 10 000). */
 export const REPORT_COUNT_CAP = 10_000;
+
+/** A remediation policy of the organization (step API-4 B7): scope, mode and period only. */
+export interface AlertRemediationPolicy {
+  publicId: string;
+  /** The overridden domain (null: the organization policy). */
+  domainId: bigint | null;
+  domainName: string | null;
+  mode: string;
+  detectOnlyUntil: Date | null;
+  detectOnlyThen: 'remind' | 'enforce' | null;
+  detectOnlyStartedAt: Date | null;
+  detectOnlyNotifiedAt: Date | null;
+}
+
+/** Simulated actions are counted up to this bound (B7: `simulatedSinceStart` capped 10 000). */
+export const SIMULATED_COUNT_CAP = 10_000;
+/** Longest detect-only period (B7: until ≤ now + 30 d): the count window when the start is gone. */
+export const DETECT_ONLY_MAX_PERIOD_MS = 30 * 86_400_000;
 
 const APPROVAL_REASON_CODES: ReadonlySet<string> = new Set([
   'mailbox_threshold',
@@ -465,6 +483,122 @@ export class SecurityAlertReads {
     };
   }
 
+  /**
+   * `email_messages.ingest_source` of a message of the organization (step API-4 A9.2): a copy
+   * (`journal_intake`, `mailbox_api`) is rendered as an API-mode detection. Null when the row is
+   * gone (purged).
+   */
+  async messageIngestSource(
+    tx: Tx,
+    organizationId: bigint,
+    id: bigint,
+    receivedAt: Date,
+  ): Promise<'gateway' | 'journal_intake' | 'mailbox_api' | null> {
+    const row = await tx.emailMessage.findFirst({
+      where: { id, receivedAt, organizationId },
+      select: { id: true, organizationId: true, receivedAt: true, ingestSource: true },
+    });
+    if (row === null) return null;
+    if (
+      row.id !== id ||
+      row.organizationId !== organizationId ||
+      row.receivedAt.getTime() !== receivedAt.getTime()
+    ) {
+      throw new InconsistentNotificationReadError('email_message');
+    }
+    return row.ingestSource;
+  }
+
+  /**
+   * A remediation policy of the organization by public id (step API-4 B7): its scope (and the
+   * tenant's domain name), mode and detect-only period columns — never the document.
+   */
+  async remediationPolicy(
+    tx: Tx,
+    organizationId: bigint,
+    publicId: string,
+  ): Promise<AlertRemediationPolicy | null> {
+    const row = await tx.apiRemediationPolicy.findFirst({
+      where: { publicId, organizationId },
+      select: {
+        publicId: true,
+        organizationId: true,
+        domainId: true,
+        mode: true,
+        detectOnlyUntil: true,
+        detectOnlyThen: true,
+        detectOnlyStartedAt: true,
+        detectOnlyNotifiedAt: true,
+      },
+    });
+    if (row === null) return null;
+    if (row.publicId !== publicId || row.organizationId !== organizationId) {
+      throw new InconsistentNotificationReadError('api_remediation_policy');
+    }
+    let domainName: string | null = null;
+    if (row.domainId !== null) {
+      const domain = await this.domain(tx, organizationId, row.domainId);
+      domainName = domain?.name ?? '';
+    }
+    return {
+      publicId: row.publicId,
+      domainId: row.domainId,
+      domainName,
+      mode: row.mode,
+      detectOnlyUntil: row.detectOnlyUntil,
+      detectOnlyThen: row.detectOnlyThen,
+      detectOnlyStartedAt: row.detectOnlyStartedAt,
+      detectOnlyNotifiedAt: row.detectOnlyNotifiedAt,
+    };
+  }
+
+  /**
+   * Simulated remediation actions (`api_remediation_actions.status = 'simulated'`) of a
+   * remediation policy's scope since `since` (step API-4 B7), bounded by `SIMULATED_COUNT_CAP`
+   * (index `(organization_id, status, created_at)`): a domain policy counts the mailboxes of its
+   * domain; the organization policy counts the mailboxes of domains without an override (and
+   * mailboxes of no domain).
+   */
+  async simulatedActions(
+    tx: Tx,
+    organizationId: bigint,
+    domainId: bigint | null,
+    since: Date,
+  ): Promise<{ count: number; capped: boolean }> {
+    const scope =
+      domainId === null
+        ? Prisma.sql`AND (m.domain_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM api_remediation_policies p
+               WHERE p.organization_id = a.organization_id AND p.domain_id = m.domain_id))`
+        : Prisma.sql`AND m.domain_id = ${domainId}`;
+    const rows = await tx.$queryRaw<
+      Array<{ n: bigint | number; org_min: bigint | null; org_max: bigint | null }>
+    >`
+      SELECT COUNT(*) AS n, MIN(organization_id) AS org_min, MAX(organization_id) AS org_max
+        FROM (
+          SELECT a.organization_id
+            FROM api_remediation_actions a
+            JOIN api_mailboxes m ON m.id = a.mailbox_id AND m.organization_id = a.organization_id
+           WHERE a.organization_id = ${organizationId}
+             AND a.status = 'simulated'
+             AND a.created_at >= ${since}
+             ${scope}
+           LIMIT ${SIMULATED_COUNT_CAP}
+        ) bounded`;
+    const row = rows[0];
+    const count = Number(row?.n ?? 0);
+    if (
+      count > 0 &&
+      (row?.org_min === null ||
+        row?.org_max === null ||
+        BigInt(row!.org_min) !== organizationId ||
+        BigInt(row!.org_max) !== organizationId)
+    ) {
+      throw new InconsistentNotificationReadError('api_remediation_action');
+    }
+    return { count, capped: count >= SIMULATED_COUNT_CAP };
+  }
+
   /** A journal intake source of the organization by public id (step 8.6 D9). */
   intakeSource(
     tx: Tx,
@@ -551,6 +685,7 @@ export function alertScopeKey(
     intakeSourcePublicId?: string;
     apiModeConnectionPublicId?: string;
     clawbackPublicId?: string;
+    remediationPolicyPublicId?: string;
   },
 ): string {
   switch (kind) {
@@ -574,5 +709,11 @@ export function alertScopeKey(
     // Step API-3 C13: one window per organization.
     case 'api_mode_report_received':
       return ALERT_SCOPE_NONE;
+    // Step API-4 A9.2: no scope (as `threat_detected`; the webhook-worker's scope key).
+    case 'dlp_detected':
+      return ALERT_SCOPE_NONE;
+    // Step API-4 B7: one window per remediation policy (the mailbox-worker's scope key).
+    case 'api_mode_detect_only_ended':
+      return scope.remediationPolicyPublicId ?? ALERT_SCOPE_NONE;
   }
 }

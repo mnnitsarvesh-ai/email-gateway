@@ -28,6 +28,7 @@ const threat: AlertFacts = {
     stage: 'scan',
     messagePublicId: MESSAGE,
     receivedAt: '2026-11-13T09:14:02.481Z',
+    copy: null,
   },
 };
 const dns: AlertFacts = {
@@ -158,6 +159,7 @@ describe('security alert templates (step 6.2 N4)', () => {
         stage: 'scan',
         messagePublicId: 'not-a-uuid@x://y',
         receivedAt: 'garbage',
+        copy: null,
       },
     });
     expect(notice.text).toContain('Events in this window so far: unknown');
@@ -461,5 +463,155 @@ describe('api_mode_report_received template (step API-3 C13)', () => {
       reports: { pendingTriage: 0, inReview: 0, receivedInWindow: 0, oldestPendingAt: null },
     });
     expect(none.text).toContain('Oldest report waiting since: none waiting');
+  });
+});
+
+describe('API-mode detection templates (step API-4 A7, A9.2, B7)', () => {
+  const POLICY = '0192f0c4-eeee-7fff-8000-0000000000d1';
+
+  it('threat_detected of a copy: after delivery (API mode), protection mode, /api-mode detections link', () => {
+    const notice = renderSecurityAlert({
+      ...threat,
+      kind: 'threat_detected',
+      threat: {
+        verdict: 'malicious',
+        stage: 'scan',
+        messagePublicId: MESSAGE,
+        receivedAt: '2026-11-13T09:14:02.481Z',
+        copy: { protectionMode: 'api', mailboxCount: 3 },
+      },
+    });
+    expect(notice.subject).toBe('[Email Gateway] Security alert (high): threat detected');
+    expect(notice.text).toContain('Detection stage: after delivery (API mode)');
+    expect(notice.text).not.toContain('Detection stage: scan');
+    expect(notice.text).toContain(
+      'Protection mode: API mode (after delivery, through the mailbox API)',
+    );
+    expect(notice.text).toContain('Mailboxes with a copy: 3');
+    expect(notice.text).toContain(`Details: ${PORTAL}/api-mode?tab=detections&message=${MESSAGE}`);
+    expect(notice.text).not.toContain(`${PORTAL}/messages/`);
+    assertNoForbiddenContent(notice.text);
+    const sandbox = renderSecurityAlert({
+      ...threat,
+      kind: 'threat_detected',
+      threat: {
+        verdict: 'malicious',
+        stage: 'sandbox',
+        messagePublicId: MESSAGE,
+        receivedAt: '2026-11-13T09:14:02.481Z',
+        copy: { protectionMode: 'hybrid', mailboxCount: 1 },
+      },
+    });
+    expect(sandbox.text).toContain('Detection stage: after delivery (API mode), sandbox');
+    expect(sandbox.text).toContain('Protection mode: Hybrid (gateway and API mode)');
+  });
+
+  it('dlp_detected: organization, action, direction, category codes, protection mode, link', () => {
+    const notice = renderSecurityAlert({
+      ...common,
+      kind: 'dlp_detected',
+      dlp: {
+        action: 'quarantine',
+        direction: 'internal',
+        categories: ['payment_card', 'iban', 'payment_card', 'Not A Code', '4111111111111111'],
+        protectionMode: 'api',
+        mailboxCount: 2,
+        messagePublicId: MESSAGE,
+        receivedAt: '2026-11-13T09:14:02.481Z',
+      },
+    });
+    expect(notice.subject).toBe('[Email Gateway] Security alert (high): sensitive data detected');
+    expect(notice.text).toContain('A security alert was raised for Acme Corp.');
+    expect(notice.text).toContain('Alert: Sensitive data detected (DLP, API mode)');
+    expect(notice.text).toContain('DLP action: quarantine');
+    expect(notice.text).toContain('Direction: internal');
+    // Codes only: anything that is not a category code is shown as `unknown`, never verbatim.
+    expect(notice.text).toContain('DLP categories: payment_card, iban, unknown');
+    expect(notice.text).not.toContain('4111');
+    expect(notice.text).toContain('Protection mode: API mode');
+    expect(notice.text).toContain('Mailboxes with a copy: 2');
+    expect(notice.text).toContain('remediation follows the API-mode remediation policy');
+    expect(notice.text).toContain(`Details: ${PORTAL}/api-mode?tab=detections&message=${MESSAGE}`);
+    assertNoForbiddenContent(notice.text);
+    const outbound = renderSecurityAlert({
+      ...common,
+      kind: 'dlp_detected',
+      dlp: {
+        action: 'block',
+        direction: 'outbound',
+        categories: [],
+        protectionMode: 'hybrid',
+        mailboxCount: 1,
+        messagePublicId: MESSAGE,
+        receivedAt: '2026-11-13T09:14:02.481Z',
+      },
+    });
+    expect(outbound.text).toContain('DLP categories: none');
+    expect(outbound.text).toContain('outbound detections are recorded, never removed');
+  });
+
+  it('api_mode_detect_only_ended: scope, remind or enforce, mode now, simulated count, link', () => {
+    const remind = renderSecurityAlert({
+      ...common,
+      severity: 'low',
+      kind: 'api_mode_detect_only_ended',
+      policy: {
+        remediationPolicyPublicId: POLICY,
+        domainName: null,
+        then: 'remind',
+        modeNow: 'detect_only',
+        endedAt: '2026-11-20T09:00:00.000Z',
+        simulated: 12,
+        simulatedCapped: false,
+        simulatedSince: '2026-11-13T09:00:00.000Z',
+      },
+    });
+    expect(remind.subject).toBe('[Email Gateway] Security alert (low): detect-only period ended');
+    expect(remind.text).toContain(`Remediation policy: organization policy (${POLICY})`);
+    expect(remind.text).toContain('Detect-only period ended: 2026-11-20T09:00:00.000Z');
+    expect(remind.text).toContain('What happened: reminder only.');
+    expect(remind.text).toContain('Policy mode now: detect_only');
+    expect(remind.text).toContain(
+      'Actions that would have been taken (simulated) since 2026-11-13T09:00:00.000Z: 12',
+    );
+    expect(remind.text).toContain('switch the policy to enforce or extend the period');
+    expect(remind.text).toContain(`Review: ${PORTAL}/api-mode?tab=remediation`);
+    assertNoForbiddenContent(remind.text);
+    const enforce = renderSecurityAlert({
+      ...common,
+      severity: 'medium',
+      kind: 'api_mode_detect_only_ended',
+      policy: {
+        remediationPolicyPublicId: POLICY,
+        domainName: 'Acme.Example.',
+        then: 'enforce',
+        modeNow: 'enforce',
+        endedAt: null,
+        simulated: 10_000,
+        simulatedCapped: true,
+        simulatedSince: '2026-10-21T09:00:00.000Z',
+      },
+    });
+    expect(enforce.text).toContain('Remediation policy: domain acme.example');
+    expect(enforce.text).toContain('switched to enforce automatically');
+    expect(enforce.text).toContain(': 10000 or more');
+    expect(enforce.text).toContain('Detect-only period ended: unknown');
+    // A domain name that is not a hostname is never printed.
+    const odd = renderSecurityAlert({
+      ...common,
+      kind: 'api_mode_detect_only_ended',
+      policy: {
+        remediationPolicyPublicId: POLICY,
+        domainName: 'evil@x.example',
+        then: 'remind',
+        modeNow: 'detect_only',
+        endedAt: null,
+        simulated: 0,
+        simulatedCapped: false,
+        simulatedSince: '2026-10-21T09:00:00.000Z',
+      },
+    });
+    expect(odd.text).toContain('Remediation policy: domain (name not shown)');
+    assertNoForbiddenContent(odd.text);
   });
 });

@@ -34,6 +34,7 @@ describe('integration-worker configuration (§4.4)', () => {
     expect(cfg.INTEGRATION_TASK_POLL_MS).toBe(2_000);
     expect(cfg.INTEGRATION_TASK_CONCURRENCY).toBe(4);
     expect(cfg.INTEGRATION_TX_TIMEOUT_MS).toBe(120_000);
+    expect(cfg.PROVIDER_OWNERSHIP_CHECK_BATCH).toBe(10);
     expect(cfg.INTEGRATION_HEALTH_TICK_SECONDS).toBe(60);
     expect(cfg.INTEGRATION_HEALTH_INTERVAL_SECONDS).toBe(900);
     expect(cfg.INTEGRATION_HEALTH_ERROR_GRACE_MINUTES).toBe(60);
@@ -167,5 +168,18 @@ describe('integration-worker configuration (§4.4)', () => {
     ]);
     expect(() => parseGatewayMxHosts('mx1.example.net')).toThrow();
     expect(issues(base({ GATEWAY_MX_HOSTS: '' }))).toContain('GATEWAY_MX_HOSTS');
+  });
+
+  it('bounds PROVIDER_OWNERSHIP_CHECK_BATCH (step API-4 B3.3)', () => {
+    expect(
+      loadWorkerConfig(base({ PROVIDER_OWNERSHIP_CHECK_BATCH: '25' }))
+        .PROVIDER_OWNERSHIP_CHECK_BATCH,
+    ).toBe(25);
+    expect(issues(base({ PROVIDER_OWNERSHIP_CHECK_BATCH: '0' }))).toContain(
+      'PROVIDER_OWNERSHIP_CHECK_BATCH',
+    );
+    expect(issues(base({ PROVIDER_OWNERSHIP_CHECK_BATCH: '101' }))).toContain(
+      'PROVIDER_OWNERSHIP_CHECK_BATCH',
+    );
   });
 });

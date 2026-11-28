@@ -1,3 +1,5 @@
+import { EMPTY_DIRECTORY, roundOutcome } from '@email-gateway/policy-runtime';
+import { cleanFacts, definition, POLICY_A } from '@email-gateway/policy-runtime/testing';
 import {
   compileSnapshot,
   evaluatePolicyPerRecipient,
@@ -6,15 +8,12 @@ import {
   buildPolicyInput,
 } from '@email-gateway/policy-dsl';
 import { describe, expect, it } from 'vitest';
-import { EMPTY_DIRECTORY } from './directory.repository';
 import {
   deliveryRecordOf,
   recipientFinalAction,
-  roundOutcome,
   splitMetricLabel,
   storedStatuses,
 } from './evaluation.service';
-import { cleanFacts, definition, POLICY_A } from './fixtures.test-support';
 
 const RECIPIENTS = ['a@corp.example', 'b@corp.example', 'c@corp.example'];
 

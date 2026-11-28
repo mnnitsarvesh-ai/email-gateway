@@ -16,6 +16,7 @@ import type {
   DkimKeyView,
   DnsRecordView,
   DomainDetail,
+  DomainOwnershipView,
   DomainStatusView,
   DomainSummary,
   VISIBLE_DOMAIN_STATUSES,
@@ -91,6 +92,8 @@ function recentlyRetired(key: DkimKeyRow, now: Date): boolean {
 export interface DomainDetailParts {
   domain: DomainRow;
   verification: VerificationRow | null;
+  /** Step API-4 (B3): the ownership block. */
+  ownership: DomainOwnershipView;
   dkimKeys: readonly DkimKeyRow[];
   verificationLabel: string;
   now: Date;
@@ -119,6 +122,7 @@ export function toDomainDetail(parts: DomainDetailParts): DomainDetail {
             verifiedAt: toIsoOrNull(verification.verifiedAt),
           }
         : null,
+    ownership: parts.ownership,
     dkimKeys: parts.dkimKeys
       .filter((key) => key.status !== 'retired' || recentlyRetired(key, now))
       .map((key) => toDkimKeyView(key, domain.name)),
@@ -230,6 +234,8 @@ function propagationOf(
 
 export interface StatusViewParts {
   domain: DomainRow;
+  /** Step API-4 (B3): the ownership block. */
+  ownership: DomainOwnershipView;
   records: readonly DnsRecordRow[];
   dkimKeys: readonly DkimKeyRow[];
   mx: readonly MxObservationRow[];
@@ -269,6 +275,7 @@ export function toStatusView(parts: StatusViewParts): DomainStatusView {
     lastCheckedAt: toIsoOrNull(domain.lastCheckedAt),
     nextCheckAt: toIsoOrNull(domain.nextCheckAt),
     checkFailures: domain.checkFailures,
+    ownership: parts.ownership,
     checks: {
       ownership: groupCheck(groups.ownership),
       mx: {

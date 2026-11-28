@@ -231,8 +231,10 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // (docs/plan/steps/35-api-mode-protection.md D12): 455; plus the 9 remediation operations of
     // step API-2 (docs/plan/steps/36-api-mode-remediation.md R13): 464; plus the 19 clawback,
     // report and settings operations of step API-3
-    // (docs/plan/steps/37-api-mode-clawback-reporting.md C14): 483, all under /api/v1.
-    expect(count).toBe(483);
+    // (docs/plan/steps/37-api-mode-clawback-reporting.md C14): 483; plus the 5 onboarding
+    // operations of step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md A10, B3, B6, B8):
+    // 488, all under /api/v1.
+    expect(count).toBe(488);
   });
 
   it('gives every /api/v1 operation a tag', () => {
@@ -322,6 +324,8 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       'GET /api/v1/domains/{id}/destinations',
       'PUT /api/v1/domains/{id}/destinations',
       'DELETE /api/v1/domains/{id}/destinations',
+      // Step API-4 B3: ownership through the bound provider tenant.
+      'POST /api/v1/domains/{domainId}/ownership/provider-check',
     ];
     const byKey = new Map(operations(doc).map((op) => [op.key, op]));
     for (const key of expected) {
@@ -952,8 +956,9 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // API-2: 6 transactional remediation mutations (policy, domain policy put and delete, retry,
     // remediate, restore); step API-3: 12 transactional clawback, report and settings mutations
     // (create, submit, hard-delete submit, approve, deny, cancel, restore, triage, report
-    // clawback, report mailbox add and set, settings put).
-    expect(keyed).toHaveLength(118);
+    // clawback, report mailbox add and set, settings put); step API-4: 2 transactional
+    // mutations (the domain scope put and the provider ownership check).
+    expect(keyed).toHaveLength(120);
   });
 
   it('documents the 17 step 6.2 routes with their tags, permissions and the redacted replay (§6.1, ADR-0057)', () => {
@@ -1331,7 +1336,7 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
     // checked by their own tests below.
     const isApi2 = (key: string) => {
       const [method, path] = key.split(' ') as [string, string];
-      return /^ApiMode(Remediation|Clawback|Reports|Settings)Controller_/.test(
+      return /^ApiMode(Remediation|Clawback|Reports|Settings|Onboarding)Controller_/.test(
         String(raw(method.toLowerCase(), path).operationId),
       );
     };
@@ -2172,6 +2177,101 @@ describe('OpenAPI document (e2e, dependencies stubbed)', () => {
       JSON.parse(serialized),
       'The policy catalogue changed: regenerate docs/api/policy-catalog.json with UPDATE_OPENAPI=1',
     ).toEqual(committed);
+  });
+
+  it('documents the 5 step API-4 onboarding operations and the changed bodies and views (A10, A12, B3, B6, B7, B8)', () => {
+    const raw = (method: string, path: string) =>
+      (doc.paths[path] as Record<string, Record<string, unknown>>)[method]!;
+    const B = '/api/v1/api-mode';
+    const expected: Array<[string, string, string, string[], boolean]> = [
+      [
+        'GET',
+        `${B}/protection-coverage`,
+        'ApiModeOnboardingController_protectionCoverage_v1',
+        ['domain:read'],
+        false,
+      ],
+      [
+        'GET',
+        `${B}/domains/{domainId}/onboarding`,
+        'ApiModeOnboardingController_domainOnboarding_v1',
+        ['domain:read'],
+        false,
+      ],
+      [
+        'GET',
+        `${B}/domains/{domainId}/scope`,
+        'ApiModeOnboardingController_getScope_v1',
+        ['remediation:read'],
+        false,
+      ],
+      [
+        'PUT',
+        `${B}/domains/{domainId}/scope`,
+        'ApiModeOnboardingController_putScope_v1',
+        ['remediation:write'],
+        true,
+      ],
+      [
+        'POST',
+        '/api/v1/domains/{domainId}/ownership/provider-check',
+        'DomainsController_providerOwnershipCheck_v1',
+        ['domain:manage'],
+        true,
+      ],
+    ];
+    for (const [method, path, operationId, permissions, keyed] of expected) {
+      const op = raw(method.toLowerCase(), path);
+      // The operation ids the registry (B10) and the portal client (WP6) rely on.
+      expect(op.operationId, path).toBe(operationId);
+      expect(op['x-eg-permissions'], path).toEqual({ mode: 'all', permissions });
+      if (keyed) {
+        expect(op['x-eg-idempotency'], path).toBe('required');
+        expect(op['x-eg-rate-class'], path).toBe('sensitive');
+      } else {
+        expect(op['x-eg-idempotency'], path).toBeUndefined();
+      }
+    }
+    expect(raw('get', `${B}/protection-coverage`)['x-eg-cursor']).toBe('v1');
+    expect(raw('post', '/api/v1/domains/{domainId}/ownership/provider-check').tags).toEqual([
+      'domains',
+    ]);
+    const all = JSON.stringify(expected.map(([, path]) => doc.paths[path]));
+    for (const code of [
+      'api_mode_scope_department_invalid',
+      'api_mode_scope_domain_not_api',
+      'api_mode_scope_conflict',
+      'api_mode_scope_mailbox_invalid',
+      'domain_provider_connection_unavailable',
+      'domain_not_pending',
+    ]) {
+      expect(all, code).toContain(code);
+    }
+    expect(all).not.toMatch(/whsec_|AKIA|ghp_|BEGIN [A-Z ]*PRIVATE KEY|egk_|sk-[A-Za-z0-9]{8}/);
+    // Changed bodies and views.
+    const remediationPut = JSON.stringify(raw('put', `${B}/remediation-policy`));
+    for (const text of ['detectOnly', 'policyMapping', 'api_mode_detect_only_invalid']) {
+      expect(remediationPut, text).toContain(text);
+    }
+    const remediationGet = JSON.stringify(raw('get', `${B}/remediation-policy`));
+    for (const text of ['effectivePolicyMapping', 'simulatedSinceStart']) {
+      expect(remediationGet, text).toContain(text);
+    }
+    const overview = JSON.stringify(raw('get', `${B}/overview`));
+    for (const text of ['evaluated24h', 'detections24h', 'excluded']) {
+      expect(overview, text).toContain(text);
+    }
+    const detections = JSON.stringify(raw('get', `${B}/detections`));
+    for (const text of ['policyDisposition', 'dlpAction', 'policyState', 'outbound']) {
+      expect(detections, text).toContain(text);
+    }
+    const settings = JSON.stringify(raw('put', `${B}/settings`));
+    for (const text of ['policyEvaluationEnabled', 'outboundDetectionEnabled']) {
+      expect(settings, text).toContain(text);
+    }
+    expect(JSON.stringify(raw('get', '/api/v1/domains/{id}'))).toContain('providerCheckAvailable');
+    expect(JSON.stringify(raw('get', '/api/v1/policies/executions'))).toContain('evaluationMode');
+    expect(JSON.stringify(raw('get', '/api/v1/notifications/settings'))).toContain('dlpDetected');
   });
 
   // Serializing the ~420-operation document through Prettier takes seconds when the whole e2e

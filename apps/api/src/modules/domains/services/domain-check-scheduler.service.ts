@@ -16,6 +16,7 @@ import { CLAIM_SECONDS, domainKvKeys } from '../domains.constants';
 import { type DueDomain, DomainJobsRepository } from '../repositories/domain-jobs.repository';
 import { acquireCheckLock, releaseCheckLock } from './check-lock';
 import { DkimRotationService } from './dkim-rotation.service';
+import { DomainProviderOwnershipService } from './domain-provider-ownership.service';
 import { DomainVerificationService } from './domain-verification.service';
 
 export type DomainSchedulerConfig = Pick<
@@ -44,6 +45,10 @@ export interface DomainJobSummary {
   errors: number;
   /** Rotating DKIM keys retired. */
   retired: number;
+  /** Step API-4 (B3.4): provider ownership results applied (won through the provider tenant). */
+  providerVerified: number;
+  /** Step API-4 (B3.4): provider rows failed or expired (the domain stays pending). */
+  providerFailed: number;
 }
 
 const emptySummary = (): DomainJobSummary => ({
@@ -56,6 +61,8 @@ const emptySummary = (): DomainJobSummary => ({
   skipped: 0,
   errors: 0,
   retired: 0,
+  providerVerified: 0,
+  providerFailed: 0,
 });
 
 /** Runs `fn` over `items` with at most `limit` calls in flight. */
@@ -78,7 +85,8 @@ export async function forEachWithConcurrency<T>(
  * Background verification and re-verification (D11), in the api process like the session
  * purge. Each tick: KV tick lock (one replica per tick) → due domains → conditional claim per
  * domain (`next_check_at` moves 5 minutes ahead, so a crashed check is retried later) →
- * per-domain KV lock → check with bounded concurrency → DKIM retirement → one log line.
+ * per-domain KV lock → check with bounded concurrency → step API-4 provider ownership results →
+ * DKIM retirement → one log line.
  * Domains of organizations that are not active are postponed by the healthy recheck interval.
  * Safe with any number of replicas; disabled with DOMAIN_BACKGROUND_JOBS_ENABLED=false.
  */
@@ -95,6 +103,7 @@ export class DomainCheckScheduler implements OnApplicationBootstrap, OnModuleDes
     private readonly jobs: DomainJobsRepository,
     private readonly verification: DomainVerificationService,
     private readonly rotation: DkimRotationService,
+    private readonly providerOwnership: DomainProviderOwnershipService,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -157,6 +166,15 @@ export class DomainCheckScheduler implements OnApplicationBootstrap, OnModuleDes
     await forEachWithConcurrency(claimed, this.config.DOMAIN_CHECK_CONCURRENCY, (domain) =>
       this.checkOne(domain, now, summary),
     );
+
+    // Step API-4 (B3.4): the integration-worker's answers to provider ownership checks.
+    try {
+      const provider = await this.providerOwnership.applyDue(now);
+      summary.providerVerified = provider.verified;
+      summary.providerFailed = provider.failed + provider.expired + provider.superseded;
+    } catch (err) {
+      this.logger.error({ message: 'Provider ownership results failed', err });
+    }
 
     try {
       summary.retired = await this.rotation.retireDue(now);

@@ -56,6 +56,7 @@ import {
   mailboxNotFound,
   notificationsUnavailable,
 } from '../api-mode.errors';
+import { detectionPolicyView } from '../domain/detection-policy';
 import { computeApiModeWizard, type ApiModeWizardInput } from '../domain/wizard';
 import {
   type ApiModeConnectionDetailView,
@@ -229,8 +230,11 @@ export function remediationSummary(
 function clawbackCounterSums(rows: readonly ClawbackCounterRow[], now: Date) {
   const recent = rows.filter((r) => r.hour.getTime() >= now.getTime() - DAY_MS);
   const sum = (k: keyof Omit<ClawbackCounterRow, 'apiConnectionId' | 'hour'>) =>
-    recent.reduce((n, r) => n + Number(r[k]), 0);
+    recent.reduce((n, r) => n + Number(r[k] ?? 0), 0);
   return {
+    policyEvaluations: sum('policyEvaluations'),
+    policyErrors: sum('policyErrors'),
+    outboundDetections: sum('outboundDetections'),
     internalCopies: sum('internalCopies'),
     targetsQueued: sum('clawbackTargetsQueued'),
     targetsSucceeded: sum('clawbackTargetsSucceeded'),
@@ -401,13 +405,17 @@ export class ApiModeService {
       this.repository.organizationRemediationMode(scope),
     ]);
     // Step API-3 C13: internal mail, clawbacks and reports.
-    const [clawCounters, clawLive, reportLive, settingsRow] = await Promise.all([
+    const [clawCounters, clawLive, reportLive, settingsRow, excluded] = await Promise.all([
       this.clawbacks.clawbackCounters(scope, apiIds, new Date(now.getTime() - DAY_MS)),
       this.clawbacks.clawbackOverview(scope, now, CLAWBACK_COUNT_CAP),
       this.clawbacks.reportOverview(scope, apiIds),
       this.clawbacks.orgSettings(scope),
+      // Step API-4 (B6): mailboxes excluded by a domain scope.
+      this.repository.excludedMailboxes(scope),
     ]);
-    const internalEnabled = resolveOrgSettings(settingsRow).internalMailEnabled;
+    const resolvedSettings = resolveOrgSettings(settingsRow);
+    const internalEnabled = resolvedSettings.internalMailEnabled;
+    const parity = clawbackCounterSums(clawCounters, now);
     const byHealth = { unknown: 0, healthy: 0, degraded: 0, failing: 0 };
     const items = connections.map((c) => {
       const health = c.api?.healthStatus ?? 'unknown';
@@ -485,6 +493,17 @@ export class ApiModeService {
       },
       clawback: clawbackSummary(clawLive, clawCounters, now),
       reports: reportsSummary([...reportLive.values()], clawCounters, now),
+      // Step API-4 (A12): detect-mode policy evaluation, outbound detections and scope.
+      policy: {
+        enabled: resolvedSettings.policyEvaluationEnabled,
+        evaluated24h: parity.policyEvaluations,
+        errors24h: parity.policyErrors,
+      },
+      outbound: {
+        detections24h: parity.outboundDetections,
+        enabled: resolvedSettings.outboundDetectionEnabled,
+      },
+      scope: { excluded },
       connections: items,
     };
   }
@@ -843,6 +862,10 @@ export class ApiModeService {
       remediationId: row.remediationId,
       quarantineEntryId: row.quarantineEntryId,
       direction: row.direction,
+      policyState: row.policyState,
+      policyDisposition: row.policyDisposition,
+      policyTagged: row.policyTagged,
+      dlpAction: row.dlpAction,
       verdictRevision: row.verdictRevision,
       clawbacks: [...(clawbacks.get(copyKey(row.id, row.receivedAt)) ?? [])],
     };
@@ -954,6 +977,10 @@ export class ApiModeService {
         ...(one(f.minRiskScore) !== undefined && { minRiskScore: Number(one(f.minRiskScore)) }),
         ...(f.remediationState?.values && { remediationState: [...f.remediationState.values] }),
         ...(f.direction?.values && { direction: [...f.direction.values] }),
+        ...(f.policyDisposition?.values && {
+          policyDisposition: [...f.policyDisposition.values],
+        }),
+        ...(f.dlpAction?.values && { dlpAction: [...f.dlpAction.values] }),
       },
       range,
       { take: query.limit + 1, ...(before && { before }) },
@@ -978,14 +1005,23 @@ export class ApiModeService {
   async detection(scope: TenantScope, rawId: unknown): Promise<DetectionDetailView> {
     const row = await this.repository.detection(scope, parsePublicId(rawId, 'detectionId'));
     if (row === null) throw detectionNotFound();
-    const [codes, clawbacks] = await Promise.all([
+    const [codes, clawbacks, evaluation, dlp, decision] = await Promise.all([
       this.repository.reasonCodes(scope, row.messageId, row.receivedAt),
       this.clawbacksOf(scope, [row]),
+      // Step API-4 (A12): the detect row, the DLP result and the decision record's
+      // post-delivery list (inline-authority copies show no detect row: the gateway decided).
+      row.policyState === 'evaluated'
+        ? this.repository.detectEvaluation(scope, row.messageId, row.receivedAt)
+        : Promise.resolve(null),
+      this.repository.dlpResult(scope, row.messageId, row.receivedAt),
+      this.repository.copyPolicyDecision(scope, row),
     ]);
     return {
       ...this.detectionView(row, clawbacks),
       deliveredBasis: row.deliveredBasis,
       reasonCodes: codes.slice(0, DETECTION_REASON_CODES),
+      policy: evaluation === null ? null : detectionPolicyView(evaluation, decision),
+      dlp,
     };
   }
 }

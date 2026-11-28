@@ -856,7 +856,7 @@ describe('organization purge of the API-3 tables (§3.4)', () => {
       Object.values(
         await ctx.get(ApiModeTenantDataRepository).purgeOrganization(systemScope(orgB.id)),
       ),
-    ).toEqual(Array(12).fill(0));
+    ).toEqual(Array(13).fill(0));
   });
 });
 

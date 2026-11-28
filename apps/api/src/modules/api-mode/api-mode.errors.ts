@@ -48,6 +48,12 @@ export const API_MODE_ERROR_CODES = {
   reportAddressOutOfScope: 'api_mode_report_address_out_of_scope',
   reportMailboxNotEligible: 'api_mode_report_mailbox_not_eligible',
   settingsConflict: 'api_mode_settings_conflict',
+  // Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md §6 HTTP).
+  detectOnlyInvalid: 'api_mode_detect_only_invalid',
+  scopeDepartmentInvalid: 'api_mode_scope_department_invalid',
+  scopeDomainNotApi: 'api_mode_scope_domain_not_api',
+  scopeConflict: 'api_mode_scope_conflict',
+  scopeMailboxInvalid: 'api_mode_scope_mailbox_invalid',
   inconsistentRead: INCONSISTENT_READ,
 } as const;
 
@@ -338,4 +344,46 @@ export const purgeHardDeleteDisabled = (): CodedHttpException =>
     C.hardDeleteDisabled,
     'Hard delete is turned off on this platform (API_MODE_HARD_DELETE_ENABLED): a purge may not ' +
       'hard-delete',
+  );
+
+// ---- step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md B6, B7) ---------------------
+
+export const detectOnlyInvalid = (reason: string): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.detectOnlyInvalid,
+    'A detect-only period needs mode detect_only and an end between one hour and 30 days ahead',
+    { reason },
+  );
+
+export const scopeDepartmentInvalid = (departmentIds: readonly string[]): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.scopeDepartmentInvalid,
+    'One or more departments do not exist in the organization',
+    { departmentIds: departmentIds.slice(0, 20).join(',') },
+  );
+
+export const scopeMailboxInvalid = (count: number): CodedHttpException =>
+  err(
+    HttpStatus.UNPROCESSABLE_ENTITY,
+    C.scopeMailboxInvalid,
+    'One or more mailboxes are not mailboxes of this domain',
+    { invalid: count },
+  );
+
+export const scopeDomainNotApi = (effectiveMode: string): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.scopeDomainNotApi,
+    'A mailbox scope applies only to domains in the api or hybrid protection mode',
+    { effectiveMode },
+  );
+
+export const scopeConflict = (currentRowVersion: number | null): CodedHttpException =>
+  err(
+    HttpStatus.CONFLICT,
+    C.scopeConflict,
+    'The scope was changed by someone else: reload and retry',
+    { currentRowVersion },
   );

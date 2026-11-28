@@ -1,3 +1,4 @@
+import { type InconsistencySink, wrongRead } from '@email-gateway/policy-runtime';
 import type { Prisma } from '@email-gateway/database';
 import {
   resolveUrlSettings,
@@ -14,7 +15,6 @@ import {
   type TokenKey,
   tokenExpiry,
 } from '@email-gateway/url-security';
-import { type InconsistencySink, wrongRead } from '../evaluation/errors';
 import type { BodyEditPlan } from './policy-copy';
 
 /**

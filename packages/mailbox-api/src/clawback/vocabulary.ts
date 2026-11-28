@@ -4,9 +4,11 @@
  * migration (no Prisma import: this package is pure); unit tests pin every list.
  */
 import {
+  REMEDIATION_ACTION_STRENGTH_ORDER,
   REMEDIATION_RESULT_CODES,
   REMEDIATION_SKIP_REASONS,
   REMEDIATION_TRIGGERS,
+  remediationActionStrength,
   type RemediationAction,
 } from '../remediation/vocabulary';
 
@@ -252,18 +254,12 @@ export const CLAWBACK_HARD_BLOCK_IDS = [
 ] as const;
 export type ClawbackHardBlockId = (typeof CLAWBACK_HARD_BLOCK_IDS)[number];
 
-/** C5.3 strength order, weakest first. */
-export const CLAWBACK_STRENGTH_ORDER = [
-  'tag',
-  'move_junk',
-  'move_quarantine',
-  'soft_delete',
-  'hard_delete',
-] as const satisfies readonly RemediationAction[];
+/** C5.3 strength order, weakest first (the shared `REMEDIATION_ACTION_STRENGTH_ORDER`). */
+export const CLAWBACK_STRENGTH_ORDER = REMEDIATION_ACTION_STRENGTH_ORDER;
 
 /** The C5.3 strength of an action (0 = `tag` … 4 = `hard_delete`). */
 export const actionStrength = (action: RemediationAction): number =>
-  CLAWBACK_STRENGTH_ORDER.indexOf(action);
+  remediationActionStrength(action);
 
 /** The `remediation:purge` permission (catalog 77, §3.3). */
 export const REMEDIATION_PURGE_PERMISSION = 'remediation:purge';

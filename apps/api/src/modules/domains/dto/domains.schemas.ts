@@ -156,9 +156,67 @@ export const VerificationSchema = z.object({
   verifiedAt: IsoDate.nullable(),
 });
 
+/**
+ * Step API-4 (B3, ADR-0107): how ownership was won and the state of the check through the bound
+ * provider tenant (codes and ids only).
+ */
+export const DomainOwnershipSchema = z.object({
+  method: z
+    .enum(['dns_txt', 'provider_tenant'])
+    .nullable()
+    .describe(
+      'How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as ' +
+        'verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null ' +
+        'while never verified',
+    ),
+  providerCheck: z
+    .object({
+      id: z.string().describe('The verification id (decimal)'),
+      status: z.enum(['pending', 'verified', 'failed', 'expired']),
+      result: z
+        .enum(['verified', 'unverified', 'absent', 'alias', 'error'])
+        .nullable()
+        .describe('The provider’s answer (null until the integration-worker checked)'),
+      connectionId: z.uuid().nullable().describe('The provider connection checked'),
+      requestedAt: IsoDate,
+      checkedAt: IsoDate.nullable(),
+      expiresAt: IsoDate,
+    })
+    .nullable()
+    .describe('The newest ownership check through the provider tenant; null = none'),
+  providerCheckAvailable: z
+    .boolean()
+    .describe(
+      'The domain waits for ownership and the organization has a bound, enabled provider ' +
+        'connection with an active mail-flow grant (POST …/ownership/provider-check)',
+    ),
+});
+export type DomainOwnershipView = z.output<typeof DomainOwnershipSchema>;
+
+export const ProviderOwnershipCheckBodySchema = z.strictObject({
+  connectionId: z
+    .uuid()
+    .optional()
+    .describe(
+      'The bound provider connection to check through; optional when exactly one qualifies (or ' +
+        'the domain’s previous provider check used one that still qualifies)',
+    ),
+});
+export type ProviderOwnershipCheckBody = z.output<typeof ProviderOwnershipCheckBodySchema>;
+
+export const ProviderOwnershipCheckResponseSchema = z.object({
+  verificationId: z.string().describe('The provider verification id (decimal)'),
+  status: z.literal('pending'),
+  connectionId: z.uuid(),
+  expiresAt: IsoDate,
+  reused: z.boolean().describe('A pending provider check of the domain was reused'),
+});
+export type ProviderOwnershipCheckResponse = z.output<typeof ProviderOwnershipCheckResponseSchema>;
+
 export const DomainDetailSchema = DomainSummarySchema.extend({
   statusChangedAt: IsoDate.nullable(),
   verification: VerificationSchema.nullable(),
+  ownership: DomainOwnershipSchema,
   dkimKeys: z
     .array(DkimKeySchema)
     .describe('Non-retired keys and keys retired in the last 30 days'),
@@ -223,6 +281,7 @@ export const DomainStatusViewSchema = z.object({
   lastCheckedAt: IsoDate.nullable(),
   nextCheckAt: IsoDate.nullable(),
   checkFailures: z.number().int(),
+  ownership: DomainOwnershipSchema.describe('Step API-4: ownership method and provider check'),
   checks: z.object({
     ownership: CheckSchema,
     mx: CheckSchema.extend({
@@ -270,3 +329,15 @@ export type CleanupRecordView = z.output<typeof CleanupRecordSchema>;
 export type DnsRecordsResponse = z.output<typeof DnsRecordsResponseSchema>;
 export type DomainStatusView = z.output<typeof DomainStatusViewSchema>;
 export type RotateDkimResponse = z.output<typeof RotateDkimResponseSchema>;
+
+/** Step API-4 (B3): OpenAPI examples of the provider ownership check (non-secret placeholders). */
+export const PROVIDER_CHECK_EXAMPLES = {
+  body: { connectionId: '0192f3a0-3333-7000-8000-000000000003' },
+  response: {
+    verificationId: '4182',
+    status: 'pending' as const,
+    connectionId: '0192f3a0-3333-7000-8000-000000000003',
+    expiresAt: '2026-11-27T10:00:00.000Z',
+    reused: false,
+  },
+} as const;

@@ -80,6 +80,7 @@ export function executionOf(row: HistoryRow, messageId: string | null): PolicyEx
     atoFacts: storedAtoFactsView(row.atoFacts),
     durationUs: row.durationUs,
     evaluatedAt: row.evaluatedAt.toISOString(),
+    evaluationMode: row.evaluationMode,
   };
 }
 
@@ -117,6 +118,7 @@ export class PolicyHistoryService {
       ...(query.ruleId !== undefined && { ruleId: query.ruleId }),
       ...(query.overrideApplied !== undefined && { overrideApplied: query.overrideApplied }),
       ...(query.trigger !== undefined && { trigger: query.trigger }),
+      ...(query.mode !== 'all' && { evaluationMode: query.mode }),
     });
     const page = rows.slice(0, query.limit);
     const ids = await this.executions.messagePublicIds(

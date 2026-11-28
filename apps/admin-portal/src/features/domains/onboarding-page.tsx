@@ -39,7 +39,20 @@ import {
   ModeOptions,
   useOrganizationProtectionMode,
 } from '@/features/api-mode/protection-mode';
-import { MailboxStep, useMailboxLinks } from './mailbox-step';
+import type { DomainOnboarding } from '@/features/api-mode/parity-model';
+import { useCan } from '@/lib/auth/me';
+import {
+  API_STEP_LABEL,
+  ActionStep,
+  ApiConnectStep,
+  FirstCopyCheck,
+  IntakeStep,
+  MailboxesStep,
+  OwnershipStep,
+  ProviderOwnershipCard,
+  ReviewSummary,
+  StepFacts,
+} from './api-onboarding-steps';
 import { DestinationsEditor } from './destinations-editor';
 import { DnsRecordsPanel } from './dns-records';
 import { Section, isUuid } from './kit';
@@ -48,27 +61,88 @@ import { RecipientValidationSection } from './recipients-panel';
 import { DomainStatusActions } from './status-actions';
 import { VerificationPanel } from './verification-panel';
 
+/** Every step key of the wizard (the URL `step` accepts any of them). */
 export const ONBOARDING_STEPS = [
   'mode',
   'add',
   'dns',
   'verify',
+  'ownership',
   'destinations',
   'recipients',
   'mailbox',
+  'connect',
+  'intake',
+  'mailboxes',
+  'action',
+  'review',
   'activate',
   'done',
 ] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
+
+/** The API-side steps whose state the api computes (B8). */
+export const API_STEPS = [
+  'ownership',
+  'connect',
+  'intake',
+  'mailboxes',
+  'action',
+  'review',
+] as const;
+type ApiStep = (typeof API_STEPS)[number];
+const isApiStep = (step: OnboardingStep): step is ApiStep =>
+  (API_STEPS as readonly string[]).includes(step);
+
+/**
+ * The steps each mode shows, in order (step API-4 B1). Inline is exactly the step API-1 list
+ * (its informational mailbox step stays listed as skipped); API lists only what applies (no
+ * DNS records other than ownership, no destinations or recipients); Hybrid is inline plus the
+ * API steps.
+ */
+export const STEPS_BY_MODE: Record<ProtectionMode, readonly OnboardingStep[]> = {
+  inline: [
+    'mode',
+    'add',
+    'dns',
+    'verify',
+    'destinations',
+    'recipients',
+    'mailbox',
+    'activate',
+    'done',
+  ],
+  api: ['mode', 'add', 'ownership', 'connect', 'intake', 'mailboxes', 'action', 'review', 'done'],
+  hybrid: [
+    'mode',
+    'add',
+    'dns',
+    'verify',
+    'destinations',
+    'recipients',
+    'connect',
+    'intake',
+    'mailboxes',
+    'action',
+    'review',
+    'done',
+  ],
+};
 
 const STEP_LABEL: Record<OnboardingStep, string> = {
   mode: 'Protection mode',
   add: 'Add domain',
   dns: 'Publish DNS records',
   verify: 'Verify ownership',
+  ownership: 'Verify ownership',
   destinations: 'Destination mail server',
   recipients: 'Recipient validation (optional)',
   mailbox: 'Mailbox protection',
+  connect: API_STEP_LABEL.connect,
+  intake: API_STEP_LABEL.intake,
+  mailboxes: API_STEP_LABEL.mailboxes,
+  action: API_STEP_LABEL.action,
+  review: API_STEP_LABEL.review,
   activate: 'Activate',
   done: 'Done',
 };
@@ -123,63 +197,95 @@ export interface ServerProgress {
   readonly hasDestinations: boolean;
   readonly recipientMode: string | null;
   /**
-   * Mailbox step (API and Hybrid): a provider connection linked to the domain has an active
-   * mailbox-access grant or a verified journal intake source; `null` while unknown.
+   * The api's onboarding state of an API or Hybrid domain (`GET /api-mode/domains/{id}/
+   * onboarding`, B8); absent for inline domains (never requested on the inline path, B9).
    */
-  readonly mailboxReady?: boolean | null;
+  readonly onboarding?: DomainOnboarding | null;
 }
 
-/** Steps that do not apply to a mode (D3): API mode has no destinations and recipients. */
+/**
+ * Steps a mode lists but that do not apply (shown as skipped): only the informational mailbox
+ * step of the inline list (unchanged since step API-1). API and Hybrid never list a step that
+ * does not apply (B1).
+ */
 export function skippedSteps(mode: ProtectionMode): ReadonlySet<OnboardingStep> {
-  if (mode === 'api') return new Set<OnboardingStep>(['destinations', 'recipients']);
   if (mode === 'inline') return new Set<OnboardingStep>(['mailbox']);
   return new Set<OnboardingStep>();
 }
 
 /** Completion of each step, from the server state only (never inferred from clicks). */
 export function stepCompletion(progress: ServerProgress): Record<OnboardingStep, boolean> {
-  const { domain } = progress;
+  const { domain, onboarding } = progress;
   const owned = domain ? isOwned(domain.status) : false;
+  const api = (key: ApiStep) => onboarding?.steps.find((s) => s.key === key)?.status === 'done';
   return {
     mode: domain !== null,
     add: domain !== null,
     dns: owned,
     verify: owned,
+    ownership: owned,
     destinations: progress.hasDestinations,
     recipients: progress.recipientMode !== null && progress.recipientMode !== 'accept_all',
-    mailbox: progress.mailboxReady === true,
+    mailbox: false,
+    connect: api('connect'),
+    intake: api('intake'),
+    mailboxes: api('mailboxes'),
+    action: api('action'),
+    review: api('review'),
     activate: domain?.status === 'active',
-    done: domain?.status === 'active',
+    done:
+      domain?.status === 'active' &&
+      (domain.protectionMode.effective === 'inline' || api('review')),
   };
 }
 
 /**
- * The step a resumed wizard opens at: the first one the server says is not done. Skipped steps
- * (D3) and the informational mailbox step never hold the wizard (activation needs ownership
- * only).
+ * The step a resumed wizard opens at: the first step of the mode's list the server says is not
+ * done. Skipped steps, recipients (optional) and inline's informational mailbox step never hold
+ * the wizard.
  */
 export function resumeStep(progress: ServerProgress): OnboardingStep {
   const { domain } = progress;
   if (!domain) return 'mode';
-  if (!isOwned(domain.status)) return domain.lastCheckedAt ? 'verify' : 'dns';
-  if (domain.protectionMode.effective !== 'api' && !progress.hasDestinations) return 'destinations';
+  const mode = domain.protectionMode.effective;
+  const owned = isOwned(domain.status);
+  if (mode === 'api') {
+    if (!owned) return 'ownership';
+    const steps = progress.onboarding?.steps ?? [];
+    const open = API_STEPS.find(
+      (key) => key !== 'ownership' && steps.find((s) => s.key === key)?.status !== 'done',
+    );
+    return open ?? 'done';
+  }
+  if (!owned) return domain.lastCheckedAt ? 'verify' : 'dns';
+  if (!progress.hasDestinations) return 'destinations';
+  if (mode === 'hybrid') {
+    const steps = progress.onboarding?.steps ?? [];
+    const open = API_STEPS.find(
+      (key) => key !== 'ownership' && steps.find((s) => s.key === key)?.status !== 'done',
+    );
+    return open ?? 'done';
+  }
   if (domain.status !== 'active') return 'activate';
   return 'done';
 }
 
-/** The step after `step` for a mode (skipped steps are passed over). */
+/** The step after `step` in a mode's list (skipped steps are passed over). */
 export function nextStep(step: OnboardingStep, mode: ProtectionMode): OnboardingStep {
+  const list = STEPS_BY_MODE[mode];
   const skipped = skippedSteps(mode);
-  const index = ONBOARDING_STEPS.indexOf(step);
-  return ONBOARDING_STEPS.slice(index + 1).find((candidate) => !skipped.has(candidate)) ?? 'done';
+  const index = list.indexOf(step);
+  return list.slice(index + 1).find((candidate) => !skipped.has(candidate)) ?? 'done';
 }
 
-/** The step before `step` for a mode. */
+/** The step before `step` in a mode's list. */
 export function previousStep(step: OnboardingStep, mode: ProtectionMode): OnboardingStep {
+  const list = STEPS_BY_MODE[mode];
   const skipped = skippedSteps(mode);
-  const index = ONBOARDING_STEPS.indexOf(step);
+  const index = list.indexOf(step);
   return (
-    ONBOARDING_STEPS.slice(0, index)
+    list
+      .slice(0, Math.max(0, index))
       .reverse()
       .find((candidate) => !skipped.has(candidate)) ?? 'mode'
   );
@@ -337,12 +443,14 @@ function AddDomainStep({
 }
 
 function Stepper({
+  steps,
   current,
   completion,
   skipped,
   selectable,
   onSelect,
 }: {
+  steps: readonly OnboardingStep[];
   current: OnboardingStep;
   completion: Record<OnboardingStep, boolean>;
   skipped: ReadonlySet<OnboardingStep>;
@@ -352,53 +460,58 @@ function Stepper({
   return (
     <nav aria-label="Onboarding steps">
       <ol className="grid gap-1 sm:grid-cols-2 lg:grid-cols-4">
-        {ONBOARDING_STEPS.filter((step) => step !== 'done').map((step, index) => {
-          const active = step === current;
-          const isSkipped = skipped.has(step);
-          const done = !isSkipped && completion[step];
-          const Icon = isSkipped
-            ? MinusCircleIcon
-            : done
-              ? CheckCircle2Icon
-              : active
-                ? CircleDotIcon
-                : CircleIcon;
-          return (
-            <li key={step}>
-              <button
-                type="button"
-                aria-current={active ? 'step' : undefined}
-                disabled={isSkipped || !selectable(step)}
-                onClick={() => onSelect(step)}
-                className={cn(
-                  'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50',
-                  active ? 'border-primary bg-accent' : 'bg-card hover:bg-muted',
-                )}
-              >
-                <Icon
-                  className={cn('size-4 shrink-0', done ? 'text-success' : 'text-muted-foreground')}
-                  aria-hidden
-                />
-                <span className="grid">
-                  <span className="text-xs text-muted-foreground">
-                    Step {index + 1}
-                    {isSkipped ? ' · skipped' : ''}
+        {steps
+          .filter((step) => step !== 'done')
+          .map((step, index) => {
+            const active = step === current;
+            const isSkipped = skipped.has(step);
+            const done = !isSkipped && completion[step];
+            const Icon = isSkipped
+              ? MinusCircleIcon
+              : done
+                ? CheckCircle2Icon
+                : active
+                  ? CircleDotIcon
+                  : CircleIcon;
+            return (
+              <li key={step}>
+                <button
+                  type="button"
+                  aria-current={active ? 'step' : undefined}
+                  disabled={isSkipped || !selectable(step)}
+                  onClick={() => onSelect(step)}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50',
+                    active ? 'border-primary bg-accent' : 'bg-card hover:bg-muted',
+                  )}
+                >
+                  <Icon
+                    className={cn(
+                      'size-4 shrink-0',
+                      done ? 'text-success' : 'text-muted-foreground',
+                    )}
+                    aria-hidden
+                  />
+                  <span className="grid">
+                    <span className="text-xs text-muted-foreground">
+                      Step {index + 1}
+                      {isSkipped ? ' · skipped' : ''}
+                    </span>
+                    <span className="font-medium">{STEP_LABEL[step]}</span>
+                    <span className="sr-only">
+                      {isSkipped
+                        ? ', skipped in this protection mode'
+                        : done
+                          ? ', complete'
+                          : step === 'recipients' || step === 'mailbox'
+                            ? ', optional'
+                            : ', not complete'}
+                    </span>
                   </span>
-                  <span className="font-medium">{STEP_LABEL[step]}</span>
-                  <span className="sr-only">
-                    {isSkipped
-                      ? ', skipped in this protection mode'
-                      : done
-                        ? ', complete'
-                        : step === 'recipients' || step === 'mailbox'
-                          ? ', optional'
-                          : ', not complete'}
-                  </span>
-                </span>
-              </button>
-            </li>
-          );
-        })}
+                </button>
+              </li>
+            );
+          })}
       </ol>
     </nav>
   );
@@ -434,9 +547,9 @@ function StepNav({
   );
 }
 
-/** Section title with the step's position in the full step list ("3. Publish DNS records"). */
-function stepTitle(step: OnboardingStep, label = STEP_LABEL[step]): string {
-  return `${ONBOARDING_STEPS.indexOf(step) + 1}. ${label}`;
+/** Section title with the step's position in the mode's step list ("3. Publish DNS records"). */
+function stepTitle(step: OnboardingStep, mode: ProtectionMode, label = STEP_LABEL[step]): string {
+  return `${STEPS_BY_MODE[mode].indexOf(step) + 1}. ${label}`;
 }
 
 function ResumedWizard({
@@ -451,16 +564,45 @@ function ResumedWizard({
   const domain = useApiQuery(
     'DomainsController_get_v1',
     { path: { id: domainId } },
-    { retry: false },
+    {
+      retry: false,
+      // A provider ownership check finishes in the worker (B3): poll while it is pending.
+      refetchInterval: (query) =>
+        query.state.data?.ownership.providerCheck?.status === 'pending' ? 5000 : false,
+    },
   );
   const mode: ProtectionMode = domain.data?.protectionMode.effective ?? 'inline';
-  const destinations = useApiQuery('DomainDestinationsController_get_v1', {
-    path: { id: domainId },
-  });
-  const validation = useApiQuery('DomainRecipientsController_get_v1', { path: { id: domainId } });
-  const mailbox = useMailboxLinks(domainId, domain.isSuccess && mode !== 'inline');
+  const apiSide = domain.isSuccess && mode !== 'inline';
+  const destinations = useApiQuery(
+    'DomainDestinationsController_get_v1',
+    { path: { id: domainId } },
+    { enabled: domain.isSuccess && mode !== 'api' },
+  );
+  const validation = useApiQuery(
+    'DomainRecipientsController_get_v1',
+    { path: { id: domainId } },
+    { enabled: domain.isSuccess && mode !== 'api' },
+  );
+  const canOnboarding = useCan('ApiModeOnboardingController_domainOnboarding_v1');
+  // Never requested on the inline path (B9). The first-copy check polls every 5 s while the
+  // review step is open (API4-14).
+  const requested = step && step !== 'add' ? step : undefined;
+  const onboarding = useApiQuery(
+    'ApiModeOnboardingController_domainOnboarding_v1',
+    { path: { domainId } },
+    {
+      enabled: apiSide && canOnboarding,
+      refetchInterval: (query) =>
+        requested === 'review' && query.state.data?.firstCopy.status !== 'received' ? 5000 : false,
+    },
+  );
 
-  if (domain.isLoading || destinations.isLoading || validation.isLoading)
+  if (
+    domain.isLoading ||
+    destinations.isLoading ||
+    validation.isLoading ||
+    (apiSide && canOnboarding && onboarding.isLoading)
+  )
     return <LoadingState label="Loading the domain's onboarding state" rows={5} />;
   if (domain.error) {
     if (domain.error.status === 404) return <NotFoundView />;
@@ -470,27 +612,36 @@ function ResumedWizard({
     return <ErrorState error={destinations.error} onRetry={() => void destinations.refetch()} />;
   if (validation.error)
     return <ErrorState error={validation.error} onRetry={() => void validation.refetch()} />;
+  if (onboarding.error)
+    return <ErrorState error={onboarding.error} onRetry={() => void onboarding.refetch()} />;
   const data = domain.data;
   if (!data) return null;
 
+  const view = apiSide ? (onboarding.data ?? null) : null;
   const progress: ServerProgress = {
     domain: data,
     hasDestinations: (destinations.data?.servers.length ?? 0) > 0,
     recipientMode: validation.data?.mode ?? null,
-    mailboxReady: mailbox.ready,
+    onboarding: view,
   };
+  const steps = STEPS_BY_MODE[mode];
   const completion = stepCompletion(progress);
   const skipped = skippedSteps(mode);
-  const requested = step && step !== 'add' && !skipped.has(step) ? step : undefined;
-  const current = requested ?? resumeStep(progress);
+  const current =
+    requested && steps.includes(requested) && !skipped.has(requested)
+      ? requested
+      : resumeStep(progress);
   const owned = isOwned(data.status);
   const go = (target: OnboardingStep) => setStep(target);
   const next = (from: OnboardingStep) => go(nextStep(from, mode));
   const back = (from: OnboardingStep) => go(previousStep(from, mode));
+  const apiState = (key: ApiStep) => view?.steps.find((s) => s.key === key);
+  const needsOnboarding = isApiStep(current) && current !== 'ownership';
 
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <Stepper
+        steps={steps}
         current={current}
         completion={completion}
         skipped={skipped}
@@ -509,14 +660,10 @@ function ResumedWizard({
       ) : null}
       {current === 'dns' ? (
         <Section
-          title={stepTitle('dns')}
-          description={
-            mode === 'api'
-              ? 'Add the ownership TXT record now. In API mode the MX record stays with your provider: MX records are not required in API mode. SPF, DKIM and DMARC matter only for mail sent through the gateway.'
-              : 'Add the ownership TXT record now; MX, SPF, DKIM and DMARC can follow. Activation needs only the ownership record.'
-          }
+          title={stepTitle('dns', mode)}
+          description="Add the ownership TXT record now; MX, SPF, DKIM and DMARC can follow. Activation needs only the ownership record."
         >
-          <DnsRecordsPanel domainId={domainId} apiMode={mode === 'api'} />
+          <DnsRecordsPanel domainId={domainId} />
           <StepNav
             onBack={() => go('mode')}
             onNext={() => go('verify')}
@@ -526,9 +673,10 @@ function ResumedWizard({
       ) : null}
       {current === 'verify' ? (
         <Section
-          title={stepTitle('verify')}
+          title={stepTitle('verify', mode)}
           description="The gateway looks up the ownership TXT record. New records can take minutes (sometimes hours) to propagate to every DNS resolver; checks keep running in the background."
         >
+          {mode === 'hybrid' ? <ProviderOwnershipCard domain={data} /> : null}
           <VerificationPanel domainId={domainId} />
           <StepNav
             onBack={() => go('dns')}
@@ -538,9 +686,23 @@ function ResumedWizard({
           />
         </Section>
       ) : null}
+      {current === 'ownership' ? (
+        <Section
+          title={stepTitle('ownership', mode)}
+          description="Prove that your organization owns the domain: publish one TXT record, or verify it automatically through your bound Microsoft 365 or Google Workspace tenant. API mode needs no other DNS change."
+        >
+          <OwnershipStep domain={data} />
+          <StepNav
+            onBack={() => go('mode')}
+            onNext={() => next('ownership')}
+            nextDisabled={!owned}
+            hint={owned ? undefined : 'Continue once ownership is verified.'}
+          />
+        </Section>
+      ) : null}
       {current === 'destinations' ? (
         <Section
-          title={stepTitle('destinations')}
+          title={stepTitle('destinations', mode)}
           description="Where the gateway delivers approved inbound mail: a provider preset or your own servers."
         >
           <DestinationsEditor
@@ -568,27 +730,88 @@ function ResumedWizard({
           />
         </div>
       ) : null}
-      {current === 'mailbox' ? (
+      {needsOnboarding && !view ? (
+        <Section title={stepTitle(current, mode)}>
+          <p className="text-sm text-muted-foreground">
+            Your role cannot read the onboarding state of API-mode domains; ask an administrator to
+            complete this step.
+          </p>
+          <StepNav onBack={() => back(current)} onNext={() => next(current)} />
+        </Section>
+      ) : null}
+      {view && current === 'connect' ? (
         <Section
-          title={stepTitle('mailbox')}
-          description="API-mode protection needs a provider connection linked to this domain with a journal copy or mailbox access. This step is informational: activation does not wait for it."
+          title={stepTitle('connect', mode)}
+          description="The domain's Microsoft 365 or Google Workspace connection: link the domain, bind the tenant (read-only mail-flow access) and grant mailbox access for API mode."
         >
-          <MailboxStep links={mailbox} />
+          <StepFacts step={apiState('connect')} />
+          <ApiConnectStep domain={data} onboarding={view} />
+          <StepNav onBack={() => back('connect')} onNext={() => next('connect')} />
+        </Section>
+      ) : null}
+      {view && current === 'intake' ? (
+        <Section
+          title={stepTitle('intake', mode)}
+          description="How copies of delivered mail reach the gateway: a journal copy and/or mailbox feeds."
+        >
+          <StepFacts step={apiState('intake')} />
+          <IntakeStep onboarding={view} />
+          <StepNav onBack={() => back('intake')} onNext={() => next('intake')} />
+        </Section>
+      ) : null}
+      {view && current === 'mailboxes' ? (
+        <Section
+          title={stepTitle('mailboxes', mode)}
+          description="Which mailboxes of the domain API-mode protection covers."
+        >
+          <StepFacts step={apiState('mailboxes')} />
+          <MailboxesStep domainId={domainId} />
+          <StepNav onBack={() => back('mailboxes')} onNext={() => next('mailboxes')} />
+        </Section>
+      ) : null}
+      {view && current === 'action' ? (
+        <Section
+          title={stepTitle('action', mode)}
+          description="What the gateway does in the mailbox when a copy is a threat or your policies decide against it. Start in detect only: nothing changes in mailboxes while you review the simulated actions."
+        >
+          <StepFacts step={apiState('action')} />
+          <ActionStep domainId={domainId} onboarding={view} />
+          <StepNav onBack={() => back('action')} onNext={() => next('action')} />
+        </Section>
+      ) : null}
+      {view && current === 'review' ? (
+        <Section
+          title={stepTitle('review', mode)}
+          description={
+            mode === 'api'
+              ? 'Check every step, activate the domain, then send a test message. API mode never changes mail flow: your MX record stays with your provider.'
+              : 'Check every step, activate the domain, then send a test message. Switch the MX record to the gateway afterwards for the inline part.'
+          }
+        >
+          <StepFacts step={apiState('review')} />
+          <ReviewSummary onboarding={view} onEdit={(key) => go(key)} />
+          {data.status === 'active' ? (
+            <p className="text-sm">The domain is active.</p>
+          ) : owned ? (
+            <div className="flex flex-wrap gap-2">
+              <DomainStatusActions domain={data} />
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground" role="status">
+              Ownership is not verified yet: the domain can be activated once it is.
+            </p>
+          )}
+          {data.status === 'active' ? <FirstCopyCheck onboarding={view} /> : null}
           <StepNav
-            onBack={() => back('mailbox')}
-            onNext={() => go('activate')}
-            nextLabel={completion.mailbox ? 'Continue' : 'Continue without it for now'}
+            onBack={() => back('review')}
+            onNext={completion.review ? () => go('done') : undefined}
           />
         </Section>
       ) : null}
       {current === 'activate' ? (
         <Section
-          title={stepTitle('activate')}
-          description={
-            mode === 'api'
-              ? 'Activation records the domain as active. In API mode your MX record stays with your provider; mail flow is not changed.'
-              : 'Activation starts mail acceptance for the domain. Switch the MX record to the gateway afterwards.'
-          }
+          title={stepTitle('activate', mode)}
+          description="Activation starts mail acceptance for the domain. Switch the MX record to the gateway afterwards."
         >
           {data.status === 'active' ? (
             <p className="text-sm">The domain is active.</p>
@@ -609,13 +832,15 @@ function ResumedWizard({
         </Section>
       ) : null}
       {current === 'done' ? (
-        <Section title={data.status === 'active' ? 'Onboarding complete' : 'Not finished yet'}>
+        <Section title={completion.done ? 'Onboarding complete' : 'Not finished yet'}>
           <p className="text-sm">
-            {data.status !== 'active'
+            {!completion.done
               ? 'Some steps are not complete yet; the stepper above shows which.'
               : mode === 'api'
-                ? `${data.unicodeName} is active in API mode. Keep its MX record at your provider; Mailbox protection shows coverage and detections.`
-                : `${data.unicodeName} is active. Point its MX record to the gateway if you have not yet; the domain page shows the checks.`}
+                ? `${data.unicodeName} is protected in API mode. Keep its MX record at your provider; Mailbox protection shows coverage and detections.`
+                : mode === 'hybrid'
+                  ? `${data.unicodeName} is active in Hybrid mode. Point its MX record to the gateway if you have not yet; Mailbox protection shows the API side.`
+                  : `${data.unicodeName} is active. Point its MX record to the gateway if you have not yet; the domain page shows the checks.`}
           </p>
           <Button asChild className="justify-self-start">
             <Link href={`/domains/${domainId}`}>Open {data.unicodeName}</Link>
@@ -657,6 +882,7 @@ function Onboarding() {
       {domainId === undefined ? (
         <>
           <Stepper
+            steps={STEPS_BY_MODE[state.mode ?? 'inline']}
             current={newStep}
             completion={stepCompletion(NEW_DOMAIN_PROGRESS)}
             skipped={state.mode ? skippedSteps(state.mode) : new Set()}
@@ -664,18 +890,22 @@ function Onboarding() {
             onSelect={(step) => setState({ step }, { push: true })}
           />
           {newStep === 'mode' ? (
-            <Section title={stepTitle('mode')}>
+            <Section title={stepTitle('mode', chosenMode)}>
               <ModeStep
                 initial={state.mode}
                 onContinue={(mode) => setState({ mode, step: 'add' }, { push: true })}
               />
             </Section>
           ) : (
-            <Section title={stepTitle('add')}>
+            <Section title={stepTitle('add', chosenMode)}>
               <AddDomainStep
                 mode={chosenMode}
                 onBack={() => setState({ step: 'mode' }, { push: true })}
-                onCreated={(id) => router.replace(`/domains/onboarding?domainId=${id}&step=dns`)}
+                onCreated={(id) =>
+                  router.replace(
+                    `/domains/onboarding?domainId=${id}&step=${chosenMode === 'api' ? 'ownership' : 'dns'}`,
+                  )
+                }
               />
             </Section>
           )}

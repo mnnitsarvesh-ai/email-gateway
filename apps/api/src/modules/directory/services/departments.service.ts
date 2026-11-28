@@ -19,6 +19,7 @@ import {
 import {
   departmentConflict,
   departmentInUse,
+  departmentInUseByScope,
   departmentLimitReached,
   departmentMemberExists,
   departmentMemberLimitReached,
@@ -240,6 +241,9 @@ export class DepartmentsService {
         .map((v) => v.policyPublicId)
         .sort();
       if (users.length > 0) throw departmentInUse(users);
+      // Step API-4 (B6): refused while an API-mode mailbox scope lists it.
+      const scopes = await this.repository.apiModeScopesReferencing(tx, scope, current.publicId);
+      if (scopes.length > 0) throw departmentInUseByScope(scopes);
       const result = await this.repository.delete(tx, scope, current.id, expectedRowVersion);
       if (!result.deleted) throw departmentConflict(current.rowVersion);
       await this.record(tx, principal, scope, client, DEPARTMENT_AUDIT.deleted, current.publicId, {

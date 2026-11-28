@@ -33,6 +33,7 @@ import { toStatusView } from '../domain.mapper';
 import {
   DAY_MS,
   DomainAuditAction,
+  DomainStatusReason,
   domainKvKeys,
   FIRST_CHECK_DELAY_SECONDS,
   VERIFY_LIMIT_PER_WINDOW,
@@ -60,6 +61,7 @@ import {
 import { MxObservationsRepository } from '../repositories/mx-observations.repository';
 import { VerificationsRepository } from '../repositories/verifications.repository';
 import { acquireCheckLock, releaseCheckLock } from './check-lock';
+import { DomainOwnershipReader } from './domain-ownership-reader';
 import { DomainConfigurationService } from './domain-configuration.service';
 import { DomainEventsService } from './domain-events.service';
 
@@ -122,6 +124,7 @@ export class DomainVerificationService {
     private readonly events: DomainEventsService,
     private readonly configuration: DomainConfigurationService,
     private readonly checker: DomainDnsChecker,
+    private readonly ownershipReader: DomainOwnershipReader,
   ) {
     this.gateway = gatewayDnsConfigFrom(config);
     this.schedule = scheduleConfigFrom(config);
@@ -178,12 +181,13 @@ export class DomainVerificationService {
   async statusView(scope: TenantScope, publicId: string): Promise<DomainStatusView> {
     const domain = await this.domains.findByPublicId(scope, publicId);
     if (!domain) throw domainNotFound();
-    const [records, dkimKeys, mx] = await Promise.all([
+    const [records, dkimKeys, mx, ownership] = await Promise.all([
       this.records.listForDomain(scope, domain.id),
       this.keys.listForDomain(scope, domain.id),
       this.mx.list(scope, domain.id),
+      this.ownershipReader.view(scope, domain),
     ]);
-    return toStatusView({ domain, records, dkimKeys, mx, gateway: this.gateway });
+    return toStatusView({ domain, ownership, records, dkimKeys, mx, gateway: this.gateway });
   }
 
   /**
@@ -312,8 +316,13 @@ export class DomainVerificationService {
         await this.keys.activate(tx, scope, change.keyId, now);
       }
     }
-    // A concurrent winner makes this update fail on the verified_name unique key (D4).
-    await this.domains.update(tx, scope, domain.id, plan.domain);
+    // A concurrent winner makes this update fail on the verified_name unique key (D4). Step
+    // API-4 (B3): a TXT win records `ownership_method = dns_txt`.
+    const txtWin = plan.transition?.to === 'verified';
+    await this.domains.update(tx, scope, domain.id, {
+      ...plan.domain,
+      ...(txtWin && { ownershipMethod: 'dns_txt' as const }),
+    });
 
     const ref = { id: domain.id, publicId: domain.publicId, name: domain.name };
     if (plan.transition) {
@@ -326,6 +335,7 @@ export class DomainVerificationService {
         action: plan.transition.auditAction,
         actor: options.actor,
         sourceIp: options.sourceIp,
+        ...(txtWin && { metadata: { method: 'dns_txt' } }),
         at: now,
       });
       if (plan.transition.to === 'verified') {
@@ -361,6 +371,71 @@ export class DomainVerificationService {
       });
     }
     return plan.outcome;
+  }
+
+  /**
+   * Step API-4 (B3.4, ADR-0107): the ownership win of a pending domain whose name the bound
+   * provider tenant lists as verified — the same first-to-verify-wins rule as a TXT check (the
+   * caller holds the domain row lock in `tx`): another organization owns the name → the claim is
+   * superseded (`failed`, `claimed_by_another_organization`); else the domain becomes `verified`
+   * with `ownership_method = provider_tenant`, audit `domain.verified` `{ method, connectionId }`,
+   * the status event and the other organizations' pending claims superseded. A concurrent winner
+   * fails the update on the `verified_name` unique key (the caller's transaction rolls back).
+   */
+  async claimThroughProvider(
+    tx: Client,
+    scope: TenantScope,
+    domain: DomainRow,
+    connectionPublicId: string | null,
+    now: Date,
+  ): Promise<'won' | 'lost'> {
+    const owner = await this.ownership.findVerifiedOwner(tx, domain.name);
+    const ref = { id: domain.id, publicId: domain.publicId, name: domain.name };
+    if (owner && owner.id !== domain.id) {
+      const to = nextStatus(domain.status, 'claim_superseded');
+      await this.domains.update(tx, scope, domain.id, {
+        status: to,
+        statusReason: DomainStatusReason.ClaimedByAnotherOrganization,
+        statusChangedAt: now,
+        nextCheckAt: null,
+      });
+      await this.events.transition(tx, {
+        organizationId: scope.organizationId,
+        domain: ref,
+        from: domain.status,
+        to,
+        reason: DomainStatusReason.ClaimedByAnotherOrganization,
+        action: DomainAuditAction.ClaimSuperseded,
+        actor: SYSTEM_ACTOR,
+        metadata: { method: 'provider_tenant', connectionId: connectionPublicId },
+        at: now,
+      });
+      return 'lost';
+    }
+    const to = nextStatus(domain.status, 'ownership_verified');
+    await this.domains.update(tx, scope, domain.id, {
+      status: to,
+      statusReason: null,
+      statusChangedAt: now,
+      verifiedAt: now,
+      ownershipMethod: 'provider_tenant',
+      checkFailures: 0,
+      // The DNS records (MX/SPF/DKIM/DMARC) of the now owned domain are checked as usual.
+      nextCheckAt: new Date(now.getTime() + FIRST_CHECK_DELAY_SECONDS * 1000),
+    });
+    await this.events.transition(tx, {
+      organizationId: scope.organizationId,
+      domain: ref,
+      from: domain.status,
+      to,
+      reason: null,
+      action: DomainAuditAction.Verified,
+      actor: SYSTEM_ACTOR,
+      metadata: { method: 'provider_tenant', connectionId: connectionPublicId },
+      at: now,
+    });
+    await this.supersedeOtherClaims(tx, domain, now);
+    return 'won';
   }
 
   /** D4: every other organization's pending claim on the name fails (system actor). */
@@ -408,6 +483,23 @@ export class DomainVerificationService {
     await this.transactions.run(async (tx) => {
       const domain = await this.domains.lockById(tx, scope, domainId);
       if (!domain || domain.status !== 'failed') return;
+      await this.restartLocked(tx, scope, domain, actor, sourceIp, now);
+    });
+  }
+
+  /**
+   * The restart of a locked `failed` domain in the caller's transaction (also used by the step
+   * API-4 provider ownership check, B3.2); returns the domain's new status.
+   */
+  async restartLocked(
+    tx: Client,
+    scope: TenantScope,
+    domain: DomainRow,
+    actor: AuditActor,
+    sourceIp: string | null,
+    now: Date,
+  ): Promise<DomainRow['status']> {
+    {
       const to = nextStatus(domain.status, 'verification_restarted');
       const previous = await this.verifications.findCurrent(scope, domain.id, tx);
       const nextCheckAt = new Date(now.getTime() + FIRST_CHECK_DELAY_SECONDS * 1000);
@@ -436,7 +528,8 @@ export class DomainVerificationService {
         sourceIp,
         at: now,
       });
-    });
+      return to;
+    }
   }
 }
 

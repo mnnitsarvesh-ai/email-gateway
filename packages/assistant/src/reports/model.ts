@@ -828,6 +828,26 @@ function apiModeSection(o: ReportSourceBodies['api_mode_overview']): ReportSecti
       { label: 'Reports awaiting triage', value: fmtNumber(o.reports.pendingTriage) },
       { label: 'Reports resolved (24 h)', value: fmtNumber(o.reports.resolved24h) },
       { label: 'Internal copies (24 h)', value: fmtNumber(o.internal.copies24h) },
+      // Step API-4 (A12): tenant policy evaluation of copies and outbound detections.
+      ...(o.policy
+        ? [
+            {
+              label: 'Policy evaluations (24 h)',
+              value: o.policy.enabled ? fmtNumber(o.policy.evaluated24h) : 'off',
+              ...(o.policy.enabled && o.policy.errors24h > 0
+                ? { hint: `${fmtNumber(o.policy.errors24h)} failed` }
+                : {}),
+            },
+          ]
+        : []),
+      ...(o.outbound
+        ? [
+            {
+              label: 'Outbound detections (24 h)',
+              value: o.outbound.enabled ? fmtNumber(o.outbound.detections24h) : 'off',
+            },
+          ]
+        : []),
     ],
     charts: [
       donutOf('chart-api-mode-health', 'Connections by health', health),

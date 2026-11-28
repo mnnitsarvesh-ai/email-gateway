@@ -960,6 +960,12 @@ importers:
       '@email-gateway/message-lifecycle':
         specifier: workspace:*
         version: link:../../packages/message-lifecycle
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../../packages/policy-dsl
+      '@email-gateway/policy-runtime':
+        specifier: workspace:*
+        version: link:../../packages/policy-runtime
       '@email-gateway/provider-integrations':
         specifier: workspace:*
         version: link:../../packages/provider-integrations
@@ -1106,6 +1112,9 @@ importers:
       '@email-gateway/policy-dsl':
         specifier: workspace:*
         version: link:../../packages/policy-dsl
+      '@email-gateway/policy-runtime':
+        specifier: workspace:*
+        version: link:../../packages/policy-runtime
       '@email-gateway/quarantine':
         specifier: workspace:*
         version: link:../../packages/quarantine
@@ -1868,6 +1877,21 @@ importers:
       prettier:
         specifier: ^3.6.2
         version: 3.9.10
+
+  packages/policy-runtime:
+    dependencies:
+      '@email-gateway/database':
+        specifier: workspace:*
+        version: link:../database
+      '@email-gateway/mailbox-api':
+        specifier: workspace:*
+        version: link:../mailbox-api
+      '@email-gateway/policy-dsl':
+        specifier: workspace:*
+        version: link:../policy-dsl
+      '@email-gateway/security-contracts':
+        specifier: workspace:*
+        version: link:../security-contracts
 
   packages/provider-integrations:
     dependencies:

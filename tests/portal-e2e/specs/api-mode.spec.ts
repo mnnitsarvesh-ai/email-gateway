@@ -4,8 +4,9 @@
  * (seed/api-mode.ts; enterprise plan, `api_mode_protection` on):
  *
  * - the onboarding wizard's first step "Protection mode" for each option (Inline, API, Hybrid):
- *   API creates the domain with inbound off (toggle hidden), skips destinations and recipients and
- *   marks MX "Not required in API mode"; the stored mode is checked on the writer;
+ *   API creates the domain with inbound off (toggle hidden) and (step API-4 B1) lists only the
+ *   API-mode steps (no DNS, destinations or recipients step); the stored mode is checked on the
+ *   writer;
  * - a domain mode change and an organization mode change through their dialogs (reason
  *   required) with the audit entries visible on the audit page; the MX-conflict refusal names the
  *   domain and suggests Hybrid (domain and organization);
@@ -83,25 +84,31 @@ test('wizard: the protection-mode step for Inline, API and Hybrid', async ({ pag
     }
     await add.getByLabel('Domain name (required)').fill(created[mode]);
     await add.getByRole('button', { name: 'Add domain' }).click();
-    await expect(page).toHaveURL(/domainId=.*step=dns/);
-    await expect(page.getByRole('heading', { name: '3. Publish DNS records' })).toBeVisible();
     const steps = page.getByRole('navigation', { name: 'Onboarding steps' });
     if (mode === 'api') {
-      await expect(page.getByText('Not required in API mode').first()).toBeVisible();
-      await expect(steps.getByRole('button', { name: /Destination mail server/ })).toBeDisabled();
-      await expect(steps.getByRole('button', { name: /Recipient validation/ })).toBeDisabled();
-      await expectNoSeriousA11yViolations(page, '/domains/onboarding (DNS, API)');
-      await steps.getByRole('button', { name: /Mailbox protection/ }).click();
-      await expect(page.getByRole('heading', { name: '7. Mailbox protection' })).toBeVisible();
+      // Step API-4 (B1): API lists only what applies — the TXT ownership record, no DNS step,
+      // destinations, recipients or MX/SPF/DKIM/DMARC records.
+      await expect(page).toHaveURL(/domainId=.*step=ownership/);
+      await expect(page.getByRole('heading', { name: '3. Verify ownership' })).toBeVisible();
+      await expect(steps.getByRole('button', { name: /Destination mail server/ })).toHaveCount(0);
+      await expect(steps.getByRole('button', { name: /Recipient validation/ })).toHaveCount(0);
+      await expect(steps.getByRole('button', { name: /Publish DNS records/ })).toHaveCount(0);
+      await expectNoSeriousA11yViolations(page, '/domains/onboarding (ownership, API)');
+      await steps.getByRole('button', { name: /Connect mailboxes/ }).click();
+      await expect(page.getByRole('heading', { name: '4. Connect mailboxes' })).toBeVisible();
       await expect(
         page.getByText(/No Microsoft 365 or Google Workspace connection is linked/),
       ).toBeVisible();
     } else if (mode === 'inline') {
+      await expect(page).toHaveURL(/domainId=.*step=dns/);
+      await expect(page.getByRole('heading', { name: '3. Publish DNS records' })).toBeVisible();
       await expect(steps.getByRole('button', { name: /Mailbox protection/ })).toBeDisabled();
       await expect(page.getByText('Not required in API mode')).toHaveCount(0);
     } else {
+      await expect(page).toHaveURL(/domainId=.*step=dns/);
+      await expect(page.getByRole('heading', { name: '3. Publish DNS records' })).toBeVisible();
       await expect(steps.getByRole('button', { name: /Destination mail server/ })).toBeEnabled();
-      await expect(steps.getByRole('button', { name: /Mailbox protection/ })).toBeEnabled();
+      await expect(steps.getByRole('button', { name: /Connect mailboxes/ })).toBeEnabled();
     }
   }
   expect(await storedDomain(created.api)).toEqual({ protectionMode: 'api', inboundEnabled: false });

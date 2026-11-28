@@ -70,6 +70,7 @@ import {
 import { cleanup } from './cleanup';
 import { mailBucket, reader, writer } from './db';
 import { historyOf, requiredEnginesOf, scanVerdictOf, writeMessageDetails } from './details';
+import { ETA, ETA_DOMAINS, ETA_NEW_ZONE, seedOnboarding } from './onboarding';
 import {
   DAY,
   type DeliveryPlan,
@@ -585,6 +586,9 @@ export async function seed(): Promise<SeedSummary> {
     // Step API-1: the API-mode tenant (enterprise: `api_mode_protection` is on).
     const zeta = await createOrganization(p, ZETA.slug, ZETA.name);
     const zetaApiMode = await seedApiMode(p, zeta);
+    // Step API-4: the onboarding tenant (enterprise: API mode and journal intake are on).
+    const eta = await createOrganization(p, ETA.slug, ETA.name);
+    const etaOnboarding = await seedOnboarding(p, eta);
     // The suite drives alpha's whole traffic through ten users within minutes (step 7.2 adds 14
     // details sections per role): the tenant budget of the standard plan (300 requests per
     // minute for the whole organization) would answer `429` to later specs. Alpha gets the
@@ -611,7 +615,7 @@ export async function seed(): Promise<SeedSummary> {
       {
         email: string;
         roles: string[];
-        org: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'platform';
+        org: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'eta' | 'platform';
         name: string;
       }
     > = {
@@ -776,6 +780,19 @@ export async function seed(): Promise<SeedSummary> {
         org: 'zeta',
         name: 'Zeta Approver',
       },
+      // Step API-4: the onboarding tenant eta (seed/onboarding.ts).
+      etaAdmin: {
+        email: `admin@${ETA_DOMAINS.bound}`,
+        roles: ['organization_admin'],
+        org: 'eta',
+        name: 'Eta Admin',
+      },
+      etaReadOnly: {
+        email: `readonly@${ETA_DOMAINS.bound}`,
+        roles: ['read_only_user'],
+        org: 'eta',
+        name: 'Eta Read-only',
+      },
       platformAdmin: {
         email: 'platform-admin@e2e-portal.test',
         roles: ['platform_admin'],
@@ -783,7 +800,7 @@ export async function seed(): Promise<SeedSummary> {
         name: 'E2E Platform Admin',
       },
     };
-    const orgOf = { alpha, beta, gamma, delta, epsilon, zeta, platform } as const;
+    const orgOf = { alpha, beta, gamma, delta, epsilon, zeta, eta, platform } as const;
     const users = {} as Record<UserKey, E2eUser>;
     const userIds = new Map<string, bigint>();
     const userPublicIds = new Map<string, string>();
@@ -1304,6 +1321,7 @@ export async function seed(): Promise<SeedSummary> {
         delta: { id: delta.publicId, name: delta.name, slug: delta.slug },
         epsilon: { id: epsilon.publicId, name: epsilon.name, slug: epsilon.slug },
         zeta: { id: zeta.publicId, name: zeta.name, slug: zeta.slug },
+        eta: { id: eta.publicId, name: eta.name, slug: eta.slug },
       },
       alpha: {
         domainId: alphaDomain.publicId,
@@ -1367,6 +1385,7 @@ export async function seed(): Promise<SeedSummary> {
         googleName: ZETA_GOOGLE_NAME,
         mailboxes: ZETA_MAILBOXES.map((m) => m.address),
       },
+      onboarding: { ...etaOnboarding, newZone: ETA_NEW_ZONE },
       archive: {
         custodian: ARCHIVE_CUSTODIAN,
         policyId: archive.alphaPolicyId,

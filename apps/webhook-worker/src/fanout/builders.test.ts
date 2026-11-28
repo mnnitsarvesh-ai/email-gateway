@@ -2,8 +2,10 @@ import { EventTypes } from '@email-gateway/event-contracts';
 import { buildEnvelope, eventSeverity } from '@email-gateway/webhooks';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  COPY_PUBLIC_IDS,
   DOMAIN_PUBLIC_ID,
   fakeFacts,
+  MESSAGE_PUBLIC_ID,
   messageFacts,
   ORG_PUBLIC_ID,
   sourceEvent,
@@ -389,5 +391,168 @@ describe('fact sanitizers', () => {
     ]);
     expect(snakeCodeOrNull('verification_expired')).toBe('verification_expired');
     expect(snakeCodeOrNull('Free text')).toBeNull();
+  });
+});
+
+describe('API-mode detection builders (step API-4 A9.1)', () => {
+  const copyMessage = () =>
+    Promise.resolve(messageFacts({ ingestSource: 'journal_intake', domainId: 77n }));
+  const dlp = (action: string) => ({
+    action,
+    verdict: 'suspicious',
+    categories: ['payment_card', 'iban'],
+  });
+  /** No subject, body, address, URL, file name or matched value in any envelope. */
+  const contentFree = (pe: PublicEvent) => {
+    const { envelope } = envelopeOf(pe); // strict schema + payload guard
+    const data = structuredClone(envelope.data) as { message: Record<string, unknown> };
+    delete data.message.internetMessageId; // the §5.1 header id is the only `@` allowed
+    expect(JSON.stringify(data)).not.toMatch(/@|https?:|subject|body|filename|matched/i);
+  };
+
+  it('copy_detected threat → mailbox.threat.detected (stage scan, risk row codes, counts)', async () => {
+    const facts = fakeFacts({ message: copyMessage });
+    const [pe, ...rest] = await build(EventTypes.MessageCopyDetected, {}, facts);
+    expect(rest).toEqual([]);
+    expect(pe!.type).toBe('mailbox.threat.detected');
+    expect(pe!.subKey).toBe('scan');
+    expect(pe!.data).toEqual({
+      message: expect.objectContaining({ id: MESSAGE_PUBLIC_ID, domainId: DOMAIN_PUBLIC_ID }),
+      detection: {
+        stage: 'scan',
+        verdict: 'malicious',
+        riskScore: 870,
+        reasonCodes: ['phishing.known_bad_url', 'auth.dmarc_fail'],
+        protectionMode: 'api',
+        direction: 'inbound',
+        copySource: 'journal',
+        policyDisposition: 'quarantine',
+        mailboxCount: 2,
+        remediation: { pending: 2, simulated: 0, skipped: 0 },
+        attachment: null,
+        detectionIds: [
+          '01890a5d-ac96-774b-bcce-b302099a80f0',
+          '01890a5d-ac96-774b-bcce-b302099a80f1',
+        ],
+        decidedAt: '2026-11-01T10:15:32.000Z',
+      },
+    });
+    expect(pe!.severity).toBe('high');
+    expect(pe!.matchable).toEqual({
+      type: 'mailbox.threat.detected',
+      severity: 'high',
+      direction: 'inbound',
+      domainPublicId: DOMAIN_PUBLIC_ID,
+      verdict: 'malicious',
+    });
+    expect(pe!.message).toEqual(messageFacts().key);
+    expect(facts.calls.sort()).toEqual(['message', 'riskReasonCodes']);
+    contentFree(pe!);
+  });
+
+  it('copy_detected DLP → mailbox.dlp.detected (categories, action, remediation)', async () => {
+    const [pe] = await build(
+      EventTypes.MessageCopyDetected,
+      { verdict: 'clean', dlp: dlp('require_approval'), direction: 'internal' },
+      fakeFacts({ message: copyMessage }),
+    );
+    expect(pe!.type).toBe('mailbox.dlp.detected');
+    expect(pe!.data.dlp).toEqual({
+      action: 'require_approval',
+      verdict: 'suspicious',
+      categories: ['payment_card', 'iban'],
+      protectionMode: 'api',
+      direction: 'internal',
+      policyDisposition: 'quarantine',
+      mailboxCount: 2,
+      remediation: { pending: 2, simulated: 0, skipped: 0 },
+      detectionIds: [
+        '01890a5d-ac96-774b-bcce-b302099a80f0',
+        '01890a5d-ac96-774b-bcce-b302099a80f1',
+      ],
+      decidedAt: '2026-11-01T10:15:32.000Z',
+    });
+    expect(pe!.severity).toBe('medium');
+    // The detection's direction is matched (not the message row's), no verdict attribute.
+    expect(pe!.matchable).toEqual({
+      type: 'mailbox.dlp.detected',
+      severity: 'medium',
+      direction: 'internal',
+      domainPublicId: DOMAIN_PUBLIC_ID,
+    });
+    contentFree(pe!);
+  });
+
+  it('an outbound detection (threat and DLP) is never remediated: remediation null', async () => {
+    const events = await build(
+      EventTypes.MessageCopyDetected,
+      {
+        verdict: 'spam',
+        dlp: dlp('block'),
+        direction: 'outbound',
+        copies: { counted: 1, remediation: { pending: 0, simulated: 0, skipped: 1, none: 0 } },
+        detectionIds: ['01890a5d-ac96-774b-bcce-b302099a80f2'],
+      },
+      fakeFacts({ message: copyMessage }),
+    );
+    expect(events.map((e) => [e.type, e.severity])).toEqual([
+      ['mailbox.threat.detected', 'low'],
+      ['mailbox.dlp.detected', 'high'],
+    ]);
+    expect((events[0]!.data.detection as { remediation: unknown }).remediation).toBeNull();
+    expect((events[1]!.data.dlp as { remediation: unknown }).remediation).toBeNull();
+    for (const pe of events) contentFree(pe);
+  });
+
+  it('sandbox of a copy message → mailbox.threat.detected (stage sandbox) and no email.threat.detected', async () => {
+    const facts = fakeFacts({ message: copyMessage });
+    const events = await build(EventTypes.AttachmentSandboxCompleted, {}, facts);
+    expect(events.map((e) => e.type)).toEqual(['mailbox.threat.detected']);
+    const [pe] = events;
+    expect(pe!.subKey).toBe('sandbox:3');
+    expect(pe!.data.detection).toEqual({
+      stage: 'sandbox',
+      verdict: 'malicious',
+      riskScore: null,
+      reasonCodes: ['sandbox.static.script_download_cradle', 'sandbox.static.embedded_urls'],
+      protectionMode: 'api',
+      direction: 'inbound',
+      copySource: 'journal',
+      policyDisposition: 'quarantine',
+      mailboxCount: 2,
+      remediation: null,
+      attachment: { partIndex: 3, sha256: 'c'.repeat(64), detectedType: 'seven_zip' },
+      detectionIds: [...COPY_PUBLIC_IDS],
+      decidedAt: '2026-11-01T10:15:35.000Z',
+    });
+    expect(pe!.matchable.direction).toBe('inbound');
+    expect(facts.calls).toContain('copyDetections');
+    contentFree(pe!);
+  });
+
+  it('sandbox of a copy message without counted copies (inline authority, out of scope) → nothing', async () => {
+    const events = await build(
+      EventTypes.AttachmentSandboxCompleted,
+      {},
+      fakeFacts({ message: copyMessage, copyDetections: () => Promise.resolve(null) }),
+    );
+    expect(events).toEqual([]);
+  });
+
+  it('sandbox of a gateway message stays email.threat.detected only (no copy read)', async () => {
+    const facts = fakeFacts();
+    const events = await build(EventTypes.AttachmentSandboxCompleted, {}, facts);
+    expect(events.map((e) => e.type)).toEqual(['email.threat.detected']);
+    expect(facts.calls).not.toContain('copyDetections');
+  });
+
+  it('deterministic envelope ids per (source event, type, subKey)', async () => {
+    const facts = () => fakeFacts({ message: copyMessage });
+    const overrides = { dlp: dlp('quarantine') };
+    const a = await build(EventTypes.MessageCopyDetected, overrides, facts());
+    const b = await build(EventTypes.MessageCopyDetected, overrides, facts());
+    const ids = (events: PublicEvent[]) => events.map((e) => envelopeOf(e).envelope.id);
+    expect(ids(a)).toEqual(ids(b));
+    expect(new Set(ids(a)).size).toBe(2);
   });
 });

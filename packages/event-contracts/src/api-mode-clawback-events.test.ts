@@ -236,7 +236,8 @@ describe('notification.alert_requested.v1 API-3 kinds (C6, C13)', () => {
   const okAlert = (payload: unknown) => notificationAlertRequestedV1.safeParse(payload).success;
 
   it('appends api_mode_purge_approval and api_mode_report_received', () => {
-    expect(NOTIFICATION_ALERT_KIND_VALUES.slice(-2)).toEqual([
+    // Step API-4 appended two more kinds after these (api-mode-parity-events.test.ts).
+    expect(NOTIFICATION_ALERT_KIND_VALUES.slice(-4, -2)).toEqual([
       'api_mode_purge_approval',
       'api_mode_report_received',
     ]);

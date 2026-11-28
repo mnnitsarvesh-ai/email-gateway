@@ -64,7 +64,12 @@ export const AUTO_CLAWBACK_TEXT: Record<AutoClawback, string> = {
 
 type NumberKey =
   'autoMaxMailboxes' | 'purgeApprovalMailboxes' | 'clawbackLookbackDays' | 'tiMinConfidence';
-type BoolKey = 'internalMailEnabled' | 'reportAckEnabled' | 'reportFeedbackEnabled';
+type BoolKey =
+  | 'internalMailEnabled'
+  | 'reportAckEnabled'
+  | 'reportFeedbackEnabled'
+  | 'policyEvaluationEnabled'
+  | 'outboundDetectionEnabled';
 
 const NUMBER_FIELDS: ReadonlyArray<{ key: NumberKey; label: string; help: string }> = [
   {
@@ -105,6 +110,17 @@ const BOOL_FIELDS: ReadonlyArray<{ key: BoolKey; label: string; help: string }> 
     label: 'Send the triage result',
     help: 'Default of "Notify the reporter" when a report is resolved.',
   },
+  // Step API-4 A12 (API4-1, API4-5).
+  {
+    key: 'policyEvaluationEnabled',
+    label: 'Evaluate tenant policies on copies',
+    help: 'Your policies (custom rules, allow and block lists, DLP, BEC) are evaluated on every API-mode copy in detect mode; their dispositions drive mailbox actions through the remediation policy mapping. Nothing is delivered, held or bounced.',
+  },
+  {
+    key: 'outboundDetectionEnabled',
+    label: 'Detect outbound mail (DLP)',
+    help: 'Outbound journal copies are evaluated too; a detection is recorded on the sender’s mailbox and alerted, never remediated (the message has already been sent).',
+  },
 ];
 
 type Draft = Record<NumberKey, string> & Record<BoolKey, boolean> & { autoClawback: AutoClawback };
@@ -119,6 +135,8 @@ function draftOf(s: OrgSettings): Draft {
     tiMinConfidence: String(s.tiMinConfidence),
     reportAckEnabled: s.reportAckEnabled,
     reportFeedbackEnabled: s.reportFeedbackEnabled,
+    policyEvaluationEnabled: s.policyEvaluationEnabled,
+    outboundDetectionEnabled: s.outboundDetectionEnabled,
   };
 }
 
@@ -168,6 +186,8 @@ function OrgSettingsForm({ view }: { view: OrgSettingsView }) {
               tiMinConfidence: Number(draft.tiMinConfidence),
               reportAckEnabled: draft.reportAckEnabled,
               reportFeedbackEnabled: draft.reportFeedbackEnabled,
+              policyEvaluationEnabled: draft.policyEvaluationEnabled,
+              outboundDetectionEnabled: draft.outboundDetectionEnabled,
               reason: reason.trim(),
               expectedRowVersion: view.rowVersion,
             },

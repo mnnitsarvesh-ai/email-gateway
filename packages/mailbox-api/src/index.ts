@@ -42,3 +42,8 @@ export * from './clawback/search-keys';
 export * from './reports/vocabulary';
 export * from './reports/extract';
 export * from './reports/original';
+// Step API-4 (note 38 A4, A5, A8.1, B6, B7; ADR-0105/0107): the policy lane, post-delivery
+// statuses, detection classification, mailbox scope and the detect-only start period.
+export * from './remediation/policy-outcome';
+export * from './remediation/detect-only';
+export * from './scope';

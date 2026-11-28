@@ -51,6 +51,10 @@ export const USER_KEYS = [
   'zetaReadOnly',
   // Step API-2: a zeta security analyst with MFA (approves a mailbox entry's restore).
   'zetaApprover',
+  // Step API-4: the onboarding tenant eta (seed/onboarding.ts): an organization admin (the
+  // wizard) and a read-only user ("ask an administrator").
+  'etaAdmin',
+  'etaReadOnly',
   'platformAdmin',
 ] as const;
 export type UserKey = (typeof USER_KEYS)[number];
@@ -59,7 +63,7 @@ export interface E2eUser {
   email: string;
   password: string;
   roles: string[];
-  organization: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'platform';
+  organization: 'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'eta' | 'platform';
   /** Base32 TOTP secret once MFA is enabled (seeded, or enrolled through the UI). */
   totpSecret?: string;
   /** Last TOTP step sent to the api (each step is accepted once). */
@@ -96,7 +100,7 @@ export interface E2eState {
   seededAt: string;
   users: Record<UserKey, E2eUser>;
   orgs: Record<
-    'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta',
+    'alpha' | 'beta' | 'gamma' | 'delta' | 'epsilon' | 'zeta' | 'eta',
     { id: string; name: string; slug: string }
   >;
   alpha: {
@@ -219,6 +223,16 @@ export interface E2eState {
       reportIds: [string, string];
       reportMailbox: string;
     };
+  };
+  /** Step API-4: the onboarding tenant eta (seed/onboarding.ts). */
+  onboarding: {
+    domains: Record<'bound' | 'inline', string>;
+    domainNames: Record<'bound' | 'inline', string>;
+    m365ConnectionId: string;
+    m365Name: string;
+    journalSourceId: string;
+    /** The zone of the domains the spec creates. */
+    newZone: string;
   };
   archive: {
     custodian: string;

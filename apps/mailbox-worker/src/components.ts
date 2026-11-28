@@ -7,6 +7,15 @@ import { ClawbackRunner } from './clawback/clawback-runner';
 import { LateSignalHandler } from './clawback/late-signal.handler';
 import { TI_SWEEP_LOCK, TiSweep } from './clawback/ti-sweep';
 import { hasRole, notificationsAvailable, type WorkerConfig } from './config';
+import {
+  atoFactsRepositoryFor,
+  DirectoryRepository,
+  FactsRepository,
+  SnapshotCache,
+  SnapshotRepository,
+  type LoadedSnapshot,
+  type PolicyRead,
+} from '@email-gateway/policy-runtime';
 import { CopiesHandler } from './copies/copies.handler';
 import { S3HeaderReader, type HeaderReader } from './copies/header-reader';
 import { S3EmlSink, type EmlSink } from './feeds/eml-sink';
@@ -17,8 +26,11 @@ import { InventoryRunner } from './inventory/inventory-runner';
 import type { MailboxMetrics } from './metrics/mailbox-metrics';
 import { RemediationDecider } from './remediation/decide';
 import { RemediationRunner } from './remediation/executor';
+import { CopyPolicyEvaluator } from './policy/copy-policy';
 import { RemediationPolicyLoader } from './remediation/policy-loader';
 import { ReportsRunner } from './reports/reports-runner';
+import { DetectOnlyExpiry } from './health/detect-only';
+import { ScopeEvaluator } from './health/scope-evaluator';
 import {
   createMailboxAccessTokens,
   ProviderRuntime,
@@ -64,7 +76,10 @@ export interface ComponentDeps {
  * (step API-3: materialization, queueing, reconcile, cancel, approval expiry, bulk restore and the
  * leader-locked threat-intelligence sweep), `reports` (step API-3: report parsing,
  * identification, original ingest, acknowledgements) and `health` (leader-locked health,
- * maintenance incl. mailbox entry expiry and API-3 retention, and the counters flush). The
+ * maintenance incl. mailbox entry expiry and API-3 retention, the counters flush and — step API-4
+ * — the mailbox scope evaluation (B6) and the detect-only expiry (B7)). The copies role evaluates
+ * copy messages against the tenant policies in detect mode (A1–A3) with the policy-engine's
+ * runtime (`@email-gateway/policy-runtime`). The
  * provider runtime (credential key, token cache, provider HTTPS) exists only where a
  * provider-calling role runs; `clawback` and `reports` never call a provider (C-I1).
  */
@@ -90,6 +105,12 @@ export class MailboxComponents {
   readonly reports: ReportsRunner;
   readonly health: HealthJob;
   readonly maintenance: Maintenance;
+  /** Step API-4 A1–A3: detect evaluation of copy messages (policy-engine runtime). */
+  readonly policyEvaluator: CopyPolicyEvaluator;
+  /** Step API-4 B6: the health leader's mailbox scope evaluation. */
+  readonly scope: ScopeEvaluator;
+  /** Step API-4 B7: the health leader's detect-only expiry. */
+  readonly detectOnly: DetectOnlyExpiry;
   readonly healthLeader: LeaderJob;
   private readonly periodics: Periodic[] = [];
   private started = false;
@@ -137,6 +158,32 @@ export class MailboxComponents {
       now,
       ...orgs,
     });
+    const policyLog = logger.child({ component: 'copy-policy' });
+    const inconsistent = (read: PolicyRead) => {
+      metrics?.policyInconsistentReads.inc({ read });
+      policyLog.warn({ read }, 'policy runtime read failed its echo check; the event is retried');
+    };
+    this.policyEvaluator = new CopyPolicyEvaluator({
+      enabled: config.API_MODE_POLICY_EVALUATION_ENABLED,
+      facts: new FactsRepository(inconsistent),
+      snapshots: new SnapshotRepository(
+        new SnapshotCache<LoadedSnapshot>(config.POLICY_SNAPSHOT_CACHE_MAX_ENTRIES),
+        config.POLICY_PLATFORM_DEFAULT,
+        inconsistent,
+        ({ policyPublicId }) =>
+          policyLog.warn(
+            { policyPublicId },
+            'active policy points to a version that is not published; it contributes no rule',
+          ),
+      ),
+      directory: new DirectoryRepository(inconsistent),
+      // Step 8.4 D23 (same source as the policy-engine): ATO facts of outbound/internal senders.
+      atoFacts: atoFactsRepositoryFor({
+        atoFacts: { inc: () => undefined },
+        atoFactsSeconds: { observe: () => undefined },
+        inconsistentReads: { inc: ({ read }) => inconsistent(read) },
+      }),
+    });
     const headers = deps.headers ?? new S3HeaderReader(deps.s3, deps.mailBucket);
     const sink = deps.sink ?? new S3EmlSink(deps.s3, deps.mailBucket);
     this.copies = new CopiesHandler({
@@ -156,6 +203,7 @@ export class MailboxComponents {
         hardDeleteEnabled: config.API_MODE_HARD_DELETE_ENABLED,
       }),
       lateSignals: this.lateSignals,
+      policy: this.policyEvaluator,
       ...orgs,
     });
     const quarantineBounds = {
@@ -328,6 +376,7 @@ export class MailboxComponents {
         reports: { triageWarnHours: config.API_MODE_REPORT_TRIAGE_WARN_HOURS },
       },
       policies: this.policies,
+      redis: deps.redis,
       ...orgs,
     });
     this.maintenance = new Maintenance({
@@ -343,13 +392,37 @@ export class MailboxComponents {
       },
       ...orgs,
     });
+    this.scope = new ScopeEvaluator({
+      prisma,
+      metrics,
+      logger: logger.child({ role: 'health' }),
+      now,
+      config: {
+        refreshMinutes: config.API_MODE_SCOPE_REFRESH_MINUTES,
+        maxDepartments: config.API_MODE_SCOPE_MAX_DEPARTMENTS,
+      },
+      ...orgs,
+    });
+    this.detectOnly = new DetectOnlyExpiry({
+      prisma,
+      metrics,
+      logger: logger.child({ role: 'health' }),
+      now,
+      policies: this.policies,
+      config: { alertMinIntervalHours: config.API_MODE_ALERT_MIN_INTERVAL_HOURS },
+      ...orgs,
+    });
     const lock = `${deps.lockPrefix ?? ''}${HEALTH_LOCK}`;
     this.healthLeader = new LeaderJob(
       'health',
       lock,
       config.API_MODE_HEALTH_INTERVAL_MS,
       async () => {
+        // Step API-4: scope first (coverage and feeds read it), then health, then B7 expiry.
+        await this.scope.runOnce();
         await this.health.runOnce();
+        await this.scope.gauge();
+        await this.detectOnly.runOnce();
         await this.maintenance.runOnce();
       },
       {

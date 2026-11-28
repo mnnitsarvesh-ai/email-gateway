@@ -8,7 +8,17 @@ import {
   type FixtureRequest,
   type FixtureResponse,
 } from '../types';
-import { DAY, HOUR, MINUTE, bodyOf, domainsOf, guarded, idempotent, isoAgo } from './domains';
+import {
+  DAY,
+  HOUR,
+  MINUTE,
+  bodyOf,
+  domainsOf,
+  guarded,
+  idempotent,
+  isoAgo,
+  registerProviderOwnershipSource,
+} from './domains';
 
 export { DEV_MOCK_MARKER } from '../types';
 
@@ -463,6 +473,22 @@ function orgState(organizationId: string): OrgState {
   }
   return org;
 }
+
+/**
+ * Step API-4 B3.1: connections that can prove domain ownership (tenant bound, not disabled,
+ * active mail-flow grant).
+ */
+export function ownershipCheckConnections(organizationId: string): string[] {
+  return providerConnectionsOf(organizationId)
+    .filter(
+      (c) =>
+        c.tenantId !== null &&
+        c.status !== 'disabled' &&
+        c.grants.some((g) => g.profile === PROFILE[c.provider] && g.status === 'active'),
+    )
+    .map((c) => c.id);
+}
+registerProviderOwnershipSource(ownershipCheckConnections);
 
 /** The organization's 8.2 connections (step API-1: read by the api-mode fixtures). */
 export function providerConnectionsOf(organizationId: string): Connection[] {
@@ -1554,7 +1580,8 @@ export const fixtures: FixtureHandlers = {
         for (const id of ids) {
           const entry = all.find((e) => e.domain.id === id && !e.deleted);
           if (!entry) return apiError(404, 'domain_not_in_organization', 'Domain not found');
-          if (entry.domain.status !== 'active')
+          // Step API-4 B4: verified (not yet active) domains may be linked too.
+          if (entry.domain.status !== 'active' && entry.domain.status !== 'verified')
             return apiError(422, 'domain_not_verified', `${entry.domain.name} is not verified`);
           if (
             org.connections.some(

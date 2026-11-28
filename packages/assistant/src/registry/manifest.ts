@@ -336,6 +336,12 @@ export const API_MODE_WRITES_TESTED_BY: Readonly<Record<string, string>> = Objec
     'ApiModeReportsController_addMailbox_v1',
     'ApiModeReportsController_setMailbox_v1',
     'ApiModeSettingsController_put_v1',
+    // Step API-4 B10 (docs/plan/steps/38-api-mode-parity-onboarding.md): the mailbox scope (high:
+    // narrowing it removes protection) and the ownership check through the bound provider tenant
+    // (low: it can only prove ownership the bound tenant already shows), tested with the API-mode
+    // writes.
+    'ApiModeOnboardingController_putScope_v1',
+    'DomainsController_providerOwnershipCheck_v1',
   ].map((id) => [id, API_MODE_WRITES_TESTED_BY_SUITE]),
 );
 
@@ -412,7 +418,7 @@ export const NOT_APPLICABLE_REASONS = {
   fileExport: 'file export stream (portal only; chat links to the page)',
   critical: 'critical: portal only by policy (chat links to the page)',
   apiModePortalOnly:
-    'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
+    'API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)',
 } as const;
 
 /**
@@ -420,8 +426,8 @@ export const NOT_APPLICABLE_REASONS = {
  * `not_applicable` until step API-3; step API-2 R16 added its six remediation writes to that set.
  * Step API-3 C15 (docs/plan/steps/37-api-mode-clawback-reporting.md) turns every API-mode write
  * into a confirmed write tool (`API_MODE_WRITES_TESTED_BY`) except the two protection-mode writes:
- * they stay portal only because they are bound to the MX conflict checks and the open
- * domain-onboarding decision PO-D1. The clawback hard delete is a critical portal-only operation
+ * they stay portal only because they are bound to the MX conflict checks and (step API-4, design
+ * note 38 B10, PO-D1 decided) the add-domain wizard. The clawback hard delete is a critical portal-only operation
  * (`CRITICAL_OPERATIONS`). The existing quarantine write tools also act on mailbox-located
  * entries: the same operations with the same confirmation and risk.
  */
@@ -620,6 +626,10 @@ export const RISK_OVERRIDES: Readonly<Record<string, ToolRisk>> = {
   ApiModeReportsController_addMailbox_v1: 'medium',
   ApiModeReportsController_setMailbox_v1: 'medium',
   ApiModeSettingsController_put_v1: 'high',
+  // Step API-4 B10: narrowing the mailbox scope removes protection (re-authentication); the
+  // provider ownership check is the same class as restarting a verification.
+  ApiModeOnboardingController_putScope_v1: 'high',
+  DomainsController_providerOwnershipCheck_v1: 'low',
 };
 
 export const CONFIRM_OF_RISK: Readonly<Record<ToolRisk, ToolConfirm>> = {
@@ -768,6 +778,11 @@ export const CONTROLLER_HINTS: Readonly<
   ApiModeClawbackController: { portalRoute: '/api-mode', resourceType: 'api_clawback' },
   ApiModeReportsController: { portalRoute: '/api-mode', resourceType: 'api_user_report' },
   ApiModeSettingsController: { portalRoute: '/api-mode', resourceType: 'api_mode_settings' },
+  // Step API-4: protection by mode, the domain onboarding state and the mailbox scope.
+  ApiModeOnboardingController: {
+    portalRoute: '/domains/{domainId}',
+    resourceType: 'api_mode_domain',
+  },
   ArchiveAdminController: { portalRoute: '/archive', resourceType: 'archive' },
   ArchiveMessagesController: {
     portalRoute: '/archive/{messageId}',
@@ -1432,6 +1447,22 @@ const BASE_OVERRIDES: Readonly<Record<string, OperationOverride>> = {
     untrustedFields: ['data[].address', 'data[].domain.name'],
   },
   ApiModeSettingsController_get_v1: {},
+  // Step API-4 B10: protection by mode (domain names are tenant-authored), the onboarding state
+  // and the scope (department names are operator text; the PUT's `reason` is stored, never shown
+  // back).
+  ApiModeOnboardingController_protectionCoverage_v1: {
+    display: columns('name', 'effectiveMode', 'status', 'gaps'),
+    untrustedFields: ['items[].name'],
+  },
+  ApiModeOnboardingController_domainOnboarding_v1: {},
+  ApiModeOnboardingController_getScope_v1: {
+    untrustedFields: ['departments[].name'],
+  },
+  ApiModeOnboardingController_putScope_v1: {
+    untrustedFields: ['departments[].name'],
+  },
+  // A write of the domains module enabled with the API-mode writes of the hardening phase.
+  DomainsController_providerOwnershipCheck_v1: { phase: 'AI-6' },
 
   // --- own organization (bind {id}) ---
   ProtectionModeController_getOrganization_v1: { bind: SELF_ORGANIZATION },

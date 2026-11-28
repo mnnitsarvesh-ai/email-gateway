@@ -18,6 +18,9 @@
  * - the hard-delete purge is never a tool (`denied_not_applicable`, no loopback request);
  * - reports: triage (medium; the result feedback row), clawback from a report (medium), report
  *   mailbox by address and by id (medium); the organization settings put (high).
+ * - step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md B10): the mailbox scope put
+ *   (high: narrowing removes protection; re-authenticated) and the ownership check of a pending
+ *   domain through the bound provider tenant (low).
  *
  * Synthetic `it-apiclaw-*` organizations and `.test` names only; nothing reaches a provider (the
  * api only writes the rows the mailbox-worker executes).
@@ -45,6 +48,8 @@
 // @covers post /api/v1/api-mode/report-mailboxes
 // @covers put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox
 // @covers put /api/v1/api-mode/settings
+// @covers put /api/v1/api-mode/domains/:domainId/scope
+// @covers post /api/v1/domains/:domainId/ownership/provider-check
 import { createHash, randomUUID } from 'node:crypto';
 import { uuidv7 } from '@email-gateway/common';
 import { EventTypes } from '@email-gateway/event-contracts';
@@ -679,5 +684,67 @@ describe('reports, report mailboxes and settings through chat (C15)', () => {
     expect(
       await ctx.prisma.apiModeOrgSetting.findUniqueOrThrow({ where: { organizationId: org.id } }),
     ).toMatchObject({ autoClawback: 'review', purgeApprovalMailboxes: 25 });
+  });
+
+  it('step API-4: the mailbox scope put (high, re-authenticated) selects the domain’s mailboxes', async () => {
+    const put = await chat('api_mode_onboarding_put_scope', {
+      domainId: world.domain.publicId,
+      body: {
+        scope: { kind: 'mailboxes' },
+        mailboxIds: [world.mailboxes[0]!.publicId],
+        reason: REASON,
+        expectedRowVersion: null,
+      },
+    });
+    expect(put.proposal.confirmation).toMatchObject({ risk: 'high', requiresReauth: true });
+    expectExecuted(put, 200);
+    await audited(put, 'api_mode.scope_updated');
+    expect(
+      await ctx.prisma.apiModeDomainSetting.findUniqueOrThrow({
+        where: { domainId: world.domain.id },
+      }),
+    ).toMatchObject({ scopeKind: 'mailboxes', rowVersion: 1 });
+    expect(
+      await ctx.prisma.apiMailbox.count({
+        where: { organizationId: org.id, domainId: world.domain.id, scopeSelected: true },
+      }),
+    ).toBe(1);
+  });
+
+  it('step API-4: the provider ownership check of a pending domain (low) writes the provider row', async () => {
+    const p = ctx.prisma;
+    const connection = await p.providerConnection.findFirstOrThrow({
+      where: { organizationId: org.id, publicId: world.connectionPublicId },
+      select: { id: true },
+    });
+    await p.providerConnectionGrant.create({
+      data: {
+        organizationId: org.id,
+        connectionId: connection.id,
+        profile: 'm365.mail_flow',
+        profileVersion: 1,
+        authMethod: 'platform_app',
+        status: 'active',
+        requestedPermissions: [],
+        observedPermissions: [],
+        verifiedAt: new Date(),
+      },
+    });
+    const pending = await insertDomain(ctx, org, {
+      status: 'pending_verification',
+      label: 'apiclaw-p',
+    });
+    const check = await chat('domains_provider_ownership_check', {
+      domainId: pending.publicId,
+      body: { connectionId: world.connectionPublicId },
+    });
+    expect(check.proposal.confirmation).toMatchObject({ risk: 'low', requiresReauth: false });
+    expectExecuted(check, 202);
+    await audited(check, 'domain.provider_verification_requested');
+    expect(
+      await p.domainVerification.findFirstOrThrow({
+        where: { organizationId: org.id, domainId: pending.id, method: 'provider_tenant' },
+      }),
+    ).toMatchObject({ status: 'pending', providerConnectionId: connection.id });
   });
 });

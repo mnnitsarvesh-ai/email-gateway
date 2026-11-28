@@ -381,6 +381,12 @@ export type MessageArchiveRequestedV1 = z.infer<typeof messageArchiveRequestedV1
 /** Notification kinds of a policy decision (P25). */
 export const POLICY_NOTIFICATION_KIND_VALUES = ['policy_alert', 'sender_non_delivery'] as const;
 export const POLICY_ALERT_SEVERITY_VALUES = ['info', 'warning', 'critical'] as const;
+/**
+ * How the evaluation that requested a notification ran (Prisma `PolicyEvaluationMode`, step API-4
+ * A1, A7): `inline` = the policy-engine's gating evaluation; `detect` = the mailbox-worker's
+ * evaluation of an API-mode copy.
+ */
+export const POLICY_EVALUATION_MODE_VALUES = ['inline', 'detect'] as const;
 
 /**
  * A notification requested by a policy decision (step 5.2 P15, P19, P25): an ALERT to the
@@ -391,6 +397,13 @@ export const POLICY_ALERT_SEVERITY_VALUES = ['info', 'warning', 'critical'] as c
  * notification-worker (ledger `notification-worker.policy`, at least once). Ids, enums and rule
  * references only (strict): the worker reads what it renders from the database, never from the
  * event, and never renders subject, body, file names or URLs.
+ *
+ * Producers: the policy-engine (inline evaluations; never sets `evaluationMode`) and, from step
+ * API-4 (A7, ADR-0106), the mailbox-worker `copies` role (a policy ALERT of a detect evaluation
+ * of an API-mode copy: `kind = policy_alert`, `evaluationMode = 'detect'`, `lifecycleRound` 0,
+ * once per registry message, in the copy_scanned ledger transaction). `evaluationMode` is
+ * optional and additive: absent = `inline`. A detect evaluation never requests
+ * `sender_non_delivery` (the message was already delivered).
  */
 export const policyNotificationRequestedV1 = z
   .strictObject({
@@ -405,8 +418,17 @@ export const policyNotificationRequestedV1 = z
     /** Rules that requested the notification (`<policyPublicId>#<versionNo>/<ruleId>`), unique. */
     ruleRefs: z.array(policyRuleRef).max(16),
     requestedAt: z.iso.datetime(),
+    /** Step API-4 (A7): `detect` for an API-mode copy evaluation; absent = `inline`. */
+    evaluationMode: z.enum(POLICY_EVALUATION_MODE_VALUES).optional(),
   })
   .superRefine((payload, ctx) => {
+    if (payload.evaluationMode === 'detect' && payload.kind !== 'policy_alert') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['kind'],
+        message: 'A detect evaluation requests policy alerts only (never a sender notice)',
+      });
+    }
     if (payload.kind === 'sender_non_delivery') {
       if (payload.direction === 'inbound') {
         ctx.addIssue({
@@ -2091,6 +2113,12 @@ export const NOTIFICATION_ALERT_KIND_VALUES = [
   // Step API-3 C13 (ADR-0104): new user reports reached `pending_triage` (mailbox-worker
   // `reports` role; at most once per organization per API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES).
   'api_mode_report_received',
+  // Step API-4 A9.2 (ADR-0106): a DLP detection of an API-mode copy (webhook-worker fanout of
+  // `mail.message.copy_detected.v1`, projected to `mailbox.dlp.detected`).
+  'dlp_detected',
+  // Step API-4 B7 (ADR-0107): a remediation policy's detect-only period ended (mailbox-worker
+  // health leader; once per period through `detect_only_notified_at`).
+  'api_mode_detect_only_ended',
 ] as const;
 /** Public event severities (step 6.2 §5). */
 export const NOTIFICATION_ALERT_SEVERITY_VALUES = ['info', 'low', 'medium', 'high'] as const;
@@ -2107,6 +2135,8 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
   api_mode_unhealthy: ['apiModeConnectionId'],
   api_mode_purge_approval: ['clawbackId'],
   api_mode_report_received: [],
+  dlp_detected: ['webhookEventId', 'messageId', 'receivedAt'],
+  api_mode_detect_only_ended: ['remediationPolicyId'],
 };
 
 /**
@@ -2117,7 +2147,9 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * archive-worker intake health loop: `journal_intake_silent`; step API-1 mailbox-worker health
  * role: `api_mode_unhealthy`; step API-3 api and mailbox-worker `clawback` role:
  * `api_mode_purge_approval`; step API-3 mailbox-worker `reports` role:
- * `api_mode_report_received`) through `message_outbox`
+ * `api_mode_report_received`; step API-4 webhook-worker fanout: `threat_detected` also for
+ * `mailbox.threat.detected`, and `dlp_detected` for `mailbox.dlp.detected`; step API-4
+ * mailbox-worker health leader: `api_mode_detect_only_ended`) through `message_outbox`
  * (`aggregate_type = 'organization'`,
  * `aggregate_id` = the decimal organization id); published to `email.policy` and consumed from
  * `email.notifications` by the notification-worker, which reads what it renders at send time.
@@ -2127,7 +2159,9 @@ const NOTIFICATION_ALERT_REQUIRED_REFS: Readonly<
  * DNS: the public event id and domain id; webhook disabled: the subscription public id; journal
  * intake silent: the intake source public id; API mode unhealthy: the `api_mode_connections`
  * public id; purge approval: the `api_clawbacks` public id; report received: no ref, the
- * notification-worker counts the organization's pending reports at send time);
+ * notification-worker counts the organization's pending reports at send time; DLP detected: the
+ * public event id, message id and received time, like a threat; detect-only ended: the
+ * `api_remediation_policies` public id);
  * `messageId` and `receivedAt` go together; `window.from` precedes `window.to`.
  */
 export const notificationAlertRequestedV1 = z
@@ -2148,6 +2182,8 @@ export const notificationAlertRequestedV1 = z
       apiModeConnectionId: z.uuid().optional(),
       /** Step API-3: the clawback public id (`api_mode_purge_approval`). */
       clawbackId: z.uuid().optional(),
+      /** Step API-4: the remediation policy public id (`api_mode_detect_only_ended`). */
+      remediationPolicyId: z.uuid().optional(),
     }),
     window: z.strictObject({ from: z.iso.datetime(), to: z.iso.datetime() }),
     counts: z.strictObject({ suppressedBefore: z.number().int().min(0).max(4_294_967_295) }),
@@ -2431,6 +2467,181 @@ export const reportFeedbackRequestedV1 = z.strictObject({
 });
 export type ReportFeedbackRequestedV1 = z.infer<typeof reportFeedbackRequestedV1>;
 
+/** Copy sources of a detection (Prisma `ApiCopySource`, step API-1 D7.6). */
+export const COPY_DETECTED_SOURCE_VALUES = ['journal', 'graph', 'gmail'] as const;
+/** Directions of a detection (Prisma `ApiCopyDirection`; `outbound` from step API-4 A6). */
+export const COPY_DETECTED_DIRECTION_VALUES = ['inbound', 'internal', 'outbound'] as const;
+/** Protection mode of a detection's counted copies (step API-4 A8.2). */
+export const COPY_DETECTED_PROTECTION_MODE_VALUES = ['api', 'hybrid'] as const;
+/**
+ * Policy evaluation states a detection can carry (Prisma `ApiCopyPolicyState` without `none`,
+ * `inline` and `not_applicable`: those copies never produce a detection event).
+ */
+export const COPY_DETECTED_POLICY_STATE_VALUES = ['evaluated', 'disabled', 'failed'] as const;
+/** The nine policy action types of `policy-dsl/1` (ADR-0045; `POLICY_ACTION_TYPES`). */
+export const POLICY_ACTION_TYPE_VALUES = [
+  'ALLOW',
+  'REJECT',
+  'QUARANTINE',
+  'TAG',
+  'WARN',
+  'REQUIRE_APPROVAL',
+  'URL_REWRITE',
+  'ARCHIVE',
+  'ALERT',
+] as const;
+/** At most this many copy public ids in one `mail.message.copy_detected.v1` (contracts §39). */
+export const COPY_DETECTED_MAX_DETECTION_IDS = 20;
+/** At most this many DLP category codes in one detection (contracts §39). */
+export const COPY_DETECTED_MAX_DLP_CATEGORIES = 8;
+/** A DLP verdict or category code (`dlp_scan_results`, `DLP_CATEGORIES`; ≤ 32 characters). */
+export const COPY_DETECTED_CODE_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
+
+const copyDetectedCount = z.number().int().min(0).max(4_294_967_295);
+const copyDetectedCode = z.string().regex(COPY_DETECTED_CODE_PATTERN, 'Expected a code');
+
+/**
+ * An API-mode copy message with a detection (step API-4 A8, ADR-0106, contracts §39). Written by
+ * the mailbox-worker `copies` role through `message_outbox` (`aggregate_type = 'message'`,
+ * `aggregate_id` = the message public id; `correlation_id` from the `copy_scanned` event) in the
+ * ledger transaction of `mail.message.copy_scanned.v1`, once per registry copy message (journal
+ * message or feed copy message) when at least one recorded copy has copy verdict authority and
+ * is in scope and the outcome is a detection: a threat verdict (`spam`, `bulk`, `suspicious`,
+ * `phishing`, `malware`, `bec`), a DLP action other than `allow`, a policy disposition other than
+ * `allow`, or a tagged result. Outbound detection copies count; hybrid inline-authority copies
+ * never do (P-I3). Published to `email.security`; consumed from `email.webhooks` (topology v19)
+ * by the webhook-worker fanout (ledger `webhook-worker.fanout`), which projects it to the public
+ * webhooks `mailbox.threat.detected` / `mailbox.dlp.detected` and the alerts `threat_detected` /
+ * `dlp_detected`.
+ *
+ * Strict; ids, codes, enums, counts and times only — never an address, subject, file name, URL,
+ * matched value or rule text. `protectionMode` = `api` when any counted copy's domain is
+ * effective `api`, else `hybrid`. `detectionIds` = public ids of the counted copies (1..20,
+ * unique; the first 20 when more). Consistency: `dlp` is null or carries an action other than
+ * `allow`; a `policy.state` of `evaluated` names the disposition and decision source, the other
+ * states carry none (no override, no action types); the remediation counts add up to
+ * `copies.counted` (≥ 1), and there are no more detection ids than counted copies; action types
+ * and DLP categories are unique.
+ */
+export const messageCopyDetectedV1 = z
+  .strictObject({
+    /** Registry id (`message_identities.id`). */
+    messageId: decimalIdSchema,
+    messagePublicId: z.uuid(),
+    receivedAt: z.iso.datetime(),
+    ingestSource: z.enum(MESSAGE_COPY_INGEST_SOURCE_VALUES),
+    copySource: z.enum(COPY_DETECTED_SOURCE_VALUES),
+    direction: z.enum(COPY_DETECTED_DIRECTION_VALUES),
+    protectionMode: z.enum(COPY_DETECTED_PROTECTION_MODE_VALUES),
+    /** The copy's detect-mode verdict (Prisma `MessageVerdict`); null when none was reached. */
+    verdict: z.enum(MESSAGE_VERDICT_VALUES).nullable(),
+    /** Risk score of the round (0–1000); null when none was computed. */
+    riskScore: z.number().int().min(0).max(1000).nullable(),
+    policy: z.strictObject({
+      state: z.enum(COPY_DETECTED_POLICY_STATE_VALUES),
+      disposition: policyDisposition.nullable(),
+      decisionSource: z.enum(POLICY_DECISION_SOURCE_VALUES).nullable(),
+      overrideApplied: z.boolean(),
+      actionTypes: z.array(z.enum(POLICY_ACTION_TYPE_VALUES)).max(POLICY_ACTION_TYPE_VALUES.length),
+    }),
+    dlp: z
+      .strictObject({
+        action: z.enum(DLP_INCIDENT_ACTION_VALUES),
+        /** `dlp_scan_results.verdict` code. */
+        verdict: copyDetectedCode,
+        /** DLP category codes (`DLP_CATEGORIES`), unique. */
+        categories: z.array(copyDetectedCode).max(COPY_DETECTED_MAX_DLP_CATEGORIES),
+      })
+      .nullable(),
+    copies: z.strictObject({
+      counted: copyDetectedCount,
+      remediation: z.strictObject({
+        pending: copyDetectedCount,
+        simulated: copyDetectedCount,
+        skipped: copyDetectedCount,
+        none: copyDetectedCount,
+      }),
+    }),
+    /** `api_message_copies.public_id` of the counted copies. */
+    detectionIds: z.array(z.uuid()).min(1).max(COPY_DETECTED_MAX_DETECTION_IDS),
+    decidedAt: z.iso.datetime(),
+  })
+  .superRefine((payload, ctx) => {
+    const { policy } = payload;
+    if (policy.state === 'evaluated') {
+      for (const field of ['disposition', 'decisionSource'] as const) {
+        if (policy[field] === null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['policy', field],
+            message: `An evaluated policy names its ${field}`,
+          });
+        }
+      }
+    } else {
+      for (const field of ['disposition', 'decisionSource'] as const) {
+        if (policy[field] !== null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['policy', field],
+            message: `A ${policy.state} policy state carries no ${field}`,
+          });
+        }
+      }
+      if (policy.overrideApplied || policy.actionTypes.length > 0) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['policy'],
+          message: `A ${policy.state} policy state carries no override or action types`,
+        });
+      }
+    }
+    if (new Set(policy.actionTypes).size !== policy.actionTypes.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['policy', 'actionTypes'],
+        message: 'Duplicate action type',
+      });
+    }
+    if (payload.dlp !== null) {
+      if (new Set(payload.dlp.categories).size !== payload.dlp.categories.length) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['dlp', 'categories'],
+          message: 'Duplicate DLP category',
+        });
+      }
+    }
+    const { counted, remediation } = payload.copies;
+    if (counted < 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['copies', 'counted'],
+        message: 'A detection counts at least one copy',
+      });
+    }
+    const sum =
+      remediation.pending + remediation.simulated + remediation.skipped + remediation.none;
+    if (sum !== counted) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['copies', 'remediation'],
+        message: 'The remediation counts add up to copies.counted',
+      });
+    }
+    if (payload.detectionIds.length > counted) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['detectionIds'],
+        message: 'No more detection ids than counted copies',
+      });
+    }
+    if (new Set(payload.detectionIds).size !== payload.detectionIds.length) {
+      ctx.addIssue({ code: 'custom', path: ['detectionIds'], message: 'Duplicate detection id' });
+    }
+  });
+export type MessageCopyDetectedV1 = z.infer<typeof messageCopyDetectedV1>;
+
 export const EventTypes = {
   MessageReceived: 'mail.message.received.v1',
   MessageScanned: 'mail.message.scanned.v1',
@@ -2487,4 +2698,7 @@ export const EventTypes = {
   // Step API-3 (C12, §5): reporter feedback of a user report (consumer: notification-worker,
   // queue email.notifications, v18).
   ReportFeedbackRequested: 'mail.report.feedback_requested.v1',
+  // Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md A8, §6): an API-mode copy
+  // message with a detection (consumer: webhook-worker fanout, queue email.webhooks, v19).
+  MessageCopyDetected: 'mail.message.copy_detected.v1',
 } as const;

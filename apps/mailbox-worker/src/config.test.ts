@@ -266,3 +266,29 @@ describe('mailbox-worker configuration (D16)', () => {
     }
   });
 });
+
+describe('step API-4 configuration (note 38 A1–A3, B6)', () => {
+  it('reads the policy runtime keys and the API-4 switches with their defaults', () => {
+    const cfg = loadWorkerConfig(base);
+    expect(cfg.POLICY_PLATFORM_DEFAULT).toBe('pol-default/1');
+    expect(cfg.POLICY_SNAPSHOT_CACHE_MAX_ENTRIES).toBe(1000);
+    expect(cfg.API_MODE_POLICY_EVALUATION_ENABLED).toBe(true);
+    expect(cfg.API_MODE_SCOPE_REFRESH_MINUTES).toBe(15);
+    expect(cfg.API_MODE_SCOPE_MAX_DEPARTMENTS).toBe(20);
+    expect(
+      loadWorkerConfig({ ...base, API_MODE_POLICY_EVALUATION_ENABLED: 'false' })
+        .API_MODE_POLICY_EVALUATION_ENABLED,
+    ).toBe(false);
+  });
+
+  it('validates them like the policy-engine (platform default key, cache bounds)', () => {
+    fails({ ...base, POLICY_PLATFORM_DEFAULT: 'pol-unknown/9' }, 'POLICY_PLATFORM_DEFAULT');
+    fails({ ...base, POLICY_SNAPSHOT_CACHE_MAX_ENTRIES: '5' }, 'POLICY_SNAPSHOT_CACHE_MAX_ENTRIES');
+    fails({ ...base, API_MODE_SCOPE_MAX_DEPARTMENTS: '21' }, 'API_MODE_SCOPE_MAX_DEPARTMENTS');
+    fails({ ...base, API_MODE_SCOPE_REFRESH_MINUTES: '0' }, 'API_MODE_SCOPE_REFRESH_MINUTES');
+    fails(
+      { ...base, API_MODE_POLICY_EVALUATION_ENABLED: 'maybe' },
+      'API_MODE_POLICY_EVALUATION_ENABLED',
+    );
+  });
+});

@@ -16,10 +16,7 @@ import {
   evaluatePolicyPerRecipient,
   evaluationResultToRow,
   intendedActionStatuses,
-  lifecycleOutcome,
-  type LifecycleOutcome,
   type PerRecipientEvaluation,
-  perRecipientToRowFields,
   type PolicyDeliveredObject,
   type PolicyDelivery,
   type PolicyEvaluationResult,
@@ -60,11 +57,22 @@ import type {
   QuarantineStoreWriter,
 } from '../quarantine/store-writer';
 import type { PolicyMetrics } from '../metrics/policy-metrics';
-import type { DirectoryRepository } from './directory.repository';
-import { type InconsistencySink, POLICY_INPUT_INVALID, wrongRead } from './errors';
-import { type AtoFactsSource, buildInputWithDirectory } from './input-builder';
-import type { FactsRepository, RoundRef } from './facts.repository';
-import type { SnapshotLookup, SnapshotRepository } from './snapshot.repository';
+import {
+  type AtoFactsSource,
+  buildInputWithDirectory,
+  type DirectoryRepository,
+  durationUsOf,
+  type FactsRepository,
+  type InconsistencySink,
+  POLICY_INPUT_INVALID,
+  policyExecutionLogData,
+  type RoundOutcome,
+  type RoundRef,
+  roundOutcome,
+  type SnapshotLookup,
+  type SnapshotRepository,
+  wrongRead,
+} from '@email-gateway/policy-runtime';
 
 /** `message_idempotency.consumer` of the `email.policy.evaluate` consumer (P13, topology v9). */
 export const POLICY_EVALUATE_CONSUMER = 'policy-engine.evaluate';
@@ -74,14 +82,6 @@ export const SOURCE_SERVICE = 'policy-engine';
 export const MAX_APPROVAL_RECIPIENTS = 1000;
 
 export type TriggerPayload = MessageScannedV1 | MessageParseFailedV1;
-
-/** The lifecycle outcome of a round (step 5.2 P18, step 5.3 Q5: `policy_partial`, `partial`). */
-export interface RoundOutcome {
-  edge: 'E10' | 'E11' | 'E12' | 'E13';
-  to: LifecycleOutcome['to'];
-  reason: LifecycleOutcome['reason'] | 'policy_partial';
-  finalAction: LifecycleOutcome['finalAction'];
-}
 
 type RecipientFinalAction =
   'deliver' | 'tag' | 'quarantine' | 'require_approval' | 'discard' | 'reject';
@@ -189,37 +189,6 @@ export function recipientFinalAction(
       return 'require_approval';
     case 'reject':
       return direction === 'inbound' ? 'discard' : 'reject';
-  }
-}
-
-/**
- * The Q5 lifecycle mapping: not split → the P18 edge of the lifecycle disposition (the uniform
- * disposition of every recipient); split → E10 `policy_partial` when a recipient is allowed,
- * else E11 when one is quarantined, else E12; `final_action = partial` for every split.
- */
-export function roundOutcome(
-  evaluation: PerRecipientEvaluation,
-  direction: 'inbound' | 'outbound' | 'internal',
-): RoundOutcome {
-  if (!evaluation.split) {
-    const representative = evaluation.recipients?.[0]?.result ?? evaluation.message;
-    return lifecycleOutcome(
-      { disposition: evaluation.lifecycleDisposition, actions: representative.actions },
-      direction,
-    );
-  }
-  switch (evaluation.lifecycleDisposition) {
-    case 'allow':
-      return { edge: 'E10', to: 'approved', reason: 'policy_partial', finalAction: 'partial' };
-    case 'quarantine':
-      return {
-        edge: 'E11',
-        to: 'quarantined',
-        reason: 'policy_quarantine',
-        finalAction: 'partial',
-      };
-    default:
-      return { edge: 'E12', to: 'held_for_review', reason: 'policy_hold', finalAction: 'partial' };
   }
 }
 
@@ -597,63 +566,16 @@ export class PolicyEvaluationService {
       objectKey: copyKey,
       policyVersionIds: loaded.policyVersionIds,
     });
-    const split = perRecipientToRowFields(evaluation);
     await tx.policyExecutionLog.create({
-      data: {
-        receivedAt: ref.receivedAt,
-        messageId: ref.messageId,
-        organizationId,
-        evaluationSeq: row.evaluationSeq,
-        scanId: row.scanId === null ? null : BigInt(row.scanId),
-        trigger: row.trigger,
-        direction: row.direction,
-        disposition: row.disposition,
-        decisionSource: row.decisionSource,
-        decisivePolicyVersionId:
-          row.decisivePolicyVersionId === null ? null : BigInt(row.decisivePolicyVersionId),
-        decisivePolicyPublicId: row.decisivePolicyPublicId,
-        decisiveRuleId: row.decisiveRuleId,
+      data: policyExecutionLogData({
+        key: { messageId: ref.messageId, receivedAt: ref.receivedAt, organizationId },
+        row,
         action: outcome.finalAction,
-        finalVerdict: row.finalVerdict,
-        riskScore: row.riskScore,
-        overrideApplied: row.overrideApplied,
-        matchedPolicyVersionIds: row.matchedPolicyVersionIds,
-        actions: row.actions,
-        matchedRules: row.matchedRules,
-        trace: row.trace,
-        floor: row.floor,
-        recommendation: row.recommendation,
-        overrideDetail:
-          row.overrideDetail === null
-            ? undefined
-            : (row.overrideDetail as unknown as Prisma.InputJsonValue),
-        clamps: row.clamps,
-        reasonCodes: row.reasonCodes,
-        delivery:
-          row.delivery === null ? undefined : (row.delivery as unknown as Prisma.InputJsonValue),
-        deliveredObject: row.deliveredObject,
-        objectKey: row.objectKey,
-        explanation: row.explanation,
-        explanationText: row.explanationText,
-        policyGeneration: BigInt(row.policyGeneration),
-        snapshotSha256: row.snapshotSha256,
-        policyVersions: row.policyVersions,
-        platformDefaultId: row.platformDefaultId,
-        dslVersion: row.dslVersion,
-        evaluatorVersion: row.evaluatorVersion,
-        inputVersion: row.inputVersion,
-        inputSha256: row.inputSha256,
-        tzdataVersion: row.tzdataVersion,
-        durationUs: Math.min(4_294_967_295, Math.round(durationSeconds * 1e6)),
+        evaluation,
+        input,
+        durationUs: durationUsOf(durationSeconds),
         evaluatedAt,
-        recipientSplit: split.recipientSplit,
-        recipientDecisions:
-          split.recipientDecisions === null
-            ? undefined
-            : (split.recipientDecisions as unknown as Prisma.InputJsonValue),
-        // Step 8.4 D23: exactly the `ato` block the evaluation used (NULL when absent).
-        ...(input.ato !== undefined ? { atoFacts: input.ato } : {}),
-      },
+      }),
       select: { id: true },
     });
 

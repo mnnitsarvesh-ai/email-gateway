@@ -215,12 +215,16 @@ export const DETECTION_STATUSES = [
   'too_large',
 ] as const;
 export const DETECTION_SOURCES = ['journal', 'graph', 'gmail'] as const;
-/** Step API-3 C8: inbound copies and internal (east-west) copies. */
-export const DETECTION_DIRECTIONS = ['inbound', 'internal'] as const;
+/**
+ * Step API-3 C8: inbound copies and internal (east-west) copies; step API-4 A6: outbound
+ * detections recorded on the sender's mailbox (never remediated: the message has left).
+ */
+export const DETECTION_DIRECTIONS = ['inbound', 'internal', 'outbound'] as const;
 
 export const DIRECTION_LABEL: Record<Detection['direction'], string> = {
   inbound: 'Inbound',
   internal: 'Internal',
+  outbound: 'Outbound',
 };
 
 /** A late verdict (sandbox or URL inspection after delivery) revised the copy's verdict (C2). */

@@ -42,6 +42,7 @@ import {
   DomainsRepository,
   isUniqueViolation,
 } from '../repositories/domains.repository';
+import { DomainOwnershipReader } from './domain-ownership-reader';
 import { domainReserved } from '../../provider-connections/provider-connections.errors';
 import { OrganizationFeaturesService } from '../../../tenancy/organization-features.service';
 import { mailFilteringNotEnabled } from '../domains.errors';
@@ -109,6 +110,7 @@ export class DomainsService {
     private readonly configuration: DomainConfigurationService,
     private readonly events: DomainEventsService,
     private readonly features: OrganizationFeaturesService,
+    private readonly ownershipReader: DomainOwnershipReader,
   ) {
     this.allowTestNames = config.APP_ENV === 'local' || config.APP_ENV === 'ci';
     this.reservedNames = [
@@ -374,13 +376,15 @@ export class DomainsService {
   }
 
   private async detail(scope: TenantScope, domain: DomainRow, now: Date): Promise<DomainDetail> {
-    const [verification, dkimKeys] = await Promise.all([
+    const [verification, dkimKeys, ownership] = await Promise.all([
       this.verifications.findCurrent(scope, domain.id),
       this.keys.listForDomain(scope, domain.id),
+      this.ownershipReader.view(scope, domain),
     ]);
     return toDomainDetail({
       domain,
       verification,
+      ownership,
       dkimKeys,
       verificationLabel: this.config.DOMAIN_VERIFICATION_LABEL,
       now,

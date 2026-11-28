@@ -4,7 +4,7 @@ import { type GrantRef, isMailFlowGrant } from '@email-gateway/provider-integrat
 import type { ProviderRuntime } from '../providers/provider-runtime';
 import { systemAudit } from '../shared/db';
 import { isUniqueViolation } from '../shared/errors';
-import { evaluateBinding } from './binding';
+import { bindingProofDomainWhere, evaluateBinding } from './binding';
 
 /** What one `settle` call did. */
 export type TenantBindingResult =
@@ -27,7 +27,9 @@ class BindingRefused extends Error {
  * The connection is therefore bound to the provider tenant (`external_tenant_id`,
  * `external_tenant_name`, `tenant_verified_at` and the platform-wide unique `active_tenant_key`)
  * only when at least one of the organization's own linked domains, TXT-verified at the gateway
- * (`domains.status = 'active'`, which only that organization can have), is `verified` in the
+ * (`domains.status` `verified` or `active` with `ownership_method = 'dns_txt'`, which only that
+ * organization can have; step API-4 B3.5/B4, ADR-0107: a domain proven through the provider
+ * tenant never proves the tenant, `bindingProofDomainWhere`), is `verified` in the
  * claimed tenant by a provider check made AFTER the grant's current verification
  * (`provider_checked_at >= grant.verified_at`; a result from an earlier claim never counts). The
  * provider tenant identity is read again right before binding (one directory call); a tenant
@@ -87,7 +89,7 @@ export class TenantBinder {
         organizationId,
         providerVerification: 'verified',
         providerCheckedAt: { gte: grant.verifiedAt },
-        domain: { organizationId, status: 'active' },
+        domain: bindingProofDomainWhere(organizationId),
       },
     });
     if (proven === 0) return 'unproven';

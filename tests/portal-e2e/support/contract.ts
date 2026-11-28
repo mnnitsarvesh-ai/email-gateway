@@ -141,6 +141,13 @@ export const NAV_GATES: ReadonlyArray<NavGate> = [
     href: '/api-mode',
     gate: ['ApiModeController_overview_v1'],
   },
+  // Step API-4 (A10): Protection by mode (last item of Security).
+  {
+    gatewayOnly: true,
+    label: 'Protection by mode',
+    href: '/protection-by-mode',
+    gate: ['ApiModeOnboardingController_protectionCoverage_v1'],
+  },
   // Step 8.4: Account security.
   { label: 'ATO dashboard', href: '/ato', gate: ['AtoOverviewController_overview_v1'] },
   { label: 'Accounts', href: '/ato/accounts', gate: ['AtoAccountsController_list_v1'] },

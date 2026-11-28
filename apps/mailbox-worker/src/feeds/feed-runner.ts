@@ -1,6 +1,7 @@
 import {
   Prisma,
   type ApiMailboxFeedStatus,
+  type ApiMailboxScopeState,
   type ApiMailboxStatus,
   type PrismaClient,
 } from '@email-gateway/database';
@@ -22,6 +23,7 @@ import {
   type ThrottleGate,
 } from '@email-gateway/mailbox-api';
 import { isApiSide, loadOrgApiModeState, type OrgApiModeState } from '../domain/api-mode-state';
+import { mailboxScope } from '../domain/scope';
 import {
   applyGrantRevocation,
   connectionUsable,
@@ -100,6 +102,9 @@ export interface FeedMailbox {
   subscriptionExpiresAt: Date | null;
   clientStateVersion: number;
   consecutiveFailures: number;
+  /** Step API-4 B6: the mailbox's scope state and selection (excluded mailboxes are not fed). */
+  scopeState: ApiMailboxScopeState;
+  scopeSelected: boolean;
 }
 
 export type SyncResult =
@@ -132,6 +137,8 @@ export const MAILBOX_SELECT = {
   subscriptionExpiresAt: true,
   clientStateVersion: true,
   consecutiveFailures: true,
+  scopeState: true,
+  scopeSelected: true,
 } as const;
 
 const familyOf = (ctx: ConnectionContext): MailboxApiFamily =>
@@ -270,12 +277,15 @@ export class FeedRunner {
       return done('deferred');
     }
     const domain = state.domains.find((d) => d.id === mailbox.domainId);
+    // Step API-4 B6: a mailbox excluded by its domain's scope stops (resumed without backfill).
+    const scope = await mailboxScope(this.deps.prisma, mailbox.organizationId, mailbox);
     if (
       !ctx.feedsEnabled ||
       mailbox.status !== 'active' ||
       mailbox.providerUserId === null ||
       !domain ||
-      !isApiSide(domain.effectiveMode)
+      !isApiSide(domain.effectiveMode) ||
+      !scope.inScope
     ) {
       const clients = this.deps.runtime.clientsFor(ctx);
       await this.turnOff(

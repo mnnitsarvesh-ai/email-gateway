@@ -39,8 +39,27 @@ export const COPY_RESULTS = [
   'outbound_only',
   'report_received',
   'report_scanned',
+  // Step API-4 (A6.2): an outbound journal message recorded as a detection on the sender mailbox.
+  'outbound_detection',
 ] as const;
 export type CopyResult = (typeof COPY_RESULTS)[number];
+
+/** `result` values of `api_mode_policy_evaluations_total` (step API-4 A3.3). */
+export const POLICY_EVALUATION_RESULTS = [
+  'evaluated',
+  'failed',
+  'disabled',
+  'inline',
+  'not_applicable',
+] as const;
+export type PolicyEvaluationResult = (typeof POLICY_EVALUATION_RESULTS)[number];
+
+/** `api_mode_policy_evaluation_seconds` buckets (A11). */
+export const POLICY_EVALUATION_BUCKETS = [0.01, 0.05, 0.1, 0.5, 1, 5];
+
+/** `kind` values of `api_mode_copy_detections_total` (A11). */
+export const COPY_DETECTION_KINDS = ['threat', 'dlp', 'policy'] as const;
+export type CopyDetectionKind = (typeof COPY_DETECTION_KINDS)[number];
 
 /** `api_mode_report_triage_seconds` buckets (step API-3 C13). */
 export const REPORT_TRIAGE_BUCKETS = [300, 3600, 14_400, 86_400, 259_200];
@@ -142,6 +161,13 @@ export class MailboxMetrics implements IdpMetricsSink {
   readonly reportsPending: Gauge;
   readonly reportsOldestPending: Gauge;
   readonly reportTriage: Histogram;
+  readonly policyEvaluations: Counter<'result'>;
+  readonly policyEvaluationSeconds: Histogram;
+  readonly policyInconsistentReads: Counter<'read'>;
+  readonly copyDetections: Counter<'kind' | 'direction'>;
+  readonly outboundDetections: Counter;
+  readonly scopeMailboxes: Gauge<'state'>;
+  readonly detectOnlyPolicies: Gauge<'then'>;
 
   constructor(metrics: MetricsService) {
     this.copies = metrics.counter(
@@ -285,6 +311,41 @@ export class MailboxMetrics implements IdpMetricsSink {
       [],
       REPORT_TRIAGE_BUCKETS,
     );
+    this.policyEvaluations = metrics.counter(
+      'api_mode_policy_evaluations_total',
+      'Detect-mode policy evaluations of API-mode copy messages by result (evaluated, failed, disabled, inline, not_applicable)',
+      ['result'],
+    );
+    this.policyEvaluationSeconds = metrics.histogram(
+      'api_mode_policy_evaluation_seconds',
+      'Duration of detect-mode policy evaluations of API-mode copy messages',
+      [],
+      POLICY_EVALUATION_BUCKETS,
+    );
+    this.policyInconsistentReads = metrics.counter(
+      'api_mode_policy_inconsistent_reads_total',
+      'Policy runtime reads of the copies role that failed their echo check (the event is retried), by read',
+      ['read'],
+    );
+    this.copyDetections = metrics.counter(
+      'api_mode_copy_detections_total',
+      'API-mode copy messages with a detection (mail.message.copy_detected.v1) by kind (threat, dlp, policy) and direction',
+      ['kind', 'direction'],
+    );
+    this.outboundDetections = metrics.counter(
+      'api_mode_outbound_detections_total',
+      'Outbound journal messages recorded as detections on the sender mailbox',
+    );
+    this.scopeMailboxes = metrics.gauge(
+      'api_mode_scope_mailboxes',
+      'API-mode mailboxes by protection scope state (in_scope, excluded; health leader)',
+      ['state'],
+    );
+    this.detectOnlyPolicies = metrics.gauge(
+      'api_mode_detect_only_policies',
+      'Remediation policies in a running detect-only start period by what follows it (remind, enforce; health leader)',
+      ['then'],
+    );
   }
 
   // ------------------------------------------------------------------ IdpMetricsSink
@@ -338,6 +399,17 @@ export class MailboxMetrics implements IdpMetricsSink {
 
   report(result: ReportResult, count = 1): void {
     if (count > 0) this.reports.inc({ result }, count);
+  }
+
+  /** One detect evaluation outcome of a copy message (no organization label). */
+  policyEvaluation(result: PolicyEvaluationResult, seconds: number | null = null): void {
+    this.policyEvaluations.inc({ result });
+    if (seconds !== null) this.policyEvaluationSeconds.observe(seconds);
+  }
+
+  /** One copy detection (`kind` per applying classification, A8.1). */
+  copyDetection(kind: CopyDetectionKind, direction: string): void {
+    this.copyDetections.inc({ kind, direction: label(direction) });
   }
 
   /** One execution attempt of a remediation action. */

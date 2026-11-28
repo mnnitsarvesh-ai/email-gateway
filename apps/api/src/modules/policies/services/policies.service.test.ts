@@ -376,6 +376,29 @@ describe('PoliciesService: lifecycle (P17)', () => {
     );
   });
 
+  it('step API-4 B6: refuses deleting a department an API-mode mailbox scope lists', async () => {
+    const ctx = setup();
+    const created = await ctx.departments.create(principal, SCOPE, { name: 'Legal' }, client);
+    const domainId = '0192f3a0-2222-7000-8000-000000000002';
+    ctx.store.apiModeScopes.push({
+      organizationId: SCOPE.organizationId,
+      domainPublicId: domainId,
+      departmentIds: [created.id],
+    });
+    const error = await ctx.departments
+      .remove(principal, SCOPE, created.id, undefined, client)
+      .catch((e: unknown) => e as CodedHttpException);
+    expect(error).toBeInstanceOf(CodedHttpException);
+    expect((error as CodedHttpException).code).toBe('department_in_use');
+    expect((error as CodedHttpException).details).toMatchObject({
+      reference: 'api_mode_scope',
+      domains: [{ domainId }],
+    });
+    // Another organization's scope never blocks the delete.
+    ctx.store.apiModeScopes[0]!.organizationId = SCOPE.organizationId + 1n;
+    await ctx.departments.remove(principal, SCOPE, created.id, undefined, client);
+  });
+
   it('audits override rules and turning overrides on; identical settings change nothing', async () => {
     const ctx = setup();
     const { policy } = await createPolicy(ctx, 'override', overrideDefinition());

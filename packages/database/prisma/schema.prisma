@@ -104,9 +104,33 @@ enum DomainStatus {
   deleted
 }
 
+/// How a domain verification row proves ownership (step 2.1 D3). Step API-4 (B3, ADR-0107)
+/// appends `provider_tenant`: the domain is listed as verified (for Email) in the organization's
+/// bound Microsoft 365 / Google Workspace tenant, checked by the integration-worker. Append-only.
 enum DomainVerificationMethod {
   dns_txt
   dns_cname
+  provider_tenant
+}
+
+/// How a domain's ownership was won (step API-4 B3, ADR-0107; `domains.ownership_method`):
+/// the DNS TXT record or the listing in the organization's bound provider tenant. Only `dns_txt`
+/// ownership counts as tenant-binding proof (P-I6). Append-only.
+enum DomainOwnershipMethod {
+  dns_txt
+  provider_tenant
+}
+
+/// Answer of the provider for a `provider_tenant` ownership check (step API-4 B3;
+/// `domain_verifications.provider_result`): `verified` only when the bound tenant lists the
+/// domain as verified for Email; `error` = provider or HTTP failure (`provider_error_code`).
+/// Append-only.
+enum DomainProviderCheckResult {
+  verified
+  unverified
+  absent
+  alias
+  error
 }
 
 enum DomainVerificationStatus {
@@ -745,6 +769,15 @@ enum PolicyDisposition {
   require_approval
   quarantine
   reject
+}
+
+/// How a policy evaluation was run (step API-4 A1, ADR-0105; `policy_execution_logs.evaluation_mode`):
+/// `inline` = the policy-engine's gating evaluation of a gateway message; `detect` = the
+/// mailbox-worker's evaluation of an API-mode copy (recorded, never delivered, held or bounced).
+/// Append-only.
+enum PolicyEvaluationMode {
+  inline
+  detect
 }
 
 /// What started a policy evaluation (step 5.2 P7): a completed round, a failed round or a parse
@@ -1793,6 +1826,7 @@ model Organization {
   apiClawbacks             ApiClawback[]
   apiUserReports           ApiUserReport[]
   apiModeOrgSetting        ApiModeOrgSetting?
+  apiModeDomainSettings    ApiModeDomainSetting[]
 
   @@index([status])
   @@index([status, purgeAfter])
@@ -2197,45 +2231,49 @@ model LoginAuditLog {
 /// row stays as history (DKIM keys, audit linkage) until the organization purge. A deleted row
 /// frees both the global name (`verified_name`) and the per-organization name (`live_name`).
 model Domain {
-  id                      BigInt          @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId                String          @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId          BigInt          @map("organization_id") @db.UnsignedBigInt
+  id                      BigInt                 @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                String                 @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId          BigInt                 @map("organization_id") @db.UnsignedBigInt
   /// Lower-cased ASCII (punycode). Unique per organization among non-deleted rows only (see
   /// `liveName`): several organizations may hold a pending claim on the same name, so an
   /// unverified claim cannot squat a domain.
-  name                    String          @db.VarChar(253)
-  status                  DomainStatus    @default(pending_verification)
+  name                    String                 @db.VarChar(253)
+  status                  DomainStatus           @default(pending_verification)
   /// Why the domain is in its status (e.g. `claimed_by_another_organization`, a suspension reason).
-  statusReason            String?         @map("status_reason") @db.VarChar(512)
-  statusChangedAt         DateTime?       @map("status_changed_at") @db.DateTime(3)
-  inboundEnabled          Boolean         @default(true) @map("inbound_enabled")
-  outboundEnabled         Boolean         @default(false) @map("outbound_enabled")
-  verifiedAt              DateTime?       @map("verified_at") @db.DateTime(3)
+  statusReason            String?                @map("status_reason") @db.VarChar(512)
+  statusChangedAt         DateTime?              @map("status_changed_at") @db.DateTime(3)
+  inboundEnabled          Boolean                @default(true) @map("inbound_enabled")
+  outboundEnabled         Boolean                @default(false) @map("outbound_enabled")
+  verifiedAt              DateTime?              @map("verified_at") @db.DateTime(3)
   /// First activation (`verified` → `active`).
-  activatedAt             DateTime?       @map("activated_at") @db.DateTime(3)
-  deletedAt               DateTime?       @map("deleted_at") @db.DateTime(3)
+  activatedAt             DateTime?              @map("activated_at") @db.DateTime(3)
+  deletedAt               DateTime?              @map("deleted_at") @db.DateTime(3)
   /// When the background job checks the DNS records next; NULL for `failed` and `deleted`.
-  nextCheckAt             DateTime?       @map("next_check_at") @db.DateTime(3)
-  lastCheckedAt           DateTime?       @map("last_checked_at") @db.DateTime(3)
+  nextCheckAt             DateTime?              @map("next_check_at") @db.DateTime(3)
+  lastCheckedAt           DateTime?              @map("last_checked_at") @db.DateTime(3)
   /// Consecutive checks with an indeterminate result (drives the retry backoff).
-  checkFailures           Int             @default(0) @map("check_failures") @db.UnsignedInt
+  checkFailures           Int                    @default(0) @map("check_failures") @db.UnsignedInt
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status IN ('verified', 'active',
   /// 'suspended'), name, NULL)) STORED`. Its unique key makes verified ownership globally unique
   /// (one owner per name, in every post-verification state; a deleted domain frees it). Tenant
   /// resolution on the mail path looks up by this column, never by `name`. Never write it.
-  verifiedName            String?         @unique @map("verified_name") @db.VarChar(253)
+  verifiedName            String?                @unique @map("verified_name") @db.VarChar(253)
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (IF(status = 'deleted', NULL, name))
   /// STORED`. UNIQUE (organization_id, live_name): one non-deleted row per name and organization;
   /// an organization can re-add a name it deleted. Never write it.
-  liveName                String?         @map("live_name") @db.VarChar(253)
-  createdAt               DateTime        @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt               DateTime        @updatedAt @map("updated_at") @db.DateTime(3)
+  liveName                String?                @map("live_name") @db.VarChar(253)
+  createdAt               DateTime               @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt               DateTime               @updatedAt @map("updated_at") @db.DateTime(3)
   /// Step API-1 (D1, D2, ADR-0098): the domain's own protection mode; NULL = inherit the
   /// organization's. Effective mode = COALESCE(domains.protection_mode,
   /// organizations.protection_mode). A change to effective `api` is refused while the domain's MX
   /// points to the gateway; never changes `inbound_enabled` / `outbound_enabled`.
-  protectionMode          ProtectionMode? @map("protection_mode")
-  protectionModeChangedAt DateTime?       @map("protection_mode_changed_at") @db.DateTime(3)
+  protectionMode          ProtectionMode?        @map("protection_mode")
+  protectionModeChangedAt DateTime?              @map("protection_mode_changed_at") @db.DateTime(3)
+  /// Step API-4 (B3, ADR-0107): how ownership was won; set with every ownership win (`dns_txt` /
+  /// `provider_tenant`), NULL while never verified. Migration 47 backfilled `dns_txt` for every
+  /// verified / active / suspended domain. Only `dns_txt` counts as tenant-binding proof (P-I6).
+  ownershipMethod         DomainOwnershipMethod? @map("ownership_method")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
@@ -2249,6 +2287,7 @@ model Domain {
   recipients               DomainRecipientAddress[]
   providerConnectionDomain ProviderConnectionDomain?
   apiRemediationPolicies   ApiRemediationPolicy[]
+  apiModeDomainSetting     ApiModeDomainSetting?
 
   @@unique([organizationId, liveName])
   @@index([name])
@@ -2258,29 +2297,41 @@ model Domain {
 }
 
 model DomainVerification {
-  id             BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
-  organizationId BigInt                   @map("organization_id") @db.UnsignedBigInt
-  domainId       BigInt                   @map("domain_id") @db.UnsignedBigInt
-  method         DomainVerificationMethod @default(dns_txt)
-  token          String                   @db.VarChar(128)
-  status         DomainVerificationStatus @default(pending)
-  attempts       Int                      @default(0) @db.UnsignedInt
-  nextCheckAt    DateTime?                @map("next_check_at") @db.DateTime(3)
-  lastCheckedAt  DateTime?                @map("last_checked_at") @db.DateTime(3)
-  lastError      String?                  @map("last_error") @db.VarChar(512)
-  lastOutcome    DnsCheckOutcome?         @map("last_outcome")
+  id                   BigInt                     @id @default(autoincrement()) @db.UnsignedBigInt
+  organizationId       BigInt                     @map("organization_id") @db.UnsignedBigInt
+  domainId             BigInt                     @map("domain_id") @db.UnsignedBigInt
+  method               DomainVerificationMethod   @default(dns_txt)
+  token                String                     @db.VarChar(128)
+  status               DomainVerificationStatus   @default(pending)
+  attempts             Int                        @default(0) @db.UnsignedInt
+  nextCheckAt          DateTime?                  @map("next_check_at") @db.DateTime(3)
+  lastCheckedAt        DateTime?                  @map("last_checked_at") @db.DateTime(3)
+  lastError            String?                    @map("last_error") @db.VarChar(512)
+  lastOutcome          DnsCheckOutcome?           @map("last_outcome")
   /// JSON-safe DNS evidence of the last check (upstream, outcome, answers); public data only.
-  evidence       Json?
-  verifiedAt     DateTime?                @map("verified_at") @db.DateTime(3)
-  expiresAt      DateTime                 @map("expires_at") @db.DateTime(3)
-  createdAt      DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt      DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+  evidence             Json?
+  verifiedAt           DateTime?                  @map("verified_at") @db.DateTime(3)
+  expiresAt            DateTime                   @map("expires_at") @db.DateTime(3)
+  createdAt            DateTime                   @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt            DateTime                   @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-4 (B3, ADR-0107), `method = provider_tenant` only: the bound provider connection
+  /// checked (provider_connections.id, no FK; purge order design §3.3). `token` then holds the
+  /// fixed marker `provider-tenant` (never a secret).
+  providerConnectionId BigInt?                    @map("provider_connection_id") @db.UnsignedBigInt
+  /// The provider's answer, written by the integration-worker; NULL until checked.
+  providerResult       DomainProviderCheckResult? @map("provider_result")
+  providerCheckedAt    DateTime?                  @map("provider_checked_at") @db.DateTime(3)
+  /// Classified provider / HTTP error code when `provider_result = error`.
+  providerErrorCode    String?                    @map("provider_error_code") @db.VarChar(64)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   domain       Domain       @relation(fields: [domainId], references: [id], onDelete: Cascade)
 
   @@index([domainId, status])
   @@index([status, nextCheckAt])
+  /// Step API-4 (B3): the integration-worker's claim of unchecked provider rows and the api
+  /// scheduler's pick of checked ones.
+  @@index([method, status, providerCheckedAt])
   @@map("domain_verifications")
 }
 
@@ -4636,6 +4687,10 @@ model PolicyExecutionLog {
   createdAt               DateTime                @default(now()) @map("created_at") @db.DateTime(3)
   /// `ato-policy-facts/1` block used by the evaluation (step 8.4 D23); NULL when absent.
   atoFacts                Json?                   @map("ato_facts")
+  /// Step API-4 (A1, ADR-0105): `inline` = the policy-engine's gating evaluation; `detect` = the
+  /// mailbox-worker's evaluation of an API-mode copy (`delivered_object = none`, `delivery` NULL,
+  /// `action` recorded but never applied; `evaluation_seq` = the copy's lifecycle round 0).
+  evaluationMode          PolicyEvaluationMode    @default(inline) @map("evaluation_mode")
 
   @@id([id, receivedAt])
   @@unique([messageId, evaluationSeq, receivedAt])
@@ -8803,9 +8858,46 @@ enum ApiCopySource {
 /// Recipient direction of a copy (D7.4). Journal copies of internal (east-west) recipients are
 /// recorded as `internal` from step API-3 when the organization's internal-mail setting is on
 /// (C8, ADR-0104); feed copies of internal mail carried `internal` since API-1.
+///
+/// Step API-4 (A6, ADR-0105) appends `outbound`: a detection of an outbound journal message,
+/// recorded on the sender's mailbox; never remediated, never a clawback target, never a coverage
+/// sighting (P-I5). Append-only.
 enum ApiCopyDirection {
   inbound
   internal
+  outbound
+}
+
+/// Tenant policy evaluation state of a copy (step API-4 A1, A3; `api_message_copies.policy_state`):
+/// `none` = recorded before API-4 or not yet decided; `evaluated` = a detect evaluation drove the
+/// policy lane; `inline` = hybrid inline-authority copy (disposition shown from the gateway's
+/// evaluation, display only); `disabled` = platform switch or organization setting off;
+/// `failed` = input error or evaluator exception (verdict lane only); `not_applicable` = parse
+/// failure, too large, report mailbox. Append-only.
+enum ApiCopyPolicyState {
+  none
+  evaluated
+  inline
+  disabled
+  failed
+  not_applicable
+}
+
+/// Mailbox scope state of an API-mode mailbox (step API-4 B6; `api_mailboxes.scope_state`):
+/// `excluded` mailboxes keep their copies recorded but get no remediation and no feed.
+/// Append-only.
+enum ApiMailboxScopeState {
+  in_scope
+  excluded
+}
+
+/// Per-domain mailbox scope kind (step API-4 B6; `api_mode_domain_settings.scope_kind`): every
+/// mailbox, the members of listed policy-directory departments, or selected mailboxes
+/// (`api_mailboxes.scope_selected`). Append-only.
+enum ApiModeScopeKind {
+  all
+  departments
+  mailboxes
 }
 
 /// Basis of `api_message_copies.provider_delivered_at` (D7.8).
@@ -8935,6 +9027,14 @@ model ApiMailbox {
   reportMailbox         Boolean                 @default(false) @map("report_mailbox")
   /// When `report_mailbox` was last turned on (NULL = never or turned off).
   reportMailboxAt       DateTime?               @map("report_mailbox_at") @db.DateTime(3)
+  /// Step API-4 (B6, ADR-0107): evaluated mailbox scope of the domain's `api_mode_domain_settings`
+  /// (`all` → in scope; `mailboxes` → `scope_selected`; `departments` → membership). Excluded
+  /// mailboxes keep their copies recorded but get no remediation, feed or clawback.
+  scopeState            ApiMailboxScopeState    @default(in_scope) @map("scope_state")
+  /// Selected by the api's scope PUT for scope kind `mailboxes` (cleared and set per domain).
+  scopeSelected         Boolean                 @default(false) @map("scope_selected")
+  /// When the mailbox-worker health leader last evaluated `scope_state`.
+  scopeEvaluatedAt      DateTime?               @map("scope_evaluated_at") @db.DateTime(3)
 
   apiConnection      ApiModeConnection      @relation(fields: [apiConnectionId], references: [id], onDelete: Restrict)
   addresses          ApiMailboxAddress[]
@@ -8948,6 +9048,8 @@ model ApiMailbox {
   @@index([apiConnectionId, coverageState])
   @@index([feedStatus, nextSyncAt])
   @@index([syncRequestedAt])
+  /// Step API-4 (B6): scope evaluation and in-scope / excluded counts of a domain.
+  @@index([domainId, scopeState])
   @@map("api_mailboxes")
 }
 
@@ -9023,6 +9125,15 @@ model ApiMessageCopy {
   /// Step API-3 (C3.3): number of late signals (`mail.threat.late_signal.v1` of the copy's own
   /// registry message) that raised the stored `verdict` / `risk_score`; 0 = the first scan's.
   verdictRevision       Int                       @default(0) @map("verdict_revision") @db.UnsignedTinyInt
+  /// Step API-4 (A1, A3): tenant policy evaluation state of the copy's registry message.
+  policyState           ApiCopyPolicyState        @default(none) @map("policy_state")
+  /// Policy disposition for this copy's recipient (journal) or message (feed, outbound);
+  /// for `policy_state = inline` the gateway evaluation's disposition (display only).
+  policyDisposition     PolicyDisposition?        @map("policy_disposition")
+  /// TAG or WARN applies with disposition `allow` (A4.1 `tagged`).
+  policyTagged          Boolean                   @default(false) @map("policy_tagged")
+  /// The message's `dlp_scan_results.action` when the DLP final is definite; NULL otherwise.
+  dlpAction             DlpAction?                @map("dlp_action")
 
   @@id([id, receivedAt])
   @@unique([messageId, receivedAt, mailboxId])
@@ -9108,6 +9219,12 @@ model ApiModeCounter {
   clawbackTargetsFailed    Int      @default(0) @map("clawback_targets_failed") @db.UnsignedInt
   reportsReceived          Int      @default(0) @map("reports_received") @db.UnsignedInt
   reportsResolved          Int      @default(0) @map("reports_resolved") @db.UnsignedInt
+  /// Step API-4 (A3, A6, A8, A11): detect policy evaluations and failed evaluations, outbound
+  /// detection copies recorded, copy messages with a detection (`copy_detected.v1` written).
+  policyEvaluations        Int      @default(0) @map("policy_evaluations") @db.UnsignedInt
+  policyErrors             Int      @default(0) @map("policy_errors") @db.UnsignedInt
+  outboundDetections       Int      @default(0) @map("outbound_detections") @db.UnsignedInt
+  copyDetections           Int      @default(0) @map("copy_detections") @db.UnsignedInt
 
   apiConnection ApiModeConnection @relation(fields: [apiConnectionId], references: [id], onDelete: Cascade)
 
@@ -9131,6 +9248,14 @@ model ApiModeCounter {
 /// (`simulated` actions, no provider call); `enforce` acts in the mailbox. Append-only.
 enum ApiRemediationPolicyMode {
   detect_only
+  enforce
+}
+
+/// What happens when a remediation policy's detect-only period ends (step API-4 B7;
+/// `api_remediation_policies.detect_only_then`): a reminder alert (mode stays `detect_only`) or
+/// an automatic switch to `enforce`. Append-only.
+enum ApiDetectOnlyThen {
+  remind
   enforce
 }
 
@@ -9207,24 +9332,32 @@ enum ApiCopyRemediationAction {
 /// decision. Content-free: verdicts, levels, scores, rule ids and actions only.
 /// `updated_by_user_id` has no FK (the trail survives the user).
 model ApiRemediationPolicy {
-  id              BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
-  publicId        String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
-  organizationId  BigInt                   @map("organization_id") @db.UnsignedBigInt
+  id                   BigInt                   @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId             String                   @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId       BigInt                   @map("organization_id") @db.UnsignedBigInt
   /// NULL = the organization policy; otherwise the overridden domain of the organization.
-  domainId        BigInt?                  @map("domain_id") @db.UnsignedBigInt
+  domainId             BigInt?                  @map("domain_id") @db.UnsignedBigInt
   /// READ-ONLY, generated by MySQL: `GENERATED ALWAYS AS (COALESCE(domain_id, 0)) STORED`. With
   /// the unique key below: one organization row (scope 0) and one row per domain (MySQL treats
   /// NULLs as distinct, so a plain domain_id would not dedupe organization rows). Never write it.
-  scopeKey        BigInt?                  @map("scope_key") @db.UnsignedBigInt
-  mode            ApiRemediationPolicyMode
+  scopeKey             BigInt?                  @map("scope_key") @db.UnsignedBigInt
+  mode                 ApiRemediationPolicyMode
   /// `api-remediation-policy/1` (R2.1).
-  document        Json
-  documentSha256  String                   @map("document_sha256") @db.Char(64)
+  document             Json
+  documentSha256       String                   @map("document_sha256") @db.Char(64)
   /// Optimistic concurrency (CAS) of the api.
-  rowVersion      Int                      @default(1) @map("row_version") @db.UnsignedInt
-  updatedByUserId BigInt?                  @map("updated_by_user_id") @db.UnsignedBigInt
-  createdAt       DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
-  updatedAt       DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+  rowVersion           Int                      @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId      BigInt?                  @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt            DateTime                 @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt            DateTime                 @updatedAt @map("updated_at") @db.DateTime(3)
+  /// Step API-4 (B7, ADR-0107): end of the detect-only start period (only with
+  /// `mode = detect_only`; NULL = no period). Saving `enforce` clears the period.
+  detectOnlyUntil      DateTime?                @map("detect_only_until") @db.DateTime(3)
+  /// What happens at `detect_only_until`: a reminder or the automatic switch to `enforce`.
+  detectOnlyThen       ApiDetectOnlyThen?       @map("detect_only_then")
+  detectOnlyStartedAt  DateTime?                @map("detect_only_started_at") @db.DateTime(3)
+  /// Set once by the mailbox-worker health leader when the period ended (alert sent).
+  detectOnlyNotifiedAt DateTime?                @map("detect_only_notified_at") @db.DateTime(3)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// ON UPDATE RESTRICT (not Prisma's default CASCADE): MySQL refuses a cascading foreign key on
@@ -9233,6 +9366,8 @@ model ApiRemediationPolicy {
 
   @@unique([organizationId, scopeKey])
   @@index([domainId])
+  /// Step API-4 (B7): expiry sweep of detect-only periods.
+  @@index([detectOnlyUntil])
   @@map("api_remediation_policies")
 }
 
@@ -9768,6 +9903,10 @@ model ApiModeOrgSetting {
   /// The threshold in effect before that principal's raise: their own purges are still checked
   /// against it (they cannot lift the second-approver rule for themselves).
   purgeApprovalBeforeRaise Int?                @map("purge_approval_before_raise") @db.UnsignedInt
+  /// Step API-4 (A1, API4-1): evaluate tenant policies on the organization's API-mode copies.
+  policyEvaluationEnabled  Boolean             @default(true) @map("policy_evaluation_enabled")
+  /// Step API-4 (A6, API4-5): evaluate outbound journal messages and record outbound detections.
+  outboundDetectionEnabled Boolean             @default(true) @map("outbound_detection_enabled")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
@@ -9784,4 +9923,47 @@ model ApiModeCursor {
   updatedAt DateTime @updatedAt @map("updated_at") @db.DateTime(3)
 
   @@map("api_mode_cursors")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step API-4: API-mode parity and onboarding (docs/plan/steps/38-api-mode-parity-onboarding.md
+// §3; ADR-0105, ADR-0106, ADR-0107). One new table, not partitioned.
+// ---------------------------------------------------------------------------------------------
+
+/// API-mode onboarding and mailbox-scope state of one domain (step API-4 §3.2, B6, B8; ADR-0107).
+/// Created lazily by the api (scope PUT) or the mailbox-worker (first copy) with
+/// `INSERT … ON DUPLICATE KEY UPDATE` on the unique `domain_id`; no row = scope `all`, no first
+/// copy recorded. `scope_department_ids` = JSON array (1..20) of `tenant_departments.public_id`
+/// for kind `departments`. `first_copy_id` references the partitioned `api_message_copies` (no
+/// FK). CAS on `row_version` (scope PUT); `updated_by_user_id` has no FK (the trail survives the
+/// user). Deleted with the domain (FK CASCADE) and by the organization purge. Content-free.
+model ApiModeDomainSetting {
+  id                        BigInt           @id @default(autoincrement()) @db.UnsignedBigInt
+  publicId                  String           @unique @default(uuid(7)) @map("public_id") @db.Char(36)
+  organizationId            BigInt           @map("organization_id") @db.UnsignedBigInt
+  domainId                  BigInt           @unique @map("domain_id") @db.UnsignedBigInt
+  scopeKind                 ApiModeScopeKind @default(all) @map("scope_kind")
+  /// `tenant_departments.public_id` list (1..20) for `scope_kind = departments`; NULL otherwise.
+  scopeDepartmentIds        Json?            @map("scope_department_ids")
+  scopeChangedAt            DateTime?        @map("scope_changed_at") @db.DateTime(3)
+  /// Set by the api on a scope change; cleared by the mailbox-worker health leader after the
+  /// evaluation of the domain's mailboxes.
+  scopeRecomputeRequestedAt DateTime?        @map("scope_recompute_requested_at") @db.DateTime(3)
+  /// api_message_copies.id of the first recorded in-scope copy (B8; no FK: partitioned).
+  firstCopyId               BigInt?          @map("first_copy_id") @db.UnsignedBigInt
+  firstCopyReceivedAt       DateTime?        @map("first_copy_received_at") @db.DateTime(3)
+  /// Verdict time of that copy.
+  firstCopyAt               DateTime?        @map("first_copy_at") @db.DateTime(3)
+  /// Optimistic concurrency (CAS) of the scope PUT.
+  rowVersion                Int              @default(1) @map("row_version") @db.UnsignedInt
+  updatedByUserId           BigInt?          @map("updated_by_user_id") @db.UnsignedBigInt
+  createdAt                 DateTime         @default(now()) @map("created_at") @db.DateTime(3)
+  updatedAt                 DateTime         @updatedAt @map("updated_at") @db.DateTime(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  domain       Domain       @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([scopeRecomputeRequestedAt])
+  @@map("api_mode_domain_settings")
 }

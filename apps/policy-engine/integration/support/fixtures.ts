@@ -1,4 +1,12 @@
 import {
+  atoFactsRepositoryFor,
+  DirectoryRepository,
+  FactsRepository,
+  SnapshotCache,
+  type LoadedSnapshot,
+  SnapshotRepository,
+} from '@email-gateway/policy-runtime';
+import {
   DeleteObjectCommand,
   GetObjectCommand,
   GetObjectTaggingCommand,
@@ -25,16 +33,11 @@ import { urlRewriteConfig } from '../../src/core.module';
 import { loadWorkerConfig } from '../../src/config';
 import { S3PolicyCopyWriter } from '../../src/delivery/policy-copy';
 import { CopyFactsReader } from '../../src/delivery/policy-url-rewrite';
-import { atoFactsRepositoryFor } from '../../src/evaluation/ato-facts.repository';
-import { DirectoryRepository } from '../../src/evaluation/directory.repository';
 import {
   PolicyEvaluationService,
   type TriggerPayload,
 } from '../../src/evaluation/evaluation.service';
-import { FactsRepository } from '../../src/evaluation/facts.repository';
 import { PolicyEvaluateConsumer } from '../../src/evaluation/policy-evaluate.consumer';
-import { SnapshotCache } from '../../src/evaluation/snapshot-cache';
-import { type LoadedSnapshot, SnapshotRepository } from '../../src/evaluation/snapshot.repository';
 import { PolicyMetrics, type PolicyRead } from '../../src/metrics/policy-metrics';
 import { QuarantineMetrics, type QuarantineRead } from '../../src/metrics/quarantine-metrics';
 import { DigestScheduler } from '../../src/quarantine/digest-scheduler';

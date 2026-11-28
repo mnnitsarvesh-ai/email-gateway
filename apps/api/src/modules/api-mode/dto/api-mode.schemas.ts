@@ -58,8 +58,21 @@ export const CONNECTION_STATUSES = [
   'disabled',
 ] as const;
 /** `api_message_copies.remediation_state` (step API-2 §3.2). */
-/** Step API-3 C8: `api_message_copies.direction`. */
-export const COPY_DIRECTIONS = ['inbound', 'internal'] as const;
+/** Step API-3 C8: `api_message_copies.direction`; step API-4 (A6) appends `outbound`. */
+export const COPY_DIRECTIONS = ['inbound', 'internal', 'outbound'] as const;
+/** Step API-4 (A1): `api_message_copies.policy_state`. */
+export const COPY_POLICY_STATES = [
+  'none',
+  'evaluated',
+  'inline',
+  'disabled',
+  'failed',
+  'not_applicable',
+] as const;
+/** 5.2 `PolicyDisposition`. */
+export const POLICY_DISPOSITIONS = ['allow', 'require_approval', 'quarantine', 'reject'] as const;
+/** 5.1 `DlpAction`. */
+export const DLP_ACTIONS = ['allow', 'alert', 'require_approval', 'quarantine', 'block'] as const;
 export const COPY_REMEDIATION_STATES = [
   'none',
   'pending',
@@ -371,6 +384,22 @@ export const ApiModeOverviewSchema = z.object({
   internal: InternalMailSummarySchema.describe('Step API-3: internal (east-west) mail'),
   clawback: ClawbackSummarySchema.describe('Step API-3: clawbacks, search and purge'),
   reports: ReportsSummarySchema.describe('Step API-3: user-reported phishing'),
+  policy: z
+    .object({
+      enabled: z.boolean().describe('Detect-mode policy evaluation of copies is on'),
+      evaluated24h: z.number().int().describe('Copy messages evaluated in the last 24 hours'),
+      errors24h: z.number().int().describe('Evaluation failures in the last 24 hours'),
+    })
+    .describe('Step API-4 (A12): tenant policy evaluation of copies'),
+  outbound: z
+    .object({
+      detections24h: z.number().int().describe('Outbound detections of the last 24 hours'),
+      enabled: z.boolean().describe('Outbound journal messages are evaluated'),
+    })
+    .describe('Step API-4 (A6): outbound detections (never remediated)'),
+  scope: z
+    .object({ excluded: z.number().int().describe('Mailboxes excluded by a domain scope') })
+    .describe('Step API-4 (B6): mailbox scope'),
   connections: z.array(
     z.object({
       id: PublicIdSchema,
@@ -481,7 +510,10 @@ export const DetectionListQuerySchema = defineListQuery({
     minRiskScore: { type: 'int', min: 0, max: 1000, maxValues: 1 },
     remediationState: { type: 'enum', values: COPY_REMEDIATION_STATES, maxValues: 7 },
     // Step API-3 C8.6.
-    direction: { type: 'enum', values: COPY_DIRECTIONS, maxValues: 2 },
+    direction: { type: 'enum', values: COPY_DIRECTIONS, maxValues: 3 },
+    // Step API-4 A12.
+    policyDisposition: { type: 'enum', values: POLICY_DISPOSITIONS, maxValues: 4 },
+    dlpAction: { type: 'enum', values: DLP_ACTIONS, maxValues: 5 },
   },
   sorts: ['-receivedAt'],
   defaultSort: '-receivedAt',
@@ -500,7 +532,15 @@ export const DETECTION_LIST_PARAMETERS: Record<string, string> = {
   minRiskScore: 'Lowest risk score (0-1000)',
   remediationState:
     '`none`, `pending`, `simulated`, `remediated`, `restored`, `failed`, `skipped`; comma list',
-  direction: '`inbound`, `internal` (east-west mail, step API-3); comma list',
+  direction:
+    '`inbound`, `internal` (east-west mail, step API-3), `outbound` (outbound detections of ' +
+    'the sender’s mailbox, step API-4; never remediated); comma list',
+  policyDisposition:
+    'Step API-4: detect-mode tenant policy disposition `allow`, `require_approval`, ' +
+    '`quarantine`, `reject`; comma list',
+  dlpAction:
+    'Step API-4: the message’s DLP action `allow`, `alert`, `require_approval`, `quarantine`, ' +
+    '`block`; comma list',
   from: 'Start of the receipt window (default `to` − 7 days; at most 31 days)',
   to: 'End of the receipt window (exclusive; default now)',
   sort: '`-receivedAt` (newest first)',
@@ -539,7 +579,27 @@ export const DetectionSchema = z.object({
   quarantineEntryId: PublicIdSchema.nullable().describe(
     'The mailbox-located quarantine entry of the copy (latest), if any',
   ),
-  direction: z.enum(COPY_DIRECTIONS).describe('Step API-3: `internal` = east-west mail'),
+  direction: z
+    .enum(COPY_DIRECTIONS)
+    .describe(
+      'Step API-3: `internal` = east-west mail; step API-4: `outbound` = an outbound detection ' +
+        'recorded on the sender’s mailbox (never remediated)',
+    ),
+  policyState: z
+    .enum(COPY_POLICY_STATES)
+    .describe(
+      'Step API-4: detect-mode policy evaluation of the copy (`inline`: the gateway decided; ' +
+        '`disabled`: turned off; `failed`: evaluation error, the verdict lane decided)',
+    ),
+  policyDisposition: z
+    .enum(POLICY_DISPOSITIONS)
+    .nullable()
+    .describe('Step API-4: the tenant policy disposition (detect mode; display only for inline)'),
+  policyTagged: z.boolean().describe('Step API-4: TAG or WARN applied with disposition allow'),
+  dlpAction: z
+    .enum(DLP_ACTIONS)
+    .nullable()
+    .describe('Step API-4: the message’s definite DLP action'),
   verdictRevision: z
     .number()
     .int()
@@ -556,11 +616,54 @@ export const DetectionPageSchema = z.object({
 });
 export type DetectionPage = z.infer<typeof DetectionPageSchema>;
 
+/** Step API-4 A12: the detect row of a copy message as the detections detail shows it. */
+export const DetectionPolicySchema = z.object({
+  evaluationId: z.string().describe('The `policy_execution_logs` id of the detect row'),
+  evaluationMode: z.literal('detect'),
+  disposition: z.enum(POLICY_DISPOSITIONS),
+  decisionSource: z.enum(['tenant_rule', 'platform_default', 'floor']),
+  decisiveRuleRef: z.string().nullable(),
+  overrideApplied: z.boolean(),
+  matchedRules: z.array(
+    z.object({ ruleRef: z.string(), actions: z.array(z.string()) }).describe('A matched rule'),
+  ),
+  actions: z.array(
+    z.object({
+      type: z.string(),
+      status: z.string().describe('`requested`, `recorded`, `not_applicable` (detect mode)'),
+      reason: z.string().nullable(),
+    }),
+  ),
+  explanation: z.string().describe('Content-free explanation text'),
+  postDelivery: z
+    .array(
+      z.object({
+        type: z.string(),
+        status: z.string(),
+        reason: z.string().nullable(),
+      }),
+    )
+    .describe('What each policy action means after delivery (from the decision record)'),
+  evaluatedAt: isoInstant,
+});
+export type DetectionPolicyView = z.infer<typeof DetectionPolicySchema>;
+
 export const DetectionDetailSchema = DetectionSchema.extend({
   deliveredBasis: z
     .enum(['received_header', 'graph_received', 'gmail_internal', 'ingest'])
     .nullable(),
   reasonCodes: z.array(z.string()).describe('Up to 10 risk reason codes of the copy (codes only)'),
+  policy: DetectionPolicySchema.nullable().describe(
+    'Step API-4: the detect-mode evaluation (null: not evaluated, past retention, or inline)',
+  ),
+  dlp: z
+    .object({
+      action: z.enum(DLP_ACTIONS),
+      verdict: z.string().describe('DLP verdict code'),
+      categories: z.array(z.string()).describe('Category codes (≤ 8; never matched values)'),
+    })
+    .nullable()
+    .describe('Step API-4: the message’s DLP result (codes only)'),
 });
 export type DetectionDetailView = z.infer<typeof DetectionDetailSchema>;
 

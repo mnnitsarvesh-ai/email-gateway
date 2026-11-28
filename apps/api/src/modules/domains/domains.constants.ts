@@ -23,6 +23,8 @@ export const DomainAuditAction = {
   RecipientValidationChanged: 'domain.recipient_validation_changed',
   RecipientsAdded: 'domain.recipients_added',
   RecipientsRemoved: 'domain.recipients_removed',
+  // Step API-4 (B3, ADR-0107): an ownership check through the bound provider tenant.
+  ProviderVerificationRequested: 'domain.provider_verification_requested',
 } as const;
 export type DomainAuditAction = (typeof DomainAuditAction)[keyof typeof DomainAuditAction];
 
@@ -44,7 +46,18 @@ export const domainKvKeys = {
   rotateCounter: (domainId: bigint) => `domains:rotate:${domainId}`,
   /** DKIM signing-key sync tick lock: one replica publishes per tick (step 2.2 D12). */
   dkimSyncLock: 'jobs:dkim-signing-sync',
+  /** Step API-4 (B3): per-organization fixed window of provider ownership checks. */
+  providerCheckCounter: (organizationId: bigint) => `rl:domain-provider-check:${organizationId}`,
 };
+
+/** Step API-4 (B3): window of `DOMAIN_PROVIDER_CHECKS_PER_HOUR`. */
+export const PROVIDER_CHECK_WINDOW_SECONDS = 3600;
+/** Step API-4 (B3): the fixed `token` marker of provider verification rows (never a secret). */
+export const PROVIDER_TENANT_TOKEN = 'provider-tenant';
+/** Step API-4 (B3): provider verification rows the scheduler applies per tick. */
+export const PROVIDER_RESULT_BATCH_SIZE = 50;
+/** Step API-4 (B3): the Idempotency-Key operation of the provider ownership check. */
+export const PROVIDER_CHECK_OPERATION = 'domain.provider_ownership_check';
 
 /** Per-domain check lock lifetime (D11). */
 export const CHECK_LOCK_SECONDS = 120;

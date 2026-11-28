@@ -70,6 +70,12 @@ export function alertEnabled(
         settings.alerts.threatDetected.enabled &&
         severityRank(severity) >= severityRank(settings.alerts.threatDetected.minSeverity)
       );
+    case 'dlp_detected':
+      // Step API-4 A9.2: `alerts.dlpDetected { enabled, minSeverity, throttleMinutes }`.
+      return (
+        settings.alerts.dlpDetected.enabled &&
+        severityRank(severity) >= severityRank(settings.alerts.dlpDetected.minSeverity)
+      );
     case 'domain_dns_failed':
       return settings.alerts.domainDnsFailed.enabled;
     case 'webhook_disabled':

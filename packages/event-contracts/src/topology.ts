@@ -202,6 +202,16 @@ import {
  * 5 exchange); no exchange, queue, policy or broker user is added and no permission changes (the
  * relay publishes every `org.` key; `eg-mailbox` already reads its queue).
  *
+ * v19 (step API-4 A8.3, §6, ADR-0106) adds one event binding to an existing queue:
+ * `email.webhooks` binds `org.*.mail.message.copy_detected.v1` on `email.security` (producer the
+ * mailbox-worker `copies` role through the outbox, in the copy_scanned ledger transaction; the
+ * same exchange as `mail.message.copy_scanned.v1`; consumer the webhook-worker fanout, same
+ * ledger `webhook-worker.fanout`, which projects it to `mailbox.threat.detected` /
+ * `mailbox.dlp.detected` and the alerts `threat_detected` / `dlp_detected`). v19 = v18 + one
+ * binding (eighty-one: 76 queue + 5 exchange); no exchange, queue, policy or broker user is added
+ * and no permission changes (the relay publishes every `org.` key; `eg-webhook` already reads
+ * its queue).
+ *
  * `infrastructure/rabbitmq/definitions.json` is
  * generated from `TOPOLOGY` (`pnpm --filter @email-gateway/event-contracts topology:export`) and
  * imported by `infrastructure/rabbitmq/init.mjs`; services never declare, they verify passively.
@@ -210,7 +220,7 @@ import {
  * target, overflow, length limits) is a per-queue policy `eg.<queue>` (Q4), so it changes without
  * re-declaring a queue.
  */
-export const TOPOLOGY_VERSION = 18;
+export const TOPOLOGY_VERSION = 19;
 export const DEFAULT_VHOST = 'email-gateway';
 
 /** The six exchanges of the topology (ADR-0024): all topic, durable, not internal. */
@@ -1020,6 +1030,9 @@ export const TOPOLOGY: Topology = {
         eventBinding('email.security', 'ato.response.completed.v1'),
         // v14 (step 8.2 D12, ADR-0079): provider connection health transitions.
         eventBinding('email.events', 'integration.connection.health_changed.v1'),
+        // v19 (step API-4 A8.3, ADR-0106): API-mode copy detections, projected to
+        // `mailbox.threat.detected` / `mailbox.dlp.detected`.
+        eventBinding('email.security', 'mail.message.copy_detected.v1'),
         retryBinding('email.events', 'email.webhooks'),
       ],
       consumer: {
@@ -1036,7 +1049,7 @@ export const TOPOLOGY: Topology = {
       },
       policy: policyFor('work', 'email.webhooks'),
       description:
-        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2; security incidents and account takeover since step 8.4; integration health, step 8.2)',
+        'Internal events projected to public webhook events and security alerts by the webhook-worker (step 6.2; security incidents and account takeover since step 8.4; integration health, step 8.2; API-mode copy detections, step API-4)',
     },
     {
       // v13 (step 8.4 D2, D3, ADR-0070): the ato-worker's `detect` role consumes the

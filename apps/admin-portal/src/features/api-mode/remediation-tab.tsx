@@ -25,13 +25,31 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import type { ApiError } from '@/lib/api/errors';
 import { useApiMutation, useApiQuery } from '@/lib/api/hooks';
-import type { OperationId } from '@/lib/api/types';
 import { useCan } from '@/lib/auth/me';
 import { formatNumber } from '@/lib/format';
 import { FormDialog, LabelledSelect, MutationError, Section } from '@/features/domains/kit';
 import {
+  DetectOnlyEndedBanner,
+  DetectOnlyFields,
+  PolicyMappingEditor,
+  detectOnlyDraftOf,
+  validateDetectOnlyDraft,
+  type DetectOnlyDraft,
+} from './parity';
+import {
+  DEFAULT_POLICY_MAPPING,
+  DETECT_ONLY_THEN_LABEL,
+  MAPPING_KEY_LABEL,
+  POLICY_MAPPING_KEYS,
+  detectOnlyUntil,
+  isDefaultMapping,
+  type DetectOnlyView,
+  type EffectivePolicyMapping,
+} from './parity-model';
+import {
   DETECT_ONLY_NOTICE,
   HARD_DELETE_WARNING,
+  POLICY_QUERIES,
   MAX_RULES,
   MODE_TEXT,
   POLICY_SOURCE_LABEL,
@@ -52,11 +70,7 @@ import {
   type RuleVerdict,
 } from './remediation-model';
 
-/** Queries a policy change makes stale (the policy view and the coverage badge). */
-export const POLICY_QUERIES: readonly OperationId[] = [
-  'ApiModeRemediationController_getPolicy_v1',
-  'ApiModeController_overview_v1',
-];
+export { POLICY_QUERIES };
 
 // ---- the editable draft ----------------------------------------------------------------------
 
@@ -74,6 +88,8 @@ export interface RuleDraft {
 export interface PolicyDraft {
   mode: PolicyMode;
   rules: RuleDraft[];
+  /** Step API-4 A4.2: the effective policy mapping (every key). */
+  mapping: EffectivePolicyMapping;
 }
 
 let draftKey = 0;
@@ -83,6 +99,7 @@ const nextKey = () => `rule-${(draftKey += 1)}`;
 export function draftOf(mode: PolicyMode, document: PolicyDocument): PolicyDraft {
   return {
     mode,
+    mapping: { ...DEFAULT_POLICY_MAPPING, ...(document.policyMapping ?? {}) },
     rules: document.rules.map((rule) => ({
       key: nextKey(),
       id: rule.id,
@@ -98,10 +115,14 @@ export function draftOf(mode: PolicyMode, document: PolicyDocument): PolicyDraft
   };
 }
 
-/** The document the PUT sends: only the bounds that are set (strict schema, R2.1). */
+/**
+ * The document the PUT sends: only the bounds that are set (strict schema, R2.1); the policy
+ * mapping only when it differs from the default (A4.2: absent = the default).
+ */
 export function documentOf(draft: PolicyDraft): PolicyDocument {
   return {
     v: 1,
+    ...(isDefaultMapping(draft.mapping) ? {} : { policyMapping: { ...draft.mapping } }),
     rules: draft.rules.map((rule) => ({
       id: rule.id.trim(),
       when: {
@@ -376,6 +397,26 @@ export interface PolicySubmission {
   readonly mode: PolicyMode;
   readonly document: PolicyDocument;
   readonly reason: string;
+  /**
+   * Step API-4 B7: a new detect-only period, `null` to clear it, absent to keep it (only sent
+   * with mode detect only; enforce clears it on the server).
+   */
+  readonly detectOnly?: { until: string; then: 'remind' | 'enforce' } | null;
+}
+
+/** The `detectOnly` member of the PUT for a draft (B7). */
+export function detectOnlyBodyOf(
+  mode: PolicyMode,
+  draft: DetectOnlyDraft,
+  current: DetectOnlyView | null,
+  now: number = Date.now(),
+): PolicySubmission['detectOnly'] {
+  if (mode !== 'detect_only') return undefined;
+  if (draft.days.trim() !== '')
+    return { until: detectOnlyUntil(Number(draft.days.trim()), now), then: draft.then };
+  if (current && draft.then !== current.then && !current.ended)
+    return { until: current.until, then: draft.then };
+  return undefined;
 }
 
 const PRESET_LABEL = {
@@ -400,10 +441,13 @@ export function PolicyEditor({
   saveLabel = 'Save policy',
   onSave,
   onDiscard,
+  detectOnly = null,
 }: {
   scopeLabel: string;
   initialMode: PolicyMode;
   initialDocument: PolicyDocument;
+  /** Step API-4 B7: the stored detect-only period of this policy. */
+  detectOnly?: DetectOnlyView | null;
   presets: RemediationPolicyView['presets'];
   hardDeleteAvailable: boolean;
   pending: boolean;
@@ -414,6 +458,7 @@ export function PolicyEditor({
 }) {
   const base = useId();
   const [draft, setDraft] = useState<PolicyDraft>(() => draftOf(initialMode, initialDocument));
+  const [period, setPeriod] = useState<DetectOnlyDraft>(() => detectOnlyDraftOf(detectOnly));
   const [reason, setReason] = useState('');
   const [hints, setHints] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -431,11 +476,19 @@ export function PolicyEditor({
     });
   const submit = () => {
     const problems = validateDraft(draft);
+    const periodProblem = draft.mode === 'detect_only' ? validateDetectOnlyDraft(period) : null;
+    if (periodProblem) problems.push(periodProblem);
     if (reason.trim().length === 0) problems.push('Enter a reason.');
     if (reason.trim().length > 500) problems.push('The reason has at most 500 characters.');
     setHints(problems);
     if (problems.length > 0) return;
-    onSave({ mode: draft.mode, document: documentOf(draft), reason: reason.trim() });
+    const detectOnlyBody = detectOnlyBodyOf(draft.mode, period, detectOnly);
+    onSave({
+      mode: draft.mode,
+      document: documentOf(draft),
+      reason: reason.trim(),
+      ...(detectOnlyBody !== undefined ? { detectOnly: detectOnlyBody } : {}),
+    });
   };
   const errorText = remediationErrorText(error);
   return (
@@ -470,6 +523,9 @@ export function PolicyEditor({
             : ''}
         </p>
       </fieldset>
+      {draft.mode === 'detect_only' ? (
+        <DetectOnlyFields current={detectOnly} draft={period} onChange={setPeriod} />
+      ) : null}
       <div className="grid gap-2">
         <span className="text-sm font-medium">Presets</span>
         <div className="flex flex-wrap gap-2">
@@ -481,7 +537,7 @@ export function PolicyEditor({
               variant="outline"
               onClick={() => {
                 const preset = presets[name];
-                setDraft(draftOf(preset.mode, preset.document));
+                setDraft((d) => ({ ...draftOf(preset.mode, preset.document), mapping: d.mapping }));
                 setHints([]);
                 setNotice(
                   `Preset ${PRESET_LABEL[name]} applied (${MODE_TEXT[preset.mode]}). Review the rules and save with a reason.`,
@@ -533,6 +589,10 @@ export function PolicyEditor({
           Add rule
         </Button>
       </div>
+      <PolicyMappingEditor
+        value={draft.mapping}
+        onChange={(mapping) => setDraft((d) => ({ ...d, mapping }))}
+      />
       <div className="grid gap-2">
         <Label htmlFor={`${base}-reason`}>Reason (required)</Label>
         <Textarea
@@ -573,6 +633,22 @@ export function PolicyEditor({
   );
 }
 
+/** The effective policy mapping in words (read-only users). */
+export function MappingSummary({ mapping }: { mapping: EffectivePolicyMapping }) {
+  return (
+    <div className="grid gap-1">
+      <h3 className="text-sm font-medium">Your policies after delivery</h3>
+      <ul className="grid gap-0.5 text-sm" aria-label="Policy mapping">
+        {POLICY_MAPPING_KEYS.map((key) => (
+          <li key={key}>
+            {MAPPING_KEY_LABEL[key]}: {actionLabel(mapping[key])}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 // ---- organization policy ---------------------------------------------------------------------
 
 function OrganizationPolicy({ policy }: { policy: RemediationPolicyView }) {
@@ -602,12 +678,20 @@ function OrganizationPolicy({ policy }: { policy: RemediationPolicyView }) {
           ' · no policy of your own yet: the platform default applies'
         )}
       </p>
+      <DetectOnlyEndedBanner target={{ scope: 'organization', view: org }} />
+      {org.mode === 'detect_only' && org.detectOnly && !org.detectOnly.ended ? (
+        <p className="text-sm">
+          Detect only until <DateTime value={org.detectOnly.until} mode="absolute" />, then{' '}
+          {DETECT_ONLY_THEN_LABEL[org.detectOnly.then].toLowerCase()}.
+        </p>
+      ) : null}
       {canWrite ? (
         <PolicyEditor
           key={version}
           scopeLabel="organization"
           initialMode={org.mode}
           initialDocument={org.document}
+          detectOnly={org.detectOnly}
           presets={policy.presets}
           hardDeleteAvailable={policy.hardDeleteAvailable}
           pending={save.isPending}
@@ -616,10 +700,16 @@ function OrganizationPolicy({ policy }: { policy: RemediationPolicyView }) {
             save.reset();
             setVersion((v) => v + 1);
           }}
-          onSave={({ mode, document, reason }) => {
+          onSave={({ mode, document, reason, detectOnly }) => {
             void save
               .submit({
-                body: { mode, document, reason, expectedRowVersion: org.rowVersion },
+                body: {
+                  mode,
+                  document,
+                  ...(detectOnly !== undefined ? { detectOnly } : {}),
+                  reason,
+                  expectedRowVersion: org.rowVersion,
+                },
               })
               .then(async (outcome) => {
                 if (!outcome.ok && outcome.error.code === 'api_mode_remediation_policy_conflict')
@@ -635,6 +725,7 @@ function OrganizationPolicy({ policy }: { policy: RemediationPolicyView }) {
             {DETECT_ONLY_NOTICE}
           </p>
           <PolicyRulesTable document={org.document} label="Rules of the organization policy" />
+          <MappingSummary mapping={org.effectivePolicyMapping} />
         </>
       )}
     </Section>
@@ -723,12 +814,19 @@ function DomainPolicyDialog({
         pending={save.isPending}
         error={save.error}
         saveLabel="Save override"
-        onSave={({ mode, document, reason }) => {
+        detectOnly={override?.detectOnly ?? null}
+        onSave={({ mode, document, reason, detectOnly }) => {
           if (!target) return;
           void save
             .submit({
               path: { domainId: target },
-              body: { mode, document, reason, expectedRowVersion: override?.rowVersion ?? null },
+              body: {
+                mode,
+                document,
+                ...(detectOnly !== undefined ? { detectOnly } : {}),
+                reason,
+                expectedRowVersion: override?.rowVersion ?? null,
+              },
             })
             .then(async (outcome) => {
               if (!outcome.ok && outcome.error.code === 'api_mode_remediation_policy_conflict')
@@ -767,6 +865,9 @@ function DomainOverrides({ policy }: { policy: RemediationPolicyView }) {
         ) : null
       }
     >
+      {policy.domains.map((d) => (
+        <DetectOnlyEndedBanner key={d.id} target={{ scope: 'domain', view: d }} />
+      ))}
       {policy.domains.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No domain override: every domain inherits the organization policy.
@@ -789,7 +890,15 @@ function DomainOverrides({ policy }: { policy: RemediationPolicyView }) {
                 <TableRow key={d.id}>
                   <TableCell className="font-medium">{d.domainName}</TableCell>
                   <TableCell>
-                    <PolicyModeBadge mode={d.mode} />
+                    <span className="grid justify-items-start gap-0.5">
+                      <PolicyModeBadge mode={d.mode} />
+                      {d.detectOnly ? (
+                        <span className="text-xs text-muted-foreground">
+                          {d.detectOnly.ended ? 'period ended' : 'until'}{' '}
+                          <DateTime value={d.detectOnly.until} />
+                        </span>
+                      ) : null}
+                    </span>
                   </TableCell>
                   <TableCell className="text-sm">
                     <span className="tabular-nums">{formatNumber(d.document.rules.length)}</span>

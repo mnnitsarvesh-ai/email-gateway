@@ -2986,6 +2986,28 @@ const policyRulesText = (document: unknown): string | null => {
   );
 };
 
+/** Step API-4 (A4.2): the document's `policyMapping` keys (absent = the defaults apply). */
+const policyMappingText = (document: unknown): string | null => {
+  if (!isRecord(document) || !isRecord(document.policyMapping)) return null;
+  const entries = Object.entries(document.policyMapping).filter(
+    ([, action]) => typeof action === 'string',
+  );
+  if (entries.length === 0) return null;
+  return cappedList(
+    entries.map(([key, action]) => `${sanitizeText(key, 24)} → ${mailboxActionWords(action)}`),
+    4,
+  );
+};
+
+/** Step API-4 (B7): the detect-only period of a remediation-policy PUT (null = none / cleared). */
+const detectOnlyText = (detectOnly: unknown): string | null => {
+  if (detectOnly === null) return 'none';
+  if (!isRecord(detectOnly)) return null;
+  const until = text(detectOnly.until);
+  const then = detectOnly.then === 'enforce' ? 'then enforce automatically' : 'then remind';
+  return until === null ? null : `until ${sanitizeText(until, 40)}, ${then}`;
+};
+
 const POLICY_WARNING =
   'A weaker policy stops removing threats from mailboxes; detect-only records decisions without acting.';
 
@@ -3051,6 +3073,8 @@ const API_MODE_TEMPLATES: Readonly<Record<string, Template>> = {
     changes: [
       ...change('Mode', ctx.snap['organization.mode'], ctx.body.mode),
       ...change('Rules', undefined, policyRulesText(ctx.body.document)),
+      ...change('Policy mapping', undefined, policyMappingText(ctx.body.document)),
+      ...change('Detect-only period', undefined, detectOnlyText(ctx.body.detectOnly)),
       ...change('Reason', undefined, ctx.body.reason),
     ],
     impact: [
@@ -3070,6 +3094,8 @@ const API_MODE_TEMPLATES: Readonly<Record<string, Template>> = {
     changes: [
       ...change('Mode', ctx.snap.mode ?? null, ctx.body.mode),
       ...change('Rules', undefined, policyRulesText(ctx.body.document)),
+      ...change('Policy mapping', undefined, policyMappingText(ctx.body.document)),
+      ...change('Detect-only period', undefined, detectOnlyText(ctx.body.detectOnly)),
       ...change('Reason', undefined, ctx.body.reason),
     ],
     impact: ['New verdicts of the domain’s mailboxes are decided with this override.'],
@@ -3324,6 +3350,57 @@ const API_MODE_TEMPLATES: Readonly<Record<string, Template>> = {
     ],
     reversible: true,
   }),
+  // Step API-4 (design note 38 B6, B10): the mailbox scope of an API-mode domain.
+  ApiModeOnboardingController_putScope_v1: (ctx) => {
+    const scope = (ctx.body.scope ?? {}) as { kind?: unknown; departmentIds?: unknown };
+    const departments = Array.isArray(scope.departmentIds) ? scope.departmentIds.length : null;
+    const mailboxes = Array.isArray(ctx.body.mailboxIds) ? ctx.body.mailboxIds.length : null;
+    const narrowing = scope.kind !== undefined && scope.kind !== 'all';
+    return {
+      title: 'Set mailbox scope',
+      action: `Sets which mailboxes of the domain API mode protects (${text(scope.kind) ?? '?'}).`,
+      target: [
+        ...target('Domain id', ctx.args.domainId),
+        ...target('Current scope', ctx.snap.kind),
+        ...target('Mailboxes in scope', ctx.snap.inScope),
+        ...target('Mailboxes excluded', ctx.snap.excluded),
+      ],
+      changes: [
+        ...change('Scope', ctx.snap.kind ?? null, scope.kind),
+        ...change('Departments', undefined, departments),
+        ...change('Selected mailboxes', ctx.snap.selectedMailboxes ?? null, mailboxes),
+        ...change('Reason', undefined, ctx.body.reason),
+      ],
+      impact: [
+        'The mailbox-worker re-evaluates the domain’s mailboxes on its next run.',
+        'Excluded mailboxes keep their copies recorded but get no remediation, change feed or clawback.',
+      ],
+      warnings: narrowing
+        ? ['Narrowing the scope removes protection from every mailbox left out.']
+        : [],
+      reversible: true,
+    };
+  },
+  // Step API-4 (design note 38 B3, B10): ownership through the bound provider tenant.
+  DomainsController_providerOwnershipCheck_v1: (ctx) => ({
+    title: 'Verify domain ownership through the provider',
+    action: `Asks the organization’s bound Microsoft 365 / Google Workspace tenant whether it lists ${domainName(ctx)} as verified.`,
+    target: [
+      ...target('Domain', ctx.snap.name),
+      ...target('Domain id', ctx.args.domainId),
+      ...target('Status', ctx.snap.status),
+      ...target('Provider check available', yesNo(ctx.snap['ownership.providerCheckAvailable'])),
+      ...target('Current provider check', ctx.snap['ownership.providerCheck.status']),
+    ],
+    changes: [
+      ...change('Ownership check', undefined, 'through the bound provider tenant'),
+      ...change('Connection', undefined, ctx.body.connectionId),
+    ],
+    impact: [
+      'The integration-worker checks the domain in the provider tenant; a verified listing verifies the domain (first to verify wins), any other answer leaves it pending.',
+    ],
+    reversible: true,
+  }),
   ApiModeSettingsController_put_v1: (ctx) => ({
     title: 'Update API-mode settings',
     action: "Replaces the organization's API-mode settings with the values shown.",
@@ -3378,8 +3455,9 @@ const API_MODE_TEMPLATES: Readonly<Record<string, Template>> = {
 };
 
 /**
- * The 188 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
- * AI-R, 64 of step AI-4, 25 of step AI-5, 20 of step API-3), keyed by operation id.
+ * The 190 templates (31 of step AI-2, 47 of step AI-3, the native `report_send_email` of step
+ * AI-R, 64 of step AI-4, 25 of step AI-5, 20 of step API-3, 2 of step API-4), keyed by operation
+ * id.
  */
 export const IMPACT_TEMPLATES: Readonly<Record<string, Template>> = {
   ...API_MODE_TEMPLATES,

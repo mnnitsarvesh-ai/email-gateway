@@ -16,6 +16,45 @@ Activate **before** you change MX. DNS changes reach different parts of the inte
 
 The status view (`GET /api/v1/domains/{id}/status`) tells you where you are: `readyForActivation` is true once ownership is verified, and `mailFlowReady` is true once the domain is active and its MX records point at the gateway.
 
+## API mode and hybrid: the add-domain wizard (step API-4)
+
+The order above is the **inline** path (MX at the gateway). If your organization uses **API mode** (Microsoft 365 or Google Workspace keeps your MX; the gateway reads a journal copy of every message and acts in the mailboxes after delivery) the add-domain wizard shows only the steps that apply ([design](../plan/steps/38-api-mode-parity-onboarding.md) B1–B9, [ADR-0107](../architecture/adr/0107-api-mode-onboarding-provider-ownership-scope-detect-only.md)):
+
+| Mode     | Steps                                                                                                                                          |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inline` | Protection mode → Add → DNS → Verify → Destinations → Recipients → Activate (unchanged)                                                        |
+| `api`    | Protection mode → Add → **Ownership** → **Connect mailboxes** → **Intake** → **Which mailboxes** → **Threat action** → **Review and activate** |
+| `hybrid` | the inline steps, then Connect mailboxes → Intake → Which mailboxes → Threat action → Review and activate                                      |
+
+An `api` domain needs **no MX, SPF, DKIM or DMARC change** and has no destination servers or recipient list: those records stay stored but are not listed. Progress and resume come from the server (`GET /api/v1/api-mode/domains/{id}/onboarding`), never from which buttons were clicked.
+
+- **Ownership.** Either publish the ownership TXT record (section 1 below), or — when your organization already has a Microsoft 365 / Google Workspace connection that is **bound** to your tenant (bound through a domain you proved with DNS) and has the read-only mail-flow permission active — choose **Verify automatically through Microsoft 365 / Google Workspace** (`POST /api/v1/domains/{id}/ownership/provider-check`, `domain:manage`, at most 10 checks per organization per hour). The gateway asks the provider whether the domain is a **verified** domain of that tenant (Microsoft 365: verified and enabled for Email; Google Workspace: a verified primary or secondary domain, not an alias). If so, the domain becomes `verified` within about a minute with ownership method `provider_tenant` (shown on the domain page); otherwise the check fails with the provider's answer (`unverified`, `absent`, `alias`, `error`) and the TXT record keeps working. A check expires after 60 minutes. The same "first to verify wins" rule applies as with TXT. A provider-proven domain never binds a connection to a tenant by itself (only DNS-proven domains do).
+- **Connect mailboxes.** Link the domain to the provider connection (a `verified` domain can be linked; it need not be active yet), grant the read-only mail-flow permission and the **mailbox access** permission (moving, tagging and deleting messages after delivery).
+- **Intake.** A journal copy (recommended: a Microsoft 365 journal rule or a Google Workspace "Also deliver to" rule to the gateway's journal address shown for the source) and/or mailbox change feeds.
+- **Which mailboxes.** All mailboxes (default), the members of policy-directory departments, or selected mailboxes. Excluded mailboxes are still recorded (you see their detections) but nothing is moved or tagged in them and their feeds stop.
+- **Threat action.** "Detect only for 7 days, then remind me" (default and recommended: decisions are simulated and listed, nothing changes in the mailboxes; when the period ends the administrators receive an e-mail and the page shows how many actions would have been taken), "Detect only for 7 days, then enforce automatically", "Enforce now (standard)", "Strict" or "Use the organization policy".
+- **Review and activate.** Activating an `api` domain never changes mail flow. Then send a test message to any mailbox of the domain: the page waits for the **first copy** and shows its verdict, delay, source, policy and remediation state. If nothing arrives after 10 minutes it lists hints:
+
+| Hint                               | Meaning and fix                                                                                         |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `domain_not_active`                | Activate the domain                                                                                     |
+| `mode_not_api`                     | The domain's effective mode is inline; change its protection mode                                       |
+| `connection_missing`               | No provider connection covers the domain; link it to one                                                |
+| `connection_not_bound`             | The connection is not bound to your tenant yet; finish the connection's consent and binding             |
+| `mailbox_access_missing`           | Grant the mailbox access permission                                                                     |
+| `journal_source_missing`           | No journal source for the connection (warning without feeds, information with feeds)                    |
+| `journal_source_unverified`        | The journal source has not received its verification message yet                                        |
+| `journal_source_silent`            | The journal source is silent or failing (check the provider's journal or routing rule)                  |
+| `journal_seen_no_domain_recipient` | Journal messages arrive, but none for this domain: the journal rule's scope probably excludes its users |
+| `feeds_disabled`                   | No verified journal source and feeds are off: enable one of them                                        |
+| `feeds_initializing`               | Feeds are starting on the mailboxes (covers less than 90 % of the in-scope mailboxes so far)            |
+| `no_mailboxes_in_scope`            | The mailbox scope excludes every mailbox of the domain                                                  |
+| `connection_throttled`             | The provider is throttling the connection; copies arrive when the pause ends                            |
+| `copies_failing`                   | Recent copies of the connection could not be scanned or parsed; see the API-mode runbook                |
+| `send_test_message`                | Always shown: send a test message to any mailbox of the domain                                          |
+
+The **Protection by mode** page (Security → Protection by mode) compares what inline, API and hybrid protection cover and lists every domain's actual coverage and gaps. Operators: [API-mode runbook](../runbooks/api-mode.md#onboarding-and-the-first-copy-step-api-4).
+
 ## Domain names you can add
 
 - Use the name as you see it, for example `example.com` or `Bücher.example`. International names are accepted and stored in their ASCII form (`xn--bcher-kva.example`); a trailing dot is ignored and letters are not case-sensitive.
@@ -178,4 +217,4 @@ DMARC tells receivers what to do with mail that fails SPF and DKIM alignment, an
 
 ### If someone else owns your domain
 
-Ownership goes to the first organization that proves it with the TXT record. If another organization on the platform holds your domain (for example a previous owner, or a test account), contact the gateway's support with proof of ownership. The platform operator can release the name after investigation; you then add and verify it as usual.
+Ownership goes to the first organization that proves it, with the TXT record or (API mode) through its bound provider tenant. If another organization on the platform holds your domain (for example a previous owner, or a test account), contact the gateway's support with proof of ownership. The platform operator can release the name after investigation; you then add and verify it as usual.

@@ -19,13 +19,18 @@ export interface ApiModeOrgSettings {
   tiMinConfidence: number;
   reportAckEnabled: boolean;
   reportFeedbackEnabled: boolean;
+  /** Step API-4 (A1, API4-1): detect-mode policy evaluation of copies. */
+  policyEvaluationEnabled: boolean;
+  /** Step API-4 (A6, API4-5): outbound journal messages are evaluated and detections recorded. */
+  outboundDetectionEnabled: boolean;
 }
 
 /**
  * C17 organization defaults (product-owner defaults API3-1, -2, -3, -7, -8, -18, -20): internal
  * mail on, automatic clawback `enforce`, auto cap 500 mailboxes, P2 threshold 50, lookback 14
- * days, threat-intelligence confidence 80, acknowledgement and result feedback on. They equal the
- * column defaults of the migration.
+ * days, threat-intelligence confidence 80, acknowledgement and result feedback on; step API-4
+ * (API4-1, API4-5) adds policy evaluation of copies and outbound detection, both on. They equal
+ * the column defaults of the migrations.
  */
 export const ORG_SETTINGS_DEFAULTS: Readonly<ApiModeOrgSettings> = Object.freeze({
   internalMailEnabled: true,
@@ -36,6 +41,8 @@ export const ORG_SETTINGS_DEFAULTS: Readonly<ApiModeOrgSettings> = Object.freeze
   tiMinConfidence: 80,
   reportAckEnabled: true,
   reportFeedbackEnabled: true,
+  policyEvaluationEnabled: true,
+  outboundDetectionEnabled: true,
 });
 
 /** C14 #19 input bounds (inclusive). */
@@ -50,7 +57,8 @@ const bounded = (b: { min: number; max: number }) => z.number().int().min(b.min)
 
 /**
  * The settings fields of `PUT /api-mode/settings` (C14 #19), strict. The api extends it with
- * `reason` and `expectedRowVersion`.
+ * `reason` and `expectedRowVersion`. The two step API-4 flags are optional (absent = keep the
+ * current effective value), so API-3 clients stay valid.
  */
 export const orgSettingsSchema = z.strictObject({
   internalMailEnabled: z.boolean(),
@@ -61,10 +69,20 @@ export const orgSettingsSchema = z.strictObject({
   tiMinConfidence: bounded(ORG_SETTINGS_BOUNDS.tiMinConfidence),
   reportAckEnabled: z.boolean(),
   reportFeedbackEnabled: z.boolean(),
+  policyEvaluationEnabled: z.boolean().optional(),
+  outboundDetectionEnabled: z.boolean().optional(),
 });
 
-/** An `api_mode_org_settings` row as the caller loaded it (Prisma field names). */
-export interface ApiModeOrgSettingsRow extends ApiModeOrgSettings {
+/**
+ * An `api_mode_org_settings` row as the caller loaded it (Prisma field names). The step API-4
+ * columns are optional so callers selecting only the API-3 columns compile (absent = default).
+ */
+export interface ApiModeOrgSettingsRow extends Omit<
+  ApiModeOrgSettings,
+  'policyEvaluationEnabled' | 'outboundDetectionEnabled'
+> {
+  policyEvaluationEnabled?: boolean;
+  outboundDetectionEnabled?: boolean;
   rowVersion: number;
 }
 
@@ -105,6 +123,8 @@ export function resolveOrgSettings(row: ApiModeOrgSettingsRow | null): ResolvedO
     tiMinConfidence: clamp(row.tiMinConfidence, b.tiMinConfidence, d.tiMinConfidence),
     reportAckEnabled: row.reportAckEnabled,
     reportFeedbackEnabled: row.reportFeedbackEnabled,
+    policyEvaluationEnabled: row.policyEvaluationEnabled ?? d.policyEvaluationEnabled,
+    outboundDetectionEnabled: row.outboundDetectionEnabled ?? d.outboundDetectionEnabled,
     source: 'row',
     rowVersion: row.rowVersion,
   };

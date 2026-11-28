@@ -81,6 +81,7 @@ import {
   type ConnectionAggregate,
   ProviderConnectionsRepository,
 } from '../repositories/provider-connections.repository';
+import { isLinkableDomainStatus } from '../domain/link-rules';
 import { ProviderRunsRepository } from '../repositories/provider-runs.repository';
 import { parseBody, parsePublicId, principalPublicId, principalUserId } from './provider-common';
 
@@ -425,8 +426,8 @@ export class ProviderConnectionsService {
 
   /**
    * `PUT /provider-connections/{id}/domains` (#14, D4): keyed; replaces the linked set. Each
-   * domain must be the organization's (`404 domain_not_in_organization`), `active` at the
-   * gateway (`422 domain_not_verified`) and not linked to another connection (`409
+   * domain must be the organization's (`404 domain_not_in_organization`), `verified` or `active`
+   * at the gateway (step API-4 B4; else `422 domain_not_verified`) and not linked to another connection (`409
    * domain_linked_elsewhere`); unlinking needs outbound off (`409 outbound_active`). The provider
    * check of the new domains is requested from the integration-worker (`next_health_check_at =
    * now`); with no provider-verified domain left an `active` connection returns to `configuring`
@@ -473,7 +474,8 @@ export class ProviderConnectionsService {
           if (domain.linkedConnectionId !== null && domain.linkedConnectionId !== c.id) {
             throw domainLinkedElsewhere(id);
           }
-          if (domain.status !== 'active') throw domainNotVerified(id);
+          // Step API-4 B4: `verified` or `active` (pending → 422 domain_not_verified).
+          if (!isLinkableDomainStatus(domain.status)) throw domainNotVerified(id);
         }
         const current = new Set(aggregate.domains.map((d) => d.domainId));
         const next = new Set(found.map((d) => d.id));

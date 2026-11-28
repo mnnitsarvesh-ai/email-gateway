@@ -33,7 +33,7 @@ const source = {
 
 function row(id: bigint, receivedAt: Date, facts = { sender: { envelope: 'x@bad.example' } }) {
   const { row: stored } = storedEvaluation(facts, source, { scanId: 900n + id });
-  return { ...stored, id, receivedAt, messageId: 70n + id };
+  return { ...stored, id, receivedAt, messageId: 70n + id, evaluationMode: 'inline' };
 }
 
 function setup(rows: Array<Record<string, unknown>>) {
@@ -98,6 +98,26 @@ describe('PolicyHistoryService (P16, P22)', () => {
       SCOPE,
       expect.objectContaining({ before: { receivedAt: t, id: 2n } }),
     );
+  });
+
+  it('step API-4 A12: mode inline (default), detect or all; rows carry evaluationMode', async () => {
+    const t = new Date('2026-11-10T00:00:00.000Z');
+    const { service, executions } = setup([{ ...row(1n, t), evaluationMode: 'detect' }]);
+    const page = await service.history(SCOPE, query({}));
+    expect(executions.history).toHaveBeenLastCalledWith(
+      SCOPE,
+      expect.objectContaining({ evaluationMode: 'inline' }),
+    );
+    expect(page.data[0]!.evaluationMode).toBe('detect');
+    await service.history(SCOPE, query({ mode: 'detect' }));
+    expect(executions.history).toHaveBeenLastCalledWith(
+      SCOPE,
+      expect.objectContaining({ evaluationMode: 'detect' }),
+    );
+    await service.history(SCOPE, query({ mode: 'all' }));
+    const last = executions.history.mock.calls.at(-1) as unknown as [unknown, object];
+    expect(last[1]).not.toHaveProperty('evaluationMode');
+    expect(() => query({ mode: 'copy' })).toThrow();
   });
 
   it('refuses a range above the bound, a reversed range and a forged cursor', async () => {

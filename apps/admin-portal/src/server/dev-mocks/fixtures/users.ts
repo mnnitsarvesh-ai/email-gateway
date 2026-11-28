@@ -157,6 +157,11 @@ function seed(organizationId: string): OrgState {
   return { users, deleted: new Set(), sessions, departments, members };
 }
 
+/** Step API-4 B6: the policy-directory departments (read by the api-mode scope fixture). */
+export function departmentsOf(organizationId: string): readonly Department[] {
+  return org(organizationId).departments;
+}
+
 function org(organizationId: string): OrgState {
   let state = orgs.get(organizationId);
   if (!state) {

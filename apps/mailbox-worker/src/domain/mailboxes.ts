@@ -1,7 +1,8 @@
 import { uuidv7 } from '@email-gateway/common';
-import type { MessageVerdict, PrismaClient } from '@email-gateway/database';
+import type { MessageVerdict, Prisma, PrismaClient } from '@email-gateway/database';
 import { big, type Db } from '../shared/db';
 import { InconsistentReadError } from '../shared/errors';
+import { newMailboxScopeState } from './scope';
 
 export interface MailboxRef {
   id: bigint;
@@ -15,50 +16,67 @@ export interface MailboxRef {
  * lower case), or a new `discovered` mailbox (no provider user id, primary = the address) with its
  * primary address row under `apiConnectionId`. Idempotent and race-safe: the address is unique per
  * organization (`INSERT IGNORE`); the loser of a concurrent creation removes its own mailbox row
- * and uses the winner's.
+ * and uses the winner's. Step API-4 B6: a new mailbox gets the `scope_state` of its domain's scope
+ * kind (`excluded` for `mailboxes` domains, `in_scope` otherwise).
  */
 export async function resolveOrDiscoverMailbox(
   prisma: PrismaClient,
-  input: {
-    organizationId: bigint;
-    apiConnectionId: bigint;
-    address: string;
-    domainId: bigint | null;
-    now: Date;
-  },
+  input: DiscoverInput,
 ): Promise<MailboxRef> {
   const address = input.address.trim().toLowerCase();
   const found = await findMailboxByAddress(prisma, input.organizationId, address);
   if (found) return found;
-  return prisma.$transaction(async (tx) => {
-    const publicId = uuidv7(input.now.getTime());
-    await tx.$executeRaw`
-      INSERT INTO api_mailboxes
-        (public_id, organization_id, api_connection_id, provider_user_id, primary_address,
-         domain_id, status, coverage_state, feed_status, created_at, updated_at)
-      VALUES (${publicId}, ${input.organizationId}, ${input.apiConnectionId}, NULL, ${address},
-              ${input.domainId}, 'discovered', 'out_of_scope', 'off', ${input.now}, ${input.now})`;
-    const created = await tx.apiMailbox.findUnique({
-      where: { publicId },
-      select: { id: true },
-    });
-    if (!created) throw new InconsistentReadError('api_mailboxes');
-    const inserted = await tx.$executeRaw`
-      INSERT IGNORE INTO api_mailbox_addresses (organization_id, mailbox_id, address, kind, created_at)
-      VALUES (${input.organizationId}, ${created.id}, ${address}, 'primary', ${input.now})`;
-    if (inserted === 1) {
-      return {
-        id: created.id,
-        publicId,
-        organizationId: input.organizationId,
-        apiConnectionId: input.apiConnectionId,
-      };
-    }
-    await tx.apiMailbox.delete({ where: { id: created.id } });
-    const winner = await findMailboxByAddress(tx, input.organizationId, address);
-    if (!winner) throw new InconsistentReadError('api_mailbox_addresses');
-    return winner;
+  return prisma.$transaction((tx) => discoverMailboxIn(tx, { ...input, address }));
+}
+
+export interface DiscoverInput {
+  organizationId: bigint;
+  apiConnectionId: bigint;
+  address: string;
+  domainId: bigint | null;
+  now: Date;
+}
+
+/**
+ * `resolveOrDiscoverMailbox` inside the caller's transaction (step API-4 A6.2: the sender mailbox
+ * of an outbound detection is discovered in the copies ledger transaction).
+ */
+export async function discoverMailboxIn(
+  tx: Prisma.TransactionClient,
+  input: DiscoverInput,
+): Promise<MailboxRef> {
+  const address = input.address.trim().toLowerCase();
+  const found = await findMailboxByAddress(tx, input.organizationId, address);
+  if (found) return found;
+  const scopeState = await newMailboxScopeState(tx, input.organizationId, input.domainId);
+  const publicId = uuidv7(input.now.getTime());
+  await tx.$executeRaw`
+    INSERT INTO api_mailboxes
+      (public_id, organization_id, api_connection_id, provider_user_id, primary_address,
+       domain_id, status, coverage_state, feed_status, scope_state, created_at, updated_at)
+    VALUES (${publicId}, ${input.organizationId}, ${input.apiConnectionId}, NULL, ${address},
+            ${input.domainId}, 'discovered', 'out_of_scope', 'off', ${scopeState}, ${input.now},
+            ${input.now})`;
+  const created = await tx.apiMailbox.findUnique({
+    where: { publicId },
+    select: { id: true },
   });
+  if (!created) throw new InconsistentReadError('api_mailboxes');
+  const inserted = await tx.$executeRaw`
+    INSERT IGNORE INTO api_mailbox_addresses (organization_id, mailbox_id, address, kind, created_at)
+    VALUES (${input.organizationId}, ${created.id}, ${address}, 'primary', ${input.now})`;
+  if (inserted === 1) {
+    return {
+      id: created.id,
+      publicId,
+      organizationId: input.organizationId,
+      apiConnectionId: input.apiConnectionId,
+    };
+  }
+  await tx.apiMailbox.delete({ where: { id: created.id } });
+  const winner = await findMailboxByAddress(tx, input.organizationId, address);
+  if (!winner) throw new InconsistentReadError('api_mailbox_addresses');
+  return winner;
 }
 
 export async function findMailboxByAddress(
@@ -125,4 +143,25 @@ export async function findInlineMessage(
   return row
     ? { messageId: big(row.id), receivedAt: row.received_at, finalVerdict: row.final_verdict }
     : null;
+}
+
+/**
+ * Step API-4 A6.3 (P-I3): whether the gateway already handled this message outbound — a gateway
+ * message (`ingest_source = 'gateway'`, `direction = 'outbound'`) of the organization with the
+ * same Message-ID key within ± `windowHours` of the copy.
+ */
+export async function hasGatewayOutboundMessage(
+  db: Db,
+  input: { organizationId: bigint; messageIdKey: string; around: Date; windowHours: number },
+): Promise<boolean> {
+  const span = input.windowHours * 3_600_000;
+  const rows = await db.$queryRaw<Array<{ id: bigint | number }>>`
+    SELECT m.id FROM email_messages m
+    WHERE m.organization_id = ${input.organizationId}
+      AND m.message_id_key = ${input.messageIdKey.slice(0, 255)}
+      AND m.received_at >= ${new Date(input.around.getTime() - span)}
+      AND m.received_at <= ${new Date(input.around.getTime() + span)}
+      AND m.ingest_source = 'gateway' AND m.direction = 'outbound'
+    LIMIT 1`;
+  return rows.length > 0;
 }

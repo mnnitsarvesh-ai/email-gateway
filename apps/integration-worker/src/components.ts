@@ -15,6 +15,7 @@ import { LeaderJob, type LeaderLock, Periodic } from './shared/loops';
 import { orgFilter } from './shared/db';
 import { DomainCheckTask } from './tasks/domain-checks';
 import { GrantVerifier } from './tasks/grant-verifier';
+import { ProviderOwnershipTask } from './tasks/provider-ownership';
 import { TenantBinder } from './tasks/tenant-binding';
 import { ValidationRunner } from './tasks/validation-runner';
 
@@ -47,6 +48,7 @@ export class IntegrationComponents {
   readonly binder: TenantBinder;
   readonly verifier: GrantVerifier;
   readonly domainChecks: DomainCheckTask;
+  readonly ownership: ProviderOwnershipTask;
   readonly validations: ValidationRunner;
   readonly health: HealthRunner;
   readonly maintenance: Maintenance;
@@ -137,6 +139,14 @@ export class IntegrationComponents {
       now,
       ...scoped,
     });
+    this.ownership = new ProviderOwnershipTask(writer, {
+      runtime: this.runtime,
+      metrics,
+      logger: logger.child({ component: 'provider-ownership' }),
+      now,
+      batch: config.PROVIDER_OWNERSHIP_CHECK_BATCH,
+      ...scoped,
+    });
     this.validations = new ValidationRunner(writer, {
       checks: this.checks,
       metrics,
@@ -175,13 +185,14 @@ export class IntegrationComponents {
           async () => {
             const signal = this.abort.signal;
             await this.updateTaskLag();
-            const [grants, domains, runs, probes] = await Promise.all([
+            const [grants, domains, runs, probes, ownership] = await Promise.all([
               this.verifier.runOnce(concurrency, signal),
               this.domainChecks.runOnce(concurrency, signal),
               this.validations.runOnce(concurrency, signal),
               this.validations.completeProbes(50),
+              this.ownership.runOnce(signal).then((r) => r.length),
             ]);
-            return grants + domains + runs + probes > 0;
+            return grants + domains + runs + probes + ownership > 0;
           },
           logger,
         ),
@@ -217,7 +228,10 @@ export class IntegrationComponents {
     }
   }
 
-  /** `integration_worker_task_lag_seconds`: the oldest pending verification or queued run. */
+  /**
+   * `integration_worker_task_lag_seconds`: the oldest pending grant verification, queued run or
+   * unchecked provider ownership verification (step API-4 B3.3).
+   */
   async updateTaskLag(): Promise<number> {
     const now = (this.deps.now ?? (() => new Date()))();
     const only = this.deps.organizationIds;
@@ -228,6 +242,10 @@ export class IntegrationComponents {
         UNION ALL
         SELECT MIN(created_at) AS t FROM provider_validation_runs
          WHERE status = 'queued' ${orgFilter('organization_id', only)}
+        UNION ALL
+        SELECT MIN(created_at) AS t FROM domain_verifications
+         WHERE method = 'provider_tenant' AND status = 'pending' AND provider_checked_at IS NULL
+           ${orgFilter('organization_id', only)}
       ) pending`;
     const lag = row?.oldest
       ? Math.max(0, (now.getTime() - new Date(row.oldest).getTime()) / 1000)

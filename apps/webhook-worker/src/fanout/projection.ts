@@ -9,6 +9,7 @@ import {
   EventTypes,
   type IntegrationHealthChangedV1,
   type MessageReceivedV1,
+  type MessageCopyDetectedV1,
   type MessageScannedV1,
   type MessageStateChangedV1,
   type PolicyDecidedV1,
@@ -18,7 +19,9 @@ import {
 import type { ScanVerdict } from '@email-gateway/security-contracts';
 import {
   type AlertKind,
+  dlpDetectionSeverity,
   incidentWebhookSeverity,
+  MAILBOX_DLP_ACTIONS,
   type Severity,
   type ThreatVerdict,
   type WebhookDirection,
@@ -33,9 +36,10 @@ import {
  */
 
 /**
- * The thirteen internal events bound to `email.webhooks`: the eight of topology v11 (§4.3), the
- * four security incident / account takeover events of topology v13 (step 8.4 D16) and
- * `integration.connection.health_changed.v1` of topology v14 (step 8.2 D12).
+ * The fourteen internal events bound to `email.webhooks`: the eight of topology v11 (§4.3), the
+ * four security incident / account takeover events of topology v13 (step 8.4 D16),
+ * `integration.connection.health_changed.v1` of topology v14 (step 8.2 D12) and
+ * `mail.message.copy_detected.v1` of topology v19 (step API-4 A8, ADR-0106).
  */
 export const FANOUT_SOURCE_TYPES = [
   EventTypes.MessageReceived,
@@ -51,6 +55,7 @@ export const FANOUT_SOURCE_TYPES = [
   EventTypes.AtoAccountRiskUpdated,
   EventTypes.AtoResponseCompleted,
   EventTypes.IntegrationHealthChanged,
+  EventTypes.MessageCopyDetected,
 ] as const;
 export type FanoutSourceType = (typeof FANOUT_SOURCE_TYPES)[number];
 
@@ -69,6 +74,9 @@ export type CandidateRule =
   | 'rejected'
   | 'released'
   | 'threat_sandbox'
+  | 'mailbox_threat_scan'
+  | 'mailbox_threat_sandbox'
+  | 'mailbox_dlp'
   | 'domain_verified'
   | 'dns_failed_verification'
   | 'dns_failed_records'
@@ -122,6 +130,15 @@ export const THREAT_VERDICT_OF_FINAL: Readonly<Record<string, ThreatVerdict>> = 
 
 export function threatVerdictOf(finalVerdict: string): ThreatVerdict | null {
   return THREAT_VERDICT_OF_FINAL[finalVerdict] ?? null;
+}
+
+const MAILBOX_DLP_ACTION_SET: ReadonlySet<string> = new Set(MAILBOX_DLP_ACTIONS);
+
+/** The DLP action of a copy detection that makes a `mailbox.dlp.detected` (never `allow`). */
+export function mailboxDlpActionOf(
+  dlp: MessageCopyDetectedV1['dlp'],
+): (typeof MAILBOX_DLP_ACTIONS)[number] | null {
+  return dlp !== null && MAILBOX_DLP_ACTION_SET.has(dlp.action) ? dlp.action : null;
 }
 
 /** `email.rejected` reasons: the lifecycle reason codes of E13, E17, E18, E24 (§5.2). */
@@ -302,6 +319,10 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
     case EventTypes.AttachmentSandboxCompleted: {
       const p = event.payload as AttachmentSandboxCompletedV1;
       if (p.verdict !== 'malicious') return [];
+      // Whether the message is a gateway message or an API-mode copy is known only after the
+      // writer read (`email_messages.ingest_source`): both candidates pass the pre-filter and the
+      // builders produce exactly one of them (step API-4 A9.1, ADR-0106: a copy's sandbox verdict
+      // is `mailbox.threat.detected`, never `email.threat.detected`).
       return [
         {
           rule: 'threat_sandbox',
@@ -311,7 +332,48 @@ export function projectCandidates(event: EventEnvelope<unknown>): Candidate[] {
           verdict: 'malicious',
           alert: 'threat_detected',
         },
+        {
+          rule: 'mailbox_threat_sandbox',
+          type: 'mailbox.threat.detected',
+          subKey: `sandbox:${p.partIndex}`,
+          severity: 'high',
+          verdict: 'malicious',
+          alert: 'threat_detected',
+        },
       ];
+    }
+    case EventTypes.MessageCopyDetected: {
+      // Step API-4 A8/A9.1 (ADR-0106): a detection of an API-mode copy message. A threat verdict
+      // → `mailbox.threat.detected` (alert `threat_detected`); a DLP action → `mailbox.dlp.detected`
+      // (alert `dlp_detected`); both, one or none (a policy-only or tag-only detection is not
+      // public). Direction from the payload.
+      const p = event.payload as MessageCopyDetectedV1;
+      if (p.copies.counted < 1 || p.detectionIds.length === 0) return [];
+      const out: Candidate[] = [];
+      const threat = p.verdict === null ? null : threatVerdictOf(p.verdict);
+      if (threat !== null) {
+        out.push({
+          rule: 'mailbox_threat_scan',
+          type: 'mailbox.threat.detected',
+          subKey: 'scan',
+          severity: SCAN_SEVERITY[threat],
+          direction: p.direction,
+          verdict: threat,
+          alert: 'threat_detected',
+        });
+      }
+      const dlpAction = mailboxDlpActionOf(p.dlp);
+      if (dlpAction !== null) {
+        out.push({
+          rule: 'mailbox_dlp',
+          type: 'mailbox.dlp.detected',
+          subKey: 'dlp',
+          severity: dlpDetectionSeverity(dlpAction),
+          direction: p.direction,
+          alert: 'dlp_detected',
+        });
+      }
+      return out;
     }
     case EventTypes.DomainStatusChanged: {
       const p = event.payload as DomainStatusChangedV1;

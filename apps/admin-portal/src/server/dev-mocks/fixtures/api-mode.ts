@@ -99,6 +99,45 @@ interface PolicyRow {
   document: PolicyDocument;
   rowVersion: number;
   updatedAt: string;
+  /** Step API-4 B7: the detect-only period (null = none). */
+  detectOnly?: { until: string; then: 'remind' | 'enforce'; startedAt: string } | null;
+}
+
+type EffectiveMapping = PolicyView['organization']['effectivePolicyMapping'];
+const DEFAULT_MAPPING: EffectiveMapping = {
+  quarantine: 'move_quarantine',
+  require_approval: 'move_quarantine',
+  reject: 'move_quarantine',
+  allow_tagged: 'tag',
+};
+const MAPPING_KEYS = ['quarantine', 'require_approval', 'reject', 'allow_tagged'] as const;
+const MAPPING_ACTIONS = new Set(['move_quarantine', 'move_junk', 'soft_delete', 'tag', 'none']);
+
+/** Step API-4 A4.2: the effective mapping (missing keys take their default). */
+export function effectiveMappingOf(document: PolicyDocument): EffectiveMapping {
+  return { ...DEFAULT_MAPPING, ...(document.policyMapping ?? {}) };
+}
+
+/** Step API-4 B7: the detect-only view of a policy row (`simulatedSinceStart` from the actions). */
+function detectOnlyView(organizationId: string, row: PolicyRow | null, domainId: string | null) {
+  if (!row || row.mode !== 'detect_only' || !row.detectOnly) return null;
+  const started = Date.parse(row.detectOnly.startedAt);
+  const org = orgState(organizationId);
+  const domainOf = (mailboxId: string) =>
+    org.mailboxes.find((m) => m.id === mailboxId)?.domain?.id ?? null;
+  const simulated = org.actions.filter(
+    (a) =>
+      a.status === 'simulated' &&
+      Date.parse(a.createdAt) >= started &&
+      (domainId === null || domainOf(a.mailbox.id) === domainId),
+  ).length;
+  return {
+    until: row.detectOnly.until,
+    then: row.detectOnly.then,
+    startedAt: row.detectOnly.startedAt,
+    ended: Date.parse(row.detectOnly.until) <= Date.now(),
+    simulatedSinceStart: Math.min(simulated, 10_000),
+  };
 }
 
 interface ApiConnectionState {
@@ -195,6 +234,118 @@ const VERDICTS: Detection['verdict'][] = [
   'clean',
   'bulk',
 ];
+
+/** Step API-4 A12: the policy evaluation view of a detect row (content-free; synthetic). */
+function policyEvaluationOf(
+  disposition: Detection['policyDisposition'] & string,
+  source: 'tenant_rule' | 'platform_default' | 'floor',
+  ruleRef: string | null,
+  at: string,
+  outbound = false,
+): NonNullable<Detection['policy']> {
+  const type =
+    disposition === 'reject'
+      ? 'REJECT'
+      : disposition === 'quarantine'
+        ? 'QUARANTINE'
+        : disposition === 'require_approval'
+          ? 'REQUIRE_APPROVAL'
+          : 'ALLOW';
+  const reason = outbound
+    ? 'outbound_already_sent'
+    : type === 'ALLOW'
+      ? 'already_delivered'
+      : 'mapped_to_mailbox_action';
+  const status = outbound ? 'not_applicable' : type === 'ALLOW' ? 'recorded' : 'requested';
+  return {
+    evaluationId: stableUuid(`evaluation:${at}:${disposition}`).replace(/-/g, '').slice(0, 20),
+    evaluationMode: 'detect',
+    disposition,
+    decisionSource: source,
+    decisiveRuleRef: ruleRef,
+    overrideApplied: false,
+    matchedRules: ruleRef ? [{ ruleRef, actions: [type] }] : [],
+    actions: [{ type, status, reason }],
+    explanation:
+      source === 'floor'
+        ? 'The DLP floor decided: a blocking DLP match is never allowed.'
+        : ruleRef
+          ? `Rule ${ruleRef} matched and decided ${disposition}.`
+          : 'No rule matched; the platform default allowed the message.',
+    postDelivery:
+      type === 'REJECT'
+        ? [
+            { type: 'REJECT', status, reason },
+            {
+              type: 'SENDER_NOTICE',
+              status: 'not_applicable',
+              reason: outbound ? 'outbound_already_sent' : 'post_delivery_no_bounce',
+            },
+          ]
+        : [{ type, status, reason }],
+    evaluatedAt: at,
+  };
+}
+
+/** Step API-4: the policy columns of a seeded copy (variety for the list and its filters). */
+function policyFieldsOf(
+  i: number,
+  verdict: Detection['verdict'],
+  tooLarge: boolean,
+  inline: boolean,
+  at: string,
+): Pick<
+  Detection,
+  'policyState' | 'policyDisposition' | 'policyTagged' | 'dlpAction' | 'policy' | 'dlp'
+> {
+  if (tooLarge)
+    return {
+      policyState: 'not_applicable',
+      policyDisposition: null,
+      policyTagged: false,
+      dlpAction: null,
+      policy: null,
+      dlp: null,
+    };
+  if (inline)
+    return {
+      policyState: 'inline',
+      policyDisposition: 'allow',
+      policyTagged: false,
+      dlpAction: null,
+      policy: null,
+      dlp: null,
+    };
+  const rule = 'pol-0193f000-block-list#3/blocked-senders';
+  if (i % 7 === 3)
+    return {
+      policyState: 'evaluated',
+      policyDisposition: 'reject',
+      policyTagged: false,
+      dlpAction: 'block',
+      policy: policyEvaluationOf('reject', 'floor', null, at),
+      dlp: { action: 'block', verdict: 'violation', categories: ['payment_card'] },
+    };
+  const disposition: Detection['policyDisposition'] =
+    verdict === 'phishing' || verdict === 'malware'
+      ? 'quarantine'
+      : i % 13 === 2
+        ? 'require_approval'
+        : 'allow';
+  return {
+    policyState: 'evaluated',
+    policyDisposition: disposition,
+    policyTagged: verdict === 'spam' || verdict === 'suspicious',
+    dlpAction: null,
+    policy: policyEvaluationOf(
+      disposition,
+      disposition === 'allow' ? 'platform_default' : 'tenant_rule',
+      disposition === 'allow' ? null : rule,
+      at,
+    ),
+    dlp: null,
+  };
+}
 
 /** API-mode domains of the organization (effective api or hybrid, live). */
 function apiDomains(organizationId: string) {
@@ -295,15 +446,63 @@ function seedOrg(organizationId: string): OrgApiState {
         remediationAction: null,
         remediationId: null,
         quarantineEntryId: null,
+        ...policyFieldsOf(i, verdict, i === 5, i % 11 === 0, receivedAt),
       };
     });
+    // Step API-4 A6: two outbound DLP detections on a sender's mailbox (never remediated).
+    for (const n of [0, 1]) {
+      const mailbox = org.mailboxes[n + 1]!;
+      const receivedAt = isoAgo((n * 5 + 3) * HOUR);
+      const action = n === 0 ? 'block' : 'quarantine';
+      org.detections.push({
+        id: stableUuid(`${organizationId}:detection:outbound:${n}`),
+        mailboxId: mailbox.id,
+        mailboxAddress: mailbox.address,
+        connectionId: first.id,
+        source: 'journal',
+        seenJournal: true,
+        seenApi: false,
+        status: 'scanned',
+        verdict: 'dlp_violation',
+        riskScore: 640,
+        verdictAuthority: 'copy',
+        receivedAt,
+        providerDeliveredAt: null,
+        verdictAt: receivedAt,
+        lagMs: null,
+        subject: null,
+        subjectMasked: true,
+        headerFrom: mailbox.address,
+        direction: 'outbound',
+        verdictRevision: 0,
+        clawbacks: [],
+        deliveredBasis: 'ingest',
+        reasonCodes: ['dlp.payment_card'],
+        remediationState: 'skipped',
+        remediationAction: null,
+        remediationId: null,
+        quarantineEntryId: null,
+        policyState: 'evaluated',
+        policyDisposition: action === 'block' ? 'reject' : 'quarantine',
+        policyTagged: false,
+        dlpAction: action,
+        policy: policyEvaluationOf(
+          action === 'block' ? 'reject' : 'quarantine',
+          'floor',
+          null,
+          receivedAt,
+          true,
+        ),
+        dlp: { action, verdict: 'violation', categories: ['payment_card'] },
+      });
+    }
     org.detections.forEach((d, i) => SEARCH_KEYS.set(d.id, searchKeysOf(i)));
     seedRemediations(organizationId, org, first);
     for (const mailbox of org.mailboxes)
       mailbox.recentDetections = org.detections
         .filter((d) => d.mailboxId === mailbox.id)
         .slice(0, 20)
-        .map(({ deliveredBasis: _b, reasonCodes: _r, ...rest }) => rest);
+        .map(({ deliveredBasis: _b, reasonCodes: _r, policy: _p, dlp: _d, ...rest }) => rest);
   }
   return org;
 }
@@ -981,7 +1180,7 @@ function policyIssues(document: unknown): string[] {
   const issues: string[] = [];
   const doc = document as { v?: unknown; rules?: unknown } | null;
   if (!doc || typeof doc !== 'object' || doc.v !== 1) return ['document.v: must be 1'];
-  const allowed = new Set(['v', 'rules', 'remediateScanFailures']);
+  const allowed = new Set(['v', 'rules', 'remediateScanFailures', 'policyMapping']);
   for (const key of Object.keys(doc))
     if (!allowed.has(key)) issues.push(`document.${key}: unrecognized key`);
   if (!Array.isArray(doc.rules) || doc.rules.length < 1 || doc.rules.length > 16)
@@ -1003,7 +1202,7 @@ function policyIssues(document: unknown): string[] {
     )
       issues.push(`${path}.when.verdicts: 1-9 remediable verdicts`);
     if ('policyDispositions' in when)
-      issues.push(`${path}.when.policyDispositions: unsupported_until_policy_evaluation`);
+      issues.push(`${path}.when.policyDispositions: use_policy_mapping`);
     const level = (value: unknown) =>
       value === undefined ? null : typeof value === 'string' ? RULE_LEVELS.indexOf(value) : -1;
     const min = level(when.minLevel);
@@ -1034,7 +1233,42 @@ function policyBodyError(body: Record<string, unknown>): FixtureResponse | null 
   if (body.expectedRowVersion !== null && typeof body.expectedRowVersion !== 'number')
     return apiError(400, 'validation_failed', ['expectedRowVersion: a number or null']);
   const issues = policyIssues(body.document);
+  // Step API-4 A4.2: the optional strict mapping (never hard delete).
+  const mapping = (body.document as { policyMapping?: unknown } | null)?.policyMapping;
+  if (mapping !== undefined) {
+    if (typeof mapping !== 'object' || mapping === null)
+      issues.push('document.policyMapping: an object');
+    else
+      for (const [key, value] of Object.entries(mapping)) {
+        if (!(MAPPING_KEYS as readonly string[]).includes(key))
+          issues.push(`document.policyMapping.${key}: unknown key`);
+        else if (
+          !MAPPING_ACTIONS.has(String(value)) ||
+          (key === 'allow_tagged' && value !== 'tag' && value !== 'none')
+        )
+          issues.push(`document.policyMapping.${key}: invalid action`);
+      }
+  }
   if (issues.length > 0) return apiError(400, 'validation_failed', issues);
+  // Step API-4 B7: a detect-only period only with mode detect_only, 1 h to 30 days ahead.
+  if (body.detectOnly !== undefined && body.detectOnly !== null) {
+    const d = body.detectOnly as { until?: unknown; then?: unknown };
+    const until = typeof d.until === 'string' ? Date.parse(d.until) : NaN;
+    const reason =
+      body.mode !== 'detect_only'
+        ? 'mode_not_detect_only'
+        : Number.isNaN(until) || until < Date.now() + HOUR - MINUTE
+          ? 'until_too_soon'
+          : until > Date.now() + 30 * DAY + MINUTE
+            ? 'until_too_late'
+            : d.then !== 'remind' && d.then !== 'enforce'
+              ? 'then_invalid'
+              : null;
+    if (reason)
+      return apiError(422, 'api_mode_detect_only_invalid', 'Invalid detect-only period', {
+        reason,
+      });
+  }
   const hardDelete = (body.document as PolicyDocument).rules
     .filter((r) => r.action === 'hard_delete')
     .map((r) => r.id);
@@ -1046,6 +1280,18 @@ function policyBodyError(body: Record<string, unknown>): FixtureResponse | null 
       { ruleIds: hardDelete.join(',') },
     );
   return null;
+}
+
+/** B7: enforce clears the period; a new period restarts it; absent keeps it. */
+function nextDetectOnly(
+  previous: PolicyRow | null,
+  body: Record<string, unknown>,
+): PolicyRow['detectOnly'] {
+  if (body.mode !== 'detect_only') return null;
+  const d = body.detectOnly as { until: string; then: 'remind' | 'enforce' } | null | undefined;
+  if (d === null) return null;
+  if (d === undefined) return previous?.detectOnly ?? null;
+  return { until: d.until, then: d.then, startedAt: new Date().toISOString() };
 }
 
 const policyConflict = (current: number | null) =>
@@ -1100,6 +1346,9 @@ type ConnectionBlocks = Pick<
 interface ClawbackHooks {
   overview: (organizationId: string, connectionId: null) => OrgBlocks;
   connection: (organizationId: string, connectionId: string) => ConnectionBlocks;
+  /** Step API-4 A12: the two organization settings of the settings fixture. */
+  policyEvaluationEnabled: (organizationId: string) => boolean;
+  outboundDetectionEnabled: (organizationId: string) => boolean;
 }
 const EMPTY_REPORTS = {
   pendingTriage: 0,
@@ -1137,6 +1386,8 @@ function clawbackHooks(): ClawbackHooks {
         clawback: { targetsQueued24h: 0, targetsSucceeded24h: 0, targetsFailed24h: 0 },
         reports: EMPTY_REPORTS,
       }),
+      policyEvaluationEnabled: () => true,
+      outboundDetectionEnabled: () => true,
     }
   );
 }
@@ -1154,6 +1405,57 @@ export function apiModeStateOf(organizationId: string): {
     detections: org.detections,
     actions: org.actions,
     connectionIds: [...org.connections.keys()],
+  };
+}
+
+/** Step API-4: the API-mode view of one 8.2 connection (null = unknown). */
+export function apiModeConnectionRow(organizationId: string, connectionId: string) {
+  return rowOf(organizationId, connectionId);
+}
+
+/** Step API-4 B7, B8, A10: the remediation policy that applies to a domain. */
+export function effectiveRemediationOf(
+  organizationId: string,
+  domainId: string,
+): {
+  source: 'platform_default' | 'organization' | 'domain';
+  mode: PolicyMode;
+  presetKey: 'p1' | 'detectOnlyStart' | 'strict' | null;
+  detectOnly: ReturnType<typeof detectOnlyView>;
+} {
+  const org = orgState(organizationId);
+  const override = org.domainPolicies.get(domainId) ?? null;
+  const row = override ?? org.policy;
+  if (!row)
+    return { source: 'platform_default', mode: 'enforce', presetKey: 'p1', detectOnly: null };
+  const same = (doc: PolicyDocument) =>
+    JSON.stringify(doc.rules) === JSON.stringify(row.document.rules);
+  const presetKey =
+    row.document.policyMapping !== undefined
+      ? null
+      : same(STRICT)
+        ? 'strict'
+        : same(P1)
+          ? row.mode === 'detect_only'
+            ? 'detectOnlyStart'
+            : 'p1'
+          : null;
+  return {
+    source: override ? 'domain' : 'organization',
+    mode: row.mode,
+    presetKey,
+    detectOnly: detectOnlyView(organizationId, row, override ? domainId : null),
+  };
+}
+
+/** Step API-4: the policy-evaluation and outbound settings of the organization. */
+export function apiModeSettingsOf(organizationId: string): {
+  policyEvaluationEnabled: boolean;
+  outboundDetectionEnabled: boolean;
+} {
+  return {
+    policyEvaluationEnabled: clawbackHooks().policyEvaluationEnabled(organizationId),
+    outboundDetectionEnabled: clawbackHooks().outboundDetectionEnabled(organizationId),
   };
 }
 
@@ -1375,6 +1677,23 @@ export const fixtures: FixtureHandlers = {
       copiesToday: org.detections.filter((d) => Date.parse(d.receivedAt) > Date.now() - DAY).length,
       remediation: summaryOf(p.organizationId, null),
       ...clawbackHooks().overview(p.organizationId, null),
+      // Step API-4 A12: policy evaluation, outbound detections and the mailbox scope.
+      policy: {
+        enabled: clawbackHooks().policyEvaluationEnabled(p.organizationId),
+        evaluated24h: org.detections.filter(
+          (d) => d.policyState === 'evaluated' && Date.parse(d.receivedAt) > Date.now() - DAY,
+        ).length,
+        errors24h: org.detections.filter(
+          (d) => d.policyState === 'failed' && Date.parse(d.receivedAt) > Date.now() - DAY,
+        ).length,
+      },
+      outbound: {
+        detections24h: org.detections.filter(
+          (d) => d.direction === 'outbound' && Date.parse(d.receivedAt) > Date.now() - DAY,
+        ).length,
+        enabled: clawbackHooks().outboundDetectionEnabled(p.organizationId),
+      },
+      scope: { excluded: org.mailboxes.filter((m) => m.coverage === 'out_of_scope').length },
       connections: rows.map((r, i) => ({
         id: r.id,
         displayName: r.displayName,
@@ -1580,10 +1899,16 @@ export const fixtures: FixtureHandlers = {
             (!q.get('connectionId') || d.connectionId === q.get('connectionId')) &&
             (!q.get('remediationState') ||
               (q.get('remediationState') ?? '').split(',').includes(d.remediationState)) &&
-            (!q.get('direction') || (q.get('direction') ?? '').split(',').includes(d.direction))
+            (!q.get('direction') || (q.get('direction') ?? '').split(',').includes(d.direction)) &&
+            (!q.get('policyDisposition') ||
+              (q.get('policyDisposition') ?? '')
+                .split(',')
+                .includes(String(d.policyDisposition))) &&
+            (!q.get('dlpAction') ||
+              (q.get('dlpAction') ?? '').split(',').includes(String(d.dlpAction)))
           );
         })
-        .map(({ deliveredBasis: _b, reasonCodes: _r, ...row }) => row);
+        .map(({ deliveredBasis: _b, reasonCodes: _r, policy: _p, dlp: _d, ...row }) => row);
       return { status: 200, body: paginate(rows, q) };
     },
   ),
@@ -1610,6 +1935,8 @@ export const fixtures: FixtureHandlers = {
               sha256: sha(`${org.policy.id}:${org.policy.rowVersion}`),
               rowVersion: org.policy.rowVersion,
               updatedAt: org.policy.updatedAt,
+              effectivePolicyMapping: effectiveMappingOf(org.policy.document),
+              detectOnly: detectOnlyView(p.organizationId, org.policy, null),
             }
           : {
               source: 'platform_default',
@@ -1619,6 +1946,8 @@ export const fixtures: FixtureHandlers = {
               sha256: sha('p1'),
               rowVersion: null,
               updatedAt: null,
+              effectivePolicyMapping: effectiveMappingOf(P1),
+              detectOnly: null,
             },
         domains: [...org.domainPolicies.entries()].map(([domainId, row]) => ({
           id: row.id,
@@ -1629,6 +1958,8 @@ export const fixtures: FixtureHandlers = {
           sha256: sha(`${row.id}:${row.rowVersion}`),
           rowVersion: row.rowVersion,
           updatedAt: row.updatedAt,
+          effectivePolicyMapping: effectiveMappingOf(row.document),
+          detectOnly: detectOnlyView(p.organizationId, row, domainId),
         })),
         presets: PRESETS,
         hardDeleteAvailable: HARD_DELETE_AVAILABLE,
@@ -1652,6 +1983,7 @@ export const fixtures: FixtureHandlers = {
           document: body.document as PolicyDocument,
           rowVersion: (current ?? 0) + 1,
           updatedAt: new Date().toISOString(),
+          detectOnly: nextDetectOnly(org.policy, body),
         };
         return ok('ApiModeRemediationController_putPolicy_v1', {
           scope: 'organization',
@@ -1662,6 +1994,8 @@ export const fixtures: FixtureHandlers = {
           sha256: sha(`${org.policy.id}:${org.policy.rowVersion}`),
           rowVersion: org.policy.rowVersion,
           updatedAt: org.policy.updatedAt,
+          effectivePolicyMapping: effectiveMappingOf(org.policy.document),
+          detectOnly: detectOnlyView(p.organizationId, org.policy, null),
           created,
         });
       }),
@@ -1686,6 +2020,7 @@ export const fixtures: FixtureHandlers = {
           document: body.document as PolicyDocument,
           rowVersion: (current ?? 0) + 1,
           updatedAt: new Date().toISOString(),
+          detectOnly: nextDetectOnly(existing ?? null, body),
         };
         org.domainPolicies.set(domain.domain.id, row);
         return ok('ApiModeRemediationController_putDomainPolicy_v1', {
@@ -1697,6 +2032,8 @@ export const fixtures: FixtureHandlers = {
           sha256: sha(`${row.id}:${row.rowVersion}`),
           rowVersion: row.rowVersion,
           updatedAt: row.updatedAt,
+          effectivePolicyMapping: effectiveMappingOf(row.document),
+          detectOnly: detectOnlyView(p.organizationId, row, domain.domain.id),
           created: existing === undefined,
         });
       }),

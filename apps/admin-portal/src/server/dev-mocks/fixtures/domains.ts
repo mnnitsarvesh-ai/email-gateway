@@ -120,6 +120,88 @@ interface DomainEntry {
 interface DomainState {
   orgs: Map<string, DomainEntry[]>;
 }
+
+// ---- step API-4 B3: ownership through a bound provider tenant ------------------------------------
+
+type Ownership = Domain['ownership'];
+
+/**
+ * The bound connections of an organization that can check ownership (bound tenant, not
+ * disabled, active mail-flow grant), registered by the provider-connections fixture.
+ */
+type ProviderOwnershipSource = (organizationId: string) => readonly string[];
+const ownershipStore = globalThis as typeof globalThis & {
+  __egDevFixtureProviderOwnership?: ProviderOwnershipSource;
+  __egDevFixtureProviderChecks?: Map<string, number[]>;
+};
+export function registerProviderOwnershipSource(source: ProviderOwnershipSource): void {
+  ownershipStore.__egDevFixtureProviderOwnership = source;
+}
+const providerCandidates = (organizationId: string): readonly string[] =>
+  ownershipStore.__egDevFixtureProviderOwnership?.(organizationId) ?? [];
+const providerChecks = (ownershipStore.__egDevFixtureProviderChecks ??= new Map<
+  string,
+  number[]
+>());
+/** The integration-worker answers about 4 s after the request (simulated). */
+export const PROVIDER_CHECK_DELAY_MS = 4_000;
+export const DOMAIN_PROVIDER_CHECKS_PER_HOUR = 10;
+
+/**
+ * Applies a due provider answer (the worker's result, then the api scheduler's win): names
+ * starting with `unlisted` are absent from the fixture tenant, every other name is listed as
+ * verified for Email.
+ */
+function settleProviderCheck(entry: DomainEntry): void {
+  const check = entry.domain.ownership.providerCheck;
+  if (!check || check.status !== 'pending') return;
+  if (Date.parse(check.requestedAt) + PROVIDER_CHECK_DELAY_MS > Date.now()) return;
+  const now = new Date().toISOString();
+  const listed = !entry.domain.name.startsWith('unlisted');
+  const pending =
+    entry.domain.status === 'pending_verification' || entry.domain.status === 'failed';
+  entry.domain = {
+    ...entry.domain,
+    ...(listed && pending
+      ? {
+          status: 'verified' as const,
+          statusReason: null,
+          verifiedAt: now,
+          statusChangedAt: now,
+        }
+      : {}),
+    ownership: {
+      ...entry.domain.ownership,
+      method: listed && pending ? 'provider_tenant' : entry.domain.ownership.method,
+      providerCheck: {
+        ...check,
+        status: listed ? 'verified' : 'failed',
+        result: listed ? 'verified' : 'absent',
+        checkedAt: now,
+      },
+    },
+  };
+}
+
+/** The domain view with the server-computed ownership availability. */
+export function domainViewOf(organizationId: string, entry: DomainEntry): Domain {
+  return domainView(organizationId, entry);
+}
+
+function domainView(organizationId: string, entry: DomainEntry): Domain {
+  settleProviderCheck(entry);
+  return {
+    ...entry.domain,
+    ownership: {
+      ...entry.domain.ownership,
+      providerCheckAvailable: providerCandidates(organizationId).length > 0,
+    },
+  };
+}
+
+function ownershipView(organizationId: string, entry: DomainEntry): Ownership {
+  return domainView(organizationId, entry).ownership;
+}
 const globalState = globalThis as typeof globalThis & { __egDevFixtureDomains?: DomainState };
 const state: DomainState = (globalState.__egDevFixtureDomains ??= { orgs: new Map() });
 
@@ -208,6 +290,11 @@ function makeEntry(organizationId: string, index: number): DomainEntry {
       lastError: null,
       expiresAt: new Date(Date.parse(created) + 7 * DAY).toISOString(),
       verifiedAt: owned ? isoAgo((index + 1) * 3 * DAY - 2 * HOUR) : null,
+    },
+    ownership: {
+      method: owned ? 'dns_txt' : null,
+      providerCheck: null,
+      providerCheckAvailable: false,
     },
     dkimKeys: [
       dkimKey(
@@ -430,7 +517,8 @@ function records(entry: DomainEntry): DnsRecord[] {
   return list;
 }
 
-function statusView(entry: DomainEntry): StatusView {
+function statusView(entry: DomainEntry, organizationId: string): StatusView {
+  const ownership = ownershipView(organizationId, entry);
   const { domain, checks } = entry;
   const check = (status: DnsRecord['status']) => ({
     status,
@@ -445,6 +533,7 @@ function statusView(entry: DomainEntry): StatusView {
     status: domain.status,
     statusReason: domain.statusReason,
     readyForActivation: domain.status === 'verified',
+    ownership,
     mailFlowReady: domain.status === 'active' && checks.mx === 'valid',
     lastCheckedAt: domain.lastCheckedAt,
     nextCheckAt: domain.nextCheckAt,
@@ -620,6 +709,7 @@ export const fixtures: FixtureHandlers = {
         expiresAt: new Date(Date.now() + 7 * DAY).toISOString(),
         verifiedAt: null,
       },
+      ownership: { method: null, providerCheck: null, providerCheckAvailable: false },
       dkimKeys: [dkimKey(name, 'eg2026a', 'pending', now)],
     };
     entry.checks = {
@@ -639,11 +729,81 @@ export const fixtures: FixtureHandlers = {
     entry.recipients = [];
     entry.checkFailures = 0;
     list.push(entry);
-    return ok('DomainsController_create_v1', { ...entry.domain, dnsRecords: records(entry) }, 201);
+    return ok(
+      'DomainsController_create_v1',
+      { ...domainView(p.organizationId, entry), dnsRecords: records(entry) },
+      201,
+    );
   }),
+  // Step API-4 B3: ownership through the organization's bound provider tenant.
+  DomainsController_providerOwnershipCheck_v1: guarded(
+    'DomainsController_providerOwnershipCheck_v1',
+    (request, p) => {
+      if (!request.headers.get('idempotency-key'))
+        return apiError(400, 'idempotency_key_required', 'An Idempotency-Key header is required');
+      const entry = findDomain(p.organizationId, request.params.domainId);
+      if (!entry) return notFound();
+      settleProviderCheck(entry);
+      if (entry.domain.status !== 'pending_verification' && entry.domain.status !== 'failed')
+        return apiError(409, 'domain_not_pending', 'The domain is not waiting for verification');
+      const candidates = providerCandidates(p.organizationId);
+      const body = bodyOf<RequestBody<'DomainsController_providerOwnershipCheck_v1'>>(request);
+      if (body.connectionId && !candidates.includes(body.connectionId))
+        return apiError(404, 'connection_not_found', 'Connection not found');
+      const connectionId = body.connectionId ?? candidates[0];
+      if (!connectionId)
+        return apiError(
+          409,
+          'domain_provider_connection_unavailable',
+          'No bound provider connection with an active mail-flow grant',
+          { reason: 'no_bound_connection' },
+        );
+      const now = Date.now();
+      const window = (providerChecks.get(p.organizationId) ?? []).filter((t) => t > now - HOUR);
+      if (window.length >= DOMAIN_PROVIDER_CHECKS_PER_HOUR) {
+        const retryAfter = Math.max(1, Math.ceil((window[0]! + HOUR - now) / 1000));
+        return {
+          ...apiError(429, 'rate_limited', 'Too many provider ownership checks'),
+          headers: { 'retry-after': String(retryAfter) },
+        };
+      }
+      providerChecks.set(p.organizationId, [...window, now]);
+      const existing = entry.domain.ownership.providerCheck;
+      const reused = existing?.status === 'pending' && existing.connectionId === connectionId;
+      const requestedAt = new Date(now).toISOString();
+      const check = reused
+        ? existing
+        : {
+            id: String(1000 + (Math.floor(now / 1000) % 100_000)),
+            status: 'pending' as const,
+            result: null,
+            connectionId,
+            requestedAt,
+            checkedAt: null,
+            expiresAt: new Date(now + HOUR).toISOString(),
+          };
+      entry.domain = {
+        ...entry.domain,
+        status: 'pending_verification',
+        statusReason: null,
+        ownership: { ...entry.domain.ownership, providerCheck: check },
+      };
+      return ok(
+        'DomainsController_providerOwnershipCheck_v1',
+        {
+          verificationId: check.id,
+          status: 'pending',
+          connectionId,
+          expiresAt: check.expiresAt,
+          reused,
+        },
+        202,
+      );
+    },
+  ),
   DomainsController_get_v1: guarded('DomainsController_get_v1', (request, p) => {
     const entry = findDomain(p.organizationId, request.params.id);
-    return entry ? ok('DomainsController_get_v1', entry.domain) : notFound();
+    return entry ? ok('DomainsController_get_v1', domainView(p.organizationId, entry)) : notFound();
   }),
   DomainsController_remove_v1: guarded('DomainsController_remove_v1', (request, p) => {
     const entry = findDomain(p.organizationId, request.params.id);
@@ -678,11 +838,13 @@ export const fixtures: FixtureHandlers = {
     } else {
       return apiError(409, 'conflict', `Domain is ${from}`);
     }
-    return ok('DomainsController_changeStatus_v1', entry.domain);
+    return ok('DomainsController_changeStatus_v1', domainView(p.organizationId, entry));
   }),
   DomainDnsController_status_v1: guarded('DomainDnsController_status_v1', (request, p) => {
     const entry = findDomain(p.organizationId, request.params.id);
-    return entry ? ok('DomainDnsController_status_v1', statusView(entry)) : notFound();
+    return entry
+      ? ok('DomainDnsController_status_v1', statusView(entry, p.organizationId))
+      : notFound();
   }),
   DomainDnsController_verify_v1: guarded('DomainDnsController_verify_v1', (request, p) => {
     const entry = findDomain(p.organizationId, request.params.id);
@@ -702,6 +864,7 @@ export const fixtures: FixtureHandlers = {
         statusReason: null,
         verifiedAt: now,
         statusChangedAt: now,
+        ownership: { ...entry.domain.ownership, method: 'dns_txt' },
       };
       entry.checks.ownership = 'valid';
       entry.domain.dkimKeys = entry.domain.dkimKeys.map((k) => ({
@@ -713,7 +876,7 @@ export const fixtures: FixtureHandlers = {
       entry.domain = { ...entry.domain, status: 'pending_verification', statusReason: null };
       entry.checks.ownership = 'missing';
     }
-    return ok('DomainDnsController_verify_v1', statusView(entry));
+    return ok('DomainDnsController_verify_v1', statusView(entry, p.organizationId));
   }),
   DomainDnsController_dnsRecords_v1: guarded('DomainDnsController_dnsRecords_v1', (request, p) => {
     const entry = findDomain(p.organizationId, request.params.id);

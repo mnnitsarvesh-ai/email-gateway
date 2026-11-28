@@ -638,6 +638,30 @@ export const EXAMPLE_EVENT_PAYLOADS: Readonly<Record<RegisteredEventType, unknow
     kind: 'received',
     requestedAt: '2026-11-27T08:00:00.000Z',
   },
+  // Step API-4 A8.2: ids, codes, enums, counts and times only (no address, subject, URL or
+  // matched value). A phishing journal copy for two mailboxes with a tenant quarantine rule.
+  'mail.message.copy_detected.v1': {
+    messageId,
+    messagePublicId: '01890a5d-ac96-774b-bcce-b302099a80d0',
+    receivedAt,
+    ingestSource: 'journal_intake',
+    copySource: 'journal',
+    direction: 'inbound',
+    protectionMode: 'api',
+    verdict: 'phishing',
+    riskScore: 870,
+    policy: {
+      state: 'evaluated',
+      disposition: 'quarantine',
+      decisionSource: 'tenant_rule',
+      overrideApplied: false,
+      actionTypes: ['QUARANTINE', 'ALERT'],
+    },
+    dlp: null,
+    copies: { counted: 2, remediation: { pending: 2, simulated: 0, skipped: 0, none: 0 } },
+    detectionIds: ['01890a5d-ac96-774b-bcce-b302099a80f0', '01890a5d-ac96-774b-bcce-b302099a80f1'],
+    decidedAt: '2026-11-01T10:15:32.000Z',
+  },
 };
 
 /**
@@ -677,6 +701,87 @@ export const EXAMPLE_API_MODE_REPORT_RECEIVED_ALERT_PAYLOAD = Object.freeze({
   window: { from: '2026-11-27T08:00:00.000Z', to: '2026-11-27T09:00:00.000Z' },
   counts: { suppressedBefore: 2 },
   requestedAt: '2026-11-27T08:00:01.000Z',
+});
+
+/**
+ * Step API-4 (A8.2): an outbound DLP detection of `mail.message.copy_detected.v1` (recorded on
+ * the sender's mailbox, never remediated: one counted copy, skipped).
+ */
+export const EXAMPLE_COPY_DETECTED_OUTBOUND_DLP_PAYLOAD = Object.freeze({
+  messageId: '42',
+  messagePublicId: '01890a5d-ac96-774b-bcce-b302099a80d2',
+  receivedAt: '2026-11-27T09:00:00.000Z',
+  ingestSource: 'journal_intake',
+  copySource: 'journal',
+  direction: 'outbound',
+  protectionMode: 'api',
+  verdict: 'clean',
+  riskScore: 40,
+  policy: {
+    state: 'evaluated',
+    disposition: 'reject',
+    decisionSource: 'floor',
+    overrideApplied: false,
+    actionTypes: ['REJECT'],
+  },
+  dlp: { action: 'block', verdict: 'suspicious', categories: ['payment_card'] },
+  copies: { counted: 1, remediation: { pending: 0, simulated: 0, skipped: 1, none: 0 } },
+  detectionIds: ['01890a5d-ac96-774b-bcce-b302099a80f2'],
+  decidedAt: '2026-11-27T09:00:02.000Z',
+});
+
+/**
+ * Step API-4 (A7): a policy ALERT of a detect evaluation of an API-mode copy
+ * (`mail.policy.notification_requested.v1` with `evaluationMode = 'detect'`; never a sender
+ * notice).
+ */
+export const EXAMPLE_POLICY_ALERT_DETECT_PAYLOAD = Object.freeze({
+  messageId: '42',
+  receivedAt: '2026-11-27T09:00:00.000Z',
+  direction: 'inbound',
+  lifecycleRound: 0,
+  kind: 'policy_alert',
+  severity: 'warning',
+  disposition: 'quarantine',
+  decisive: {
+    source: 'tenant_rule',
+    policyId: '01890a5d-ac96-774b-bcce-b302099a80f5',
+    versionNo: 2,
+    ruleId: 'alert-finance-fraud',
+  },
+  ruleRefs: ['01890a5d-ac96-774b-bcce-b302099a80f5#2/alert-finance-fraud'],
+  requestedAt: '2026-11-27T09:00:02.000Z',
+  evaluationMode: 'detect',
+});
+
+/**
+ * Step API-4 (A9.2): the `dlp_detected` variant of `notification.alert_requested.v1` (a DLP
+ * detection of an API-mode copy; refs as `threat_detected`).
+ */
+export const EXAMPLE_DLP_DETECTED_ALERT_PAYLOAD = Object.freeze({
+  kind: 'dlp_detected',
+  severity: 'high',
+  refs: {
+    webhookEventId: '01890a5d-ac96-774b-bcce-b302099a80f3',
+    messageId: '42',
+    receivedAt: '2026-11-27T09:00:00.000Z',
+  },
+  window: { from: '2026-11-27T09:00:00.000Z', to: '2026-11-27T10:00:00.000Z' },
+  counts: { suppressedBefore: 0 },
+  requestedAt: '2026-11-27T09:00:03.000Z',
+});
+
+/**
+ * Step API-4 (B7): the `api_mode_detect_only_ended` variant of `notification.alert_requested.v1`
+ * (a remediation policy's detect-only period ended; refs name the policy only).
+ */
+export const EXAMPLE_API_MODE_DETECT_ONLY_ENDED_ALERT_PAYLOAD = Object.freeze({
+  kind: 'api_mode_detect_only_ended',
+  severity: 'low',
+  refs: { remediationPolicyId: '01890a5d-ac96-774b-bcce-b302099a80f4' },
+  window: { from: '2026-12-04T09:00:00.000Z', to: '2026-12-05T09:00:00.000Z' },
+  counts: { suppressedBefore: 0 },
+  requestedAt: '2026-12-04T09:00:01.000Z',
 });
 
 /**

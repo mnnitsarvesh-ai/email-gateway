@@ -121,8 +121,9 @@ addresses (4 MiB is ample); MIME and raw bodies use their own per-call `maxBytes
 { id (1..48, [a-z0-9_-], unique), when: { verdicts (1..9, unique; clean/unknown refused), minLevel?,
 maxLevel? (≥ minLevel; low|medium|high|critical), hardBlock?, minScore? (0..1000) }, action:
 move_quarantine|move_junk|tag|soft_delete|hard_delete|none }, remediateScanFailures?: false }`.
-`when.policyDispositions` is **reserved** for the later policy-evaluation step and refused with the
-custom issue `unsupported_until_policy_evaluation` (message and `params.code`). The mode
+`when.policyDispositions` stays refused, since step API-4 with the custom issue
+`use_policy_mapping` (`USE_POLICY_MAPPING`; API-2 used `unsupported_until_policy_evaluation`):
+policy dispositions map through the optional, strict document-level `policyMapping` (below). The mode
 (`detect_only`/`enforce`) is a column of `api_remediation_policies`, not part of the document.
 `parseRemediationPolicy`, `hardDeleteRuleIds` (the api refuses them while
 `API_MODE_HARD_DELETE_ENABLED` is off), `canonicalJson` / `canonicalPolicySha256` (sorted keys; the
@@ -163,6 +164,83 @@ hardBlocks ≤ 9, verdictAuthority }, policyOutcome: null, notes }`, schema
 SHA-256 of `api-remediation/1\0<copyPublicId>\0<action>\0<generation>` (the unique `action_key`).
 A clawback decision (step API-3 C3.2) passes `provenance = { source: 'clawback', clawbackId }`,
 recorded as the notes `source:clawback` and `clawback:<clawbackId>` (the record schema is unchanged).
+Since step API-4 `buildDecisionRecord` writes `api-remediation-decision/2` (below); readers parse
+`/1` and `/2` with the discriminated union `remediationDecisionRecordSchema`
+(`remediationDecisionRecordV1Schema`, `remediationDecisionRecordV2Schema`).
+
+## Policy lane, scope and detect-only (step API-4)
+
+[Design note 38](../../docs/plan/steps/38-api-mode-parity-onboarding.md) A4, A5, A8.1, A11, B6, B7;
+ADR-0105/0107. Pure; the mailbox-worker decides, the api validates and shows.
+
+**Policy outcome (A4.1).** `RemediationInput.policyOutcome: PolicyOutcomeFacts | null`
+(`policyOutcomeFactsSchema`: `disposition` allow|require_approval|quarantine|reject, `tagged`
+(TAG/WARN applies with allow), `overrideApplied`, `decisionSource`, `decisiveRuleRef`
+(`<policyPublicId>#<versionNo>/<ruleId>` or null), `floorReasons` (≤ 8), `dlpAction` (null unless the
+DLP final is definite), `actionTypes` (applying, unique), `recommendationOnly?` (absent in older records = false)), built by `policyOutcomeOf` of
+`@email-gateway/policy-runtime`; `null` = not evaluated (exactly the API-2/API-3 decision).
+`copy.direction` accepts `outbound` (`API_COPY_DIRECTIONS`); `context.mailboxInScope?` (absent =
+true).
+
+**policyMapping (A4.2).** Optional strict `{ quarantine?, require_approval?, reject?:
+move_quarantine|move_junk|soft_delete|tag|none; allow_tagged?: tag|none }` (never `hard_delete`);
+`effectivePolicyMapping` fills `DEFAULT_POLICY_MAPPING` (held dispositions → `move_quarantine`,
+tagged allow → `tag`). Presets carry none.
+
+**Decision (A4.3).** `decideRemediation`: (1) not scanned → none; (2) verdict lane (verdict not
+clean/unknown/null → first matching rule); (3) policy lane (`policyLaneOf`: held disposition →
+mapped action, tagged allow → `allow_tagged`, allow → none, a mapping to `none` → none; an outcome
+with `recommendationOnly` — `recommendationOnlyOf`: a `platform_default` disposition that only
+restates the risk recommendation, or an allow tagged only by the platform risk tag — feeds no lane,
+note 38 §15.8); (4) a tenant
+allow override (`disposition = allow`, `overrideApplied`, `decisionSource = tenant_rule`) suppresses
+the verdict lane — with no policy action → skip `policy_allow_override`; (5) the stronger action
+wins by `REMEDIATION_ACTION_STRENGTH_ORDER` (none < tag < move_junk < move_quarantine < soft_delete <
+hard_delete; the clawback's `CLAWBACK_STRENGTH_ORDER` is the same constant), ties → verdict lane; the
+policy lane's rule id is `policy-mapping:<key>`; (6) `outbound` → skip `outbound_not_remediable`;
+(7) the existing gates, with `mailboxInScope: false` → skip `out_of_scope`. `remediationLanes` and
+`laneDecision` expose steps 2–5.
+
+**Decision record `api-remediation-decision/2` (A4.4).** `/1` fields with `v: 2` + `policyOutcome`
+
+- `lanes: { verdict: { ruleId, action } | null, policy: { key, action } | null, winner, suppressedBy }`
+- `postDelivery: [{ type, status, reason }]` (≤ 9, `postDeliveryEntries`).
+
+**After delivery (A5).** `POST_DELIVERY_ACTION_MAP` / `postDeliveryStatusOf(effect, direction)`:
+QUARANTINE, REQUIRE_APPROVAL, REJECT, TAG, WARN → `requested` (`mapped_to_mailbox_action`); ALERT
+→ `requested`; ALLOW → `recorded` (`already_delivered`); SENDER_NOTICE (`post_delivery_no_bounce`),
+HEADER_EDIT (`post_delivery_no_header_edit`), URL_REWRITE (`post_delivery_no_rewrite`), ARCHIVE
+(`archive_follows_journaling`), ENCRYPT / REDIRECT (forward-compatible) → `not_applicable`; an
+outbound copy: everything but ALERT → `not_applicable` (`outbound_already_sent`).
+`policyEntryKind` (require_approval → `review` entry), `policyEntryReason` (verdict mapping on the
+same action, else `dlp` for a DLP floor, else `policy`), `policyEntryExplanation`.
+
+**Detections (A8.1).** `copyDetectionOf({ verdict, policyOutcome, dlpAction? })` → `{ isDetection,
+threatVerdict (threatVerdictOf: spam/bulk → spam, suspicious, phishing/malware/bec → malicious) |
+null, dlpAction (not allow) | null }`.
+
+**Vocabularies.** `API_COPY_POLICY_STATES` (none, evaluated, inline, disabled, failed,
+not_applicable), `POLICY_EVALUATION_MODES` (inline, detect), skip reasons + `outbound_not_remediable`,
+`policy_allow_override`.
+
+**Scope (B6, `scope.ts`).** `apiModeScopeSchema` (`api-mode-scope/1`: `{ kind: 'all' }` |
+`{ kind: 'departments', departmentIds: uuid[1..20] }` | `{ kind: 'mailboxes' }`),
+`apiModeScopeMailboxIdsSchema` (1..5000), `mailboxInScope(kind, { scopeSelected, scopeState })`
+(all → true; mailboxes → `scopeSelected`; departments → `scopeState = in_scope`),
+`initialScopeState` (new mailboxes: `excluded` for mailboxes scopes, else `in_scope`).
+
+**Detect-only (B7, `remediation/detect-only.ts`).** `detectOnlySchema` (`{ until, then:
+remind|enforce }`), `validateDetectOnly(value, mode, now)` (only with `detect_only`; `until` within
+now + 1 h … now + 30 d; else `api_mode_detect_only_invalid` with a reason), `defaultDetectOnly`
+(7 days, remind), `detectOnlyDue(row, now)` (`{ then, severity: low|medium }` once per period).
+
+**Health (A11).** `policy.errors_1h` is the 16th check code, evaluated only with the input block
+`policy: { evaluations1h, errors1h }` (`evaluatePolicyHealth`: ≥ 10 attempts; errors / (evaluations
+
+- errors) > 5 % → warn, > 50 % → fail).
+
+**Settings.** `ORG_SETTINGS_DEFAULTS` + `policyEvaluationEnabled: true`, `outboundDetectionEnabled:
+true` (optional in `orgSettingsSchema` and in the row: absent = default).
 
 ### Provider mappings (R3) and helpers
 
@@ -276,7 +354,8 @@ only (no address, subject or body).
 
 ### Health (step API-3, C13)
 
-`API_MODE_HEALTH_CHECK_CODES` gains `clawback.stalled` and `reports.backlog` (15 codes; cap 16),
+`API_MODE_HEALTH_CHECK_CODES` gains `clawback.stalled` and `reports.backlog` (15 codes; cap 16;
+step API-4 adds the 16th, `policy.errors_1h`),
 evaluated only with the optional input blocks `clawback: { oldestActiveAgeSeconds, thresholds: {
 stalledWarnMinutes, stalledFailMinutes } }` (> warn → warn, > fail → fail) and `reports: {
 hasReportMailbox, oldestPendingTriageAgeSeconds, thresholds: { triageWarnHours } }` (> warn hours →

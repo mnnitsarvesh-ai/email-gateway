@@ -1,3 +1,5 @@
+import { EMPTY_DIRECTORY } from '@email-gateway/policy-runtime';
+import { cleanFacts, cleanRiskRow } from '@email-gateway/policy-runtime/testing';
 import {
   buildPolicyInput,
   compileSnapshot,
@@ -6,8 +8,6 @@ import {
 } from '@email-gateway/policy-dsl';
 import { resolveQuarantineSettings } from '@email-gateway/quarantine';
 import { describe, expect, it, vi } from 'vitest';
-import { EMPTY_DIRECTORY } from '../evaluation/directory.repository';
-import { cleanFacts, cleanRiskRow } from '../evaluation/fixtures.test-support';
 import { entryFactsFromResult, entryFactsFromView } from './entry-facts';
 import { InconsistentQuarantineReadError } from './errors';
 import { QuarantineStoreWriter } from './store-writer';

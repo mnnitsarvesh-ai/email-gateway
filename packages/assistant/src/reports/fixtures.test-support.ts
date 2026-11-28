@@ -373,6 +373,9 @@ export function apiModeOverviewBody(connections = 1) {
       skipped24h: 3,
     },
     internal: { copies24h: 37, enabled: true },
+    policy: { enabled: true, evaluated24h: 120, errors24h: 2 },
+    outbound: { detections24h: 4, enabled: true },
+    scope: { excluded: 0 },
     clawback: {
       active: 1,
       reviewRequired: 0,

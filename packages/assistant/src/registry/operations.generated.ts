@@ -3,7 +3,7 @@
 // (or the API and its OpenAPI snapshot), then run the command again.
 import type { NotApplicableOperation, OperationTool } from './types';
 
-export const REGISTRY_VERSION = '7045a59c82ce34d8';
+export const REGISTRY_VERSION = 'e32e7d5d3826c13a';
 
 export const OPERATION_TOOLS: readonly OperationTool[] = [
   {
@@ -1076,7 +1076,18 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
         },
         direction: {
           type: 'string',
-          description: '`inbound`, `internal` (east-west mail, step API-3); comma list',
+          description:
+            '`inbound`, `internal` (east-west mail, step API-3), `outbound` (outbound detections of the sender’s mailbox, step API-4; never remediated); comma list',
+        },
+        policyDisposition: {
+          type: 'string',
+          description:
+            'Step API-4: detect-mode tenant policy disposition `allow`, `require_approval`, `quarantine`, `reject`; comma list',
+        },
+        dlpAction: {
+          type: 'string',
+          description:
+            'Step API-4: the message’s DLP action `allow`, `alert`, `require_approval`, `quarantine`, `block`; comma list',
         },
       },
       additionalProperties: false,
@@ -1096,6 +1107,8 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
       'minRiskScore',
       'remediationState',
       'direction',
+      'policyDisposition',
+      'dlpAction',
     ],
     hasBody: false,
     requirement: { mode: 'all', permissions: ['remediation:read'] },
@@ -1284,6 +1297,195 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     testedBy: 'apps/api/integration/assistant-writes-api-mode.test.ts',
   },
   {
+    name: 'api_mode_onboarding_domain_onboarding',
+    operationId: 'ApiModeOnboardingController_domainOnboarding_v1',
+    method: 'GET',
+    pathTemplate: '/api/v1/api-mode/domains/{domainId}/onboarding',
+    module: 'api-mode',
+    summary: 'Get the API-mode onboarding state of a domain',
+    description:
+      'Computed from server state only (never from clicks): the wizard steps `ownership`, `connect`, `intake`, `mailboxes`, `action`, `review` with their status (`not_started`, `in_progress`, `done`, `blocked`, `skipped` — all skipped for an inline domain), blocker and next-action codes; ownership (method…',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domainId: { format: 'uuid', type: 'string', description: 'Domain public id (UUID)' },
+      },
+      additionalProperties: false,
+      required: ['domainId'],
+    },
+    pathParams: ['domainId'],
+    queryParams: [],
+    hasBody: false,
+    requirement: { mode: 'all', permissions: ['domain:read'] },
+    platformOnly: false,
+    idempotency: null,
+    rateClass: null,
+    cursor: null,
+    access: 'read',
+    risk: 'read',
+    confirm: 'none',
+    phase: 'AI-1',
+    enabled: true,
+    status: 'IMPLEMENTED',
+    portalRoute: '/domains/{domainId}',
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
+    display: { resourceType: 'api_mode_domain' },
+    untrustedFields: [],
+    bind: {},
+    redactParams: [],
+    limitations: null,
+    testedBy: 'apps/api/integration/assistant-tools.test.ts',
+  },
+  {
+    name: 'api_mode_onboarding_get_scope',
+    operationId: 'ApiModeOnboardingController_getScope_v1',
+    method: 'GET',
+    pathTemplate: '/api/v1/api-mode/domains/{domainId}/scope',
+    module: 'api-mode',
+    summary: 'Get the mailbox scope of an API-mode domain',
+    description:
+      'Which mailboxes of the domain API mode protects: `all` (default), policy-directory `departments` (with their names and member counts; names are operator text) or selected `mailboxes`; the selected count, the in-scope and excluded counts of the last evaluation, whether a change waits for the mailbox…',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domainId: { format: 'uuid', type: 'string', description: 'Domain public id (UUID)' },
+      },
+      additionalProperties: false,
+      required: ['domainId'],
+    },
+    pathParams: ['domainId'],
+    queryParams: [],
+    hasBody: false,
+    requirement: { mode: 'all', permissions: ['remediation:read'] },
+    platformOnly: false,
+    idempotency: null,
+    rateClass: null,
+    cursor: null,
+    access: 'read',
+    risk: 'read',
+    confirm: 'none',
+    phase: 'AI-1',
+    enabled: true,
+    status: 'IMPLEMENTED',
+    portalRoute: '/domains/{domainId}',
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
+    display: { resourceType: 'api_mode_domain' },
+    untrustedFields: ['departments[].name'],
+    bind: {},
+    redactParams: [],
+    limitations: null,
+    testedBy: 'apps/api/integration/assistant-tools.test.ts',
+  },
+  {
+    name: 'api_mode_onboarding_put_scope',
+    operationId: 'ApiModeOnboardingController_putScope_v1',
+    method: 'PUT',
+    pathTemplate: '/api/v1/api-mode/domains/{domainId}/scope',
+    module: 'api-mode',
+    summary: 'Set the mailbox scope of an API-mode domain',
+    description:
+      '`{ scope: api-mode-scope/1, mailboxIds? (kind mailboxes only, required there, ≤ 5 000 mailboxes of this domain), reason, expectedRowVersion }` replaces the scope: the domain must be effective `api` or `hybrid` (`409 api_mode_scope_domain_not_api`), departments must be the organization’s (`422 api_m…',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domainId: { format: 'uuid', type: 'string', description: 'Domain public id (UUID)' },
+        body: {
+          type: 'object',
+          properties: {
+            scope: {
+              oneOf: [
+                {
+                  type: 'object',
+                  properties: { kind: { type: 'string', enum: ['all'] } },
+                  required: ['kind'],
+                  additionalProperties: false,
+                },
+                {
+                  type: 'object',
+                  properties: {
+                    kind: { type: 'string', enum: ['departments'] },
+                    departmentIds: {
+                      minItems: 1,
+                      maxItems: 20,
+                      type: 'array',
+                      items: {
+                        type: 'string',
+                        format: 'uuid',
+                        pattern:
+                          '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$',
+                      },
+                    },
+                  },
+                  required: ['kind', 'departmentIds'],
+                  additionalProperties: false,
+                },
+                {
+                  type: 'object',
+                  properties: { kind: { type: 'string', enum: ['mailboxes'] } },
+                  required: ['kind'],
+                  additionalProperties: false,
+                },
+              ],
+              description:
+                '`api-mode-scope/1`: `{ kind: all }`, `{ kind: departments, departmentIds (1-20) }` or `{ kind: mailboxes }`',
+            },
+            mailboxIds: {
+              description:
+                'Kind `mailboxes` only (required there): mailboxes of this domain (≤ 5 000)',
+              minItems: 1,
+              maxItems: 5000,
+              type: 'array',
+              items: {
+                type: 'string',
+                format: 'uuid',
+                pattern:
+                  '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$',
+              },
+            },
+            reason: {
+              description: 'Why (1-500 characters; stored in the audit row)',
+              type: 'string',
+              maxLength: 2000,
+            },
+            expectedRowVersion: {
+              description:
+                'The `rowVersion` read (null when no scope row exists: the PUT creates it)',
+              type: ['integer', 'null'],
+              minimum: 1,
+              maximum: 4294967295,
+            },
+          },
+          required: ['scope', 'reason', 'expectedRowVersion'],
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+      required: ['domainId', 'body'],
+    },
+    pathParams: ['domainId'],
+    queryParams: [],
+    hasBody: true,
+    requirement: { mode: 'all', permissions: ['remediation:write'] },
+    platformOnly: false,
+    idempotency: 'required',
+    rateClass: 'sensitive',
+    cursor: null,
+    access: 'write',
+    risk: 'high',
+    confirm: 'confirm+impact+reauth',
+    phase: 'AI-6',
+    enabled: true,
+    status: 'IMPLEMENTED',
+    portalRoute: '/domains/{domainId}',
+    portalPages: ['/domains'],
+    display: { resourceType: 'api_mode_domain' },
+    untrustedFields: ['departments[].name'],
+    bind: {},
+    redactParams: [],
+    limitations: null,
+    testedBy: 'apps/api/integration/assistant-writes-api-mode.test.ts',
+  },
+  {
     name: 'api_mode_list_mailboxes',
     operationId: 'ApiModeController_listMailboxes_v1',
     method: 'GET',
@@ -1350,7 +1552,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/api-mode',
-    portalPages: ['/api-mode (Mailbox protection)'],
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
     display: {
       columns: ['address', 'status', 'coverage', 'feedStatus', 'lastSyncAt'],
       resourceType: 'api_mode',
@@ -1534,6 +1736,60 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     testedBy: 'apps/api/integration/assistant-tools.test.ts',
   },
   {
+    name: 'api_mode_onboarding_protection_coverage',
+    operationId: 'ApiModeOnboardingController_protectionCoverage_v1',
+    method: 'GET',
+    pathTemplate: '/api/v1/api-mode/protection-coverage',
+    module: 'api-mode',
+    summary: 'Protection by mode: what each mode covers and each domain’s coverage',
+    description:
+      'The static capability matrix of the inline, api and hybrid modes (`capabilities`: `pre_delivery_blocking`, `hold_for_review`, `post_delivery_removal`, `retroactive_clawback`, `internal_mail`, `outbound_dlp_enforce`, `outbound_dlp_detect`, `tenant_policies`, `url_rewriting`, `message_tagging`, `user…',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'string',
+          pattern: '^\\d{1,3}$',
+          description: 'Page size, 1-100 (default 25)',
+        },
+        cursor: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 512,
+          description: '`nextCursor` of the previous page',
+        },
+        sort: { type: 'string', enum: ['-id'], description: '`-id` (newest domain first)' },
+        effectiveMode: { type: 'string', description: '`inline`, `api`, `hybrid`; comma list' },
+      },
+      additionalProperties: false,
+    },
+    pathParams: [],
+    queryParams: ['limit', 'cursor', 'sort', 'effectiveMode'],
+    hasBody: false,
+    requirement: { mode: 'all', permissions: ['domain:read'] },
+    platformOnly: false,
+    idempotency: null,
+    rateClass: null,
+    cursor: 'v1',
+    access: 'read',
+    risk: 'read',
+    confirm: 'none',
+    phase: 'AI-1',
+    enabled: true,
+    status: 'IMPLEMENTED',
+    portalRoute: '/domains/{domainId}',
+    portalPages: ['/api-mode (Mailbox protection)', '/domains', '/protection-by-mode'],
+    display: {
+      columns: ['name', 'effectiveMode', 'status', 'gaps'],
+      resourceType: 'api_mode_domain',
+    },
+    untrustedFields: ['items[].name'],
+    bind: {},
+    redactParams: [],
+    limitations: null,
+    testedBy: 'apps/api/integration/assistant-tools.test.ts',
+  },
+  {
     name: 'api_mode_remediation_get_policy',
     operationId: 'ApiModeRemediationController_getPolicy_v1',
     method: 'GET',
@@ -1558,7 +1814,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/api-mode',
-    portalPages: ['/api-mode (Mailbox protection)'],
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
     display: { resourceType: 'api_remediation' },
     untrustedFields: [
       'organization.document.rules[].id',
@@ -1588,7 +1844,23 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
             mode: { type: 'string', enum: ['detect_only', 'enforce'] },
             document: {
               description:
-                'The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins) }`; strict (unknown keys refused; `when.policyDispositions` is reserved)',
+                'The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins), policyMapping?: { quarantine?, require_approval?, reject?, allow_tagged? } }`; strict (unknown keys refused; `when.policyDispositions`…',
+            },
+            detectOnly: {
+              description:
+                'Step API-4 (B7): `{ until (now + 1 h … now + 30 d), then: remind|enforce }` — only with mode `detect_only` (else `422 api_mode_detect_only_invalid`); null/absent = no period; saving `enforce` clears the period',
+              type: ['object', 'null'],
+              properties: {
+                until: {
+                  type: 'string',
+                  format: 'date-time',
+                  pattern:
+                    '^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$',
+                },
+                then: { type: 'string', enum: ['remind', 'enforce'] },
+              },
+              required: ['until', 'then'],
+              additionalProperties: false,
             },
             reason: {
               description: 'Why (1-500 characters; stored with the request and in the audit row)',
@@ -1665,7 +1937,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/api-mode',
-    portalPages: ['/api-mode (Mailbox protection)'],
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
     display: { resourceType: 'api_remediation' },
     untrustedFields: [],
     bind: {},
@@ -1692,7 +1964,23 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
             mode: { type: 'string', enum: ['detect_only', 'enforce'] },
             document: {
               description:
-                'The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins) }`; strict (unknown keys refused; `when.policyDispositions` is reserved)',
+                'The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins), policyMapping?: { quarantine?, require_approval?, reject?, allow_tagged? } }`; strict (unknown keys refused; `when.policyDispositions`…',
+            },
+            detectOnly: {
+              description:
+                'Step API-4 (B7): `{ until (now + 1 h … now + 30 d), then: remind|enforce }` — only with mode `detect_only` (else `422 api_mode_detect_only_invalid`); null/absent = no period; saving `enforce` clears the period',
+              type: ['object', 'null'],
+              properties: {
+                until: {
+                  type: 'string',
+                  format: 'date-time',
+                  pattern:
+                    '^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$',
+                },
+                then: { type: 'string', enum: ['remind', 'enforce'] },
+              },
+              required: ['until', 'then'],
+              additionalProperties: false,
             },
             reason: {
               description: 'Why (1-500 characters; stored with the request and in the audit row)',
@@ -1729,7 +2017,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/api-mode',
-    portalPages: ['/api-mode (Mailbox protection)'],
+    portalPages: ['/api-mode (Mailbox protection)', '/domains'],
     display: { resourceType: 'api_remediation' },
     untrustedFields: [],
     bind: {},
@@ -1842,7 +2130,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'api-mode',
     summary: 'Get an API-mode remediation',
     description:
-      'One mailbox action with its decision record (`api-remediation-decision/1`: policy scope, id, version and SHA-256, mode, rule, the verdict inputs; or `{ requestedAction, reason }` of a manual request), the requester, the reversal links and the quarantine release of a release restore. Needs `remediat…',
+      'One mailbox action with its decision record (`api-remediation-decision/1`: policy scope, id, version and SHA-256, mode, rule, the verdict inputs; step API-4 `/2` adds the tenant policy outcome, the verdict and policy lanes with the winner and an allow-override suppression, and the post-delivery sta…',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2360,6 +2648,8 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
             tiMinConfidence: { type: 'integer', minimum: 50, maximum: 100 },
             reportAckEnabled: { type: 'boolean' },
             reportFeedbackEnabled: { type: 'boolean' },
+            policyEvaluationEnabled: { type: 'boolean' },
+            outboundDetectionEnabled: { type: 'boolean' },
             reason: {
               description: 'Why (1-500 characters; stored with the request and in the audit row)',
               type: 'string',
@@ -8083,7 +8373,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/users',
-    portalPages: ['/archive', '/settings (Journaling)', '/policies', '/users'],
+    portalPages: ['/archive', '/domains', '/settings (Journaling)', '/policies', '/users'],
     display: { resourceType: 'department' },
     untrustedFields: [],
     bind: {},
@@ -8152,7 +8442,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'departments',
     summary: 'Delete a department',
     description:
-      'Deletes the department and its members, optionally only at `?expectedRowVersion=`; refused while an active version of an active policy references it (`409 department_in_use`). Audited as `department.deleted`.',
+      'Deletes the department and its members, optionally only at `?expectedRowVersion=`; refused while an active version of an active policy references it, or while an API-mode mailbox scope of a domain lists it (step API-4; `409 department_in_use` with `reference: api_mode_scope`). Audited as `departmen…',
     inputSchema: {
       type: 'object',
       properties: {
@@ -10645,6 +10935,60 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     redactParams: [],
     limitations: null,
     testedBy: 'apps/api/integration/assistant-writes-domains.test.ts',
+  },
+  {
+    name: 'domains_provider_ownership_check',
+    operationId: 'DomainsController_providerOwnershipCheck_v1',
+    method: 'POST',
+    pathTemplate: '/api/v1/domains/{domainId}/ownership/provider-check',
+    module: 'domains',
+    summary: 'Verify ownership through the bound provider tenant',
+    description:
+      'Step API-4 (ADR-0107): requests an ownership check of a domain waiting for verification through the organization’s **bound** Microsoft 365 / Google Workspace connection (tenant verified, not disabled, active `*.mail_flow` grant). `{ connectionId? }` picks the connection (optional when exactly one q…',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domainId: { format: 'uuid', type: 'string', description: 'Domain public id (UUID)' },
+        body: {
+          type: 'object',
+          properties: {
+            connectionId: {
+              description:
+                'The bound provider connection to check through; optional when exactly one qualifies (or the domain’s previous provider check used one that still qualifies)',
+              type: 'string',
+              format: 'uuid',
+              pattern:
+                '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$',
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+      required: ['domainId', 'body'],
+    },
+    pathParams: ['domainId'],
+    queryParams: [],
+    hasBody: true,
+    requirement: { mode: 'all', permissions: ['domain:manage'] },
+    platformOnly: false,
+    idempotency: 'required',
+    rateClass: 'sensitive',
+    cursor: null,
+    access: 'write',
+    risk: 'low',
+    confirm: 'confirm',
+    phase: 'AI-6',
+    enabled: true,
+    status: 'IMPLEMENTED',
+    portalRoute: '/domains/{domainId}',
+    portalPages: ['/domains'],
+    display: { resourceType: 'domain' },
+    untrustedFields: [],
+    bind: {},
+    redactParams: [],
+    limitations: null,
+    testedBy: 'apps/api/integration/assistant-writes-api-mode.test.ts',
   },
   {
     name: 'domains_remove',
@@ -14143,7 +14487,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'notifications',
     summary: 'Get my notification preferences',
     description:
-      'The notification kinds you opted out of (security alerts, policy alerts, quarantine admin alerts and approval requests), your quarantine digest opt-out (the same setting as `/quarantine/me/preferences`) and whether the organization allows it. Users who are members of the organization only: API keys…',
+      'The notification kinds you opted out of (security alerts, policy alerts, quarantine admin alerts and approval requests, account takeover, integration health and — step API-4 — `dlp_detected`), your quarantine digest opt-out (the same setting as `/quarantine/me/preferences`) and whether the organiza…',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     pathParams: [],
     queryParams: [],
@@ -14184,7 +14528,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
           type: 'object',
           properties: {
             optOut: {
-              maxItems: 11,
+              maxItems: 12,
               type: 'array',
               items: {
                 type: 'string',
@@ -14200,10 +14544,11 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
                   'ato_approval_requested',
                   'ato_digest',
                   'ato_provider_health',
+                  'dlp_detected',
                 ],
               },
               description:
-                'Kinds you do not want to receive (unique): `threat_detected`, `domain_dns_failed`, `webhook_disabled`, `policy_alert`, `quarantine_admin_alert`, `quarantine_approval_requested`',
+                'Kinds you do not want to receive (unique): `threat_detected`, `domain_dns_failed`, `webhook_disabled`, `integration_unhealthy`, `policy_alert`, `quarantine_admin_alert`, `quarantine_approval_requested`, `ato_incident`, `ato_approval_requested`, `ato_digest`, `ato_provider_health`, `dlp_detected` (s…',
             },
             quarantineDigestOptOut: {
               type: 'boolean',
@@ -14282,7 +14627,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'notifications',
     summary: 'Replace the security-alert settings',
     description:
-      'Replaces the whole settings document (every key optional; `{}` restores the defaults) with `expectedRowVersion` (`409 notification_settings_conflict` with `currentRowVersion`; 0 when nothing is stored yet). Bounds: threat throttle 15-1440 minutes, DNS and webhook throttles 60-10080 minutes; unknown…',
+      'Replaces the whole settings document (every key optional; `{}` restores the defaults) with `expectedRowVersion` (`409 notification_settings_conflict` with `currentRowVersion`; 0 when nothing is stored yet). Bounds: threat and DLP (step API-4 `alerts.dlpDetected`) throttles 15-1440 minutes, DNS and…',
     inputSchema: {
       type: 'object',
       properties: {
@@ -14317,6 +14662,15 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
                       properties: {
                         enabled: { type: 'boolean' },
                         throttleMinutes: { type: 'integer', minimum: 60, maximum: 10080 },
+                      },
+                      additionalProperties: false,
+                    },
+                    dlpDetected: {
+                      type: 'object',
+                      properties: {
+                        enabled: { type: 'boolean' },
+                        minSeverity: { type: 'string', enum: ['low', 'medium', 'high'] },
+                        throttleMinutes: { type: 'integer', minimum: 15, maximum: 1440 },
                       },
                       additionalProperties: false,
                     },
@@ -17051,6 +17405,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
         ruleId: { type: 'string' },
         overrideApplied: { type: 'string', enum: ['true', 'false'] },
         trigger: { type: 'string', enum: ['scanned', 'scan_failed', 'parse_failed'] },
+        mode: { type: 'string', enum: ['inline', 'detect', 'all'] },
         limit: { type: 'integer', minimum: 1, maximum: 100 },
         cursor: { type: 'string' },
       },
@@ -17067,6 +17422,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
       'ruleId',
       'overrideApplied',
       'trigger',
+      'mode',
       'limit',
       'cursor',
     ],
@@ -17969,7 +18325,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/integrations/providers/{connectionId}',
-    portalPages: ['/ato', '/integrations', '/settings (Journaling)'],
+    portalPages: ['/ato', '/domains', '/integrations', '/settings (Journaling)'],
     display: {
       columns: ['displayName', 'provider', 'status', 'health', 'domainCount'],
       resourceType: 'provider_connection',
@@ -18025,7 +18381,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/integrations/providers/{connectionId}',
-    portalPages: ['/integrations', '/settings (Journaling)'],
+    portalPages: ['/domains', '/integrations', '/settings (Journaling)'],
     display: { resourceType: 'provider_connection' },
     untrustedFields: ['displayName', 'tenantName', 'relayProof'],
     bind: {},
@@ -18296,7 +18652,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'provider-connections',
     summary: 'Replace the linked domains of a connection',
     description:
-      '`{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must be yours (`404 domain_not_in_organization`), `active` at the gateway (`422 domain_not_verified`) and not linked to another connection (`409 domain_linked_elsewhere`); unlinking needs outbound off (`409 outbou…',
+      '`{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must be yours (`404 domain_not_in_organization`), `verified` or `active` at the gateway (step API-4 B4; `pending_verification` → `422 domain_not_verified`) and not linked to another connection (`409 domain_linked_…',
     inputSchema: {
       type: 'object',
       properties: {
@@ -18339,7 +18695,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/integrations/providers/{connectionId}',
-    portalPages: ['/integrations'],
+    portalPages: ['/domains', '/integrations'],
     display: { resourceType: 'provider_connection' },
     untrustedFields: [],
     bind: {},
@@ -19082,7 +19438,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     enabled: true,
     status: 'IMPLEMENTED',
     portalRoute: '/integrations/providers/new',
-    portalPages: ['/api-mode (Mailbox protection)', '/integrations'],
+    portalPages: ['/api-mode (Mailbox protection)', '/domains', '/integrations'],
     display: { resourceType: 'provider' },
     untrustedFields: [],
     bind: {},
@@ -24144,7 +24500,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
             },
             eventTypes: {
               minItems: 1,
-              maxItems: 15,
+              maxItems: 17,
               type: 'array',
               items: {
                 type: 'string',
@@ -24164,6 +24520,8 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
                   'ato.account.risk_changed',
                   'ato.response.completed',
                   'integration.health_changed',
+                  'mailbox.threat.detected',
+                  'mailbox.dlp.detected',
                 ],
               },
             },
@@ -24452,7 +24810,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
             eventTypes: {
               description: 'Only these event types (default: every type of the subscription)',
               minItems: 1,
-              maxItems: 15,
+              maxItems: 17,
               type: 'array',
               items: {
                 type: 'string',
@@ -24472,6 +24830,8 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
                   'ato.account.risk_changed',
                   'ato.response.completed',
                   'integration.health_changed',
+                  'mailbox.threat.detected',
+                  'mailbox.dlp.detected',
                 ],
               },
             },
@@ -24595,7 +24955,7 @@ export const OPERATION_TOOLS: readonly OperationTool[] = [
     module: 'webhooks',
     summary: 'List the webhook event catalogue',
     description:
-      'The ten subscribable event types (payload version 1) and the test-only `webhook.ping`: description, severity rule, the filters that apply and an example envelope. Payloads carry ids, codes, domains and counts only: never a subject, body, attachment, address local part, URL found in mail, S3 key or…',
+      'Every subscribable event type of the catalogue (payload version 1; step API-4 adds `mailbox.threat.detected` and `mailbox.dlp.detected` — detections of API-mode copies after delivery, with the protection mode — while `email.threat.detected` stays inline only) and the test-only `webhook.ping`: descr…',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     pathParams: [],
     queryParams: [],
@@ -24658,8 +25018,7 @@ export const NOT_APPLICABLE_OPERATIONS: readonly NotApplicableOperation[] = [
     requirement: { mode: 'all', permissions: ['domain:manage'] },
     access: 'write',
     risk: null,
-    reason:
-      'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
+    reason: 'API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)',
     portalRoute: '/organizations/{organizationId}',
     portalPages: ['/api-mode (Mailbox protection)'],
   },
@@ -24672,8 +25031,7 @@ export const NOT_APPLICABLE_OPERATIONS: readonly NotApplicableOperation[] = [
     requirement: { mode: 'any', permissions: ['organization:manage', 'platform:organizations'] },
     access: 'write',
     risk: null,
-    reason:
-      'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
+    reason: 'API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)',
     portalRoute: '/organizations/{organizationId}',
     portalPages: ['/api-mode (Mailbox protection)'],
   },
@@ -25416,7 +25774,7 @@ export const NOT_APPLICABLE_OPERATIONS: readonly NotApplicableOperation[] = [
     risk: null,
     reason: 'returns a secret (never through chat)',
     portalRoute: '/settings/journaling/intake/{sourceId}',
-    portalPages: ['/settings (Journaling)'],
+    portalPages: ['/domains', '/settings (Journaling)'],
   },
   {
     operationId: 'IntakeSourcesController_rotate_v1',

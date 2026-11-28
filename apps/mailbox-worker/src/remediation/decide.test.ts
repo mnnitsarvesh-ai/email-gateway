@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Prisma } from '@email-gateway/database';
 import { createLogger } from '@email-gateway/logger';
-import { remediationActionKey } from '@email-gateway/mailbox-api';
+import { remediationActionKey, type PolicyOutcomeFacts } from '@email-gateway/mailbox-api';
 import { hardBlockIds, RemediationDecider, type DecisionCopy } from './decide';
 import { RemediationPolicyLoader } from './policy-loader';
 
@@ -28,6 +28,10 @@ interface World {
   /** Step API-3: `api_mode_org_settings.internal_mail_enabled` (null = no row, defaults). */
   internalMailEnabled: boolean | null;
   reportMailbox: boolean;
+  /** Step API-4 B6: the domain's scope kind (null = no settings row) and the mailbox flags. */
+  scopeKind: 'all' | 'departments' | 'mailboxes' | null;
+  scopeSelected: boolean;
+  scopeState: 'in_scope' | 'excluded';
 }
 
 /** A fake writer transaction answering the decision's reads; records the writes. */
@@ -42,7 +46,14 @@ function fakeTx(world: World) {
         status: world.mailboxStatus,
         domainId: 3n,
         reportMailbox: world.reportMailbox,
+        scopeSelected: world.scopeSelected,
+        scopeState: world.scopeState,
       })),
+    },
+    apiModeDomainSetting: {
+      findUnique: vi.fn(async () =>
+        world.scopeKind === null ? null : { organizationId: ORG, scopeKind: world.scopeKind },
+      ),
     },
     apiModeOrgSetting: {
       findUnique: vi.fn(async () =>
@@ -123,6 +134,9 @@ const world = (over: Partial<World> = {}): World => ({
   insertResult: 1,
   internalMailEnabled: null,
   reportMailbox: false,
+  scopeKind: null,
+  scopeSelected: false,
+  scopeState: 'in_scope',
   ...over,
 });
 
@@ -187,7 +201,7 @@ describe('RemediationDecider (R4)', () => {
       insert.values.find((v) => typeof v === 'string' && v.startsWith('{"v"')) as string,
     );
     expect(decision).toMatchObject({
-      v: 1,
+      v: 2,
       policy: { scope: 'platform_default', publicId: null },
       mode: 'enforce',
       ruleId: 'p1-high-confidence-malware-phishing-hb',
@@ -302,6 +316,125 @@ describe('RemediationDecider (R4)', () => {
     now = new Date(NOW.getTime() + 31_000);
     const reloaded = fakeTx(w);
     expect(await d.decide(reloaded.tx, copy(), '12', now)).toEqual({ kind: 'none' });
+  });
+});
+
+describe('RemediationDecider with the policy lane and scope (step API-4 A4, B6)', () => {
+  const outcome = (over: Partial<PolicyOutcomeFacts> = {}): PolicyOutcomeFacts => ({
+    disposition: 'reject',
+    tagged: false,
+    overrideApplied: false,
+    decisionSource: 'tenant_rule',
+    decisiveRuleRef: '0193a000-0000-7000-8000-0000000000cc#1/block-sender',
+    floorReasons: [],
+    dlpAction: null,
+    actionTypes: ['REJECT'],
+    ...over,
+  });
+  const recordOf = (writes: { sql: string; values: unknown[] }[]) =>
+    JSON.parse(
+      insertOf(writes)!.values.find((v) => typeof v === 'string' && v.startsWith('{"v"')) as string,
+    ) as Record<string, unknown>;
+
+  it('a clean copy with a tenant reject → the policy lane moves it to the quarantine folder', async () => {
+    const { tx, writes } = fakeTx(world({ risk: null }));
+    const result = await decider().decide(
+      tx,
+      copy({ verdict: 'clean' }),
+      '12',
+      NOW,
+      undefined,
+      outcome(),
+    );
+    expect(result).toMatchObject({ kind: 'pending', action: 'move_quarantine', inserted: true });
+    expect(insertOf(writes)!.values).toContain(
+      remediationActionKey(COPY_PUBLIC_ID, 'move_quarantine', 0),
+    );
+    expect(recordOf(writes)).toMatchObject({
+      v: 2,
+      ruleId: 'policy-mapping:reject',
+      lanes: {
+        verdict: null,
+        policy: { key: 'reject', action: 'move_quarantine' },
+        winner: 'policy',
+      },
+      policyOutcome: { disposition: 'reject' },
+    });
+  });
+
+  it('clean + allow (untagged) → none without context reads; tagged allow → tag', async () => {
+    const plain = fakeTx(world());
+    expect(
+      await decider().decide(
+        plain.tx,
+        copy({ verdict: 'clean' }),
+        '12',
+        NOW,
+        undefined,
+        outcome({ disposition: 'allow', actionTypes: [] }),
+      ),
+    ).toEqual({ kind: 'none' });
+    expect(plain.raw.apiMailbox.findUnique).not.toHaveBeenCalled();
+    const tagged = fakeTx(world({ risk: null }));
+    expect(
+      await decider().decide(
+        tagged.tx,
+        copy({ verdict: 'clean' }),
+        '12',
+        NOW,
+        undefined,
+        outcome({ disposition: 'allow', tagged: true, actionTypes: ['TAG'] }),
+      ),
+    ).toMatchObject({ kind: 'pending', action: 'tag' });
+  });
+
+  it('an outbound detection copy is skipped outbound_not_remediable', async () => {
+    const { tx, writes } = fakeTx(world({ risk: null }));
+    expect(
+      await decider().decide(
+        tx,
+        copy({ verdict: 'clean', direction: 'outbound' }),
+        '12',
+        NOW,
+        undefined,
+        outcome(),
+      ),
+    ).toMatchObject({ kind: 'skipped' });
+    expect(insertOf(writes)!.values).toContain('outbound_not_remediable');
+  });
+
+  it('scope: an excluded mailbox is skipped out_of_scope (live selection; stored departments state)', async () => {
+    const cases: Array<[Partial<World>, boolean]> = [
+      [{ scopeKind: 'mailboxes', scopeSelected: false }, false],
+      [{ scopeKind: 'mailboxes', scopeSelected: true, scopeState: 'excluded' }, true],
+      [{ scopeKind: 'departments', scopeState: 'excluded', scopeSelected: true }, false],
+      [{ scopeKind: 'departments', scopeState: 'in_scope' }, true],
+      [{ scopeKind: 'all', scopeState: 'excluded' }, true],
+    ];
+    for (const [w, inScope] of cases) {
+      const f = fakeTx(world(w));
+      const result = await decider().decide(f.tx, copy(), '12', NOW);
+      if (inScope) expect(result).toMatchObject({ kind: 'pending' });
+      else {
+        expect(result).toMatchObject({ kind: 'skipped' });
+        expect(insertOf(f.writes)!.values).toContain('out_of_scope');
+      }
+    }
+  });
+
+  it('a tenant allow override on a level-only suspicious copy → skip policy_allow_override', async () => {
+    const { tx, writes } = fakeTx(world({ risk: { level: 'medium', hard_blocks: [] } }));
+    const result = await decider().decide(
+      tx,
+      copy({ verdict: 'suspicious', riskScore: 450 }),
+      '12',
+      NOW,
+      undefined,
+      outcome({ disposition: 'allow', overrideApplied: true, actionTypes: ['ALLOW'] }),
+    );
+    expect(result).toMatchObject({ kind: 'skipped', action: 'tag' });
+    expect(insertOf(writes)!.values).toContain('policy_allow_override');
+    expect(recordOf(writes)).toMatchObject({ lanes: { suppressedBy: 'policy_allow_override' } });
   });
 });
 

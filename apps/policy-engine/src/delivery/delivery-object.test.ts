@@ -1,5 +1,5 @@
+import { InconsistentPolicyReadError } from '@email-gateway/policy-runtime';
 import { describe, expect, it, vi } from 'vitest';
-import { InconsistentPolicyReadError } from '../evaluation/errors';
 import { deliveryObject, isRewriteKeyOf } from './delivery-object';
 
 /** Ported from the delivery-worker's development pass-through (step 4.3 U20 → step 5.2 P20). */

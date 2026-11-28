@@ -4,8 +4,15 @@ import { Prisma, type PrismaClient } from '@email-gateway/database';
 import {
   hardBlockToPrimaryEngine,
   mailboxEntryExplanation,
+  policyEntryExplanation,
+  policyEntryKind,
+  policyEntryReason,
+  remediationDecisionRecordSchema,
   verdictToQuarantineReason,
   type MessageVerdict,
+  type PolicyMappingKey,
+  type PolicyOutcomeFacts,
+  type RemediationAction,
   type RemediationMailboxContainer,
 } from '@email-gateway/mailbox-api';
 import {
@@ -111,6 +118,77 @@ export function clawbackEntryReason(
 export const clawbackEntryExplanation = (clawback: MailboxEntryClawback): string =>
   `Removed from the mailbox by clawback ${clawback.publicId} (${clawback.trigger})`;
 
+/**
+ * Step API-4 A5: the policy lane that decided a `policy` action (decision record
+ * `api-remediation-decision/2` with `lanes.winner = policy`).
+ */
+export interface MailboxEntryPolicyLane {
+  key: PolicyMappingKey;
+  action: RemediationAction;
+  /** The verdict lane's action (null: none, or suppressed with none). */
+  verdictLaneAction: RemediationAction | null;
+  outcome: PolicyOutcomeFacts;
+}
+
+/** The policy lane of a stored decision record, or null (v1 records, verdict-lane decisions). */
+export function policyLaneOfDecision(decision: unknown): MailboxEntryPolicyLane | null {
+  const parsed = remediationDecisionRecordSchema.safeParse(
+    typeof decision === 'string' ? safeParse(decision) : decision,
+  );
+  if (!parsed.success || parsed.data.v !== 2) return null;
+  const record = parsed.data;
+  if (record.lanes.winner !== 'policy' || record.lanes.policy === null) return null;
+  if (record.policyOutcome === null) return null;
+  return {
+    key: record.lanes.policy.key,
+    action: record.lanes.policy.action,
+    verdictLaneAction: record.lanes.verdict?.action ?? null,
+    outcome: record.policyOutcome,
+  };
+}
+
+function safeParse(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** The entry kind, reason and explanation of a mailbox entry (R9.1, C5.5, A5). */
+export function mailboxEntryLabels(input: {
+  verdict: MessageVerdict | null;
+  ruleId: string | null;
+  clawback: MailboxEntryClawback | null;
+  policyLane: MailboxEntryPolicyLane | null;
+}): { kind: 'quarantine' | 'review'; reason: string; explanation: string } {
+  if (input.clawback) {
+    return {
+      kind: 'quarantine',
+      reason: clawbackEntryReason(input.clawback, input.verdict),
+      explanation: clawbackEntryExplanation(input.clawback),
+    };
+  }
+  const lane = input.policyLane;
+  if (lane) {
+    return {
+      kind: policyEntryKind(lane.key),
+      reason: policyEntryReason({
+        verdictReason: verdictToQuarantineReason(input.verdict),
+        verdictLaneAction: lane.verdictLaneAction,
+        policyLaneAction: lane.action,
+        outcome: lane.outcome,
+      }),
+      explanation: policyEntryExplanation(lane.outcome.decisiveRuleRef),
+    };
+  }
+  return {
+    kind: 'quarantine',
+    reason: verdictToQuarantineReason(input.verdict),
+    explanation: mailboxEntryExplanation(input.ruleId),
+  };
+}
+
 /** What the entry writer needs about the remediation (ids and codes only). */
 export interface MailboxEntryInput {
   organizationId: bigint;
@@ -121,6 +199,8 @@ export interface MailboxEntryInput {
   ruleId: string | null;
   /** Step API-3: the clawback that queued the action (reason and explanation, C5.5). */
   clawback?: MailboxEntryClawback | null;
+  /** Step API-4 A5: the policy lane that decided the action (kind, reason, explanation). */
+  policyLane?: MailboxEntryPolicyLane | null;
   copy: {
     id: bigint;
     receivedAt: Date;
@@ -155,8 +235,9 @@ interface StoredEntry {
  * rows: the copy's registry message (sender, size, attachments, EML key), its latest risk row
  * (level, action, verdict, hard blocks, reason codes), the recipient row whose address is one of
  * the mailbox's addresses (lowest `rcpt_seq`), the organization's active user with that e-mail,
- * the resolved quarantine settings (`computeExpiry`, kind `quarantine`) and the fixed,
- * content-free explanation. `lifecycle_round` = the copy's remediation generation (R9.2). A
+ * the resolved quarantine settings (`computeExpiry` of the entry kind) and the fixed,
+ * content-free explanation. Step API-4 A5: a policy-lane `require_approval` creates a `review`
+ * entry (its restore needs an approver, R10.1), with the A5 reason and explanation. `lifecycle_round` = the copy's remediation generation (R9.2). A
  * duplicate of `(message_id, lifecycle_round, rcpt_seq)` is a crash replay: the existing entry is
  * adopted. One `quarantine_actions` row `mailbox_remediated` per created entry. Null when the
  * message has no recipient row for the mailbox (nothing to attach the entry to; logged by the
@@ -237,8 +318,14 @@ export async function createMailboxEntry(
   });
   if (user && user.organizationId !== organizationId) throw new InconsistentReadError('users');
   const settings = await resolveOrganizationQuarantineSettings(tx, organizationId, input.bounds);
+  const labels = mailboxEntryLabels({
+    verdict: copy.verdict,
+    ruleId: input.ruleId,
+    clawback: input.clawback ?? null,
+    policyLane: input.policyLane ?? null,
+  });
   const expiresAt = computeExpiry({
-    kind: 'quarantine',
+    kind: labels.kind,
     quarantinedAt: now,
     holdDays: settings.hold.days,
     reviewDays: settings.review.days,
@@ -260,11 +347,9 @@ export async function createMailboxEntry(
         recipientAddress: address.slice(0, 320),
         userId: user?.id ?? null,
         direction: message.direction,
-        kind: 'quarantine',
+        kind: labels.kind,
         origin: 'api_remediation',
-        reason: (input.clawback
-          ? clawbackEntryReason(input.clawback, copy.verdict)
-          : verdictToQuarantineReason(copy.verdict)) as never,
+        reason: labels.reason as never,
         status: 'held',
         envelopeFrom: message.envelopeFrom,
         headerFrom: message.headerFrom,
@@ -280,9 +365,7 @@ export async function createMailboxEntry(
         reasonCodes,
         primaryEngine: hardBlockToPrimaryEngine(hardBlocks),
         decisionSource: null,
-        explanationText: input.clawback
-          ? clawbackEntryExplanation(input.clawback)
-          : mailboxEntryExplanation(input.ruleId),
+        explanationText: labels.explanation,
         emlObjectKey: message.emlObjectKey,
         quarantinedAt: now,
         expiresAt,

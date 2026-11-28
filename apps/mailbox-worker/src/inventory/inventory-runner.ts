@@ -2,6 +2,7 @@ import { uuidv7 } from '@email-gateway/common';
 import { Prisma, type PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
 import { MailboxApiError } from '@email-gateway/mailbox-api';
+import { newMailboxScopeState, scopeExcludedSql } from '../domain/scope';
 import { isApiSide, loadOrgApiModeState, type OrgApiModeState } from '../domain/api-mode-state';
 import {
   applyGrantRevocation,
@@ -270,7 +271,8 @@ export class InventoryRunner {
         WHERE api_connection_id = ${ctx.id} AND organization_id = ${ctx.organizationId}
           AND status = 'active' AND provider_user_id IS NOT NULL
           AND feed_status IN ('off', 'revoked')
-          AND domain_id IN (${Prisma.join(apiDomainIds)})`;
+          AND domain_id IN (${Prisma.join(apiDomainIds)})
+          AND NOT ${scopeExcludedSql('api_mailboxes')}`;
     }
     await this.deps.prisma.apiModeConnection.updateMany({
       where: { id: ctx.id, organizationId: ctx.organizationId },
@@ -357,6 +359,8 @@ export class InventoryRunner {
           primaryAddress: user.primary,
           domainId,
           status,
+          // Step API-4 B6: excluded at once in a `mailboxes` domain, else in scope.
+          scopeState: await newMailboxScopeState(prisma, ctx.organizationId, domainId),
         },
         select: { id: true, organizationId: true },
       });

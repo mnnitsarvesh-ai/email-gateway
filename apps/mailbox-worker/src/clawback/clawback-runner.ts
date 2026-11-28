@@ -26,6 +26,7 @@ import {
 } from '@email-gateway/mailbox-api';
 import type { QuarantinePlatformBounds } from '@email-gateway/quarantine';
 import { loadOrgSettings } from '../domain/org-settings';
+import { mailboxScope } from '../domain/scope';
 import type { MailboxMetrics } from '../metrics/mailbox-metrics';
 import {
   connectionFacts,
@@ -460,6 +461,8 @@ export class ClawbackRunner {
             status: true,
             domainId: true,
             reportMailbox: true,
+            scopeState: true,
+            scopeSelected: true,
           },
         })
       ).map((m) => {
@@ -525,6 +528,12 @@ export class ClawbackRunner {
         });
         continue;
       }
+      // Step API-4 B6: targets of mailboxes excluded by their domain's scope are skipped.
+      const scope = await mailboxScope(prisma, org, mailbox, input.memo.scopeKinds);
+      if (!scope.inScope) {
+        plans.push({ copy, status: 'skipped', reasonCode: 'out_of_scope', plannedAction: null });
+        continue;
+      }
       if (!input.automatic) {
         // C5.2: the action of an admin/campaign/report clawback is chosen at submit; a copy with
         // an action in flight is not eligible, everything else is re-planned when queued.
@@ -552,6 +561,7 @@ export class ClawbackRunner {
           domainEffectiveMode: mode,
           mailboxStatus: mailbox.status,
           internalMailEnabled: input.internalMailEnabled,
+          mailboxInScope: true,
         },
         effective,
       });
@@ -859,6 +869,8 @@ export class ClawbackRunner {
       reportMailbox: ctx.mailbox.reportMailbox,
     });
     if (!eligibility.eligible) return skipTarget(eligibility.reason);
+    // Step API-4 B6: the shared decision context's scope (excluded mailboxes are not targets).
+    if (!ctx.mailboxInScope) return skipTarget('out_of_scope');
 
     let action: RemediationAction;
     let decision: unknown;
@@ -878,6 +890,7 @@ export class ClawbackRunner {
           domainEffectiveMode: ctx.domainEffectiveMode,
           mailboxStatus: ctx.mailbox.status,
           internalMailEnabled: ctx.internalMailEnabled,
+          mailboxInScope: ctx.mailboxInScope,
         },
         effective: ctx.effective,
       });

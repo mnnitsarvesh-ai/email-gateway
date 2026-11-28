@@ -250,8 +250,25 @@ describe('internal (east-west) journal mail (C8)', () => {
 
   it('outbound-only messages are not recorded and discover no mailbox; mixed record internal only', async () => {
     const before = await fx.prisma.apiMailbox.count({ where: { organizationId: org.id } });
-    const outbound = await internal(['partner@partner-org.example'], { deliver: false });
+    const outbound = await internal(['partner@partner-org.example'], {
+      deliver: false,
+      verdict: 'clean',
+    });
     expect(outbound.copies).toHaveLength(0);
+    expect(await fx.prisma.apiMailbox.count({ where: { organizationId: org.id } })).toBe(before);
+    // Step API-4 A6.2 (ADR-0105 supersedes ADR-0104 decision 1 in part): a detection (here the
+    // malware verdict) is recorded on the sender's mailbox as an `outbound` copy, never remediated.
+    const detected = await internal(['partner@partner-org.example'], { deliver: false });
+    expect(detected.copies).toHaveLength(1);
+    expect(detected.copies[0]).toMatchObject({
+      direction: 'outbound',
+      remediationState: 'skipped',
+      lagMs: null,
+    });
+    expect((await actionsOfCopy(fx, detected.copies[0]!.id))[0]).toMatchObject({
+      status: 'skipped',
+      reasonCode: 'outbound_not_remediable',
+    });
     expect(await fx.prisma.apiMailbox.count({ where: { organizationId: org.id } })).toBe(before);
     const mixed = await internal([BLAKE, 'partner@partner-org.example'], {
       deliver: false,

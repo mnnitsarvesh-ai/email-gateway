@@ -35,7 +35,8 @@ import { stack } from './support/env';
  * API-mode protection tables and columns of step API-1 (35-api-mode-protection.md §3) and the
  * API-mode remediation tables and columns of step API-2 (36-api-mode-remediation.md §3) and the
  * API-mode clawback and report tables and columns of step API-3
- * (37-api-mode-clawback-reporting.md §3).
+ * (37-api-mode-clawback-reporting.md §3) and the API-mode parity and onboarding table and
+ * columns of step API-4 (38-api-mode-parity-onboarding.md §3).
  */
 const prisma = new PrismaClient({ datasourceUrl: stack.databaseUrl() });
 
@@ -368,17 +369,19 @@ const TENANT_OWNED = [
   'api_clawback_targets',
   'api_user_reports',
   'api_mode_org_settings',
+  // Step API-4 §3.2: per-domain API-mode scope and onboarding state (organization_id NOT NULL).
+  'api_mode_domain_settings',
 ];
 
 const ALL_TABLES = [...NOT_TENANT_OWNED, ...TENANT_OWNED];
 
 describe('MySQL schema', () => {
-  it('has exactly the 196 data-model tables plus _prisma_migrations', async () => {
+  it('has exactly the 197 data-model tables plus _prisma_migrations', async () => {
     const rows = await prisma.$queryRaw<{ name: string }[]>`
       SELECT TABLE_NAME AS name FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'`;
-    expect(ALL_TABLES).toHaveLength(196);
-    expect(new Set(ALL_TABLES).size).toBe(196);
+    expect(ALL_TABLES).toHaveLength(197);
+    expect(new Set(ALL_TABLES).size).toBe(197);
     expect(rows.map((r) => r.name).sort()).toEqual([...ALL_TABLES, '_prisma_migrations'].sort());
   });
 
@@ -4074,6 +4077,8 @@ describe('policy engine schema (step 5.2, docs/plan/steps/16-policy-engine.md §
       created_at: ['datetime(3)', 'NO'],
       // Step 8.4 D23: the `ato-policy-facts/1` block of the evaluation (NULL when absent).
       ato_facts: ['json', 'YES'],
+      // Step API-4 §3.1 (A1): inline gating evaluation or detect evaluation of an API-mode copy.
+      evaluation_mode: ["enum('inline','detect')", 'NO'],
     });
     expect(cols.get('policy_execution_logs.override_applied')?.columnDefault).toBe('0');
     expect(cols.get('policy_execution_logs.recipient_split')?.columnDefault).toBe('0');
@@ -7091,6 +7096,10 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       // Step API-3 §3.2: the report-mailbox flag.
       report_mailbox: ['tinyint(1)', 'NO'],
       report_mailbox_at: ['datetime(3)', 'YES'],
+      // Step API-4 §3.1 (B6): the mailbox scope.
+      scope_state: ["enum('in_scope','excluded')", 'NO'],
+      scope_selected: ['tinyint(1)', 'NO'],
+      scope_evaluated_at: ['datetime(3)', 'YES'],
     });
     expect(cols.get('api_mailboxes.status')!.columnDefault).toBe('discovered');
     expect(cols.get('api_mailboxes.coverage_state')!.columnDefault).toBe('out_of_scope');
@@ -7153,7 +7162,8 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       source: [SOURCE, 'NO'],
       seen_journal: ['tinyint(1)', 'NO'],
       seen_api: ['tinyint(1)', 'NO'],
-      direction: ["enum('inbound','internal')", 'NO'],
+      // Step API-4 §3.1 (A6) appends `outbound`.
+      direction: ["enum('inbound','internal','outbound')", 'NO'],
       message_id_hash: ['char(64)', 'YES'],
       provider_message_id: ['varchar(256)', 'YES'],
       provider_delivered_at: ['datetime(3)', 'YES'],
@@ -7185,6 +7195,14 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       remediation_updated_at: ['datetime(3)', 'YES'],
       // Step API-3 §3.2 (C3.3).
       verdict_revision: ['tinyint unsigned', 'NO'],
+      // Step API-4 §3.1 (A1, A3).
+      policy_state: [
+        "enum('none','evaluated','inline','disabled','failed','not_applicable')",
+        'NO',
+      ],
+      policy_disposition: ["enum('allow','require_approval','quarantine','reject')", 'YES'],
+      policy_tagged: ['tinyint(1)', 'NO'],
+      dlp_action: ["enum('allow','alert','require_approval','quarantine','block')", 'YES'],
     });
     const idx = await indexes(table);
     expect(idx.get('PRIMARY')).toEqual({ columns: ['id', 'received_at'], unique: true });
@@ -7289,6 +7307,11 @@ describe('step API-1 API-mode protection schema (35-api-mode-protection.md §3)'
       'clawback_targets_failed',
       'reports_received',
       'reports_resolved',
+      // Step API-4 §3.1 (A3, A6, A8, A11).
+      'policy_evaluations',
+      'policy_errors',
+      'outbound_detections',
+      'copy_detections',
     ]) {
       counters[column] = ['int unsigned', 'NO'];
     }
@@ -7524,6 +7547,11 @@ describe('step API-2 API-mode remediation schema (36-api-mode-remediation.md §3
       updated_by_user_id: ['bigint unsigned', 'YES'],
       created_at: ['datetime(3)', 'NO'],
       updated_at: ['datetime(3)', 'NO'],
+      // Step API-4 §3.1 (B7): the detect-only start period.
+      detect_only_until: ['datetime(3)', 'YES'],
+      detect_only_then: ["enum('remind','enforce')", 'YES'],
+      detect_only_started_at: ['datetime(3)', 'YES'],
+      detect_only_notified_at: ['datetime(3)', 'YES'],
     });
     const [generated] = await prisma.$queryRaw<{ expression: string; extra: string }[]>`
       SELECT GENERATION_EXPRESSION AS expression, EXTRA AS extra FROM information_schema.COLUMNS
@@ -8182,6 +8210,9 @@ describe('step API-3 API-mode clawback and report schema (37-api-mode-clawback-r
       // API-3 review fix (migration 20261127120000): P2 separation of duties.
       purge_approval_before_raise: ['int unsigned', 'YES'],
       purge_approval_raised_by: ['varchar(80)', 'YES'],
+      // Step API-4 §3.1 (A1, A6; API4-1, API4-5).
+      policy_evaluation_enabled: ['tinyint(1)', 'NO'],
+      outbound_detection_enabled: ['tinyint(1)', 'NO'],
     });
     expectDefaults(cols, settings, {
       internal_mail_enabled: '1',
@@ -8193,6 +8224,8 @@ describe('step API-3 API-mode clawback and report schema (37-api-mode-clawback-r
       report_ack_enabled: '1',
       report_feedback_enabled: '1',
       row_version: '1',
+      policy_evaluation_enabled: '1',
+      outbound_detection_enabled: '1',
     });
     expect((await indexes(settings)).get('PRIMARY')).toEqual({
       columns: ['organization_id'],
@@ -8486,6 +8519,385 @@ describe('step API-3 API-mode clawback and report schema (37-api-mode-clawback-r
       await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
       await prisma.apiModeOrgSetting.deleteMany({ where: { organizationId } });
       await prisma.apiModeCursor.deleteMany({ where: { name: `it-apiclaw-${suffix}` } });
+      await prisma.providerConnection.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+});
+
+describe('step API-4 API-mode parity and onboarding schema (38-api-mode-parity-onboarding.md §3)', () => {
+  const foreignKeys = async (table: string) =>
+    prisma.$queryRaw<
+      { columnName: string; referenced: string; onDelete: string; onUpdate: string }[]
+    >`
+      SELECT k.COLUMN_NAME AS columnName, k.REFERENCED_TABLE_NAME AS referenced,
+             r.DELETE_RULE AS onDelete, r.UPDATE_RULE AS onUpdate
+      FROM information_schema.KEY_COLUMN_USAGE k
+      JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+        ON r.CONSTRAINT_SCHEMA = k.TABLE_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+      WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ${table}
+        AND k.REFERENCED_TABLE_NAME IS NOT NULL
+      ORDER BY k.COLUMN_NAME`;
+
+  const expectIndexes = async (
+    table: string,
+    expected: Record<string, { columns: string[]; unique: boolean }>,
+  ) => {
+    const idx = await indexes(table);
+    for (const [name, definition] of Object.entries(expected)) {
+      expect(idx.get(name), name).toEqual(definition);
+    }
+  };
+
+  it('creates api_mode_domain_settings (§3.2): keys, defaults, FKs, not partitioned', async () => {
+    const table = 'api_mode_domain_settings';
+    const cols = await columns([table]);
+    const expected: Record<string, [string, string, string | null]> = {
+      id: ['bigint unsigned', 'NO', null],
+      public_id: ['char(36)', 'NO', null],
+      organization_id: ['bigint unsigned', 'NO', null],
+      domain_id: ['bigint unsigned', 'NO', null],
+      scope_kind: ["enum('all','departments','mailboxes')", 'NO', 'all'],
+      scope_department_ids: ['json', 'YES', null],
+      scope_changed_at: ['datetime(3)', 'YES', null],
+      scope_recompute_requested_at: ['datetime(3)', 'YES', null],
+      first_copy_id: ['bigint unsigned', 'YES', null],
+      first_copy_received_at: ['datetime(3)', 'YES', null],
+      first_copy_at: ['datetime(3)', 'YES', null],
+      row_version: ['int unsigned', 'NO', '1'],
+      updated_by_user_id: ['bigint unsigned', 'YES', null],
+      created_at: ['datetime(3)', 'NO', 'CURRENT_TIMESTAMP(3)'],
+      updated_at: ['datetime(3)', 'NO', null],
+    };
+    expect([...cols.keys()].map((k) => k.split('.')[1]!).sort()).toEqual(
+      Object.keys(expected).sort(),
+    );
+    for (const [column, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(`${table}.${column}`), column).toMatchObject({
+        columnType,
+        nullable,
+        columnDefault,
+      });
+    }
+    const idx = await indexes(table);
+    expect([...idx.keys()].sort()).toEqual(
+      [
+        'PRIMARY',
+        'api_mode_domain_settings_public_id_key',
+        'api_mode_domain_settings_domain_id_key',
+        'api_mode_domain_settings_organization_id_idx',
+        'api_mode_domain_settings_scope_recompute_requested_at_idx',
+      ].sort(),
+    );
+    await expectIndexes(table, {
+      PRIMARY: { columns: ['id'], unique: true },
+      api_mode_domain_settings_public_id_key: { columns: ['public_id'], unique: true },
+      api_mode_domain_settings_domain_id_key: { columns: ['domain_id'], unique: true },
+      api_mode_domain_settings_organization_id_idx: {
+        columns: ['organization_id'],
+        unique: false,
+      },
+      api_mode_domain_settings_scope_recompute_requested_at_idx: {
+        columns: ['scope_recompute_requested_at'],
+        unique: false,
+      },
+    });
+    expect(await foreignKeys(table)).toEqual([
+      { columnName: 'domain_id', referenced: 'domains', onDelete: 'CASCADE', onUpdate: 'CASCADE' },
+      {
+        columnName: 'organization_id',
+        referenced: 'organizations',
+        onDelete: 'RESTRICT',
+        onUpdate: 'CASCADE',
+      },
+    ]);
+    expect(PARTITIONED[table]).toBeUndefined();
+    // No new partitioned table (§3.2).
+    expect(Object.keys(PARTITIONED)).toHaveLength(42);
+  });
+
+  it('adds the §3.1 columns, appended enum values and indexes to existing tables', async () => {
+    const cols = await columns([
+      'policy_execution_logs',
+      'api_message_copies',
+      'api_mailboxes',
+      'api_mode_org_settings',
+      'api_remediation_policies',
+      'api_mode_counters',
+      'domains',
+      'domain_verifications',
+    ]);
+    const expected: Record<string, [string, string, string | null]> = {
+      'policy_execution_logs.evaluation_mode': ["enum('inline','detect')", 'NO', 'inline'],
+      'api_message_copies.direction': ["enum('inbound','internal','outbound')", 'NO', 'inbound'],
+      'api_message_copies.policy_state': [
+        "enum('none','evaluated','inline','disabled','failed','not_applicable')",
+        'NO',
+        'none',
+      ],
+      'api_message_copies.policy_disposition': [
+        "enum('allow','require_approval','quarantine','reject')",
+        'YES',
+        null,
+      ],
+      'api_message_copies.policy_tagged': ['tinyint(1)', 'NO', '0'],
+      'api_message_copies.dlp_action': [
+        "enum('allow','alert','require_approval','quarantine','block')",
+        'YES',
+        null,
+      ],
+      'api_mailboxes.scope_state': ["enum('in_scope','excluded')", 'NO', 'in_scope'],
+      'api_mailboxes.scope_selected': ['tinyint(1)', 'NO', '0'],
+      'api_mailboxes.scope_evaluated_at': ['datetime(3)', 'YES', null],
+      'api_mode_org_settings.policy_evaluation_enabled': ['tinyint(1)', 'NO', '1'],
+      'api_mode_org_settings.outbound_detection_enabled': ['tinyint(1)', 'NO', '1'],
+      'api_remediation_policies.detect_only_until': ['datetime(3)', 'YES', null],
+      'api_remediation_policies.detect_only_then': ["enum('remind','enforce')", 'YES', null],
+      'api_remediation_policies.detect_only_started_at': ['datetime(3)', 'YES', null],
+      'api_remediation_policies.detect_only_notified_at': ['datetime(3)', 'YES', null],
+      'domains.ownership_method': ["enum('dns_txt','provider_tenant')", 'YES', null],
+      'domain_verifications.method': [
+        "enum('dns_txt','dns_cname','provider_tenant')",
+        'NO',
+        'dns_txt',
+      ],
+      'domain_verifications.provider_connection_id': ['bigint unsigned', 'YES', null],
+      'domain_verifications.provider_result': [
+        "enum('verified','unverified','absent','alias','error')",
+        'YES',
+        null,
+      ],
+      'domain_verifications.provider_checked_at': ['datetime(3)', 'YES', null],
+      'domain_verifications.provider_error_code': ['varchar(64)', 'YES', null],
+      // `token` stays NOT NULL: provider rows store the fixed marker `provider-tenant`.
+      'domain_verifications.token': ['varchar(128)', 'NO', null],
+    };
+    for (const column of [
+      'policy_evaluations',
+      'policy_errors',
+      'outbound_detections',
+      'copy_detections',
+    ]) {
+      expected[`api_mode_counters.${column}`] = ['int unsigned', 'NO', '0'];
+    }
+    for (const [key, [columnType, nullable, columnDefault]] of Object.entries(expected)) {
+      expect(cols.get(key), key).toMatchObject({ columnType, nullable, columnDefault });
+    }
+    await expectIndexes('api_mailboxes', {
+      api_mailboxes_domain_id_scope_state_idx: {
+        columns: ['domain_id', 'scope_state'],
+        unique: false,
+      },
+    });
+    await expectIndexes('api_remediation_policies', {
+      api_remediation_policies_detect_only_until_idx: {
+        columns: ['detect_only_until'],
+        unique: false,
+      },
+    });
+    await expectIndexes('domain_verifications', {
+      domain_verifications_method_status_provider_checked_at_idx: {
+        columns: ['method', 'status', 'provider_checked_at'],
+        unique: false,
+      },
+    });
+    // No FK on the provider connection reference (purge order §3.3).
+    expect((await foreignKeys('domain_verifications')).map((fk) => fk.columnName).sort()).toEqual([
+      'domain_id',
+      'organization_id',
+    ]);
+    // policy_execution_logs gets no new index (§3.1).
+    expect(
+      [...(await indexes('policy_execution_logs')).values()].some((i) =>
+        i.columns.includes('evaluation_mode'),
+      ),
+    ).toBe(false);
+  });
+
+  it('backfilled ownership_method: no verified, active or suspended domain without one', async () => {
+    const [row] = await prisma.$queryRaw<{ missing: bigint }[]>`
+      SELECT COUNT(*) AS missing FROM domains
+      WHERE status IN ('verified', 'active', 'suspended') AND ownership_method IS NULL`;
+    expect(Number(row!.missing)).toBe(0);
+  });
+
+  it('upserts one settings row per domain, cascades with the domain, RESTRICTs the organization', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    try {
+      const domain = await prisma.domain.create({
+        data: { organizationId, name: `it-apiparity-${suffix}.example.test` },
+      });
+      expect(domain.ownershipMethod).toBeNull();
+      const settings = await prisma.apiModeDomainSetting.create({
+        data: { organizationId, domainId: domain.id },
+      });
+      expect(settings).toMatchObject({
+        scopeKind: 'all',
+        scopeDepartmentIds: null,
+        scopeRecomputeRequestedAt: null,
+        firstCopyId: null,
+        rowVersion: 1,
+      });
+      expect(settings.publicId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
+      await expect(
+        prisma.apiModeDomainSetting.create({ data: { organizationId, domainId: domain.id } }),
+      ).rejects.toMatchObject({ code: 'P2002' });
+
+      // The lazy writers' upsert: first copy set once (COALESCE keeps the first one).
+      const now = new Date();
+      for (const firstCopyId of [101n, 202n]) {
+        await prisma.$executeRaw`
+          INSERT INTO api_mode_domain_settings
+            (public_id, organization_id, domain_id, first_copy_id, first_copy_received_at,
+             first_copy_at, updated_at)
+          VALUES (${randomUUID()}, ${organizationId}, ${domain.id}, ${firstCopyId}, ${now},
+                  ${now}, ${now})
+          ON DUPLICATE KEY UPDATE
+            first_copy_id = COALESCE(first_copy_id, VALUES(first_copy_id)),
+            first_copy_received_at = COALESCE(first_copy_received_at, VALUES(first_copy_received_at)),
+            first_copy_at = COALESCE(first_copy_at, VALUES(first_copy_at))`;
+      }
+      const after = await prisma.apiModeDomainSetting.findUniqueOrThrow({
+        where: { domainId: domain.id },
+      });
+      expect(after.firstCopyId).toBe(101n);
+      expect(after.id).toBe(settings.id);
+
+      await prisma.apiModeDomainSetting.update({
+        where: { domainId: domain.id },
+        data: {
+          scopeKind: 'departments',
+          scopeDepartmentIds: [randomUUID()],
+          scopeRecomputeRequestedAt: now,
+          rowVersion: { increment: 1 },
+        },
+      });
+
+      // The provider verification row shape (B3): fixed marker token, no FK on the connection.
+      const verification = await prisma.domainVerification.create({
+        data: {
+          organizationId,
+          domainId: domain.id,
+          method: 'provider_tenant',
+          token: 'provider-tenant',
+          providerConnectionId: 999_999_999n,
+          expiresAt: new Date(now.getTime() + 3_600_000),
+        },
+      });
+      await prisma.domainVerification.update({
+        where: { id: verification.id },
+        data: { providerResult: 'alias', providerCheckedAt: now, providerErrorCode: null },
+      });
+
+      // RESTRICT: the organization cannot go while a settings row exists.
+      await expect(
+        prisma.$executeRaw`DELETE FROM organizations WHERE id = ${organizationId}`,
+      ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      // CASCADE: deleting the domain removes its settings row and verification rows.
+      await prisma.domain.delete({ where: { id: domain.id } });
+      expect(await prisma.apiModeDomainSetting.count({ where: { organizationId } })).toBe(0);
+      expect(await prisma.domainVerification.count({ where: { organizationId } })).toBe(0);
+    } finally {
+      await prisma.apiModeDomainSetting.deleteMany({ where: { organizationId } });
+      await cleanup();
+    }
+  });
+
+  it('stores the new copy, mailbox, policy and counter defaults on existing writers', async () => {
+    const { suffix, ids, cleanup } = await scratchOrganizations(1);
+    const organizationId = ids[0]!;
+    const provider = await prisma.providerConnection.create({
+      data: { organizationId, provider: 'microsoft_365', displayName: `it-apiparity-${suffix}` },
+    });
+    try {
+      const connection = await prisma.apiModeConnection.create({
+        data: { organizationId, providerConnectionId: provider.id, provider: 'microsoft_365' },
+      });
+      const mailbox = await prisma.apiMailbox.create({
+        data: {
+          organizationId,
+          apiConnectionId: connection.id,
+          primaryAddress: `user@it-apiparity-${suffix}.example.test`,
+        },
+      });
+      expect(mailbox).toMatchObject({
+        scopeState: 'in_scope',
+        scopeSelected: false,
+        scopeEvaluatedAt: null,
+      });
+      const receivedAt = new Date();
+      const copy = await prisma.apiMessageCopy.create({
+        data: {
+          receivedAt,
+          publicId: randomUUID(),
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          messageId: 1n,
+          source: 'journal',
+          status: 'pending',
+        },
+      });
+      expect(copy).toMatchObject({
+        direction: 'inbound',
+        policyState: 'none',
+        policyDisposition: null,
+        policyTagged: false,
+        dlpAction: null,
+      });
+      const outbound = await prisma.apiMessageCopy.create({
+        data: {
+          receivedAt,
+          publicId: randomUUID(),
+          organizationId,
+          apiConnectionId: connection.id,
+          mailboxId: mailbox.id,
+          messageId: 2n,
+          source: 'journal',
+          status: 'scanned',
+          direction: 'outbound',
+          policyState: 'evaluated',
+          policyDisposition: 'reject',
+          dlpAction: 'block',
+        },
+      });
+      expect(outbound.direction).toBe('outbound');
+
+      const settings = await prisma.apiModeOrgSetting.create({ data: { organizationId } });
+      expect(settings).toMatchObject({
+        policyEvaluationEnabled: true,
+        outboundDetectionEnabled: true,
+      });
+      const policy = await prisma.apiRemediationPolicy.create({
+        data: {
+          organizationId,
+          mode: 'detect_only',
+          document: {},
+          documentSha256: '0'.repeat(64),
+          detectOnlyUntil: new Date(receivedAt.getTime() + 7 * 86_400_000),
+          detectOnlyThen: 'remind',
+          detectOnlyStartedAt: receivedAt,
+        },
+      });
+      expect(policy).toMatchObject({ detectOnlyThen: 'remind', detectOnlyNotifiedAt: null });
+      const hour = new Date(Math.floor(receivedAt.getTime() / 3_600_000) * 3_600_000);
+      const counter = await prisma.apiModeCounter.create({
+        data: { organizationId, apiConnectionId: connection.id, hour },
+      });
+      expect(counter).toMatchObject({
+        policyEvaluations: 0,
+        policyErrors: 0,
+        outboundDetections: 0,
+        copyDetections: 0,
+      });
+    } finally {
+      await prisma.apiModeCounter.deleteMany({ where: { organizationId } });
+      await prisma.apiRemediationPolicy.deleteMany({ where: { organizationId } });
+      await prisma.apiModeOrgSetting.deleteMany({ where: { organizationId } });
+      await prisma.apiMessageCopy.deleteMany({ where: { organizationId } });
+      await prisma.apiMailbox.deleteMany({ where: { organizationId } });
+      await prisma.apiModeConnection.deleteMany({ where: { organizationId } });
       await prisma.providerConnection.deleteMany({ where: { organizationId } });
       await cleanup();
     }

@@ -1,5 +1,8 @@
 import type { Prisma } from '@email-gateway/database';
 
+/** Protection mode of an API-mode copy evaluation (step API-4 A8.2). */
+export type CopyProtectionMode = 'api' | 'hybrid';
+
 type Tx = Prisma.TransactionClient;
 
 /** A writer read returned a row other than the one asked for (4.2 §6): retryable. */
@@ -169,6 +172,44 @@ export class NotificationReads {
     afterId: bigint | null = null,
   ): Promise<NoticeUser[]> {
     return findPermissionHolders(tx, organizationId, ALERT_PERMISSION, { take, afterId });
+  }
+
+  /**
+   * Step API-4 A7: the copies of an API-mode copy message that the detect evaluation counted —
+   * copy verdict authority, in-scope mailbox — read at send time: their number and the protection
+   * mode (`api` when any copy's mailbox domain is effective `api`, i.e.
+   * `COALESCE(domains.protection_mode, organizations.protection_mode)`, else `hybrid`).
+   * Echo-checked; counts only, never a mailbox address.
+   */
+  async copySummary(
+    tx: Tx,
+    organizationId: bigint,
+    messageId: bigint,
+    receivedAt: Date,
+  ): Promise<{ mailboxCount: number; protectionMode: CopyProtectionMode }> {
+    const rows = await tx.$queryRaw<
+      Array<{ organization_id: bigint; message_id: bigint; mode: string | null }>
+    >`
+      SELECT c.organization_id, c.message_id, COALESCE(d.protection_mode, o.protection_mode) AS mode
+        FROM api_message_copies c
+        JOIN api_mailboxes m ON m.id = c.mailbox_id AND m.organization_id = c.organization_id
+        JOIN organizations o ON o.id = c.organization_id
+        LEFT JOIN domains d ON d.id = m.domain_id AND d.organization_id = c.organization_id
+       WHERE c.organization_id = ${organizationId}
+         AND c.message_id = ${messageId}
+         AND c.received_at = ${receivedAt}
+         AND c.verdict_authority = 'copy'
+         AND m.scope_state = 'in_scope'
+       LIMIT 10000`;
+    for (const r of rows) {
+      if (BigInt(r.organization_id) !== organizationId || BigInt(r.message_id) !== messageId) {
+        throw new InconsistentNotificationReadError('api_message_copy');
+      }
+    }
+    return {
+      mailboxCount: rows.length,
+      protectionMode: rows.some((r) => r.mode === 'api') ? 'api' : 'hybrid',
+    };
   }
 
   /** True when `domain` is an active, non-deleted domain of the organization. */

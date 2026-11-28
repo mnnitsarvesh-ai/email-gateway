@@ -48,6 +48,9 @@ const EVENT_TYPES = [
   'ato.response.completed',
   // Step 8.2 D12.
   'integration.health_changed',
+  // Step API-4 A9.1: API-mode detections (catalogue v1 additions).
+  'mailbox.threat.detected',
+  'mailbox.dlp.detected',
 ] as const;
 
 /**

@@ -21,8 +21,9 @@ export type AlertSuppressionReason = 'opt_out' | 'disabled' | 'invalid_contact';
  * `notification_alerts_suppressed_total{kind,reason}`; step 8.4 D16 adds
  * `notification_ato_messages_total{kind,audience,result}`; step AI-R D8 adds
  * `notification_assistant_report_emails_total{result}`; step API-3 C12 adds
- * `notification_report_feedback_messages_total{kind,result}`. Bounded labels; never a tenant or
- * address.
+ * `notification_report_feedback_messages_total{kind,result}`; step API-4 adds the alert kinds
+ * `dlp_detected` and `api_mode_detect_only_ended` to the `kind` label values. Bounded labels;
+ * never a tenant or address.
  */
 export class NotificationMetrics {
   readonly messages: Counter<'kind' | 'result'>;
@@ -37,7 +38,7 @@ export class NotificationMetrics {
   constructor(metrics: MetricsService) {
     this.messages = metrics.counter(
       'notification_policy_messages_total',
-      'Policy notification events handled, by kind (policy_alert, sender_non_delivery) and result (sent, no_recipients, disabled, failed)',
+      'Policy notification events handled, by kind (policy_alert, sender_non_delivery; policy_alert includes the step API-4 detect variant of API-mode copies) and result (sent, no_recipients, disabled, failed)',
       ['kind', 'result'],
     );
     this.quarantineMessages = metrics.counter(
@@ -47,7 +48,7 @@ export class NotificationMetrics {
     );
     this.alertMessages = metrics.counter(
       'notification_alert_messages_total',
-      'Security alert events handled (step 6.2 N4), by kind (threat_detected, domain_dns_failed, webhook_disabled, integration_unhealthy, journal_intake_silent, api_mode_unhealthy) and result (sent, no_recipients, disabled, failed)',
+      'Security alert events handled (step 6.2 N4), by kind (threat_detected, domain_dns_failed, webhook_disabled, integration_unhealthy, journal_intake_silent, api_mode_unhealthy, api_mode_purge_approval, api_mode_report_received, dlp_detected, api_mode_detect_only_ended) and result (sent, no_recipients, disabled, failed)',
       ['kind', 'result'],
     );
     this.alertsSuppressed = metrics.counter(

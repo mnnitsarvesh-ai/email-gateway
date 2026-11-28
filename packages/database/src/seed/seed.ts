@@ -436,6 +436,9 @@ export async function seedDemo(
           verifiedAt: now,
           activatedAt: now,
           statusChangedAt: now,
+          // Step API-4 (B3, ADR-0107): the demo ownership counts as DNS-TXT-proven, like every
+          // ownership won before API-4 (migration 47 backfill); never NULL for an owned domain.
+          ownershipMethod: 'dns_txt',
           // Due at once: the api's domain-check job materializes its ownership record, DKIM key
           // and DNS record rows (step 2.1 D12), then rechecks it on the D11 schedule.
           nextCheckAt: now,

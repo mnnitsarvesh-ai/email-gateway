@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DirectoryRepository } from './directory.repository';
 import { InconsistentPolicyReadError } from './errors';
 import { FactsRepository, type RoundRef } from './facts.repository';
-import { definition, POLICY_A, RULES } from './fixtures.test-support';
+import { definition, POLICY_A, RULES } from './testing/fixtures';
 import { SnapshotCache } from './snapshot-cache';
 import { type LoadedSnapshot, SnapshotRepository } from './snapshot.repository';
 

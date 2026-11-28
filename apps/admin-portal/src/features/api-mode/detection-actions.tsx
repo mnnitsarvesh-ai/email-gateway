@@ -27,6 +27,8 @@ import { approvalHref, entryHref, releaseHref } from '@/features/quarantine/link
 import { ReasonConfirm } from '@/features/quarantine/reason-confirm';
 import { REMEDIATION_QUERIES } from './history-tab';
 import { clawbackHref } from './clawback-model';
+import { DlpSection, PolicyEvaluationSection } from './parity';
+import { OUTBOUND_NOT_REMEDIABLE } from './parity-model';
 import {
   DIRECTION_LABEL,
   SOURCE_LABEL,
@@ -54,7 +56,8 @@ export type DetectionRef = Pick<
   | 'remediationAction'
   | 'remediationId'
   | 'quarantineEntryId'
->;
+> &
+  Partial<Pick<Detection, 'direction'>>;
 
 /** Queries a restore through the quarantine release makes stale as well. */
 const RESTORE_QUERIES = [
@@ -70,12 +73,15 @@ const explain = (error: ApiError): string[] => {
 };
 
 /** Whether "Claw back similar…" may start a search from the detection (C2.4; the api decides). */
-export function canBeClawedBack(d: Pick<DetectionRef, 'status'>): boolean {
+export function canBeClawedBack(d: Pick<DetectionRef, 'status' | 'direction'>): boolean {
+  if (d.direction === 'outbound') return false;
   return d.status === 'scanned' || d.status === 'scan_failed';
 }
 
 /** Whether a manual remediation may be requested for the detection (R12; the api decides). */
 export function canBeRemediated(d: DetectionRef): boolean {
+  // Step API-4 P-I5: outbound detections are never remediated (the message has left).
+  if (d.direction === 'outbound') return false;
   return (d.status === 'scanned' || d.status === 'scan_failed') && d.remediationState !== 'pending';
 }
 
@@ -302,7 +308,10 @@ export function DetectionDrawer({
                   },
                   {
                     label: 'Direction',
-                    value: DIRECTION_LABEL[d.direction] ?? humanize(d.direction),
+                    value:
+                      d.direction === 'outbound'
+                        ? `${DIRECTION_LABEL.outbound} · ${OUTBOUND_NOT_REMEDIABLE}`
+                        : (DIRECTION_LABEL[d.direction] ?? humanize(d.direction)),
                   },
                   {
                     label: 'Risk score',
@@ -350,6 +359,8 @@ export function DetectionDrawer({
                   },
                 ]}
               />
+              <PolicyEvaluationSection detection={d} />
+              <DlpSection dlp={d.dlp} />
               <nav aria-label="Related" className="flex flex-wrap gap-3 text-sm">
                 {canHistory ? (
                   <Link

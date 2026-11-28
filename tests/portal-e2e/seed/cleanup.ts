@@ -96,6 +96,8 @@ const ORDER = [
   'api_user_reports',
   'api_remediation_actions',
   'api_remediation_policies',
+  // Step API-4: per-domain onboarding and scope state (RESTRICT on organizations).
+  'api_mode_domain_settings',
   'api_mode_org_settings',
   'api_message_copies',
   'api_copy_dedupe_keys',

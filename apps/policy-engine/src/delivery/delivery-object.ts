@@ -1,5 +1,5 @@
+import { type InconsistencySink, wrongRead } from '@email-gateway/policy-runtime';
 import type { Prisma } from '@email-gateway/database';
-import { type InconsistencySink, wrongRead } from '../evaluation/errors';
 
 /** The object an ALLOW delivers before header edits (step 4.3 U20, step 5.2 P20). */
 export type BaseObject = 'rewritten' | 'original';

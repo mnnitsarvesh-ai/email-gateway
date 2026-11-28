@@ -24,7 +24,7 @@ import { stack } from './support/env';
  * step 3.3 L7; v3: step 4.1 S2; v4: step 4.2 A2; v5: step 4.3 U2; v6: step 4.4 B3; v7: step 4.5
  * D2; v8: step 4.6 X11; v9: step 5.2 P15; v10: step 5.3 Q27; v11: step 6.2 §4.3; v12: step 8.1 A26;
  * v13: step 8.4 §4.1; v14: step 8.2 D12; v15: step AI-R D8; v16: step AI-6 D5; v17: step API-1
- * D7; v18: step API-3 C2.1, C12): checks through the management API. The prune case adds one stray binding to the dormant
+ * D7; v18: step API-3 C2.1, C12; v19: step API-4 A8.3): checks through the management API. The prune case adds one stray binding to the dormant
  * `scan.auth` and lets `init.mjs` remove it again.
  */
 /**
@@ -50,9 +50,10 @@ import { stack } from './support/env';
  * bindings). v17 (step API-1 D7): email.mailbox adds two (mail.message.copy_scanned.v1 + its
  * retry binding): 78 (73 queue + 5 exchange bindings). v18 (step API-3 C2.1, C12): email.mailbox
  * adds mail.threat.late_signal.v1 and email.notifications mail.report.feedback_requested.v1: 80
- * (75 queue + 5 exchange bindings).
+ * (75 queue + 5 exchange bindings). v19 (step API-4 A8.3): email.webhooks adds
+ * mail.message.copy_detected.v1: 81 (76 queue + 5 exchange bindings).
  */
-const TOPOLOGY_BINDINGS = 80;
+const TOPOLOGY_BINDINGS = 81;
 const api = new ManagementApi();
 const vhost = stack.rabbitmqVhost();
 
@@ -156,10 +157,10 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(bindings.filter((b) => b.destination_type === 'exchange')).toHaveLength(5);
   });
 
-  it('is topology v18: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R, AI-6, API-1, API-3)', async () => {
-    expect(TOPOLOGY_VERSION).toBe(18);
+  it('is topology v19: the vhost description and the rescan bindings (steps 4.1 S2, 4.2 A2, 4.3 U2, 4.4 B3, 4.5 D2, 4.6 X11, 5.2 P15, 5.3 Q27, 6.2, 8.1, 8.4, 8.2, AI-R, AI-6, API-1, API-3, API-4)', async () => {
+    expect(TOPOLOGY_VERSION).toBe(19);
     const info = await api.get<{ description?: string }>(`/vhosts/${encodeURIComponent(vhost)}`);
-    expect(info.description).toBe('email-gateway topology v18');
+    expect(info.description).toBe('email-gateway topology v19');
     const rescan = bindings
       .filter(
         (b) =>
@@ -740,6 +741,8 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
         'email.security [org.*.ato.response.completed.v1]',
         // v14 (step 8.2 D12).
         'email.events [org.*.integration.connection.health_changed.v1]',
+        // v19 (step API-4 A8.3): API-mode copy detections.
+        'email.security [org.*.mail.message.copy_detected.v1]',
         'email.events [retry.email.webhooks.#]',
       ].sort(),
     );
@@ -959,6 +962,12 @@ describe(`RabbitMQ topology v${TOPOLOGY_VERSION} on the real vhost`, () => {
     expect(reached('email.policy', 'org.42.mail.report.feedback_requested.v1')).toContain(
       'queue:email.notifications',
     );
+    // v19 (step API-4 A8.3): copy detections reach the webhook fanout (and the firehose), never
+    // the copies queue.
+    expect(reached('email.security', 'org.42.mail.message.copy_detected.v1')).toEqual([
+      'exchange:email.events',
+      'queue:email.webhooks',
+    ]);
     // Consumers (from WP3 on): the eg-mailbox user only.
     const worker = process.env.RABBITMQ_MAILBOX_USER || 'eg-mailbox';
     for (const user of await consumerUsers('email.mailbox')) expect(user).toBe(worker);

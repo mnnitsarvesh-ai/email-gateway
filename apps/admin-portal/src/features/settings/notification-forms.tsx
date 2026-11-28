@@ -54,6 +54,9 @@ export function alertSettingsSchema(bounds: Bounds) {
       dnsThrottle: throttle(bounds.domainDnsFailed),
       webhookEnabled: z.boolean(),
       webhookThrottle: throttle(bounds.webhookDisabled),
+      dlpEnabled: z.boolean(),
+      dlpMinSeverity: z.enum(['low', 'medium', 'high']),
+      dlpThrottle: throttle(bounds.dlpDetected),
       includeContact: z.boolean(),
     })
     .strict();
@@ -71,6 +74,9 @@ export function alertDefaults(view: NotificationSettings): AlertSettingsValues {
     dnsThrottle: a.domainDnsFailed.throttleMinutes,
     webhookEnabled: a.webhookDisabled.enabled,
     webhookThrottle: a.webhookDisabled.throttleMinutes,
+    dlpEnabled: a.dlpDetected.enabled,
+    dlpMinSeverity: a.dlpDetected.minSeverity,
+    dlpThrottle: a.dlpDetected.throttleMinutes,
     includeContact: a.includeOrganizationContact,
   };
 }
@@ -91,6 +97,11 @@ export function alertSettingsBody(
         webhookDisabled: {
           enabled: values.webhookEnabled,
           throttleMinutes: values.webhookThrottle,
+        },
+        dlpDetected: {
+          enabled: values.dlpEnabled,
+          minSeverity: values.dlpMinSeverity,
+          throttleMinutes: values.dlpThrottle,
         },
         includeOrganizationContact: values.includeContact,
       },
@@ -147,6 +158,12 @@ export const ALWAYS_ON_ALERTS: readonly { kind: string; label: string; detail: s
     label: 'Mailbox protection (API mode) degraded or failing',
     detail:
       'When the health of an API-mode connection becomes degraded (medium) or failing (high): missing mailbox access, coverage gaps, detection lag, throttling or feed errors. Sent to users with remediation:read and the organization contact, at most once a day per connection. Names the connection and the failing checks and links Mailbox protection; never shows a mailbox address.',
+  },
+  {
+    kind: 'api_mode_detect_only_ended',
+    label: 'Mailbox protection detect-only period ended',
+    detail:
+      'When the detect-only period of a remediation policy (organization or domain) ends: a reminder to review the simulated actions and switch to enforce (low), or the notice that the policy switched to enforce automatically (medium). Sent to users with remediation:write, once per period. Names the scope and the number of simulated actions and links the Remediation tab.',
   },
 ];
 
@@ -242,7 +259,7 @@ function AlertSettingsForm({
   });
   const b = view.bounds;
   const toggle = (
-    name: 'threatEnabled' | 'dnsEnabled' | 'webhookEnabled' | 'includeContact',
+    name: 'threatEnabled' | 'dnsEnabled' | 'webhookEnabled' | 'dlpEnabled' | 'includeContact',
     label: string,
     hint?: string,
   ) => (
@@ -261,7 +278,7 @@ function AlertSettingsForm({
     />
   );
   const minutes = (
-    name: 'threatThrottle' | 'dnsThrottle' | 'webhookThrottle',
+    name: 'threatThrottle' | 'dnsThrottle' | 'webhookThrottle' | 'dlpThrottle',
     bounds: { minThrottleMinutes: number; maxThrottleMinutes: number },
   ) => (
     <FormField
@@ -336,6 +353,37 @@ function AlertSettingsForm({
           {toggle('webhookEnabled', 'Send webhook alerts')}
           {minutes('webhookThrottle', b.webhookDisabled)}
         </fieldset>
+        <fieldset className="grid gap-3 rounded-md border p-3">
+          <legend className="px-1 text-sm font-medium">DLP detected (API mode)</legend>
+          {toggle(
+            'dlpEnabled',
+            'Send DLP alerts',
+            'When a copy of a delivered, internal or sent message matches a DLP rule (step API-4). Sent to users with dlp:read; shows the action, the direction and the category codes, never content, addresses or matched values.',
+          )}
+          <FormField
+            control={form.control}
+            name="dlpMinSeverity"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Minimum DLP severity</FormLabel>
+                <Select value={field.value} onValueChange={field.onChange} disabled={readOnly}>
+                  <FormControl>
+                    <SelectTrigger className="w-40">
+                      <SelectValue />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="low">Low (alert)</SelectItem>
+                    <SelectItem value="medium">Medium (require approval)</SelectItem>
+                    <SelectItem value="high">High (quarantine or block)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          {minutes('dlpThrottle', b.dlpDetected)}
+        </fieldset>
         {toggle(
           'includeContact',
           'Also send to the organization notification email',
@@ -378,6 +426,7 @@ export const KIND_LABELS: Record<Kind, string> = {
   ato_approval_requested: 'Account takeover response approval requested',
   ato_digest: 'Account takeover daily and weekly digests',
   ato_provider_health: 'Account takeover identity provider unhealthy',
+  dlp_detected: 'DLP detected in API-mode copies',
 };
 
 export const preferencesSchema = z
@@ -396,9 +445,10 @@ export const preferencesSchema = z
           'ato_approval_requested',
           'ato_digest',
           'ato_provider_health',
+          'dlp_detected',
         ]),
       )
-      .max(11),
+      .max(12),
     quarantineDigestOptOut: z.boolean(),
   })
   .strict();

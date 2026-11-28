@@ -93,6 +93,8 @@ describe('EVENT_REGISTRY', () => {
       // Step API-3 C12: reporter feedback (aggregate organization, exchange of quarantine
       // notifications).
       'mail.report.feedback_requested.v1': ['email.policy', 'organization'],
+      // Step API-4 A8: API-mode copy detections (exchange of copy_scanned.v1).
+      'mail.message.copy_detected.v1': ['email.security', 'message'],
     });
     for (const definition of Object.values(EVENT_REGISTRY)) {
       expect(EXCHANGE_NAMES).toContain(definition.exchange);

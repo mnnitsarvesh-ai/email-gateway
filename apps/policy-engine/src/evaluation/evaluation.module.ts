@@ -1,4 +1,10 @@
 import {
+  atoFactsRepositoryFor,
+  DirectoryRepository,
+  FactsRepository,
+  SnapshotRepository,
+} from '@email-gateway/policy-runtime';
+import {
   type DynamicModule,
   Inject,
   Injectable,
@@ -23,12 +29,8 @@ import { PolicyMetrics } from '../metrics/policy-metrics';
 import { QuarantineMetrics } from '../metrics/quarantine-metrics';
 import { QuarantineSettingsRepository } from '../quarantine/settings.repository';
 import { QuarantineStoreWriter } from '../quarantine/store-writer';
-import { atoFactsRepositoryFor } from './ato-facts.repository';
-import { DirectoryRepository } from './directory.repository';
 import { PolicyEvaluationService } from './evaluation.service';
-import { FactsRepository } from './facts.repository';
 import { createPolicyEvaluateFeed, PolicyEvaluateConsumer } from './policy-evaluate.consumer';
-import { SnapshotRepository } from './snapshot.repository';
 
 /** Starts the consumer after bootstrap and stops it before the clients close. */
 @Injectable()

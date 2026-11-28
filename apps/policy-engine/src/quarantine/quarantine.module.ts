@@ -1,4 +1,9 @@
 import {
+  DirectoryRepository,
+  FactsRepository,
+  SnapshotRepository,
+} from '@email-gateway/policy-runtime';
+import {
   type DynamicModule,
   Inject,
   Injectable,
@@ -22,9 +27,6 @@ import type { WorkerConfig } from '../config';
 import { URL_REWRITE_CONFIG } from '../core.module';
 import { S3PolicyCopyWriter } from '../delivery/policy-copy';
 import { CopyFactsReader, type PolicyUrlRewriteConfig } from '../delivery/policy-url-rewrite';
-import { DirectoryRepository } from '../evaluation/directory.repository';
-import { FactsRepository } from '../evaluation/facts.repository';
-import { SnapshotRepository } from '../evaluation/snapshot.repository';
 import { PolicyMetrics, type PolicyRead } from '../metrics/policy-metrics';
 import { QuarantineMetrics, type QuarantineRead } from '../metrics/quarantine-metrics';
 import { DigestScheduler } from './digest-scheduler';

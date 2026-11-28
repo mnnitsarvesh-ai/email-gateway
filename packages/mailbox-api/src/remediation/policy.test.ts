@@ -12,7 +12,7 @@ import {
   remediationDecisionRecordSchema,
   remediationPolicySchema,
   resolveEffectivePolicy,
-  UNSUPPORTED_UNTIL_POLICY_EVALUATION,
+  USE_POLICY_MAPPING,
   type RemediationInput,
   type RemediationPolicy,
   type RemediationPolicyDocument,
@@ -87,6 +87,8 @@ describe('vocabularies (mirror the Prisma enums)', () => {
       'remediation_paused',
       'no_mailbox_access',
       'internal_mail_disabled',
+      'outbound_not_remediable',
+      'policy_allow_override',
     ]);
     expect(REMEDIATION_RESULT_CODES).toEqual([
       'already_in_target',
@@ -179,8 +181,8 @@ describe('remediationPolicySchema (api-remediation-policy/1)', () => {
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({
       code: 'custom',
-      message: UNSUPPORTED_UNTIL_POLICY_EVALUATION,
-      params: { code: UNSUPPORTED_UNTIL_POLICY_EVALUATION },
+      message: USE_POLICY_MAPPING,
+      params: { code: USE_POLICY_MAPPING },
       path: ['rules', 0, 'when', 'policyDispositions'],
     });
   });
@@ -664,7 +666,7 @@ describe('canonical hash and decision record (R2.4)', () => {
     const decision = decideRemediation(given, effective.policy, OFF);
     const record = buildDecisionRecord(effective, given, decision);
     expect(record).toEqual({
-      v: 1,
+      v: 2,
       policy: {
         scope: 'platform_default',
         publicId: null,
@@ -681,6 +683,13 @@ describe('canonical hash and decision record (R2.4)', () => {
         verdictAuthority: 'copy',
       },
       policyOutcome: null,
+      lanes: {
+        verdict: { ruleId: 'p1-high-confidence-malware-phishing-hb', action: 'move_quarantine' },
+        policy: null,
+        winner: 'verdict',
+        suppressedBy: null,
+      },
+      postDelivery: [],
       notes: [],
     });
     expect(remediationDecisionRecordSchema.parse(record)).toEqual(record);

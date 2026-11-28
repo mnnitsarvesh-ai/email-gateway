@@ -1,5 +1,6 @@
+/** Synthetic P8 round rows and policy definitions (moved from apps/policy-engine, step API-4). */
 import { canonicalJson, sha256Hex } from '@email-gateway/policy-dsl';
-import type { RoundFacts } from './facts.repository';
+import type { RoundFacts } from '../facts.repository';
 
 /** Fixed completion time of the fixture round. */
 export const COMPLETED = new Date('2026-11-10T10:00:00.000Z');

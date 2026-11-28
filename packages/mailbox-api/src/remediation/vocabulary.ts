@@ -75,6 +75,23 @@ export const REMEDIATION_ACTIONS = [
 ] as const;
 export type RemediationAction = (typeof REMEDIATION_ACTIONS)[number];
 
+/**
+ * Strength order of the mailbox actions, weakest first (note 37 C5.3; note 38 A4.3: `none` is
+ * below `tag`). The one shared order of the clawback escalation rule and the two remediation
+ * lanes (`CLAWBACK_STRENGTH_ORDER` is this constant).
+ */
+export const REMEDIATION_ACTION_STRENGTH_ORDER = [
+  'tag',
+  'move_junk',
+  'move_quarantine',
+  'soft_delete',
+  'hard_delete',
+] as const satisfies readonly RemediationAction[];
+
+/** Strength of an action: `none` → -1, `tag` → 0 … `hard_delete` → 4. */
+export const remediationActionStrength = (action: RemediationAction | 'none'): number =>
+  action === 'none' ? -1 : REMEDIATION_ACTION_STRENGTH_ORDER.indexOf(action);
+
 /** Reversals (R3): undo a remediation. */
 export const REVERSAL_ACTIONS = ['restore_inbox', 'remove_tag'] as const;
 export type ReversalAction = (typeof REVERSAL_ACTIONS)[number];
@@ -140,6 +157,10 @@ export const REMEDIATION_SKIP_REASONS = [
   'no_mailbox_access',
   // Step API-3 (note 37 C8.5): an internal copy while the organization's internal mail is off.
   'internal_mail_disabled',
+  // Step API-4 (note 38 A4.3, P-I5): an outbound detection copy is never remediated.
+  'outbound_not_remediable',
+  // Step API-4 (note 38 A4.3 step 4, P-I4): a tenant allow override suppressed the verdict lane.
+  'policy_allow_override',
 ] as const;
 export type RemediationSkipReason = (typeof REMEDIATION_SKIP_REASONS)[number];
 
@@ -169,3 +190,25 @@ export const REMEDIATION_FAILURE_CODES = [
   'internal_error',
 ] as const satisfies readonly RemediationResultCode[];
 export type RemediationFailureCode = (typeof REMEDIATION_FAILURE_CODES)[number];
+
+/**
+ * `api_message_copies.direction` (`ApiCopyDirection`; step API-4 A6 appends `outbound`: a
+ * detection recorded on the sender's mailbox, never remediated).
+ */
+export const API_COPY_DIRECTIONS = ['inbound', 'internal', 'outbound'] as const;
+export type ApiCopyRecordDirection = (typeof API_COPY_DIRECTIONS)[number];
+
+/** `api_message_copies.policy_state` (`ApiCopyPolicyState`, step API-4 A1). */
+export const API_COPY_POLICY_STATES = [
+  'none',
+  'evaluated',
+  'inline',
+  'disabled',
+  'failed',
+  'not_applicable',
+] as const;
+export type ApiCopyPolicyState = (typeof API_COPY_POLICY_STATES)[number];
+
+/** `policy_execution_logs.evaluation_mode` (`PolicyEvaluationMode`, step API-4 A1). */
+export const POLICY_EVALUATION_MODES = ['inline', 'detect'] as const;
+export type PolicyEvaluationMode = (typeof POLICY_EVALUATION_MODES)[number];

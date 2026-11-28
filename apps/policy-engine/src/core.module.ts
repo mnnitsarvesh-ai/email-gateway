@@ -1,3 +1,10 @@
+import {
+  DirectoryRepository,
+  FactsRepository,
+  SnapshotCache,
+  type LoadedSnapshot,
+  SnapshotRepository,
+} from '@email-gateway/policy-runtime';
 import { type DynamicModule, Global, Module } from '@nestjs/common';
 import { MetricsService, S3Service } from '@email-gateway/common';
 import type { Logger } from '@email-gateway/logger';
@@ -5,10 +12,6 @@ import { parseTokenKey } from '@email-gateway/url-security';
 import type { WorkerConfig } from './config';
 import { S3PolicyCopyWriter } from './delivery/policy-copy';
 import { CopyFactsReader, type PolicyUrlRewriteConfig } from './delivery/policy-url-rewrite';
-import { DirectoryRepository } from './evaluation/directory.repository';
-import { FactsRepository } from './evaluation/facts.repository';
-import { SnapshotCache } from './evaluation/snapshot-cache';
-import { type LoadedSnapshot, SnapshotRepository } from './evaluation/snapshot.repository';
 import { PolicyMetrics, type PolicyRead } from './metrics/policy-metrics';
 import { QuarantineMetrics, type QuarantineRead } from './metrics/quarantine-metrics';
 import { QuarantineSettingsRepository } from './quarantine/settings.repository';

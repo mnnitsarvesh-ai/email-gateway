@@ -610,6 +610,19 @@ describe('provider-connection routes (e2e, dependencies stubbed)', () => {
   });
 
   describe('domains (#13, #14, D4)', () => {
+    it('step API-4 B4: links a verified (not yet active) domain; pending stays 422', async () => {
+      const c = world.addConnection(org, { status: 'configuring' });
+      const verified = world.addDomain(org, 'v4.example', { status: 'verified' });
+      const pending = world.addDomain(org, 'p4.example', { status: 'pending_verification' });
+      const path = `${P}/${c.publicId}/domains`;
+      const ok = await send('put', path, { domainIds: [verified.publicId] });
+      expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+      expect(ok.body.data).toEqual([expect.objectContaining({ id: verified.publicId })]);
+      const refused = await send('put', path, { domainIds: [pending.publicId] });
+      expect(refused.status).toBe(422);
+      expect(refused.body.code).toBe('domain_not_verified');
+    });
+
     it('links active domains of the organization; refuses pending, foreign and elsewhere-linked ones', async () => {
       const c = world.addConnection(org, { status: 'configuring' });
       const active = world.addDomain(org, 'a.example');

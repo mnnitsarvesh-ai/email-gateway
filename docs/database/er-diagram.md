@@ -1616,6 +1616,62 @@ erDiagram
   }
 ```
 
+### API-mode parity and onboarding
+
+Step API-4 ([design §3](../plan/steps/38-api-mode-parity-onboarding.md#3-data-model-one-forward-migration-utc-timestamp_api_mode_parity_onboarding-wp1), ADR-0105, ADR-0106, ADR-0107). Solid lines are foreign keys; dotted lines are logical references without a foreign key. One `api_mode_domain_settings` row per domain holds the mailbox scope (evaluated into `api_mailboxes.scope_state`) and the first recorded in-scope copy. A detect evaluation of a copy message is a `policy_execution_logs` row with `evaluation_mode = detect`; the copy rows carry its outcome (`policy_state`, `policy_disposition`, `policy_tagged`, `dlp_action`). A `provider_tenant` ownership check is a `domain_verifications` row naming the bound provider connection (no FK); the api's ownership win writes `domains.ownership_method`.
+
+```mermaid
+erDiagram
+  organizations ||--o{ api_mode_domain_settings : "RESTRICT"
+  domains ||--o| api_mode_domain_settings : "domain_id UQ, CASCADE"
+  api_mode_domain_settings ||..o| api_message_copies : "first_copy_id + first_copy_received_at"
+  api_mode_domain_settings ||..o{ tenant_departments : "scope_department_ids (public ids)"
+  domains ||..o{ api_mailboxes : "domain_id: scope_state, scope_selected"
+  email_messages ||..o{ policy_execution_logs : "message_id + received_at (evaluation_mode detect)"
+  domains ||--o{ domain_verifications : "CASCADE"
+  provider_connections ||..o{ domain_verifications : "provider_connection_id (method provider_tenant)"
+  api_mode_domain_settings {
+    bigint id PK
+    char public_id UK
+    bigint organization_id FK
+    bigint domain_id FK "UQ"
+    enum scope_kind "all, departments, mailboxes"
+    json scope_department_ids "1..20 department public ids"
+    datetime scope_recompute_requested_at
+    bigint first_copy_id
+    datetime first_copy_received_at
+    datetime first_copy_at
+    int row_version
+  }
+  domains {
+    enum ownership_method "dns_txt, provider_tenant (NULL until verified)"
+  }
+  domain_verifications {
+    enum method "dns_txt, dns_cname, provider_tenant"
+    bigint provider_connection_id
+    enum provider_result "verified, unverified, absent, alias, error"
+    datetime provider_checked_at
+  }
+  policy_execution_logs {
+    enum evaluation_mode "inline, detect"
+  }
+  api_message_copies {
+    enum direction "inbound, internal, outbound"
+    enum policy_state "none, evaluated, inline, disabled, failed, not_applicable"
+    enum policy_disposition
+    bool policy_tagged
+    enum dlp_action
+  }
+  api_mailboxes {
+    enum scope_state "in_scope, excluded"
+    bool scope_selected
+  }
+  api_remediation_policies {
+    datetime detect_only_until
+    enum detect_only_then "remind, enforce"
+  }
+```
+
 ## Security incidents and account takeover
 
 Step 8.4 ([design §3](../plan/steps/24-account-takeover-core.md#3-data-model-two-forward-migrations-wp1), ADR-0070, ADR-0075). Solid lines are foreign keys; dotted lines are logical references (partitioned tables have no foreign keys, and `ato_accounts` keeps no foreign key to the subject it monitors, so the trail survives a deleted user or connector).

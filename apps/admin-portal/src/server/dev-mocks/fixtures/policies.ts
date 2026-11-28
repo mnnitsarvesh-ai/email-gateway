@@ -94,6 +94,7 @@ const EXECUTIONS: Execution[] = FIXTURE_MESSAGES.flatMap((m) =>
     receivedAt: m.detail.receivedAt,
     lifecycleRound: e.lifecycleRound,
     scanId: e.round.scanId,
+    evaluationMode: 'inline',
     trigger: e.trigger,
     direction: e.direction,
     disposition: e.disposition,

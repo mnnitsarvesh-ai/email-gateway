@@ -55,7 +55,8 @@ const TEXT: Record<string, string> = {
     '`department_member_limit_reached`: DEPARTMENT_MAX_MEMBERS (`limit`)',
   [DEPARTMENT_MEMBER_EXISTS]: '`department_member_exists`: already a member',
   [DEPARTMENT_IN_USE]:
-    '`department_in_use`: an active policy version references it (`policies[].policyId`)',
+    '`department_in_use`: an active policy version references it (`policies[].policyId`), or ' +
+    'an API-mode mailbox scope lists it (`reference: api_mode_scope`, `domains[].domainId`)',
   [DEPARTMENT_CONFLICT]:
     '`department_conflict`: `expectedRowVersion` is not current (`currentRowVersion`)',
 };

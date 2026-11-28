@@ -2,34 +2,7 @@ import type { Counter, Histogram, MetricsService } from '@email-gateway/common';
 import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 
 /** Reads echo-checked by the engine (§6); the `read` label of `policy_inconsistent_reads_total`. */
-export type PolicyRead =
-  | 'message'
-  | 'message_update'
-  | 'recipients'
-  | 'scan'
-  | 'parse'
-  | 'finals'
-  | 'auth'
-  | 'bec'
-  | 'dlp'
-  | 'risk'
-  | 'attachments'
-  | 'attachment_results'
-  | 'urls'
-  | 'url_results'
-  | 'url_rewrite'
-  | 'settings'
-  | 'policies'
-  | 'versions'
-  | 'departments'
-  | 'members'
-  | 'users'
-  | 'lifecycle'
-  | 'parse_structure'
-  | 'message_urls'
-  | 'url_settings'
-  | 'ato_settings'
-  | 'ato_accounts';
+export type { PolicyRead } from '@email-gateway/policy-runtime';
 
 /**
  * The policy-engine's series (step 5.2 P24; names fixed by the design, labels bounded enums,

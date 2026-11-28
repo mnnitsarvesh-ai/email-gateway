@@ -7,7 +7,7 @@ import {
 } from '@email-gateway/webhooks';
 import { describe, expect, it, vi } from 'vitest';
 import { AlertNotificationHandler } from './alert-notification.handler';
-import type { StoredAlertEvent } from './alert-reads';
+import type { AlertRemediationPolicy, StoredAlertEvent } from './alert-reads';
 import type { NoticeMail, NoticeMailer } from './mailer';
 import { NoticeSendError } from './mailer';
 import type { NotificationMetrics } from './notification-metrics';
@@ -25,6 +25,7 @@ const RECEIVED = '2026-11-13T09:14:02.481Z';
 const INTAKE_SOURCE = '0192f0c4-bbbb-7ccc-8ddd-000000000086';
 const API_CONNECTION = '0192f0c4-cccc-7ddd-8eee-0000000000a1';
 const CLAWBACK = '0192f0c4-dddd-7eee-8fff-0000000000c1';
+const REMEDIATION_POLICY = '0192f0c4-eeee-7fff-8000-0000000000d1';
 const WINDOW = { from: '2026-11-13T09:00:00.000Z', to: '2026-11-13T10:00:00.000Z' };
 
 let preferenceRows: Array<{ organizationId: bigint; userId: bigint; preferences: unknown }> = [];
@@ -49,19 +50,27 @@ function alert(
   const refs: NotificationAlertRequestedV1['refs'] =
     kind === 'threat_detected'
       ? { webhookEventId: threatStored().eventId, messageId: '501', receivedAt: RECEIVED }
-      : kind === 'domain_dns_failed'
-        ? { webhookEventId: dnsStored().eventId, domainId: '31' }
-        : kind === 'integration_unhealthy'
-          ? { webhookEventId: integrationStored().eventId, connectionId: CONNECTION }
-          : kind === 'journal_intake_silent'
-            ? { intakeSourceId: INTAKE_SOURCE }
-            : kind === 'api_mode_unhealthy'
-              ? { apiModeConnectionId: API_CONNECTION }
-              : kind === 'api_mode_purge_approval'
-                ? { clawbackId: CLAWBACK }
-                : kind === 'api_mode_report_received'
-                  ? {}
-                  : { subscriptionId: SUBSCRIPTION };
+      : kind === 'dlp_detected'
+        ? {
+            webhookEventId: mailboxStored('mailbox.dlp.detected').eventId,
+            messageId: '501',
+            receivedAt: RECEIVED,
+          }
+        : kind === 'api_mode_detect_only_ended'
+          ? { remediationPolicyId: REMEDIATION_POLICY }
+          : kind === 'domain_dns_failed'
+            ? { webhookEventId: dnsStored().eventId, domainId: '31' }
+            : kind === 'integration_unhealthy'
+              ? { webhookEventId: integrationStored().eventId, connectionId: CONNECTION }
+              : kind === 'journal_intake_silent'
+                ? { intakeSourceId: INTAKE_SOURCE }
+                : kind === 'api_mode_unhealthy'
+                  ? { apiModeConnectionId: API_CONNECTION }
+                  : kind === 'api_mode_purge_approval'
+                    ? { clawbackId: CLAWBACK }
+                    : kind === 'api_mode_report_received'
+                      ? {}
+                      : { subscriptionId: SUBSCRIPTION };
   return {
     eventId: EVENT_ID,
     eventType: 'notification.alert_requested.v1',
@@ -98,6 +107,35 @@ function threatStored(): StoredAlertEvent {
   return {
     eventId: built.envelope.id,
     eventType: 'email.threat.detected',
+    occurredAt: new Date('2026-11-13T09:14:03.000Z'),
+    severity: 'high',
+    messageId: 501n,
+    messageReceivedAt: new Date(RECEIVED),
+    domainId: null,
+    envelope: built.envelope,
+  };
+}
+
+/** A stored API-mode detection (step API-4 A9.1) of the same message as the threat example. */
+function mailboxStored(
+  type: 'mailbox.threat.detected' | 'mailbox.dlp.detected',
+  data: Record<string, unknown> = {},
+): StoredAlertEvent {
+  const example = WEBHOOK_EXAMPLE_DATA[type] as Record<string, unknown>;
+  const built = buildEnvelope({
+    type,
+    occurredAt: '2026-11-13T09:14:03.000Z',
+    organizationPublicId: ORG_PUBLIC,
+    sourceEventId: SOURCE_EVENT,
+    data: {
+      ...example,
+      message: WEBHOOK_EXAMPLE_DATA['email.threat.detected'].message,
+      ...data,
+    } as never,
+  });
+  return {
+    eventId: built.envelope.id,
+    eventType: type,
     occurredAt: new Date('2026-11-13T09:14:03.000Z'),
     severity: 'high',
     messageId: 501n,
@@ -154,6 +192,13 @@ interface SetupOptions {
   contact?: string | null;
   holders?: Record<string, Array<{ id: bigint; email: string }>>;
   maxRecipients?: number;
+  /** `email_messages.ingest_source` of message 501 (null = purged). */
+  ingestSource?: 'gateway' | 'journal_intake' | 'mailbox_api' | null;
+  /** Extra stored public events the reads return. */
+  stored?: StoredAlertEvent[];
+  /** The remediation policy row of the detect-only alert. */
+  policy?: Partial<AlertRemediationPolicy> | null;
+  simulated?: { count: number; capped: boolean };
 }
 
 const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
@@ -171,6 +216,10 @@ const HOLDERS: Record<string, Array<{ id: bigint; email: string }>> = {
   ],
   'remediation:purge': [{ id: 19n, email: 'approver@acme.example' }],
   'remediation:write': [{ id: 20n, email: 'triage@acme.example' }],
+  'dlp:read': [
+    { id: 21n, email: 'dlp@acme.example' },
+    { id: 22n, email: 'dlp-optout@acme.example' },
+  ],
 };
 
 function setup(options: SetupOptions = {}) {
@@ -208,9 +257,38 @@ function setup(options: SetupOptions = {}) {
     ),
     windowEventCount: vi.fn(() => Promise.resolve(5)),
     webhookEvent: vi.fn((_tx: unknown, _org: bigint, eventId: string) => {
-      const stored = [threatStored(), dnsStored(), integrationStored()];
+      const stored = [
+        threatStored(),
+        dnsStored(),
+        integrationStored(),
+        mailboxStored('mailbox.dlp.detected'),
+        ...(options.stored ?? []),
+      ];
       return Promise.resolve(stored.find((e) => e.eventId === eventId) ?? null);
     }),
+    messageIngestSource: vi.fn(() =>
+      Promise.resolve(options.ingestSource === undefined ? 'gateway' : options.ingestSource),
+    ),
+    remediationPolicy: vi.fn((_tx: unknown, _org: bigint, publicId: string) =>
+      Promise.resolve(
+        publicId === REMEDIATION_POLICY && options.policy !== null
+          ? {
+              publicId: REMEDIATION_POLICY,
+              domainId: null,
+              domainName: null,
+              mode: 'detect_only',
+              detectOnlyUntil: new Date('2026-11-13T09:00:00.000Z'),
+              detectOnlyThen: 'remind' as const,
+              detectOnlyStartedAt: new Date('2026-11-06T09:00:00.000Z'),
+              detectOnlyNotifiedAt: new Date('2026-11-13T09:00:05.000Z'),
+              ...options.policy,
+            }
+          : null,
+      ),
+    ),
+    simulatedActions: vi.fn(() =>
+      Promise.resolve(options.simulated ?? { count: 37, capped: false }),
+    ),
     messageIdentity: vi.fn(() =>
       Promise.resolve({ publicId: MESSAGE_PUBLIC, receivedAt: new Date(RECEIVED) }),
     ),
@@ -963,5 +1041,213 @@ describe('AlertNotificationHandler (step 6.2 N3, N4)', () => {
     ]) {
       for (const call of fn.mock.calls as unknown[][]) expect(call[1]).toBe(7n);
     }
+  });
+});
+
+/** What no API-mode alert may contain: content, addresses of the message, matched values. */
+function assertContentFree(text: string): void {
+  // The message example's sender/recipient domains are fine; local parts and content are not.
+  expect(text).not.toMatch(/[a-z0-9._-]+@[a-z0-9.-]+/i);
+  for (const forbidden of ['Subject:', 'Body', 'Quarterly', '4111', 'IBAN DE', '/messages/']) {
+    expect(text).not.toContain(forbidden);
+  }
+}
+
+describe('AlertNotificationHandler API-mode detections (step API-4 A9.2)', () => {
+  it('threat_detected of a copy (mailbox.threat.detected): after delivery, protection mode, /api-mode link', async () => {
+    const stored = mailboxStored('mailbox.threat.detected');
+    const s = setup({ stored: [stored], ingestSource: 'journal_intake' });
+    const event = alert('threat_detected', {
+      refs: { webhookEventId: stored.eventId, messageId: '501', receivedAt: RECEIVED },
+    });
+    expect(await s.handler.handle(event, tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'quarantine:approve', 50, null);
+    const mail = s.sent[0]!;
+    expect(mail.subject).toBe('[Email Gateway] Security alert (high): threat detected');
+    expect(mail.text).toContain('Verdict: malicious');
+    expect(mail.text).toContain('Detection stage: after delivery (API mode)');
+    expect(mail.text).toContain(
+      'Protection mode: API mode (after delivery, through the mailbox API)',
+    );
+    expect(mail.text).toContain('Mailboxes with a copy: 2');
+    expect(mail.text).toContain(
+      `Details: https://portal.example/api-mode?tab=detections&message=${MESSAGE_PUBLIC}`,
+    );
+    assertContentFree(mail.text);
+  });
+
+  it('threat_detected of a copy sandbox detection: stage after delivery (API mode), sandbox', async () => {
+    const example = WEBHOOK_EXAMPLE_DATA['mailbox.threat.detected'];
+    const stored = mailboxStored('mailbox.threat.detected', {
+      detection: {
+        ...example.detection,
+        stage: 'sandbox',
+        protectionMode: 'hybrid',
+        remediation: null,
+        attachment: { partIndex: 3, sha256: 'c'.repeat(64), detectedType: 'seven_zip' },
+      },
+    });
+    const s = setup({ stored: [stored], ingestSource: 'mailbox_api' });
+    await s.handler.handle(
+      alert('threat_detected', {
+        refs: { webhookEventId: stored.eventId, messageId: '501', receivedAt: RECEIVED },
+      }),
+      tx,
+    );
+    expect(s.sent[0]!.text).toContain('Detection stage: after delivery (API mode), sandbox');
+    expect(s.sent[0]!.text).toContain('Protection mode: Hybrid (gateway and API mode)');
+  });
+
+  it('threat_detected: a stored type that disagrees with the ingest source dead-letters', async () => {
+    const stored = mailboxStored('mailbox.threat.detected');
+    const gateway = setup({ stored: [stored], ingestSource: 'gateway' });
+    await expect(
+      gateway.handler.handle(
+        alert('threat_detected', {
+          refs: { webhookEventId: stored.eventId, messageId: '501', receivedAt: RECEIVED },
+        }),
+        tx,
+      ),
+    ).rejects.toThrow('webhook_event_mismatch');
+    // A gateway-type event of a copy message is refused too.
+    const copy = setup({ ingestSource: 'journal_intake' });
+    await expect(copy.handler.handle(alert('threat_detected'), tx)).rejects.toThrow(
+      'webhook_event_mismatch',
+    );
+    expect(gateway.sent).toEqual([]);
+    expect(copy.sent).toEqual([]);
+  });
+
+  it('dlp_detected: dlp:read holders minus opt-outs, action, direction, categories, link; no matched value', async () => {
+    const s = setup({ ingestSource: 'journal_intake', contact: null });
+    preferenceRows = [
+      { organizationId: 7n, userId: 22n, preferences: { optOut: ['dlp_detected'] } },
+    ];
+    expect(await s.handler.handle(alert('dlp_detected'), tx)).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'dlp:read', 50, null);
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['dlp@acme.example']);
+    expect(mail.subject).toBe('[Email Gateway] Security alert (high): sensitive data detected');
+    expect(mail.text).toContain('Alert: Sensitive data detected (DLP, API mode)');
+    expect(mail.text).toContain('A security alert was raised for Acme.');
+    expect(mail.text).toContain('DLP action: block');
+    expect(mail.text).toContain('Direction: outbound');
+    expect(mail.text).toContain('DLP categories: payment_card');
+    expect(mail.text).toContain('Protection mode: API mode');
+    expect(mail.text).toContain('outbound detections are recorded, never removed');
+    expect(mail.text).toContain(
+      `https://portal.example/api-mode?tab=detections&message=${MESSAGE_PUBLIC}`,
+    );
+    assertContentFree(mail.text);
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'dlp_detected',
+      '-',
+      new Date(WINDOW.from),
+    );
+    expect(s.counts).toEqual([{ kind: 'dlp_detected', result: 'sent' }]);
+  });
+
+  it('dlp_detected: switched off or under alerts.dlpDetected.minSeverity → disabled', async () => {
+    const off = setup({
+      ingestSource: 'journal_intake',
+      settings: { alerts: { dlpDetected: { enabled: false } } },
+    });
+    expect(await off.handler.handle(alert('dlp_detected'), tx)).toBe('disabled');
+    const high = setup({
+      ingestSource: 'journal_intake',
+      settings: { alerts: { dlpDetected: { minSeverity: 'high' } } },
+    });
+    expect(await high.handler.handle(alert('dlp_detected', { severity: 'medium' }), tx)).toBe(
+      'disabled',
+    );
+    expect(off.sent).toEqual([]);
+    expect(high.sent).toEqual([]);
+  });
+
+  it('dlp_detected: refs missing or a gateway message dead-letter', async () => {
+    const s = setup({ ingestSource: 'gateway' });
+    await expect(s.handler.handle(alert('dlp_detected'), tx)).rejects.toThrow(
+      'webhook_event_mismatch',
+    );
+    const missing = setup({ ingestSource: 'journal_intake' });
+    await expect(
+      missing.handler.handle(alert('dlp_detected', { refs: { messageId: '501' } }), tx),
+    ).rejects.toThrow('alert_refs_missing');
+  });
+});
+
+describe('AlertNotificationHandler api_mode_detect_only_ended (step API-4 B7)', () => {
+  it('remind: remediation:write holders, organization scope, simulated count, remediation link', async () => {
+    const s = setup({ contact: null });
+    expect(
+      await s.handler.handle(alert('api_mode_detect_only_ended', { severity: 'low' }), tx),
+    ).toBe('sent');
+    expect(s.reads.holders).toHaveBeenCalledWith(tx, 7n, 'remediation:write', 50, null);
+    expect(s.reads.simulatedActions).toHaveBeenCalledWith(
+      tx,
+      7n,
+      null,
+      new Date('2026-11-06T09:00:00.000Z'),
+    );
+    const mail = s.sent[0]!;
+    expect(mail.recipients).toEqual(['triage@acme.example']);
+    expect(mail.subject).toBe('[Email Gateway] Security alert (low): detect-only period ended');
+    expect(mail.text).toContain(`Remediation policy: organization policy (${REMEDIATION_POLICY})`);
+    expect(mail.text).toContain('Detect-only period ended: 2026-11-13T09:00:00.000Z');
+    expect(mail.text).toContain('What happened: reminder only.');
+    expect(mail.text).toContain('Policy mode now: detect_only');
+    expect(mail.text).toContain(
+      'Actions that would have been taken (simulated) since 2026-11-06T09:00:00.000Z: 37',
+    );
+    expect(mail.text).toContain('Review: https://portal.example/api-mode?tab=remediation');
+    assertContentFree(mail.text);
+    expect(s.reads.windowEventCount).toHaveBeenCalledWith(
+      tx,
+      7n,
+      'api_mode_detect_only_ended',
+      REMEDIATION_POLICY,
+      new Date(WINDOW.from),
+    );
+  });
+
+  it('enforce: a domain policy switched automatically (period columns cleared), capped count', async () => {
+    const s = setup({
+      policy: {
+        domainId: 31n,
+        domainName: 'acme.example',
+        mode: 'enforce',
+        detectOnlyUntil: null,
+        detectOnlyThen: null,
+        detectOnlyStartedAt: null,
+        detectOnlyNotifiedAt: new Date('2026-11-13T09:00:05.000Z'),
+      },
+      simulated: { count: 10_000, capped: true },
+    });
+    await s.handler.handle(alert('api_mode_detect_only_ended', { severity: 'medium' }), tx);
+    // The start is gone: the count covers the longest period (30 days) before the end.
+    expect(s.reads.simulatedActions).toHaveBeenCalledWith(
+      tx,
+      7n,
+      31n,
+      new Date(Date.parse('2026-11-13T09:00:05.000Z') - 30 * 86_400_000),
+    );
+    const text = s.sent[0]!.text;
+    expect(text).toContain('Remediation policy: domain acme.example');
+    expect(text).toContain('switched to enforce automatically');
+    expect(text).toContain('Policy mode now: enforce');
+    expect(text).toContain(': 10000 or more');
+  });
+
+  it('a missing policy dead-letters; it is never switched off by tenant settings', async () => {
+    const gone = setup({ policy: null });
+    await expect(gone.handler.handle(alert('api_mode_detect_only_ended'), tx)).rejects.toThrow(
+      'remediation_policy_not_found',
+    );
+    const s = setup({
+      settings: { alerts: { threatDetected: { enabled: false }, dlpDetected: { enabled: false } } },
+    });
+    expect(await s.handler.handle(alert('api_mode_detect_only_ended'), tx)).toBe('sent');
   });
 });

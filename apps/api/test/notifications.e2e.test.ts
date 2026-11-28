@@ -130,6 +130,31 @@ describe('notifications (e2e, dependencies stubbed)', () => {
       expect(read.body.rowVersion).toBe(2);
     });
 
+    it('step API-4 A9.2: alerts.dlpDetected (enabled, minimum severity, throttle) and its bounds', async () => {
+      const res = await put({
+        settings: { alerts: { dlpDetected: { minSeverity: 'high', throttleMinutes: 120 } } },
+        expectedRowVersion: 0,
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.settings.alerts.dlpDetected).toEqual({
+        enabled: true,
+        minSeverity: 'high',
+        throttleMinutes: 120,
+      });
+      expect(res.body.bounds.dlpDetected).toEqual({
+        minThrottleMinutes: 15,
+        maxThrottleMinutes: 1440,
+      });
+      for (const settings of [
+        { alerts: { dlpDetected: { throttleMinutes: 5 } } },
+        { alerts: { dlpDetected: { minSeverity: 'critical' } } },
+      ]) {
+        const bad = await put({ settings, expectedRowVersion: 1 });
+        expect(bad.status, JSON.stringify(settings)).toBe(400);
+        expect(bad.body.code).toBe('notification_settings_invalid');
+      }
+    });
+
     it('refuses invalid documents (notification_settings_invalid) and bad envelopes (validation_failed)', async () => {
       for (const settings of [
         { alerts: { threatDetected: { throttleMinutes: 5 } } },
@@ -194,6 +219,8 @@ describe('notifications (e2e, dependencies stubbed)', () => {
         kinds: [...PREFERENCE_KINDS],
         invalidStored: false,
       });
+      // Step API-4 (A9.2): the DLP detection alert is a preference kind.
+      expect(empty.body.kinds).toContain('dlp_detected');
       const res = await api
         .http()
         .put(PREFS)

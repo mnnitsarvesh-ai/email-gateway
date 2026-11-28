@@ -38,6 +38,16 @@ import {
   type Detection,
 } from './model';
 import {
+  DISPOSITION_LABEL,
+  DLP_ACTIONS,
+  DLP_ACTION_LABEL,
+  DispositionBadge,
+  DlpActionBadge,
+  OUTBOUND_NOT_REMEDIABLE,
+  POLICY_DISPOSITIONS,
+  PolicyStateBadge,
+} from './parity-model';
+import {
   COPY_REMEDIATION_STATES,
   RemediationStateBadge,
   STATE_LABEL,
@@ -53,6 +63,9 @@ const URL_SHAPE = {
   remediationState: z.enum(COPY_REMEDIATION_STATES).optional().catch(undefined),
   /** Step API-3 C8: inbound or internal (east-west) copies. */
   direction: z.enum(DETECTION_DIRECTIONS).optional().catch(undefined),
+  /** Step API-4 A12: the policy disposition and the DLP action of the copy. */
+  policyDisposition: z.enum(POLICY_DISPOSITIONS).optional().catch(undefined),
+  dlpAction: z.enum(DLP_ACTIONS).optional().catch(undefined),
   /** The detection whose detail drawer is open (link target of entries and history). */
   detection: z.string().uuid().optional().catch(undefined),
 };
@@ -66,6 +79,8 @@ export function detectionQuery(
     connection?: string;
     remediationState?: string;
     direction?: string;
+    policyDisposition?: string;
+    dlpAction?: string;
   },
   range: { from: string; to: string },
 ): QueryParams<'ApiModeController_listDetections_v1'> {
@@ -78,6 +93,8 @@ export function detectionQuery(
     ...(filters.connection ? { connectionId: filters.connection } : {}),
     ...(filters.remediationState ? { remediationState: filters.remediationState } : {}),
     ...(filters.direction ? { direction: filters.direction } : {}),
+    ...(filters.policyDisposition ? { policyDisposition: filters.policyDisposition } : {}),
+    ...(filters.dlpAction ? { dlpAction: filters.dlpAction } : {}),
   };
 }
 
@@ -109,14 +126,43 @@ export function DetectionsTab() {
   const [restoring, setRestoring] = useState<DetectionRef | null>(null);
   const [restored, setRestored] = useState<RestoreResult | null>(null);
   const { from, to } = range;
-  const { verdict, status, source, connection, remediationState, direction } = filters;
+  const {
+    verdict,
+    status,
+    source,
+    connection,
+    remediationState,
+    direction,
+    policyDisposition,
+    dlpAction,
+  } = filters;
   const query = useMemo(
     () =>
       detectionQuery(
-        { verdict, status, source, connection, remediationState, direction },
+        {
+          verdict,
+          status,
+          source,
+          connection,
+          remediationState,
+          direction,
+          policyDisposition,
+          dlpAction,
+        },
         { from, to },
       ),
-    [verdict, status, source, connection, remediationState, direction, from, to],
+    [
+      verdict,
+      status,
+      source,
+      connection,
+      remediationState,
+      direction,
+      policyDisposition,
+      dlpAction,
+      from,
+      to,
+    ],
   );
   const list = useCursorList('ApiModeController_listDetections_v1', query);
 
@@ -156,6 +202,30 @@ export function DetectionsTab() {
         meta: { label: 'Direction' },
         cell: ({ row }) =>
           DIRECTION_LABEL[row.original.direction] ?? humanize(row.original.direction),
+      },
+      {
+        id: 'policy',
+        header: 'Policy',
+        meta: { label: 'Policy' },
+        cell: ({ row }) => (
+          <span className="grid justify-items-start gap-0.5">
+            {row.original.policyDisposition ? (
+              <DispositionBadge
+                disposition={row.original.policyDisposition}
+                tagged={row.original.policyTagged}
+              />
+            ) : null}
+            {row.original.policyState !== 'evaluated' ? (
+              <PolicyStateBadge state={row.original.policyState} />
+            ) : null}
+          </span>
+        ),
+      },
+      {
+        id: 'dlp',
+        header: 'DLP',
+        meta: { label: 'DLP' },
+        cell: ({ row }) => <DlpActionBadge action={row.original.dlpAction} />,
       },
       {
         id: 'riskScore',
@@ -216,6 +286,9 @@ export function DetectionsTab() {
         cell: ({ row }) => (
           <span className="grid justify-items-start gap-0.5">
             <RemediationStateBadge state={row.original.remediationState} />
+            {row.original.direction === 'outbound' ? (
+              <span className="text-xs text-muted-foreground">{OUTBOUND_NOT_REMEDIABLE}</span>
+            ) : null}
             {row.original.remediationAction ? (
               <span className="text-xs text-muted-foreground">
                 {actionLabel(row.original.remediationAction)}
@@ -298,6 +371,27 @@ export function DetectionsTab() {
                 label: DIRECTION_LABEL[value],
               }))}
             />
+            <FilterSelect
+              label="Policy disposition"
+              value={filters.policyDisposition}
+              onChange={(value) =>
+                setFilters({
+                  policyDisposition: value as (typeof POLICY_DISPOSITIONS)[number] | undefined,
+                })
+              }
+              options={POLICY_DISPOSITIONS.map((value) => ({
+                value,
+                label: DISPOSITION_LABEL[value],
+              }))}
+            />
+            <FilterSelect
+              label="DLP action"
+              value={filters.dlpAction}
+              onChange={(value) =>
+                setFilters({ dlpAction: value as (typeof DLP_ACTIONS)[number] | undefined })
+              }
+              options={DLP_ACTIONS.map((value) => ({ value, label: DLP_ACTION_LABEL[value] }))}
+            />
             {connectionOptions.length > 1 ? (
               <FilterSelect
                 label="Connection"
@@ -309,7 +403,14 @@ export function DetectionsTab() {
           </>
         }
         isFiltered={Boolean(
-          verdict || status || source || connection || remediationState || direction,
+          verdict ||
+          status ||
+          source ||
+          connection ||
+          remediationState ||
+          direction ||
+          policyDisposition ||
+          dlpAction,
         )}
         onClearFilters={() =>
           setFilters({
@@ -319,6 +420,8 @@ export function DetectionsTab() {
             connection: undefined,
             remediationState: undefined,
             direction: undefined,
+            policyDisposition: undefined,
+            dlpAction: undefined,
           })
         }
         rowActions={(row) => [
@@ -363,6 +466,7 @@ export function DetectionsTab() {
             <UntrustedText value={row.mailboxAddress} mono maxLength={60} />
             <div className="flex flex-wrap items-center gap-2">
               <VerdictBadge verdict={row.verdict} />
+              <DlpActionBadge action={row.dlpAction} />
               <RemediationStateBadge state={row.remediationState} />
               <DateTime value={row.receivedAt} />
             </div>

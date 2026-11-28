@@ -15,6 +15,8 @@ export const API_MODE_PERMISSIONS = {
   organizationRead: 'organization:read',
   organizationManage: 'organization:manage',
   domainManage: 'domain:manage',
+  // Step API-4 (A10, B8): protection by mode and the domain onboarding state.
+  domainRead: 'domain:read',
 } as const;
 
 /** `audit_logs.action` of the module (§5). Metadata: enums, ids and counts only (+ `reason`). */
@@ -41,6 +43,8 @@ export const API_MODE_AUDIT = {
   reportMailboxUpdated: 'api_mode.report_mailbox_updated',
   reportTriaged: 'api_mode.report_triaged',
   reportClawbackRequested: 'api_mode.report_clawback_requested',
+  // Step API-4 B6 (docs/plan/steps/38-api-mode-parity-onboarding.md).
+  scopeUpdated: 'api_mode.scope_updated',
 } as const;
 
 /** `audit_logs.resource_type` of the module's rows. */
@@ -56,6 +60,8 @@ export const API_MODE_RESOURCES = {
   clawback: 'api_clawback',
   report: 'api_user_report',
   orgSettings: 'api_mode_org_settings',
+  // Step API-4 B6.
+  domainSettings: 'api_mode_domain_settings',
 } as const;
 
 /** Stable Idempotency-Key operation names. */
@@ -85,6 +91,8 @@ export const API_MODE_OPERATIONS = {
   reportMailboxAdd: 'api_mode.report_mailbox_add',
   reportMailboxSet: 'api_mode.report_mailbox_set',
   orgSettingsPut: 'api_mode.settings_org_put',
+  // Step API-4 B6.
+  scopePut: 'api_mode.domain_scope_put',
 } as const;
 
 /** v1 cursor resources (ADR-0051). */
@@ -96,6 +104,8 @@ export const API_MODE_CURSOR_RESOURCES = {
   clawbacks: 'api_clawbacks',
   clawbackTargets: 'api_clawback_targets',
   reports: 'api_user_reports',
+  // Step API-4 A10.
+  coverage: 'protection_coverage',
 } as const;
 
 /** Writer transaction budget of the module's mutations. */
@@ -160,4 +170,11 @@ export type ApiModeConfig = Pick<
   | 'API_MODE_CLAWBACK_MAX_WINDOW_DAYS'
   | 'API_MODE_PURGE_APPROVAL_TTL_HOURS'
   | 'API_MODE_REPORT_MAILBOXES_MAX'
+  | 'API_MODE_FIRST_COPY_HINT_AFTER_MINUTES'
+  | 'API_MODE_SCOPE_MAX_MAILBOXES'
+  | 'API_MODE_SCOPE_MAX_DEPARTMENTS'
 >;
+
+/** Step API-4 (B8): `copies_failing` looks at this window and stops counting at the cap. */
+export const FIRST_COPY_FAILURE_WINDOW_MS = 24 * 3_600_000;
+export const FIRST_COPY_FAILURE_CAP = 100;

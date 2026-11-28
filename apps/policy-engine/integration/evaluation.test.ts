@@ -1,3 +1,4 @@
+import { InconsistentPolicyReadError } from '@email-gateway/policy-runtime';
 import {
   AmqpConnection,
   ConfirmPublisher,
@@ -13,7 +14,6 @@ import {
   policyNotificationRequestedV1,
 } from '@email-gateway/event-contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { InconsistentPolicyReadError } from '../src/evaluation/errors';
 import { POLICY_EVALUATE_CONSUMER } from '../src/evaluation/evaluation.service';
 import {
   createPolicyEvaluateFeed,

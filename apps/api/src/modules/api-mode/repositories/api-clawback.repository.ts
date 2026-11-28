@@ -60,6 +60,9 @@ export interface OrgSettingsRow {
   tiMinConfidence: number;
   reportAckEnabled: boolean;
   reportFeedbackEnabled: boolean;
+  /** Step API-4 (A1, A6); optional for API-3 callers (absent = the default, on). */
+  policyEvaluationEnabled?: boolean;
+  outboundDetectionEnabled?: boolean;
   rowVersion: number;
   updatedAt: Date;
   /** P2 separation of duties: who last raised `purgeApprovalMailboxes` (a principal key). */
@@ -317,6 +320,10 @@ export interface ClawbackCounterRow {
   clawbackTargetsFailed: number;
   reportsReceived: number;
   reportsResolved: number;
+  /** Step API-4 (A3, A6): detect-mode evaluations, their failures and outbound detections. */
+  policyEvaluations?: number;
+  policyErrors?: number;
+  outboundDetections?: number;
 }
 
 export interface OutboxRow {
@@ -362,6 +369,8 @@ export class ApiClawbackRepository {
     tiMinConfidence: true,
     reportAckEnabled: true,
     reportFeedbackEnabled: true,
+    policyEvaluationEnabled: true,
+    outboundDetectionEnabled: true,
     rowVersion: true,
     updatedAt: true,
     purgeApprovalRaisedBy: true,
@@ -1373,6 +1382,9 @@ export class ApiClawbackRepository {
         clawbackTargetsFailed: true,
         reportsReceived: true,
         reportsResolved: true,
+        policyEvaluations: true,
+        policyErrors: true,
+        outboundDetections: true,
       },
       orderBy: [{ hour: 'asc' }, { apiConnectionId: 'asc' }],
     });

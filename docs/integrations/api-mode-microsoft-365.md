@@ -40,6 +40,29 @@ Notes:
 - Hybrid domains: copies of messages the gateway already delivered inline are never remediated automatically.
 - Remediation shares the connection's Graph request budget and pauses when Microsoft Graph throttles (`429`/`503` with `Retry-After`). An administrator can **pause remediation** per connection (restores continue). Revoking the mailbox access stops remediation; pending actions fail with `mailbox_access_revoked`.
 
+## What your tenant policies do after delivery (step API-4)
+
+From step API-4 ([ADR-0105](../architecture/adr/0105-api-mode-copy-policy-evaluation-and-policy-lane.md), [ADR-0106](../architecture/adr/0106-api-mode-detections-alerts-webhooks.md), [ADR-0107](../architecture/adr/0107-api-mode-onboarding-provider-ownership-scope-detect-only.md)) every copy is also evaluated against **your organization's policies** (custom rules, allow and block lists, the DLP policy, BEC, the platform default and the strictness floor) by the same evaluator the gateway uses inline, in **detect mode**: the message was already delivered by Microsoft 365, so nothing is bounced, delayed, rewritten or re-routed. What a policy decides becomes a mailbox action through the remediation policy's **policy mapping** (Mailbox protection → Remediation):
+
+| Your policy decides                                                        | Default action in the mailbox                                                                             |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Quarantine                                                                 | The hidden `Email Gateway Quarantine` folder                                                              |
+| Require approval                                                           | The hidden `Email Gateway Quarantine` folder, as a **review** entry: restoring it needs an approver       |
+| Reject (discard / reject)                                                  | The hidden `Email Gateway Quarantine` folder; the sender is **never** notified (no bounce after delivery) |
+| Allow with a tag or warning                                                | The category `Email Gateway: Suspicious` (the message stays in the Inbox)                                 |
+| Allow                                                                      | nothing                                                                                                   |
+| Header or subject edits, warning banners, URL rewriting, encrypt, redirect | not possible after delivery: recorded as "not applicable" with the reason                                 |
+| Archive                                                                    | follows your journaling and archiving settings                                                            |
+| Alert                                                                      | the policy alert e-mail, marked "detected after delivery (API mode)"                                      |
+
+- Each mapping can be changed to Junk Email, soft delete, tag or nothing; **hard delete is never a mapping**.
+- The policy decision and the threat verdict are two lanes: the **stronger** mailbox action wins. A tenant **allow** rule (for example a trusted sender) stops a verdict-only action, exactly as it does inline; hard blocks (malware, known phishing) are never overridden.
+- **Outbound mail** sent by your users is evaluated too (DLP above all): a detection is recorded on the sender's mailbox and raises the `dlp_detected` alert and the `mailbox.dlp.detected` webhook, but the message has left: nothing in the sender's mailbox is ever moved or deleted.
+- **Hybrid domains:** messages the gateway already filtered inline are not evaluated or acted on again.
+- **Which mailboxes:** a domain's scope (all mailboxes, policy-directory departments or selected mailboxes) decides where actions apply; excluded mailboxes are still recorded but never acted on.
+- **Detect-only start:** the add-domain wizard starts a new domain in detect only for 7 days (simulated actions, listed in History) and then reminds the administrators (or, if chosen, switches to enforce automatically).
+- Turning it off: Mailbox protection → Settings → **Evaluate tenant policies on copies** (and **Detect outbound mail (DLP)**); the operator also has a platform switch. Detections, alerts and webhooks: Mailbox protection → Detections, the `threat_detected` / `dlp_detected` alerts and the `mailbox.threat.detected` / `mailbox.dlp.detected` webhook types.
+
 ## What clawback does in your tenant
 
 From step API-3 the gateway can also act on mail that was **already delivered** when a threat becomes known later ([ADR-0103](../architecture/adr/0103-api-mode-clawback-search-and-purge.md)). It searches only the copies it recorded from the journal (and the optional feeds); it never searches mailboxes live and never backfills mail from before onboarding.

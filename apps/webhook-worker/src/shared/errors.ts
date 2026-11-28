@@ -23,6 +23,9 @@ export const WEBHOOK_READS = [
   'alert_window',
   // Step 8.4 D16: the account kind of `ato.response.completed`.
   'ato_account',
+  // Step API-4 A9.1: the copy detection reads (risk row reason codes, counted copies).
+  'risk_score',
+  'api_message_copies',
 ] as const;
 export type WebhookRead = (typeof WEBHOOK_READS)[number];
 

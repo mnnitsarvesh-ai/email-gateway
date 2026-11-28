@@ -825,6 +825,9 @@ const booleanQuery = z
   .transform((v) => v === 'true')
   .optional();
 
+/** Step API-4 (A12): the `mode` filter of the history. */
+export const EVALUATION_MODE_FILTERS = ['inline', 'detect', 'all'] as const;
+
 export const PolicyExecutionQuerySchema = z
   .strictObject({
     from: IsoDate.describe('Inclusive lower bound of `receivedAt` (required)'),
@@ -838,6 +841,13 @@ export const PolicyExecutionQuerySchema = z
     ruleId: z.string().regex(RULE_ID).optional().describe('Decisive rule id'),
     overrideApplied: booleanQuery,
     trigger: z.enum(POLICY_TRIGGERS).optional(),
+    mode: z
+      .enum(EVALUATION_MODE_FILTERS)
+      .default('inline')
+      .describe(
+        'Step API-4: `inline` (gateway rounds, default), `detect` (API-mode copies, detect mode) ' +
+          'or `all`',
+      ),
     limit: z.coerce.number().int().min(1).max(100).default(25),
     cursor: z.string().min(1).max(96).optional(),
   })
@@ -856,6 +866,7 @@ export const PolicyExecutionQueryDocSchema = z.strictObject({
   ruleId: z.string().optional(),
   overrideApplied: z.enum(['true', 'false']).optional(),
   trigger: z.enum(POLICY_TRIGGERS).optional(),
+  mode: z.enum(EVALUATION_MODE_FILTERS).optional(),
   limit: z.number().int().min(1).max(100).optional(),
   cursor: z.string().optional(),
 });
@@ -885,6 +896,12 @@ export const PolicyExecutionSchema = z.strictObject({
   atoFacts: AtoFactsViewSchema,
   durationUs: z.number().int().min(0),
   evaluatedAt: IsoDate,
+  evaluationMode: z
+    .enum(['inline', 'detect'])
+    .describe(
+      'Step API-4: `detect` = an API-mode copy evaluated after delivery (nothing enforced; the ' +
+        'message id is a copy registry message, not a gateway message)',
+    ),
 });
 export type PolicyExecution = z.output<typeof PolicyExecutionSchema>;
 

@@ -4,6 +4,8 @@
 
 Superseded in part by [ADR-0099](0099-mailbox-access-consent-and-custody.md) (step API-1, 2026-11-26): a third purpose `mailbox_remediation` (profiles `m365.mailbox_remediation`, `google.mailbox_remediation`: Graph `Mail.ReadWrite` + `User.Read.All`, Gmail `gmail.modify` + `admin.directory.user.readonly`) with its own operator apps, consented through the unchanged grant routes and additionally gated by `remediation:write`.
 
+Superseded in part by [ADR-0107](0107-api-mode-onboarding-provider-ownership-scope-detect-only.md) (decision 1) (step API-4, 2026-11-27): tenant binding counts only linked domains whose ownership was proven by the DNS TXT record (`domains.ownership_method = dns_txt`), in `verified` or `active` status; links accept `verified` (not only `active`) domains; a domain proven through the bound tenant's listing (`provider_tenant`) never proves a binding. The provider relay still requires `active` and outbound.
+
 **Context.** Step 8.2 must connect an organization's Microsoft 365 tenant or Google Workspace customer to the gateway with OAuth2 where applicable and least-privilege permissions, and step 8.5 must reuse the same connections for identity-provider telemetry and response actions. Microsoft multi-tenant applications receive every permission they declare at admin consent; Google domain-wide delegation is granted per service-account client id and scope list. The gateway has no outbound HTTP client to either provider and no notion of a provider tenant.
 
 **Decision.**

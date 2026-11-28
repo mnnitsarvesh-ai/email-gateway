@@ -114,6 +114,8 @@ function factsIn(tx: Prisma.TransactionClient, reads: FanoutReads): FactsSource 
     sandboxSubmission: (key, id) => reads.sandboxSubmission(tx, key, id),
     domain: (org, id, publicId) => reads.domain(tx, org, id, publicId),
     atoAccountKind: (org, publicId) => reads.atoAccountKind(tx, org, publicId),
+    riskReasonCodes: (key) => reads.riskReasonCodes(tx, key),
+    copyDetections: (key) => reads.copyDetections(tx, key),
   };
 }
 
@@ -283,22 +285,22 @@ export class FanoutService {
     index: OrganizationIndex,
     occurredAt: Date,
   ) {
-    const refs =
-      kind === 'threat_detected'
-        ? {
-            webhookEventId,
-            messageId: pe.message!.messageId.toString(),
-            receivedAt: pe.message!.receivedAt.toISOString(),
-          }
-        : kind === 'integration_unhealthy'
-          ? { webhookEventId, connectionId: pe.connectionPublicId! }
-          : { webhookEventId, domainId: (pe.domainId ?? 0n).toString() };
-    const scopeKey =
-      kind === 'threat_detected'
-        ? ALERT_SCOPE_NONE
-        : kind === 'integration_unhealthy'
-          ? (pe.connectionPublicId ?? ALERT_SCOPE_NONE)
-          : (pe.domainPublicId ?? ALERT_SCOPE_NONE);
+    // `threat_detected` and `dlp_detected` (step API-4 A9.2) reference the message.
+    const messageScoped = kind === 'threat_detected' || kind === 'dlp_detected';
+    const refs = messageScoped
+      ? {
+          webhookEventId,
+          messageId: pe.message!.messageId.toString(),
+          receivedAt: pe.message!.receivedAt.toISOString(),
+        }
+      : kind === 'integration_unhealthy'
+        ? { webhookEventId, connectionId: pe.connectionPublicId! }
+        : { webhookEventId, domainId: (pe.domainId ?? 0n).toString() };
+    const scopeKey = messageScoped
+      ? ALERT_SCOPE_NONE
+      : kind === 'integration_unhealthy'
+        ? (pe.connectionPublicId ?? ALERT_SCOPE_NONE)
+        : (pe.domainPublicId ?? ALERT_SCOPE_NONE);
     return requestAlert(tx, {
       organizationId: index.organizationId,
       kind,

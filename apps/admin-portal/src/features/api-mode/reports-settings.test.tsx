@@ -321,6 +321,8 @@ describe('/api-mode Settings tab (C14 #15–#19)', () => {
       tiMinConfidence: 80,
       reportAckEnabled: true,
       reportFeedbackEnabled: true,
+      policyEvaluationEnabled: true,
+      outboundDetectionEnabled: true,
       reason: 'Smaller tenant',
       expectedRowVersion: null,
     });

@@ -158,6 +158,8 @@ export const configSchema = baseConfigSchema
     INTEGRATION_TASK_POLL_MS: int(200, 60_000).default(2_000),
     INTEGRATION_TASK_CONCURRENCY: int(1, 32).default(4),
     INTEGRATION_TX_TIMEOUT_MS: int(120_000, 600_000).default(120_000),
+    // Step API-4 B3.3: provider_tenant verifications checked per tick (one per connection).
+    PROVIDER_OWNERSHIP_CHECK_BATCH: int(1, 100).default(10),
 
     // Health (D11, D15).
     INTEGRATION_HEALTH_TICK_SECONDS: int(1, 3_600).default(60),

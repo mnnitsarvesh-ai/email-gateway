@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService } from '@email-gateway/common';
-import { type DomainStatus, Prisma, type ProtectionMode } from '@email-gateway/database';
+import {
+  type DomainOwnershipMethod,
+  type DomainStatus,
+  Prisma,
+  type ProtectionMode,
+} from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 
 type Client = Prisma.TransactionClient;
@@ -24,6 +29,8 @@ const domainSelect = {
   // Step API-1 D2: the own mode (NULL = inherit) and the organization's, for the views.
   protectionMode: true,
   protectionModeChangedAt: true,
+  // Step API-4 (B3): how ownership was won.
+  ownershipMethod: true,
   organization: { select: { protectionMode: true } },
   createdAt: true,
   updatedAt: true,
@@ -43,6 +50,8 @@ export interface DomainWrite {
   nextCheckAt?: Date | null;
   lastCheckedAt?: Date;
   checkFailures?: number;
+  /** Step API-4 (B3): written with every ownership win. */
+  ownershipMethod?: DomainOwnershipMethod;
 }
 
 export interface DomainListFilter {

@@ -23,7 +23,8 @@ import { z } from 'zod';
 
 /**
  * The public webhook event catalogue (step 6.2 §5, ADR-0054; step 8.4 D16; step 8.2 D12
- * adds `integration.health_changed`): fifteen subscribable types, all version 1, plus the test-only `webhook.ping`. Every `data` schema is
+ * adds `integration.health_changed`; step API-4 the two `mailbox.*` types): seventeen subscribable
+ * types, all version 1, plus the test-only `webhook.ping`. Every `data` schema is
  * strict: a payload carries public ids, the tenant's own domain names, codes, counts and times
  * only — never a subject, an address (local part or full), an IP address, a person's or
  * connector's name, a body, an attachment, a file name, an S3 key, a URL found in mail or a
@@ -34,6 +35,10 @@ import { z } from 'zod';
  * account takeover types (`ato.account.risk_changed`, `ato.response.completed`). Receivers
  * filter incidents by `data.incident.category` and must **ignore unknown categories**: advanced
  * threat protection categories arrive later under the same two types.
+ *
+ * Step API-4 (A9.1, ADR-0106) appends the API-mode detection types `mailbox.threat.detected` and
+ * `mailbox.dlp.detected` (version 1; the protection mode in `data`): detections of copies of
+ * delivered mail (post-delivery). `email.threat.detected` v1 is unchanged and inline-only.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'email.received',
@@ -53,6 +58,9 @@ export const WEBHOOK_EVENT_TYPES = [
   'ato.response.completed',
   // Step 8.2 D12 (docs/plan/steps/25-m365-google-connectors.md, ADR-0079).
   'integration.health_changed',
+  // Step API-4 A9.1 (docs/plan/steps/38-api-mode-parity-onboarding.md, ADR-0106).
+  'mailbox.threat.detected',
+  'mailbox.dlp.detected',
 ] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
@@ -544,6 +552,96 @@ const integrationHealthChangedData = z
     }
   });
 
+// Step API-4 A9.1: API-mode detections (copies of delivered mail). Metadata only: ids, codes,
+// counts, the protection mode and times; never an address, a mailbox, a matched value or content.
+
+/** Protection mode of a detection: `api` when a counted copy's domain is effective api. */
+export const MAILBOX_PROTECTION_MODES = ['api', 'hybrid'] as const;
+/** Source of the copies (`api_message_copies.source`). */
+export const MAILBOX_COPY_SOURCES = ['journal', 'graph', 'gmail'] as const;
+/** DLP actions that make a DLP detection (`allow` never does). */
+export const MAILBOX_DLP_ACTIONS = ['alert', 'require_approval', 'quarantine', 'block'] as const;
+/** Most copy public ids (`detectionIds`) and DLP category codes of one detection. */
+export const MAILBOX_MAX_DETECTION_IDS = 20;
+export const MAILBOX_MAX_DLP_CATEGORIES = 8;
+
+const protectionMode = z.enum(MAILBOX_PROTECTION_MODES);
+const copySource = z.enum(MAILBOX_COPY_SOURCES);
+const detectionRemediation = z.strictObject({ pending: count, simulated: count, skipped: count });
+const detectionIds = uniqueArray(uuid, 1, MAILBOX_MAX_DETECTION_IDS);
+
+const mailboxThreatDetectedData = z
+  .strictObject({
+    message: webhookMessageSchema,
+    detection: z.strictObject({
+      stage: z.enum(['scan', 'sandbox']),
+      verdict: threatVerdict,
+      riskScore: z.number().int().min(0).max(1000).nullable(),
+      reasonCodes: uniqueArray(reasonCode, 0, 32),
+      protectionMode,
+      direction,
+      copySource,
+      policyDisposition: z.enum(POLICY_DISPOSITION_VALUES).nullable(),
+      mailboxCount: count,
+      /** Remediation states of the counted copies (scan stage); null for a sandbox detection. */
+      remediation: detectionRemediation.nullable(),
+      /** The attachment (sandbox stage); null for a scan detection. */
+      attachment: z
+        .strictObject({
+          partIndex: z.number().int().min(0).max(65_535),
+          sha256,
+          detectedType: snakeCode(64),
+        })
+        .nullable(),
+      detectionIds,
+      decidedAt: iso,
+    }),
+  })
+  .superRefine((data, ctx) => {
+    const d = data.detection;
+    if (d.stage === 'scan' && d.attachment !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['detection', 'attachment'],
+        message: 'A scan detection names no attachment',
+      });
+    }
+    if (d.stage === 'sandbox' && (d.attachment === null || d.remediation !== null)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['detection'],
+        message: 'A sandbox detection names its attachment and no remediation',
+      });
+    }
+  });
+
+const mailboxDlpDetectedData = z
+  .strictObject({
+    message: webhookMessageSchema,
+    dlp: z.strictObject({
+      action: z.enum(MAILBOX_DLP_ACTIONS),
+      verdict: snakeCode(32),
+      categories: uniqueArray(snakeCode(48), 0, MAILBOX_MAX_DLP_CATEGORIES),
+      protectionMode,
+      direction,
+      policyDisposition: z.enum(POLICY_DISPOSITION_VALUES).nullable(),
+      mailboxCount: count,
+      /** Remediation states of the counted copies; null for an outbound detection. */
+      remediation: detectionRemediation.nullable(),
+      detectionIds,
+      decidedAt: iso,
+    }),
+  })
+  .superRefine((data, ctx) => {
+    if (data.dlp.direction === 'outbound' && data.dlp.remediation !== null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['dlp', 'remediation'],
+        message: 'An outbound detection is never remediated',
+      });
+    }
+  });
+
 const webhookPingData = z.strictObject({ subscriptionId: uuid, requestedAt: iso });
 
 /** Strict `data` schema of every envelope type (§5.2). */
@@ -563,6 +661,8 @@ export const dataSchemas = {
   'ato.account.risk_changed': atoAccountRiskChangedData,
   'ato.response.completed': atoResponseCompletedData,
   'integration.health_changed': integrationHealthChangedData,
+  'mailbox.threat.detected': mailboxThreatDetectedData,
+  'mailbox.dlp.detected': mailboxDlpDetectedData,
   [WEBHOOK_PING_TYPE]: webhookPingData,
 } as const satisfies Record<WebhookEnvelopeType, z.ZodType>;
 
@@ -597,6 +697,19 @@ export function integrationHealthSeverity(status: IntegrationHealthStatus): Seve
  */
 export function incidentWebhookSeverity(level: SecurityIncidentSeverity): Severity {
   return level === 'critical' || level === 'high' ? 'high' : level;
+}
+
+/** A9.1 `mailbox.dlp.detected`: block/quarantine → high, require_approval → medium, alert → low. */
+const DLP_ACTION_SEVERITY: Readonly<Record<(typeof MAILBOX_DLP_ACTIONS)[number], Severity>> = {
+  block: 'high',
+  quarantine: 'high',
+  require_approval: 'medium',
+  alert: 'low',
+};
+
+/** The public severity of a DLP detection action (A9.1). */
+export function dlpDetectionSeverity(action: (typeof MAILBOX_DLP_ACTIONS)[number]): Severity {
+  return DLP_ACTION_SEVERITY[action];
 }
 
 /** `ato.response.completed`: a failed execution or rollback is `medium`, every other end `info`. */
@@ -654,6 +767,12 @@ export function eventSeverity<T extends WebhookEnvelopeType>(
       return integrationHealthSeverity(
         (data as WebhookEventData<'integration.health_changed'>).status,
       );
+    case 'mailbox.threat.detected':
+      return VERDICT_SEVERITY[
+        (data as WebhookEventData<'mailbox.threat.detected'>).detection.verdict
+      ];
+    case 'mailbox.dlp.detected':
+      return dlpDetectionSeverity((data as WebhookEventData<'mailbox.dlp.detected'>).dlp.action);
     case 'email.received':
     case 'email.released':
     case 'email.delivered':
@@ -868,6 +987,42 @@ export const WEBHOOK_EXAMPLE_DATA: { readonly [T in WebhookEnvelopeType]: Webhoo
     failingChecks: ['domains.provider_verified', 'routing.loops'],
     changedAt: '2026-11-13T09:30:00.000Z',
   },
+  'mailbox.threat.detected': {
+    message: exampleMessage,
+    detection: {
+      stage: 'scan',
+      verdict: 'malicious',
+      riskScore: 910,
+      reasonCodes: ['attachment.clamav_match'],
+      protectionMode: 'api',
+      direction: 'inbound',
+      copySource: 'journal',
+      policyDisposition: 'quarantine',
+      mailboxCount: 2,
+      remediation: { pending: 2, simulated: 0, skipped: 0 },
+      attachment: null,
+      detectionIds: [
+        '0193b2c3-1a2b-7c3d-8e4f-5a6b7c8d9e01',
+        '0193b2c3-1a2b-7c3d-8e4f-5a6b7c8d9e02',
+      ],
+      decidedAt: '2026-11-27T09:14:05.120Z',
+    },
+  },
+  'mailbox.dlp.detected': {
+    message: { ...exampleMessage, direction: 'outbound', recipientDomains: ['partner.example'] },
+    dlp: {
+      action: 'block',
+      verdict: 'suspicious',
+      categories: ['payment_card'],
+      protectionMode: 'api',
+      direction: 'outbound',
+      policyDisposition: 'reject',
+      mailboxCount: 1,
+      remediation: null,
+      detectionIds: ['0193b2c3-1a2b-7c3d-8e4f-5a6b7c8d9e03'],
+      decidedAt: '2026-11-27T09:20:11.000Z',
+    },
+  },
   [WEBHOOK_PING_TYPE]: {
     subscriptionId: '0192f0c4-c355-7062-9b73-5e6f708192a3',
     requestedAt: '2026-11-13T09:20:00.000Z',
@@ -989,6 +1144,23 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
       'critical → high, warning → medium, healthy/unknown → info',
       INTEGRATION_FILTERS,
     ),
+    'mailbox.threat.detected': entry(
+      'mailbox.threat.detected',
+      'API mode (step API-4): a copy of a delivered message (journal copy or mailbox feed) was ' +
+        'detected as spam, suspicious or malicious after delivery, by the scan or later by the ' +
+        'sandbox. data.detection.protectionMode is api or hybrid; email.threat.detected stays ' +
+        'inline-only, so subscribe to both types for every detection.',
+      'spam → low, suspicious → medium, malicious → high',
+      VERDICT_FILTERS,
+    ),
+    'mailbox.dlp.detected': entry(
+      'mailbox.dlp.detected',
+      'API mode (step API-4): data loss prevention detected sensitive data in a copy of a ' +
+        'delivered message (inbound, internal or outbound). Category codes and the action only; ' +
+        'outbound detections are never remediated.',
+      'block/quarantine → high, require_approval → medium, alert → low',
+      MESSAGE_FILTERS,
+    ),
     [WEBHOOK_PING_TYPE]: entry(
       WEBHOOK_PING_TYPE,
       'Test event sent by POST /webhooks/{id}/test; not subscribable.',
@@ -997,12 +1169,12 @@ export const WEBHOOK_EVENT_CATALOGUE: Readonly<Record<WebhookEnvelopeType, Webho
     ),
   });
 
-/** True for the fifteen subscribable types (never `webhook.ping`). */
+/** True for the seventeen subscribable types (never `webhook.ping`). */
 export function isWebhookEventType(value: string): value is WebhookEventType {
   return (WEBHOOK_EVENT_TYPES as readonly string[]).includes(value);
 }
 
-/** True for the fifteen types and the ping. */
+/** True for the seventeen types and the ping. */
 export function isWebhookEnvelopeType(value: string): value is WebhookEnvelopeType {
   return (WEBHOOK_ENVELOPE_TYPES as readonly string[]).includes(value);
 }

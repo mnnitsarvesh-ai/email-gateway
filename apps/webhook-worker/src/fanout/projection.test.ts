@@ -276,3 +276,105 @@ describe('projection rules (W3)', () => {
     expect(rejectionOf('something_else')).toBeNull();
   });
 });
+
+describe('API-mode detections (step API-4 A8, A9.1)', () => {
+  const copy = (overrides: Record<string, unknown> = {}) =>
+    projectCandidates(sourceEvent(EventTypes.MessageCopyDetected, overrides)).map((c) => ({
+      type: c.type,
+      subKey: c.subKey,
+      severity: c.severity,
+      direction: c.direction,
+      verdict: c.verdict,
+      alert: c.alert,
+    }));
+  const dlp = (action: string) => ({ action, verdict: 'suspicious', categories: ['payment_card'] });
+
+  it('mail.message.copy_detected.v1 is a fanout source (topology v19)', () => {
+    expect(FANOUT_SOURCE_TYPES).toContain(EventTypes.MessageCopyDetected);
+  });
+
+  it.each([
+    ['phishing', 'malicious', 'high'],
+    ['malware', 'malicious', 'high'],
+    ['bec', 'malicious', 'high'],
+    ['suspicious', 'suspicious', 'medium'],
+    ['spam', 'spam', 'low'],
+    ['bulk', 'spam', 'low'],
+  ])('a %s copy → mailbox.threat.detected (%s, %s, alert threat_detected)', (v, verdict, sev) => {
+    expect(copy({ verdict: v })).toEqual([
+      {
+        type: 'mailbox.threat.detected',
+        subKey: 'scan',
+        severity: sev,
+        direction: 'inbound',
+        verdict,
+        alert: 'threat_detected',
+      },
+    ]);
+  });
+
+  it.each([
+    ['block', 'high'],
+    ['quarantine', 'high'],
+    ['require_approval', 'medium'],
+    ['alert', 'low'],
+  ])('a DLP %s → mailbox.dlp.detected (%s, alert dlp_detected, no verdict filter)', (a, sev) => {
+    expect(copy({ verdict: 'clean', dlp: dlp(a) })).toEqual([
+      {
+        type: 'mailbox.dlp.detected',
+        subKey: 'dlp',
+        severity: sev,
+        direction: 'inbound',
+        verdict: undefined,
+        alert: 'dlp_detected',
+      },
+    ]);
+  });
+
+  it('a threat with DLP yields both; outbound direction from the payload', () => {
+    expect(
+      copy({ verdict: 'phishing', dlp: dlp('quarantine'), direction: 'outbound' }).map((c) => [
+        c.type,
+        c.direction,
+        c.alert,
+      ]),
+    ).toEqual([
+      ['mailbox.threat.detected', 'outbound', 'threat_detected'],
+      ['mailbox.dlp.detected', 'outbound', 'dlp_detected'],
+    ]);
+  });
+
+  it('a policy-only, tag-only or clean detection (no threat verdict, no DLP) is not public', () => {
+    expect(copy({ verdict: 'clean', dlp: null })).toEqual([]);
+    expect(copy({ verdict: null, dlp: null })).toEqual([]);
+    expect(copy({ verdict: 'dlp_violation', dlp: null })).toEqual([]);
+    // A DLP `allow` is never a DLP detection.
+    expect(copy({ verdict: 'clean', dlp: dlp('allow') })).toEqual([]);
+  });
+
+  it('no counted copy (hybrid inline authority only) → nothing', () => {
+    expect(
+      copy({
+        verdict: 'phishing',
+        copies: { counted: 0, remediation: { pending: 0, simulated: 0, skipped: 0, none: 0 } },
+      }),
+    ).toEqual([]);
+  });
+
+  it('a malicious sandbox completion yields both threat candidates; the writer read picks one', () => {
+    expect(summary(EventTypes.AttachmentSandboxCompleted)).toEqual([
+      {
+        type: 'email.threat.detected',
+        subKey: 'sandbox:3',
+        severity: 'high',
+        alert: 'threat_detected',
+      },
+      {
+        type: 'mailbox.threat.detected',
+        subKey: 'sandbox:3',
+        severity: 'high',
+        alert: 'threat_detected',
+      },
+    ]);
+  });
+});

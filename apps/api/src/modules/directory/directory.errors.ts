@@ -65,6 +65,21 @@ export const departmentInUse = (policyIds: readonly string[]): CodedHttpExceptio
     { policies: policyIds.slice(0, 20).map((policyId) => ({ policyId })) },
   );
 
+/**
+ * Step API-4 (B6): an API-mode mailbox scope lists the department (`reference: api_mode_scope`,
+ * the domains whose scope must change first).
+ */
+export const departmentInUseByScope = (domainIds: readonly string[]): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    DEPARTMENT_IN_USE,
+    'An API-mode mailbox scope lists the department; change the scope of these domains first',
+    {
+      reference: 'api_mode_scope',
+      domains: domainIds.slice(0, 20).map((domainId) => ({ domainId })),
+    },
+  );
+
 export const departmentConflict = (current: number): CodedHttpException =>
   new CodedHttpException(
     HttpStatus.CONFLICT,

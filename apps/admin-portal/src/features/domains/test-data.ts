@@ -49,6 +49,7 @@ export function domainDetail(overrides: Partial<Domain> = {}): Domain {
         retiredAt: null,
       },
     ],
+    ownership: { method: 'dns_txt', providerCheck: null, providerCheckAvailable: false },
     ...overrides,
   };
 }
@@ -113,6 +114,7 @@ export function statusView(overrides: Partial<StatusView> = {}): StatusView {
         nextStep: 'Publish a DMARC record with p=none.',
       },
     },
+    ownership: { method: 'dns_txt', providerCheck: null, providerCheckAvailable: false },
     ...overrides,
   };
 }
@@ -230,6 +232,76 @@ export function validation(
     enforcement: 'reject',
     implemented: true,
     addressCount: 0,
+    ...overrides,
+  };
+}
+
+// ---- step API-4 (onboarding view, scope, protection coverage) --------------------------------
+
+export const CONNECTION_ID = '0193f400-0000-7000-8000-000000000001';
+export const JOURNAL_SOURCE_ID = '0193f800-0000-7000-8000-000000000001';
+export const FIRST_COPY_ID = '0193fa00-0000-7000-8000-000000000001';
+
+type Onboarding = SuccessBody<'ApiModeOnboardingController_domainOnboarding_v1'>;
+type OnboardingStepView = Onboarding['steps'][number];
+
+/** The six API steps with the given statuses (others `done`). */
+export function onboardingSteps(
+  statuses: Partial<Record<OnboardingStepView['key'], OnboardingStepView['status']>> = {},
+): OnboardingStepView[] {
+  return (['ownership', 'connect', 'intake', 'mailboxes', 'action', 'review'] as const).map(
+    (key) => ({ key, status: statuses[key] ?? 'done', blockers: [], nextAction: null }),
+  );
+}
+
+export function onboardingView(overrides: Partial<Onboarding> = {}): Onboarding {
+  return {
+    domainId: DOMAIN_ID,
+    effectiveMode: 'api',
+    steps: onboardingSteps({ review: 'in_progress' }),
+    ownership: {
+      status: 'verified',
+      method: 'dns_txt',
+      providerCheck: null,
+      providerCheckAvailable: false,
+    },
+    connection: {
+      id: CONNECTION_ID,
+      provider: 'microsoft_365',
+      bound: true,
+      status: 'active',
+      mailFlowGrant: 'active',
+      mailboxAccessGrant: 'active',
+    },
+    intake: {
+      journalSources: [{ id: JOURNAL_SOURCE_ID, status: 'active', health: 'healthy' }],
+      feeds: { enabled: false, mode: 'poll', activeMailboxes: 0, inScopeMailboxes: 9 },
+    },
+    scope: { kind: 'all', inScope: 9, excluded: 0 },
+    action: {
+      source: 'domain',
+      mode: 'detect_only',
+      presetKey: 'detectOnlyStart',
+      detectOnly: null,
+    },
+    firstCopy: { status: 'waiting', copy: null, waitingSinceMinutes: 2, hints: [] },
+    ...overrides,
+  };
+}
+
+export function scopeView(
+  overrides: Partial<SuccessBody<'ApiModeOnboardingController_getScope_v1'>> = {},
+): SuccessBody<'ApiModeOnboardingController_getScope_v1'> {
+  return {
+    domainId: DOMAIN_ID,
+    kind: 'all',
+    departments: [],
+    selectedMailboxes: 0,
+    inScope: 9,
+    excluded: 0,
+    recomputePending: false,
+    rowVersion: null,
+    updatedAt: null,
     ...overrides,
   };
 }

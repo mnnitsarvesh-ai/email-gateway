@@ -411,6 +411,50 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/api-mode/domains/{domainId}/onboarding': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the API-mode onboarding state of a domain
+     * @description Computed from server state only (never from clicks): the wizard steps `ownership`, `connect`, `intake`, `mailboxes`, `action`, `review` with their status (`not_started`, `in_progress`, `done`, `blocked`, `skipped` — all skipped for an inline domain), blocker and next-action codes; ownership (method, the provider check, whether one is available), the linked connection (bound, grants), intake (journal sources, feeds), scope counts, the threat action (source, mode, preset, detect-only period) and the live first-copy check (`waiting` / `received` with the copy’s verdict, lag, source, policy and remediation state; after API_MODE_FIRST_COPY_HINT_AFTER_MINUTES of waiting the troubleshooting hints `domain_not_active`, `mode_not_api`, `connection_missing`, `connection_not_bound`, `mailbox_access_missing`, `journal_source_missing`, `journal_source_unverified`, `journal_source_silent`, `journal_seen_no_domain_recipient`, `feeds_disabled`, `feeds_initializing`, `no_mailboxes_in_scope`, `connection_throttled`, `copies_failing`, `send_test_message`). The wizard polls it every 5 s. From the read replica. Needs `domain:read`.
+     */
+    get: operations['ApiModeOnboardingController_domainOnboarding_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/api-mode/domains/{domainId}/scope': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the mailbox scope of an API-mode domain
+     * @description Which mailboxes of the domain API mode protects: `all` (default), policy-directory `departments` (with their names and member counts; names are operator text) or selected `mailboxes`; the selected count, the in-scope and excluded counts of the last evaluation, whether a change waits for the mailbox-worker, and the CAS `rowVersion`. Excluded mailboxes keep their copies recorded but get no remediation, feed or clawback. Needs `remediation:read`.
+     */
+    get: operations['ApiModeOnboardingController_getScope_v1'];
+    /**
+     * Set the mailbox scope of an API-mode domain
+     * @description `{ scope: api-mode-scope/1, mailboxIds? (kind mailboxes only, required there, ≤ 5 000 mailboxes of this domain), reason, expectedRowVersion }` replaces the scope: the domain must be effective `api` or `hybrid` (`409 api_mode_scope_domain_not_api`), departments must be the organization’s (`422 api_mode_scope_department_invalid`), mailboxes the domain’s (`422 api_mode_scope_mailbox_invalid`); CAS on `expectedRowVersion` (null = create; mismatch `409 api_mode_scope_conflict` with `currentRowVersion`). The selection is cleared and set in the same transaction and the mailbox-worker re-evaluates the domain’s mailboxes on its next tick (new mailboxes of a `departments` scope stay protected until evaluated). Narrowing the scope removes protection: audited `api_mode.scope_updated` `{ domainId, from, to, departments, mailboxes, reason }`. Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    put: operations['ApiModeOnboardingController_putScope_v1'];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/api-mode/mailboxes': {
     parameters: {
       query?: never;
@@ -511,6 +555,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/api-mode/protection-coverage': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Protection by mode: what each mode covers and each domain’s coverage
+     * @description The static capability matrix of the inline, api and hybrid modes (`capabilities`: `pre_delivery_blocking`, `hold_for_review`, `post_delivery_removal`, `retroactive_clawback`, `internal_mail`, `outbound_dlp_enforce`, `outbound_dlp_detect`, `tenant_policies`, `url_rewriting`, `message_tagging`, `user_reports`, `alerts_webhooks`), the domains per effective mode and one page of the organization’s domains (newest first) with their actual coverage: the inline facts (inbound, outbound, MX at the gateway), the API facts (connection health and mailbox access, journal and feed intake, scope, in-scope / covered / gap mailboxes, remediation source and mode with the detect-only end, policy evaluation, last copy) and the gap codes (`inline_mx_not_at_gateway`, `inline_not_active`, `api_no_connection`, `api_no_mailbox_access`, `api_no_intake`, `api_coverage_gaps`, `api_mx_points_to_gateway`, `api_detect_only`, `api_policy_evaluation_off`). Counts only, never an address. Filter `effectiveMode`. v1 list (`protection_coverage`). From the read replica. Needs `domain:read`.
+     */
+    get: operations['ApiModeOnboardingController_protectionCoverage_v1'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/api-mode/remediation-policy': {
     parameters: {
       query?: never;
@@ -520,12 +584,12 @@ export interface paths {
     };
     /**
      * Get the API-mode remediation policy
-     * @description The organization policy (`source: platform_default` with the P1 default when no row exists: high-confidence malware and phishing to the quarantine folder, other malware, phishing, suspicious and BEC tagged, nothing hard-deleted), the per-domain overrides, the presets (P1, detect-only start, strict) and whether the platform allows hard delete. Needs `remediation:read`.
+     * @description The organization policy (`source: platform_default` with the P1 default when no row exists: high-confidence malware and phishing to the quarantine folder, other malware, phishing, suspicious and BEC tagged, nothing hard-deleted), the per-domain overrides, the presets (P1, detect-only start, strict) and whether the platform allows hard delete. Step API-4: each policy shows its effective `policyMapping` (the document’s keys over the defaults) and its detect-only period (`until`, `then`, `startedAt`, `ended`, `simulatedSinceStart` capped at 10 000). Needs `remediation:read`.
      */
     get: operations['ApiModeRemediationController_getPolicy_v1'];
     /**
      * Set the organization’s API-mode remediation policy
-     * @description `{ mode: detect_only | enforce, document, reason, expectedRowVersion }`. `detect_only` records what would have happened (simulated) without touching mailboxes. The document is `api-remediation-policy/1` (strict; 1-16 rules, first match wins; a rule matches when the verdict is listed and every present bound holds: `minLevel`/`maxLevel`, `hardBlock`, `minScore`); invalid → `400 validation_failed` with the document paths. A `hard_delete` rule while the platform setting is off → `422 api_mode_hard_delete_disabled` (`ruleIds`). CAS: `expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a mismatch → `409 api_mode_remediation_policy_conflict` with `currentRowVersion`. Audited `api_mode.remediation_policy_updated` (scope, from/to mode and SHA-256, reason). Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     * @description `{ mode: detect_only | enforce, document, reason, expectedRowVersion }`. `detect_only` records what would have happened (simulated) without touching mailboxes. The document is `api-remediation-policy/1` (strict; 1-16 rules, first match wins; a rule matches when the verdict is listed and every present bound holds: `minLevel`/`maxLevel`, `hardBlock`, `minScore`); invalid → `400 validation_failed` with the document paths. A `hard_delete` rule while the platform setting is off → `422 api_mode_hard_delete_disabled` (`ruleIds`). Step API-4: the document may carry `policyMapping` (`quarantine`, `require_approval`, `reject` → `move_quarantine` | `move_junk` | `soft_delete` | `tag` | `none`; `allow_tagged` → `tag` | `none`; defaults: quarantine folder and tag; never `hard_delete`): how tenant policy dispositions of API-mode copies map to mailbox actions (`when.policyDispositions` is refused with `use_policy_mapping`). `detectOnly: { until (now + 1 h … now + 30 d), then: remind | enforce } | null` starts a detect-only period (only with mode `detect_only`, else `422 api_mode_detect_only_invalid` with `reason`); `enforce` clears it; a `detect_only` body without `detectOnly` keeps the stored period. CAS: `expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a mismatch → `409 api_mode_remediation_policy_conflict` with `currentRowVersion`. Audited `api_mode.remediation_policy_updated` (scope, from/to mode, document and `policyMapping` SHA-256, the detect-only period, reason). Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
      */
     put: operations['ApiModeRemediationController_putPolicy_v1'];
     post?: never;
@@ -545,7 +609,7 @@ export interface paths {
     get?: never;
     /**
      * Set a domain’s API-mode remediation policy override
-     * @description The same body as the organization policy; the override applies to the mailboxes of the domain (one of your organization’s non-deleted domains, else `404 domain_not_found`). The document is `api-remediation-policy/1` (strict; 1-16 rules, first match wins; a rule matches when the verdict is listed and every present bound holds: `minLevel`/`maxLevel`, `hardBlock`, `minScore`); invalid → `400 validation_failed` with the document paths. A `hard_delete` rule while the platform setting is off → `422 api_mode_hard_delete_disabled` (`ruleIds`). CAS: `expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a mismatch → `409 api_mode_remediation_policy_conflict` with `currentRowVersion`. Audited `api_mode.remediation_policy_updated` (scope, from/to mode and SHA-256, reason). Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     * @description The same body as the organization policy; the override applies to the mailboxes of the domain (one of your organization’s non-deleted domains, else `404 domain_not_found`). The document is `api-remediation-policy/1` (strict; 1-16 rules, first match wins; a rule matches when the verdict is listed and every present bound holds: `minLevel`/`maxLevel`, `hardBlock`, `minScore`); invalid → `400 validation_failed` with the document paths. A `hard_delete` rule while the platform setting is off → `422 api_mode_hard_delete_disabled` (`ruleIds`). Step API-4: the document may carry `policyMapping` (`quarantine`, `require_approval`, `reject` → `move_quarantine` | `move_junk` | `soft_delete` | `tag` | `none`; `allow_tagged` → `tag` | `none`; defaults: quarantine folder and tag; never `hard_delete`): how tenant policy dispositions of API-mode copies map to mailbox actions (`when.policyDispositions` is refused with `use_policy_mapping`). `detectOnly: { until (now + 1 h … now + 30 d), then: remind | enforce } | null` starts a detect-only period (only with mode `detect_only`, else `422 api_mode_detect_only_invalid` with `reason`); `enforce` clears it; a `detect_only` body without `detectOnly` keeps the stored period. CAS: `expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a mismatch → `409 api_mode_remediation_policy_conflict` with `currentRowVersion`. Audited `api_mode.remediation_policy_updated` (scope, from/to mode, document and `policyMapping` SHA-256, the detect-only period, reason). Needs `remediation:write`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
      */
     put: operations['ApiModeRemediationController_putDomainPolicy_v1'];
     post?: never;
@@ -588,7 +652,7 @@ export interface paths {
     };
     /**
      * Get an API-mode remediation
-     * @description One mailbox action with its decision record (`api-remediation-decision/1`: policy scope, id, version and SHA-256, mode, rule, the verdict inputs; or `{ requestedAction, reason }` of a manual request), the requester, the reversal links and the quarantine release of a release restore. Needs `remediation:read`. Never returns provider message ids (`providerRefs` shows the container and the counts only) or message content.
+     * @description One mailbox action with its decision record (`api-remediation-decision/1`: policy scope, id, version and SHA-256, mode, rule, the verdict inputs; step API-4 `/2` adds the tenant policy outcome, the verdict and policy lanes with the winner and an allow-override suppression, and the post-delivery statuses of the policy actions; or `{ requestedAction, reason }` of a manual request), the requester, the reversal links and the quarantine release of a release restore. Needs `remediation:read`. Never returns provider message ids (`providerRefs` shows the container and the counts only) or message content.
      */
     get: operations['ApiModeRemediationController_detail_v1'];
     put?: never;
@@ -3137,7 +3201,7 @@ export interface paths {
     post?: never;
     /**
      * Delete a department
-     * @description Deletes the department and its members, optionally only at `?expectedRowVersion=`; refused while an active version of an active policy references it (`409 department_in_use`). Audited as `department.deleted`.
+     * @description Deletes the department and its members, optionally only at `?expectedRowVersion=`; refused while an active version of an active policy references it, or while an API-mode mailbox scope of a domain lists it (step API-4; `409 department_in_use` with `reference: api_mode_scope`). Audited as `department.deleted`.
      */
     delete: operations['DepartmentsController_remove_v1'];
     options?: never;
@@ -3587,6 +3651,26 @@ export interface paths {
      * @description Normalizes the name (IDN → punycode, lower case, one trailing dot ignored), enforces `max_domains`, and creates the ownership challenge, a DKIM key (RSA 2048, plus Ed25519 on request) and the DNS records to publish. `409` when the organization already has the name or another organization owns it. The first check runs about a minute later. At most 60 per caller per minute (`429` with `Retry-After`). The platform probe domain (`PROVIDER_PROBE_DOMAIN`, step 8.2), the journal intake domain (`JOURNAL_INTAKE_DOMAIN`, step 8.6) and names under them are `422 domain_reserved`. Step 8.6: an archive-only organization (`serviceProfile: archive_only`) gets the domain with inbound mail flow off; `inboundEnabled: true` is refused there (`403 mail_filtering_not_enabled`). Step API-1 (ADR-0098): optional `protectionMode` (`inline`, `api`, `hybrid`; absent = inherit the organization’s mode); `api` and `hybrid` need the plan feature `api_mode_protection` (`403 api_mode_not_enabled`); a domain whose effective mode is `api` is created with inbound mail flow off, and `protectionMode: api` with `inboundEnabled: true` is `422 protection_mode_inbound_conflict`.
      */
     post: operations['DomainsController_create_v1'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/domains/{domainId}/ownership/provider-check': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Verify ownership through the bound provider tenant
+     * @description Step API-4 (ADR-0107): requests an ownership check of a domain waiting for verification through the organization’s **bound** Microsoft 365 / Google Workspace connection (tenant verified, not disabled, active `*.mail_flow` grant). `{ connectionId? }` picks the connection (optional when exactly one qualifies or the previous check used one that still does; else `409 domain_provider_connection_unavailable` with `reason`). A `failed` domain is restarted first exactly as `POST /domains/{id}/verify`; a name owned by another organization is `409`; a domain that is not waiting is `409 domain_not_pending`; an unknown connection is `404 connection_not_found`. A pending provider check of the domain with the same connection is reused. The integration-worker asks the provider (verified for e-mail only); the domain scheduler then applies the answer through the same first-to-verify-wins transaction as a TXT check (`ownership_method = provider_tenant`, audit `domain.verified` with `{ method, connectionId }`); any other answer fails the check only (the domain stays pending, TXT still works); no answer within DOMAIN_PROVIDER_CHECK_TTL_MINUTES expires it. Provider-proven domains never prove a tenant binding. Audited `domain.provider_verification_requested`. At most DOMAIN_PROVIDER_CHECKS_PER_HOUR per organization per hour (`429` with `Retry-After`). Requires the Idempotency-Key header (transactional: the request, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`); rate class `sensitive`.
+     */
+    post: operations['DomainsController_providerOwnershipCheck_v1'];
     delete?: never;
     options?: never;
     head?: never;
@@ -4850,7 +4934,7 @@ export interface paths {
     };
     /**
      * Get my notification preferences
-     * @description The notification kinds you opted out of (security alerts, policy alerts, quarantine admin alerts and approval requests), your quarantine digest opt-out (the same setting as `/quarantine/me/preferences`) and whether the organization allows it. Users who are members of the organization only: API keys and platform overrides get `403`.
+     * @description The notification kinds you opted out of (security alerts, policy alerts, quarantine admin alerts and approval requests, account takeover, integration health and — step API-4 — `dlp_detected`), your quarantine digest opt-out (the same setting as `/quarantine/me/preferences`) and whether the organization allows it. Users who are members of the organization only: API keys and platform overrides get `403`.
      */
     get: operations['NotificationsController_preferences_v1'];
     /**
@@ -4874,12 +4958,12 @@ export interface paths {
     };
     /**
      * Get the security-alert settings
-     * @description The effective settings of the three security alerts (threat detected: enabled, minimum severity `medium`/`high`, throttle window; DNS record failures and webhook disabled: enabled, throttle window; whether `organization_settings.notification_email` also receives them), the stored document, the defaults, the bounds and `rowVersion` (0 while nothing is stored). Alerts go to active, verified users holding the kind’s permission (`quarantine:approve`, `domain:manage`, `webhook:manage`) who did not opt out; one alert per organization, kind, scope and window at most. From the read replica.
+     * @description The effective settings of the three security alerts (threat detected: enabled, minimum severity `medium`/`high`, throttle window; DNS record failures and webhook disabled: enabled, throttle window; whether `organization_settings.notification_email` also receives them), the stored document, the defaults, the bounds and `rowVersion` (0 while nothing is stored). Step API-4: `dlpDetected` (DLP detections of API-mode copies: enabled, minimum severity `low`/`medium`/`high`, throttle window); `threatDetected` also covers API-mode detections (`mailbox.threat.detected`). Alerts go to active, verified users holding the kind’s permission (`quarantine:approve`, `domain:manage`, `webhook:manage`, `dlp:read`) who did not opt out; one alert per organization, kind, scope and window at most. From the read replica.
      */
     get: operations['NotificationsController_settings_v1'];
     /**
      * Replace the security-alert settings
-     * @description Replaces the whole settings document (every key optional; `{}` restores the defaults) with `expectedRowVersion` (`409 notification_settings_conflict` with `currentRowVersion`; 0 when nothing is stored yet). Bounds: threat throttle 15-1440 minutes, DNS and webhook throttles 60-10080 minutes; unknown keys or values out of bounds are `400 notification_settings_invalid` with `violations` (paths and rules). Takes effect within the delivery worker’s cache TTL. Audited `notification.settings_updated` (changed paths only).
+     * @description Replaces the whole settings document (every key optional; `{}` restores the defaults) with `expectedRowVersion` (`409 notification_settings_conflict` with `currentRowVersion`; 0 when nothing is stored yet). Bounds: threat and DLP (step API-4 `alerts.dlpDetected`) throttles 15-1440 minutes, DNS and webhook throttles 60-10080 minutes; unknown keys or values out of bounds are `400 notification_settings_invalid` with `violations` (paths and rules). Takes effect within the delivery worker’s cache TTL. Audited `notification.settings_updated` (changed paths only).
      */
     put: operations['NotificationsController_putSettings_v1'];
     post?: never;
@@ -5673,7 +5757,7 @@ export interface paths {
     };
     /**
      * List policy executions (history)
-     * @description Stored evaluations of the organization’s messages with `receivedAt` in [`from`, `to`) (both required; at most POLICY_HISTORY_MAX_RANGE_DAYS apart), newest first, filtered by direction, disposition, decision source, decisive policy and rule, override and trigger; cursor-paginated by `(receivedAt, id)`. Each row: message public id, round, trigger, direction, disposition, final action, decisive source/policy/version/rule, action types with their statuses (`enforced`, `requested`, `recorded`, `not_applicable`), matched rule count, override, generation, input hash, duration and time. Never addresses or content. From the read replica. A change that affects evaluation increments the organization’s policy generation and applies to the **next evaluation** only: messages already evaluated are never re-evaluated.
+     * @description Stored evaluations of the organization’s messages with `receivedAt` in [`from`, `to`) (both required; at most POLICY_HISTORY_MAX_RANGE_DAYS apart), newest first, filtered by direction, disposition, decision source, decisive policy and rule, override and trigger; cursor-paginated by `(receivedAt, id)`. Each row: message public id, round, trigger, direction, disposition, final action, decisive source/policy/version/rule, action types with their statuses (`enforced`, `requested`, `recorded`, `not_applicable`), matched rule count, override, generation, input hash, duration and time. Never addresses or content. Step API-4: `mode` selects `inline` gateway evaluations (default, unchanged), `detect` evaluations of API-mode copies (recorded after delivery, nothing enforced; their message ids are copy registry messages and stay `404` on the message routes) or `all`; each row carries `evaluationMode`. From the read replica. A change that affects evaluation increments the organization’s policy generation and applies to the **next evaluation** only: messages already evaluated are never re-evaluated.
      */
     get: operations['PolicyToolsController_history_v1'];
     put?: never;
@@ -5834,7 +5918,7 @@ export interface paths {
     get: operations['ProviderDomainsController_list_v1'];
     /**
      * Replace the linked domains of a connection
-     * @description `{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must be yours (`404 domain_not_in_organization`), `active` at the gateway (`422 domain_not_verified`) and not linked to another connection (`409 domain_linked_elsewhere`); unlinking needs outbound off (`409 outbound_active`). The integration-worker checks the new domains in the provider tenant on its next health run (requested now). Audited `integration.domains_linked`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
+     * @description `{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must be yours (`404 domain_not_in_organization`), `verified` or `active` at the gateway (step API-4 B4; `pending_verification` → `422 domain_not_verified`) and not linked to another connection (`409 domain_linked_elsewhere`); unlinking needs outbound off (`409 outbound_active`). The integration-worker checks the new domains in the provider tenant on its next health run (requested now). Audited `integration.domains_linked`. Requires the Idempotency-Key header (transactional: the change, its audit row and the stored response commit together; a repeat with the same key returns the stored response with `Idempotency-Replayed: true`).
      */
     put: operations['ProviderDomainsController_replace_v1'];
     post?: never;
@@ -7696,7 +7780,7 @@ export interface paths {
     };
     /**
      * List the webhook event catalogue
-     * @description The ten subscribable event types (payload version 1) and the test-only `webhook.ping`: description, severity rule, the filters that apply and an example envelope. Payloads carry ids, codes, domains and counts only: never a subject, body, attachment, address local part, URL found in mail, S3 key or secret.
+     * @description Every subscribable event type of the catalogue (payload version 1; step API-4 adds `mailbox.threat.detected` and `mailbox.dlp.detected` — detections of API-mode copies after delivery, with the protection mode — while `email.threat.detected` stays inline only) and the test-only `webhook.ping`: description, severity rule, the filters that apply and an example envelope. Payloads carry ids, codes, domains and counts only: never a subject, body, attachment, address local part, URL found in mail, S3 key or secret.
      */
     get: operations['WebhooksController_eventTypes_v1'];
     put?: never;
@@ -12656,8 +12740,10 @@ export interface operations {
         connectionId?: string;
         /** @description `nextCursor` of the previous page */
         cursor?: string;
-        /** @description `inbound`, `internal` (east-west mail, step API-3); comma list */
+        /** @description `inbound`, `internal` (east-west mail, step API-3), `outbound` (outbound detections of the sender’s mailbox, step API-4; never remediated); comma list */
         direction?: string;
+        /** @description Step API-4: the message’s DLP action `allow`, `alert`, `require_approval`, `quarantine`, `block`; comma list */
+        dlpAction?: string;
         /** @description Start of the receipt window (default `to` − 7 days; at most 31 days) */
         from?: string;
         /** @description Page size, 1-100 (default 25) */
@@ -12666,6 +12752,8 @@ export interface operations {
         mailboxId?: string;
         /** @description Lowest risk score (0-1000) */
         minRiskScore?: string;
+        /** @description Step API-4: detect-mode tenant policy disposition `allow`, `require_approval`, `quarantine`, `reject`; comma list */
+        policyDisposition?: string;
         /** @description `none`, `pending`, `simulated`, `remediated`, `restored`, `failed`, `skipped`; comma list */
         remediationState?: string;
         /** @description `-receivedAt` (newest first) */
@@ -12705,10 +12793,15 @@ export interface operations {
               /** Format: uuid */
               connectionId: string;
               /**
-               * @description Step API-3: `internal` = east-west mail
+               * @description Step API-3: `internal` = east-west mail; step API-4: `outbound` = an outbound detection recorded on the sender’s mailbox (never remediated)
                * @enum {string}
                */
-              direction: 'inbound' | 'internal';
+              direction: 'inbound' | 'internal' | 'outbound';
+              /**
+               * @description Step API-4: the message’s definite DLP action
+               * @enum {string|null}
+               */
+              dlpAction: 'allow' | 'alert' | 'require_approval' | 'quarantine' | 'block' | null;
               /** @description The header From address, local part masked (ADR-0062) */
               headerFrom: string | null;
               /** Format: uuid */
@@ -12717,6 +12810,19 @@ export interface operations {
               mailboxAddress: string;
               /** Format: uuid */
               mailboxId: string;
+              /**
+               * @description Step API-4: the tenant policy disposition (detect mode; display only for inline)
+               * @enum {string|null}
+               */
+              policyDisposition: 'allow' | 'require_approval' | 'quarantine' | 'reject' | null;
+              /**
+               * @description Step API-4: detect-mode policy evaluation of the copy (`inline`: the gateway decided; `disabled`: turned off; `failed`: evaluation error, the verdict lane decided)
+               * @enum {string}
+               */
+              policyState:
+                'none' | 'evaluated' | 'inline' | 'disabled' | 'failed' | 'not_applicable';
+              /** @description Step API-4: TAG or WARN applied with disposition allow */
+              policyTagged: boolean;
               /** Format: date-time */
               providerDeliveredAt: string | null;
               /**
@@ -12931,10 +13037,24 @@ export interface operations {
             deliveredBasis:
               'received_header' | 'graph_received' | 'gmail_internal' | 'ingest' | null;
             /**
-             * @description Step API-3: `internal` = east-west mail
+             * @description Step API-3: `internal` = east-west mail; step API-4: `outbound` = an outbound detection recorded on the sender’s mailbox (never remediated)
              * @enum {string}
              */
-            direction: 'inbound' | 'internal';
+            direction: 'inbound' | 'internal' | 'outbound';
+            /** @description Step API-4: the message’s DLP result (codes only) */
+            dlp: {
+              /** @enum {string} */
+              action: 'allow' | 'alert' | 'require_approval' | 'quarantine' | 'block';
+              /** @description Category codes (≤ 8; never matched values) */
+              categories: string[];
+              /** @description DLP verdict code */
+              verdict: string;
+            } | null;
+            /**
+             * @description Step API-4: the message’s definite DLP action
+             * @enum {string|null}
+             */
+            dlpAction: 'allow' | 'alert' | 'require_approval' | 'quarantine' | 'block' | null;
             /** @description The header From address, local part masked (ADR-0062) */
             headerFrom: string | null;
             /** Format: uuid */
@@ -12943,6 +13063,51 @@ export interface operations {
             mailboxAddress: string;
             /** Format: uuid */
             mailboxId: string;
+            /** @description Step API-4: the detect-mode evaluation (null: not evaluated, past retention, or inline) */
+            policy: {
+              actions: {
+                reason: string | null;
+                /** @description `requested`, `recorded`, `not_applicable` (detect mode) */
+                status: string;
+                type: string;
+              }[];
+              /** @enum {string} */
+              decisionSource: 'tenant_rule' | 'platform_default' | 'floor';
+              decisiveRuleRef: string | null;
+              /** @enum {string} */
+              disposition: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+              /** Format: date-time */
+              evaluatedAt: string;
+              /** @description The `policy_execution_logs` id of the detect row */
+              evaluationId: string;
+              /** @enum {string} */
+              evaluationMode: 'detect';
+              /** @description Content-free explanation text */
+              explanation: string;
+              matchedRules: {
+                actions: string[];
+                ruleRef: string;
+              }[];
+              overrideApplied: boolean;
+              /** @description What each policy action means after delivery (from the decision record) */
+              postDelivery: {
+                reason: string | null;
+                status: string;
+                type: string;
+              }[];
+            } | null;
+            /**
+             * @description Step API-4: the tenant policy disposition (detect mode; display only for inline)
+             * @enum {string|null}
+             */
+            policyDisposition: 'allow' | 'require_approval' | 'quarantine' | 'reject' | null;
+            /**
+             * @description Step API-4: detect-mode policy evaluation of the copy (`inline`: the gateway decided; `disabled`: turned off; `failed`: evaluation error, the verdict lane decided)
+             * @enum {string}
+             */
+            policyState: 'none' | 'evaluated' | 'inline' | 'disabled' | 'failed' | 'not_applicable';
+            /** @description Step API-4: TAG or WARN applied with disposition allow */
+            policyTagged: boolean;
             /** Format: date-time */
             providerDeliveredAt: string | null;
             /**
@@ -13810,6 +13975,828 @@ export interface operations {
       };
     };
   };
+  ApiModeOnboardingController_domainOnboarding_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Domain public id (UUID) */
+        domainId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The onboarding state */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            action: {
+              detectOnly: {
+                ended: boolean;
+                /** @enum {string} */
+                then: 'remind' | 'enforce';
+                /** Format: date-time */
+                until: string;
+              } | null;
+              /** @enum {string} */
+              mode: 'detect_only' | 'enforce';
+              /** @enum {string|null} */
+              presetKey: 'p1' | 'detectOnlyStart' | 'strict' | null;
+              /** @enum {string} */
+              source: 'platform_default' | 'organization' | 'domain';
+            };
+            /** @description The provider connection the domain is linked to */
+            connection: {
+              bound: boolean;
+              /** Format: uuid */
+              id: string;
+              /** @enum {string|null} */
+              mailboxAccessGrant:
+                'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked' | null;
+              /** @enum {string|null} */
+              mailFlowGrant:
+                'pending_consent' | 'verifying' | 'active' | 'error' | 'revoked' | null;
+              /** @enum {string} */
+              provider: 'microsoft_365' | 'google_workspace';
+              /** @enum {string} */
+              status: 'draft' | 'connecting' | 'configuring' | 'active' | 'disabled';
+            } | null;
+            /** Format: uuid */
+            domainId: string;
+            /** @enum {string} */
+            effectiveMode: 'inline' | 'api' | 'hybrid';
+            firstCopy: {
+              copy: {
+                /** Format: uuid */
+                detectionId: string;
+                lagMs: number | null;
+                /** @enum {string} */
+                policyState:
+                  'none' | 'evaluated' | 'inline' | 'disabled' | 'failed' | 'not_applicable';
+                /** Format: date-time */
+                receivedAt: string;
+                /** @enum {string} */
+                remediationState:
+                  | 'none'
+                  | 'pending'
+                  | 'simulated'
+                  | 'remediated'
+                  | 'restored'
+                  | 'failed'
+                  | 'skipped';
+                /** @enum {string} */
+                source: 'journal' | 'graph' | 'gmail';
+                /** @enum {string|null} */
+                verdict:
+                  | 'clean'
+                  | 'spam'
+                  | 'bulk'
+                  | 'phishing'
+                  | 'malware'
+                  | 'bec'
+                  | 'dlp_violation'
+                  | 'suspicious'
+                  | 'unknown'
+                  | null;
+              } | null;
+              hints: {
+                /** @enum {string} */
+                code:
+                  | 'domain_not_active'
+                  | 'mode_not_api'
+                  | 'connection_missing'
+                  | 'connection_not_bound'
+                  | 'mailbox_access_missing'
+                  | 'journal_source_missing'
+                  | 'journal_source_unverified'
+                  | 'journal_source_silent'
+                  | 'journal_seen_no_domain_recipient'
+                  | 'feeds_disabled'
+                  | 'feeds_initializing'
+                  | 'no_mailboxes_in_scope'
+                  | 'connection_throttled'
+                  | 'copies_failing'
+                  | 'send_test_message';
+                /** @description A portal path, or null */
+                link: string | null;
+                /** @enum {string} */
+                severity: 'info' | 'warn';
+              }[];
+              /** @enum {string} */
+              status: 'waiting' | 'received';
+              waitingSinceMinutes: number | null;
+            };
+            intake: {
+              feeds: {
+                activeMailboxes: number;
+                enabled: boolean;
+                inScopeMailboxes: number;
+                /** @enum {string} */
+                mode: 'poll' | 'notify';
+              };
+              journalSources: {
+                /** @enum {string} */
+                health: 'unknown' | 'healthy' | 'silent' | 'failing' | 'paused';
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                status: 'pending_verification' | 'active' | 'paused' | 'disabled';
+              }[];
+            };
+            ownership: {
+              /** @enum {string|null} */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /** Format: uuid */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                result: string | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              providerCheckAvailable: boolean;
+              /** @enum {string} */
+              status: 'pending' | 'verified' | 'failed';
+            };
+            scope: {
+              excluded: number;
+              inScope: number;
+              /** @enum {string} */
+              kind: 'all' | 'departments' | 'mailboxes';
+            };
+            steps: {
+              blockers: (
+                | 'ownership_failed'
+                | 'ownership_pending'
+                | 'connection_missing'
+                | 'connection_disabled'
+                | 'connection_not_bound'
+                | 'mailbox_access_missing'
+                | 'intake_missing'
+                | 'no_mailboxes_in_scope'
+                | 'domain_not_active'
+              )[];
+              /** @enum {string} */
+              key: 'ownership' | 'connect' | 'intake' | 'mailboxes' | 'action' | 'review';
+              /** @enum {string|null} */
+              nextAction:
+                | 'verify_ownership'
+                | 'verify_through_provider'
+                | 'restart_verification'
+                | 'link_connection'
+                | 'complete_binding'
+                | 'grant_mailbox_access'
+                | 'enable_connection'
+                | 'set_up_journal'
+                | 'verify_journal_source'
+                | 'enable_feeds'
+                | 'wait_for_feeds'
+                | 'sync_inventory'
+                | 'choose_mailboxes'
+                | 'choose_action'
+                | 'activate_domain'
+                | 'send_test_message'
+                | null;
+              /** @enum {string} */
+              status: 'not_started' | 'in_progress' | 'done' | 'blocked' | 'skipped';
+            }[];
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown domain, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeOnboardingController_getScope_v1: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description Domain public id (UUID) */
+        domainId: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The scope */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description The departments of a `departments` scope */
+            departments: {
+              /** Format: uuid */
+              id: string;
+              memberCount: number;
+              /** @description Untrusted operator text; null = deleted */
+              name: string | null;
+            }[];
+            /** Format: uuid */
+            domainId: string;
+            excluded: number;
+            /** @description Non-deleted mailboxes of the domain in scope (last evaluation) */
+            inScope: number;
+            /** @enum {string} */
+            kind: 'all' | 'departments' | 'mailboxes';
+            /** @description A change is waiting for the mailbox-worker’s next evaluation */
+            recomputePending: boolean;
+            /** @description CAS version (null: no row; send null to create it) */
+            rowVersion: number | null;
+            /** @description Mailboxes selected for a `mailboxes` scope */
+            selectedMailboxes: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+          };
+        };
+      };
+      /** @description The id is not a UUID (`validation_failed`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown domain, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeOnboardingController_putScope_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Domain public id (UUID) */
+        domainId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /** @description The `rowVersion` read (null when no scope row exists: the PUT creates it) */
+          expectedRowVersion: number | null;
+          /** @description Kind `mailboxes` only (required there): mailboxes of this domain (≤ 5 000) */
+          mailboxIds?: string[];
+          /** @description Why (1-500 characters; stored in the audit row) */
+          reason: string;
+          /** @description `api-mode-scope/1`: `{ kind: all }`, `{ kind: departments, departmentIds (1-20) }` or `{ kind: mailboxes }` */
+          scope:
+            | {
+                /** @enum {string} */
+                kind: 'all';
+              }
+            | {
+                departmentIds: string[];
+                /** @enum {string} */
+                kind: 'departments';
+              }
+            | {
+                /** @enum {string} */
+                kind: 'mailboxes';
+              };
+        };
+      };
+    };
+    responses: {
+      /** @description The stored scope */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          /** @description `true` when this is the stored response of an earlier identical request */
+          'Idempotency-Replayed'?: 'true';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description The kind or departments changed, or a `mailboxes` selection was written */
+            changed: boolean;
+            created: boolean;
+            /** @description The departments of a `departments` scope */
+            departments: {
+              /** Format: uuid */
+              id: string;
+              memberCount: number;
+              /** @description Untrusted operator text; null = deleted */
+              name: string | null;
+            }[];
+            /** Format: uuid */
+            domainId: string;
+            excluded: number;
+            /** @description Non-deleted mailboxes of the domain in scope (last evaluation) */
+            inScope: number;
+            /** @enum {string} */
+            kind: 'all' | 'departments' | 'mailboxes';
+            /** @description A change is waiting for the mailbox-worker’s next evaluation */
+            recomputePending: boolean;
+            /** @description CAS version (null: no row; send null to create it) */
+            rowVersion: number | null;
+            /** @description Mailboxes selected for a `mailboxes` scope */
+            selectedMailboxes: number;
+            /** Format: date-time */
+            updatedAt: string | null;
+          };
+        };
+      };
+      /** @description The body or an id is invalid (`validation_failed`, `message` lists the issues), or the Idempotency-Key header is missing (`idempotency_key_required`) or invalid (`idempotency_key_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'idempotency_key_required' | 'idempotency_key_invalid';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Unknown domain, or one of another organization */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'domain_not_found';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 404;
+          };
+        };
+      };
+      /** @description `api_mode_scope_domain_not_api` (`effectiveMode`), `api_mode_scope_conflict` (`currentRowVersion`). `idempotency_request_in_progress` when the same key is still running */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'api_mode_scope_domain_not_api'
+              | 'api_mode_scope_conflict'
+              | 'idempotency_request_in_progress';
+            correlationId?: string;
+            currentRowVersion?: number;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /**
+       * @description `api_mode_scope_department_invalid` (`departmentIds`), `api_mode_scope_mailbox_invalid` (`invalid`); `idempotency_key_reused`
+       *
+       *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
+       */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
   ApiModeController_listMailboxes_v1: {
     parameters: {
       query?: {
@@ -14074,10 +15061,15 @@ export interface operations {
               /** Format: uuid */
               connectionId: string;
               /**
-               * @description Step API-3: `internal` = east-west mail
+               * @description Step API-3: `internal` = east-west mail; step API-4: `outbound` = an outbound detection recorded on the sender’s mailbox (never remediated)
                * @enum {string}
                */
-              direction: 'inbound' | 'internal';
+              direction: 'inbound' | 'internal' | 'outbound';
+              /**
+               * @description Step API-4: the message’s definite DLP action
+               * @enum {string|null}
+               */
+              dlpAction: 'allow' | 'alert' | 'require_approval' | 'quarantine' | 'block' | null;
               /** @description The header From address, local part masked (ADR-0062) */
               headerFrom: string | null;
               /** Format: uuid */
@@ -14086,6 +15078,19 @@ export interface operations {
               mailboxAddress: string;
               /** Format: uuid */
               mailboxId: string;
+              /**
+               * @description Step API-4: the tenant policy disposition (detect mode; display only for inline)
+               * @enum {string|null}
+               */
+              policyDisposition: 'allow' | 'require_approval' | 'quarantine' | 'reject' | null;
+              /**
+               * @description Step API-4: detect-mode policy evaluation of the copy (`inline`: the gateway decided; `disabled`: turned off; `failed`: evaluation error, the verdict lane decided)
+               * @enum {string}
+               */
+              policyState:
+                'none' | 'evaluated' | 'inline' | 'disabled' | 'failed' | 'not_applicable';
+              /** @description Step API-4: TAG or WARN applied with disposition allow */
+              policyTagged: boolean;
               /** Format: date-time */
               providerDeliveredAt: string | null;
               /**
@@ -14946,6 +15951,22 @@ export interface operations {
             };
             /** @enum {string} */
             organizationMode: 'inline' | 'api' | 'hybrid';
+            /** @description Step API-4 (A6): outbound detections (never remediated) */
+            outbound: {
+              /** @description Outbound detections of the last 24 hours */
+              detections24h: number;
+              /** @description Outbound journal messages are evaluated */
+              enabled: boolean;
+            };
+            /** @description Step API-4 (A12): tenant policy evaluation of copies */
+            policy: {
+              /** @description Detect-mode policy evaluation of copies is on */
+              enabled: boolean;
+              /** @description Evaluation failures in the last 24 hours */
+              errors24h: number;
+              /** @description Copy messages evaluated in the last 24 hours */
+              evaluated24h: number;
+            };
             /** @description Step API-2: summed over the connections */
             remediation: {
               backlog: {
@@ -14989,11 +16010,275 @@ export interface operations {
               reportMailboxes: number;
               resolved24h: number;
             };
+            /** @description Step API-4 (B6): mailbox scope */
+            scope: {
+              /** @description Mailboxes excluded by a domain scope */
+              excluded: number;
+            };
             throttling: {
               /** @description 429 and 503 answers in the last hour */
               events1h: number;
               events24h: number;
             };
+          };
+        };
+      };
+      /** @description Missing or invalid credentials (unauthorized) */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Too many requests (rate_limited, with scope and Retry-After) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RateLimitedErrorBody'];
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description The database returned a row that does not echo the query (`inconsistent_read`, retry) or a dependency (database, rate-limit store, search) is unavailable */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'inconsistent_read' | 'service_unavailable';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 503;
+          };
+        };
+      };
+    };
+  };
+  ApiModeOnboardingController_protectionCoverage_v1: {
+    parameters: {
+      query?: {
+        /** @description `nextCursor` of the previous page */
+        cursor?: string;
+        /** @description `inline`, `api`, `hybrid`; comma list */
+        effectiveMode?: string;
+        /** @description Page size, 1-100 (default 25) */
+        limit?: string;
+        /** @description `-id` (newest domain first) */
+        sort?: '-id';
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The coverage page */
+      200: {
+        headers: {
+          /** @description `no-store` */
+          'Cache-Control'?: 'no-store';
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @description The static capability matrix of the three modes (PROTECTION_MODE_CAPABILITIES) */
+            capabilities: {
+              /** @enum {string} */
+              api: 'yes' | 'no' | 'partial';
+              /** @enum {string} */
+              code:
+                | 'pre_delivery_blocking'
+                | 'hold_for_review'
+                | 'post_delivery_removal'
+                | 'retroactive_clawback'
+                | 'internal_mail'
+                | 'outbound_dlp_enforce'
+                | 'outbound_dlp_detect'
+                | 'tenant_policies'
+                | 'url_rewriting'
+                | 'message_tagging'
+                | 'user_reports'
+                | 'alerts_webhooks';
+              /** @enum {string} */
+              hybrid: 'yes' | 'no' | 'partial';
+              /** @enum {string} */
+              inline: 'yes' | 'no' | 'partial';
+              /** @description Why a cell is `partial` / `no` (a fixed code) */
+              noteCode: string | null;
+            }[];
+            /** @description The plan feature `api_mode_protection` is effective */
+            entitled: boolean;
+            items: {
+              /** @description null: the domain is inline only */
+              api: {
+                /** @enum {boolean} */
+                applies: true;
+                connection: {
+                  /** @enum {string} */
+                  health: 'unknown' | 'healthy' | 'degraded' | 'failing';
+                  /** Format: uuid */
+                  id: string;
+                  /** @enum {string} */
+                  mailboxAccess: 'active' | 'missing' | 'revoked';
+                  /** @enum {string} */
+                  provider: 'microsoft_365' | 'google_workspace';
+                } | null;
+                intake: {
+                  /** @enum {string} */
+                  feeds: 'active' | 'partial' | 'off';
+                  /** @enum {string} */
+                  journal: 'verified' | 'pending' | 'missing';
+                };
+                /**
+                 * Format: date-time
+                 * @description Newest journal or feed sighting of its mailboxes
+                 */
+                lastCopyAt: string | null;
+                mailboxes: {
+                  covered: number;
+                  gap: number;
+                  inScope: number;
+                  total: number | null;
+                };
+                policyEvaluation: boolean;
+                remediation: {
+                  /** Format: date-time */
+                  detectOnlyUntil: string | null;
+                  /** @enum {string} */
+                  mode: 'detect_only' | 'enforce';
+                  /** @enum {string} */
+                  source: 'platform_default' | 'organization' | 'domain';
+                };
+                /** @enum {string} */
+                scope: 'all' | 'departments' | 'mailboxes';
+              } | null;
+              /** Format: uuid */
+              domainId: string;
+              /** @enum {string} */
+              effectiveMode: 'inline' | 'api' | 'hybrid';
+              gaps: (
+                | 'inline_mx_not_at_gateway'
+                | 'inline_not_active'
+                | 'api_no_connection'
+                | 'api_no_mailbox_access'
+                | 'api_no_intake'
+                | 'api_coverage_gaps'
+                | 'api_mx_points_to_gateway'
+                | 'api_detect_only'
+                | 'api_policy_evaluation_off'
+              )[];
+              /** @description The mode comes from the organization */
+              inherited: boolean;
+              inline: {
+                applies: boolean;
+                inboundEnabled: boolean;
+                /** @description null: no MX observation yet */
+                mxPointsToGateway: boolean | null;
+                outboundEnabled: boolean;
+              };
+              /** @description The domain name (the organization’s own) */
+              name: string;
+              status: string;
+            }[];
+            nextCursor: string | null;
+            /** @enum {string} */
+            organizationMode: 'inline' | 'api' | 'hybrid';
+            totals: {
+              api: number;
+              hybrid: number;
+              inline: number;
+            };
+          };
+        };
+      };
+      /** @description Validation failed (`validation_failed`: unknown parameter or operator, wrong type, too many values, range too long; `message` lists `"<path>: <issue>"`) or the cursor is invalid, expired or belongs to other filters, another sort or another caller (`cursor_invalid`) */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'validation_failed' | 'cursor_invalid';
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 400;
           };
         };
       };
@@ -15115,7 +16400,35 @@ export interface operations {
           'application/json': {
             /** @description Per-domain overrides (a domain without one inherits the organization policy) */
             domains: {
+              /** @description Step API-4 (B7): the detect-only period; null = none */
+              detectOnly: {
+                /** @description `until` has passed */
+                ended: boolean;
+                /** @description Simulated actions of the policy scope since `startedAt` (capped at 10 000) */
+                simulatedSinceStart: number;
+                /** Format: date-time */
+                startedAt: string | null;
+                /**
+                 * @description `remind` (default) or `enforce` automatically
+                 * @enum {string}
+                 */
+                then: 'remind' | 'enforce';
+                /** Format: date-time */
+                until: string;
+              } | null;
               document: {
+                /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+                policyMapping?: {
+                  /** @enum {string} */
+                  allow_tagged?: 'tag' | 'none';
+                  /** @enum {string} */
+                  quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  /** @enum {string} */
+                  reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  /** @enum {string} */
+                  require_approval?:
+                    'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                };
                 /** @enum {boolean} */
                 remediateScanFailures?: false;
                 rules: {
@@ -15153,6 +16466,17 @@ export interface operations {
               /** Format: uuid */
               domainId: string;
               domainName: string;
+              /** @description The effective `policyMapping` (defaults: quarantine folder; tagged allow → tag) */
+              effectivePolicyMapping: {
+                /** @enum {string} */
+                allow_tagged: 'tag' | 'none';
+                /** @enum {string} */
+                quarantine: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                reject: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                require_approval: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              };
               /** Format: uuid */
               id: string;
               /** @enum {string} */
@@ -15165,7 +16489,35 @@ export interface operations {
             /** @description The platform allows `hard_delete` rules (API_MODE_HARD_DELETE_ENABLED) */
             hardDeleteAvailable: boolean;
             organization: {
+              /** @description Step API-4 (B7): the detect-only period; null = none */
+              detectOnly: {
+                /** @description `until` has passed */
+                ended: boolean;
+                /** @description Simulated actions of the policy scope since `startedAt` (capped at 10 000) */
+                simulatedSinceStart: number;
+                /** Format: date-time */
+                startedAt: string | null;
+                /**
+                 * @description `remind` (default) or `enforce` automatically
+                 * @enum {string}
+                 */
+                then: 'remind' | 'enforce';
+                /** Format: date-time */
+                until: string;
+              } | null;
               document: {
+                /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+                policyMapping?: {
+                  /** @enum {string} */
+                  allow_tagged?: 'tag' | 'none';
+                  /** @enum {string} */
+                  quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  /** @enum {string} */
+                  reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  /** @enum {string} */
+                  require_approval?:
+                    'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                };
                 /** @enum {boolean} */
                 remediateScanFailures?: false;
                 rules: {
@@ -15200,6 +16552,17 @@ export interface operations {
                 /** @enum {number} */
                 v: 1;
               };
+              /** @description The effective `policyMapping` (defaults: quarantine folder; tagged allow → tag) */
+              effectivePolicyMapping: {
+                /** @enum {string} */
+                allow_tagged: 'tag' | 'none';
+                /** @enum {string} */
+                quarantine: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                reject: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                require_approval: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              };
               /** Format: uuid */
               id: string | null;
               /** @enum {string} */
@@ -15220,6 +16583,18 @@ export interface operations {
               /** @description P1 in detect-only mode: recommended start */
               detectOnlyStart: {
                 document: {
+                  /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+                  policyMapping?: {
+                    /** @enum {string} */
+                    allow_tagged?: 'tag' | 'none';
+                    /** @enum {string} */
+                    quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    require_approval?:
+                      'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  };
                   /** @enum {boolean} */
                   remediateScanFailures?: false;
                   rules: {
@@ -15260,6 +16635,18 @@ export interface operations {
               /** @description The platform default */
               p1: {
                 document: {
+                  /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+                  policyMapping?: {
+                    /** @enum {string} */
+                    allow_tagged?: 'tag' | 'none';
+                    /** @enum {string} */
+                    quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    require_approval?:
+                      'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  };
                   /** @enum {boolean} */
                   remediateScanFailures?: false;
                   rules: {
@@ -15300,6 +16687,18 @@ export interface operations {
               /** @description P1 + spam to Junk */
               strict: {
                 document: {
+                  /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+                  policyMapping?: {
+                    /** @enum {string} */
+                    allow_tagged?: 'tag' | 'none';
+                    /** @enum {string} */
+                    quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                    /** @enum {string} */
+                    require_approval?:
+                      'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                  };
                   /** @enum {boolean} */
                   remediateScanFailures?: false;
                   rules: {
@@ -15447,7 +16846,14 @@ export interface operations {
     requestBody: {
       content: {
         'application/json': {
-          /** @description The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins) }`; strict (unknown keys refused; `when.policyDispositions` is reserved) */
+          /** @description Step API-4 (B7): `{ until (now + 1 h … now + 30 d), then: remind|enforce }` — only with mode `detect_only` (else `422 api_mode_detect_only_invalid`); null/absent = no period; saving `enforce` clears the period */
+          detectOnly?: {
+            /** @enum {string} */
+            then: 'remind' | 'enforce';
+            /** Format: date-time */
+            until: string;
+          } | null;
+          /** @description The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins), policyMapping?: { quarantine?, require_approval?, reject?, allow_tagged? } }`; strict (unknown keys refused; `when.policyDispositions` is refused with `use_policy_mapping`: tenant policy dispositions map through `policyMapping`; `hard_delete` is never a mapping value) */
           document: unknown;
           /** @description The `rowVersion` read (null when no policy row exists yet: the PUT creates it) */
           expectedRowVersion: number | null;
@@ -15477,7 +16883,34 @@ export interface operations {
           'application/json': {
             /** @description true: the row did not exist before */
             created: boolean;
+            /** @description Step API-4 (B7): the detect-only period; null = none */
+            detectOnly: {
+              /** @description `until` has passed */
+              ended: boolean;
+              /** @description Simulated actions of the policy scope since `startedAt` (capped at 10 000) */
+              simulatedSinceStart: number;
+              /** Format: date-time */
+              startedAt: string | null;
+              /**
+               * @description `remind` (default) or `enforce` automatically
+               * @enum {string}
+               */
+              then: 'remind' | 'enforce';
+              /** Format: date-time */
+              until: string;
+            } | null;
             document: {
+              /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+              policyMapping?: {
+                /** @enum {string} */
+                allow_tagged?: 'tag' | 'none';
+                /** @enum {string} */
+                quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                require_approval?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              };
               /** @enum {boolean} */
               remediateScanFailures?: false;
               rules: {
@@ -15509,6 +16942,17 @@ export interface operations {
             };
             /** Format: uuid */
             domainId: string | null;
+            /** @description The effective `policyMapping` (defaults: quarantine folder; tagged allow → tag) */
+            effectivePolicyMapping: {
+              /** @enum {string} */
+              allow_tagged: 'tag' | 'none';
+              /** @enum {string} */
+              quarantine: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              /** @enum {string} */
+              reject: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              /** @enum {string} */
+              require_approval: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+            };
             /** Format: uuid */
             id: string;
             /** @enum {string} */
@@ -15610,7 +17054,7 @@ export interface operations {
         };
       };
       /**
-       * @description `api_mode_hard_delete_disabled` (`ruleIds`); `idempotency_key_reused`
+       * @description `api_mode_hard_delete_disabled` (`ruleIds`), `api_mode_detect_only_invalid` (`reason`); `idempotency_key_reused`
        *
        *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
        */
@@ -15708,7 +17152,14 @@ export interface operations {
     requestBody: {
       content: {
         'application/json': {
-          /** @description The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins) }`; strict (unknown keys refused; `when.policyDispositions` is reserved) */
+          /** @description Step API-4 (B7): `{ until (now + 1 h … now + 30 d), then: remind|enforce }` — only with mode `detect_only` (else `422 api_mode_detect_only_invalid`); null/absent = no period; saving `enforce` clears the period */
+          detectOnly?: {
+            /** @enum {string} */
+            then: 'remind' | 'enforce';
+            /** Format: date-time */
+            until: string;
+          } | null;
+          /** @description The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins), policyMapping?: { quarantine?, require_approval?, reject?, allow_tagged? } }`; strict (unknown keys refused; `when.policyDispositions` is refused with `use_policy_mapping`: tenant policy dispositions map through `policyMapping`; `hard_delete` is never a mapping value) */
           document: unknown;
           /** @description The `rowVersion` read (null when no policy row exists yet: the PUT creates it) */
           expectedRowVersion: number | null;
@@ -15738,7 +17189,34 @@ export interface operations {
           'application/json': {
             /** @description true: the row did not exist before */
             created: boolean;
+            /** @description Step API-4 (B7): the detect-only period; null = none */
+            detectOnly: {
+              /** @description `until` has passed */
+              ended: boolean;
+              /** @description Simulated actions of the policy scope since `startedAt` (capped at 10 000) */
+              simulatedSinceStart: number;
+              /** Format: date-time */
+              startedAt: string | null;
+              /**
+               * @description `remind` (default) or `enforce` automatically
+               * @enum {string}
+               */
+              then: 'remind' | 'enforce';
+              /** Format: date-time */
+              until: string;
+            } | null;
             document: {
+              /** @description Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a missing key takes its default (never `hard_delete`) */
+              policyMapping?: {
+                /** @enum {string} */
+                allow_tagged?: 'tag' | 'none';
+                /** @enum {string} */
+                quarantine?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                reject?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+                /** @enum {string} */
+                require_approval?: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              };
               /** @enum {boolean} */
               remediateScanFailures?: false;
               rules: {
@@ -15770,6 +17248,17 @@ export interface operations {
             };
             /** Format: uuid */
             domainId: string | null;
+            /** @description The effective `policyMapping` (defaults: quarantine folder; tagged allow → tag) */
+            effectivePolicyMapping: {
+              /** @enum {string} */
+              allow_tagged: 'tag' | 'none';
+              /** @enum {string} */
+              quarantine: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              /** @enum {string} */
+              reject: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+              /** @enum {string} */
+              require_approval: 'move_quarantine' | 'move_junk' | 'soft_delete' | 'tag' | 'none';
+            };
             /** Format: uuid */
             id: string;
             /** @enum {string} */
@@ -15895,7 +17384,7 @@ export interface operations {
         };
       };
       /**
-       * @description `api_mode_hard_delete_disabled` (`ruleIds`); `idempotency_key_reused`
+       * @description `api_mode_hard_delete_disabled` (`ruleIds`), `api_mode_detect_only_invalid` (`reason`); `idempotency_key_reused`
        *
        *     The Idempotency-Key was already used for a different request (body, path, operation or caller), or a rule of the operation refused it (see the operation description)
        */
@@ -16473,7 +17962,7 @@ export interface operations {
             connectionId: string;
             /** Format: date-time */
             createdAt: string;
-            /** @description `api-remediation-decision/1` for policy rows, `{ requestedAction, reason }` otherwise */
+            /** @description `api-remediation-decision/1` or `/2` (step API-4: the verdict and policy lanes, the policy outcome and the post-delivery statuses) for policy rows, `{ requestedAction, reason }` otherwise */
             decision:
               | (
                   | {
@@ -16500,6 +17989,108 @@ export interface operations {
                       ruleId: string | null;
                       /** @enum {number} */
                       v: 1;
+                    }
+                  | {
+                      inputs: {
+                        hardBlocks: string[];
+                        level: string | null;
+                        riskScore: number | null;
+                        verdict: string | null;
+                        /** @enum {string} */
+                        verdictAuthority: 'copy' | 'inline';
+                      };
+                      lanes: {
+                        policy: {
+                          /** @enum {string} */
+                          action:
+                            'move_quarantine' | 'move_junk' | 'tag' | 'soft_delete' | 'hard_delete';
+                          /** @enum {string} */
+                          key: 'quarantine' | 'require_approval' | 'reject' | 'allow_tagged';
+                        } | null;
+                        /** @enum {string|null} */
+                        suppressedBy: 'policy_allow_override' | null;
+                        verdict: {
+                          /** @enum {string} */
+                          action:
+                            'move_quarantine' | 'move_junk' | 'tag' | 'soft_delete' | 'hard_delete';
+                          ruleId: string;
+                        } | null;
+                        /** @enum {string|null} */
+                        winner: 'verdict' | 'policy' | null;
+                      };
+                      /** @enum {string} */
+                      mode: 'detect_only' | 'enforce';
+                      notes: string[];
+                      policy: {
+                        publicId: string | null;
+                        rowVersion: number | null;
+                        /** @enum {string} */
+                        scope: 'platform_default' | 'organization' | 'domain';
+                        sha256: string;
+                      };
+                      policyOutcome: {
+                        actionTypes: (
+                          | 'ALLOW'
+                          | 'REJECT'
+                          | 'QUARANTINE'
+                          | 'TAG'
+                          | 'WARN'
+                          | 'REQUIRE_APPROVAL'
+                          | 'URL_REWRITE'
+                          | 'ARCHIVE'
+                          | 'ALERT'
+                        )[];
+                        /** @enum {string} */
+                        decisionSource: 'tenant_rule' | 'platform_default' | 'floor';
+                        /** @description `<policyPublicId>#<versionNo>/<ruleId>` of the deciding tenant rule */
+                        decisiveRuleRef: string | null;
+                        /** @enum {string} */
+                        disposition: 'allow' | 'require_approval' | 'quarantine' | 'reject';
+                        /** @enum {string|null} */
+                        dlpAction:
+                          'allow' | 'alert' | 'require_approval' | 'quarantine' | 'block' | null;
+                        floorReasons: string[];
+                        /** @description A tenant override of the recommendation applied */
+                        overrideApplied: boolean;
+                        /** @description The disposition (or the tag of an allow) only restates the platform default risk recommendation, so it fed no policy lane (the verdict lane decides it); absent in decision records written before this field existed */
+                        recommendationOnly?: boolean;
+                        /** @description TAG or WARN applied with disposition `allow` */
+                        tagged: boolean;
+                      } | null;
+                      postDelivery: {
+                        /** @enum {string|null} */
+                        reason:
+                          | 'mapped_to_mailbox_action'
+                          | 'already_delivered'
+                          | 'post_delivery_no_bounce'
+                          | 'post_delivery_no_header_edit'
+                          | 'post_delivery_no_rewrite'
+                          | 'archive_follows_journaling'
+                          | 'post_delivery_no_encrypt'
+                          | 'post_delivery_no_redirect'
+                          | 'outbound_already_sent'
+                          | null;
+                        /** @enum {string} */
+                        status: 'enforced' | 'requested' | 'recorded' | 'not_applicable';
+                        /** @enum {string} */
+                        type:
+                          | 'ALLOW'
+                          | 'REJECT'
+                          | 'QUARANTINE'
+                          | 'TAG'
+                          | 'WARN'
+                          | 'REQUIRE_APPROVAL'
+                          | 'URL_REWRITE'
+                          | 'ARCHIVE'
+                          | 'ALERT'
+                          | 'SENDER_NOTICE'
+                          | 'HEADER_EDIT'
+                          | 'ENCRYPT'
+                          | 'REDIRECT';
+                      }[];
+                      ruleId: string | null;
+                      /** @enum {number} */
+                      v: 2;
                     }
                   | {
                       /** @description Operator-typed (untrusted) */
@@ -18526,6 +20117,10 @@ export interface operations {
               autoMaxMailboxes: number;
               clawbackLookbackDays: number;
               internalMailEnabled: boolean;
+              /** @description Step API-4: outbound journal messages are evaluated (detect + alert only) */
+              outboundDetectionEnabled: boolean;
+              /** @description Step API-4: tenant policies are evaluated on API-mode copies (detect mode) */
+              policyEvaluationEnabled: boolean;
               purgeApprovalMailboxes: number;
               reportAckEnabled: boolean;
               reportFeedbackEnabled: boolean;
@@ -18546,6 +20141,10 @@ export interface operations {
               autoMaxMailboxes: number;
               clawbackLookbackDays: number;
               internalMailEnabled: boolean;
+              /** @description Step API-4: outbound journal messages are evaluated (detect + alert only) */
+              outboundDetectionEnabled: boolean;
+              /** @description Step API-4: tenant policies are evaluated on API-mode copies (detect mode) */
+              policyEvaluationEnabled: boolean;
               purgeApprovalMailboxes: number;
               reportAckEnabled: boolean;
               reportFeedbackEnabled: boolean;
@@ -18674,6 +20273,8 @@ export interface operations {
           /** @description The `rowVersion` read (null when no settings row exists: the PUT creates it) */
           expectedRowVersion: number | null;
           internalMailEnabled: boolean;
+          outboundDetectionEnabled?: boolean;
+          policyEvaluationEnabled?: boolean;
           purgeApprovalMailboxes: number;
           /** @description Why (1-500 characters; stored with the request and in the audit row) */
           reason: string;
@@ -18727,6 +20328,10 @@ export interface operations {
               autoMaxMailboxes: number;
               clawbackLookbackDays: number;
               internalMailEnabled: boolean;
+              /** @description Step API-4: outbound journal messages are evaluated (detect + alert only) */
+              outboundDetectionEnabled: boolean;
+              /** @description Step API-4: tenant policies are evaluated on API-mode copies (detect mode) */
+              policyEvaluationEnabled: boolean;
               purgeApprovalMailboxes: number;
               reportAckEnabled: boolean;
               reportFeedbackEnabled: boolean;
@@ -18747,6 +20352,10 @@ export interface operations {
               autoMaxMailboxes: number;
               clawbackLookbackDays: number;
               internalMailEnabled: boolean;
+              /** @description Step API-4: outbound journal messages are evaluated (detect + alert only) */
+              outboundDetectionEnabled: boolean;
+              /** @description Step API-4: tenant policies are evaluated on API-mode copies (detect mode) */
+              policyEvaluationEnabled: boolean;
               purgeApprovalMailboxes: number;
               reportAckEnabled: boolean;
               reportFeedbackEnabled: boolean;
@@ -51487,7 +53096,7 @@ export interface operations {
           };
         };
       };
-      /** @description `department_conflict`: `expectedRowVersion` is not current (`currentRowVersion`); `department_in_use`: an active policy version references it (`policies[].policyId`) */
+      /** @description `department_conflict`: `expectedRowVersion` is not current (`currentRowVersion`); `department_in_use`: an active policy version references it (`policies[].policyId`), or an API-mode mailbox scope lists it (`reference: api_mode_scope`, `domains[].domainId`) */
       409: {
         headers: {
           'RateLimit-Limit': components['headers']['RateLimit-Limit'];
@@ -59282,6 +60891,38 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            ownership: {
+              /**
+               * @description How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null while never verified
+               * @enum {string|null}
+               */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              /** @description The newest ownership check through the provider tenant; null = none */
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The provider connection checked
+                 */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                /** @description The verification id (decimal) */
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                /**
+                 * @description The provider’s answer (null until the integration-worker checked)
+                 * @enum {string|null}
+                 */
+                result: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              /** @description The domain waits for ownership and the organization has a bound, enabled provider connection with an active mail-flow grant (POST …/ownership/provider-check) */
+              providerCheckAvailable: boolean;
+            };
             /** @description Step API-1: the configured (null = inherit) and effective protection mode */
             protectionMode: {
               /** Format: date-time */
@@ -59426,6 +61067,254 @@ export interface operations {
           'application/json': {
             /** @enum {string} */
             code: 'domain_reserved' | 'protection_mode_inbound_conflict';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 422;
+          };
+        };
+      };
+      /** @description Rate limited (`Retry-After` header when known) */
+      429: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'Retry-After': components['headers']['Retry-After'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Unexpected error (internal_error; no details are disclosed) */
+      500: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ErrorBody'];
+        };
+      };
+      /** @description Authentication backend unavailable (fail closed) */
+      503: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+    };
+  };
+  DomainsController_providerOwnershipCheck_v1: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Client-chosen key, 1-128 characters of `[A-Za-z0-9._:-]`, unique per organization (case-sensitive). The first successful (2xx) response is stored for 24 hours: repeating the same request with the same key returns it again with the response header `Idempotency-Replayed: true` and changes nothing. The same key with a different request (body, path, operation or caller) is `422 idempotency_key_reused`. Errors (4xx) are not stored: fix the request and retry with the same key. */
+        'Idempotency-Key': string;
+      };
+      path: {
+        /** @description Domain public id (UUID) */
+        domainId: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': {
+          /**
+           * Format: uuid
+           * @description The bound provider connection to check through; optional when exactly one qualifies (or the domain’s previous provider check used one that still qualifies)
+           */
+          connectionId?: string;
+        };
+      };
+    };
+    responses: {
+      /** @description The pending provider check */
+      202: {
+        headers: {
+          'Idempotency-Replayed': components['headers']['Idempotency-Replayed'];
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          /**
+           * @example {
+           *       "verificationId": "4182",
+           *       "status": "pending",
+           *       "connectionId": "0192f3a0-3333-7000-8000-000000000003",
+           *       "expiresAt": "2026-11-27T10:00:00.000Z",
+           *       "reused": false
+           *     }
+           */
+          'application/json': {
+            /** Format: uuid */
+            connectionId: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** @description A pending provider check of the domain was reused */
+            reused: boolean;
+            /** @enum {string} */
+            status: 'pending';
+            /** @description The provider verification id (decimal) */
+            verificationId: string;
+          };
+        };
+      };
+      /** @description Validation failed (`message` lists `"<path>: <issue>"`) or the token is invalid/expired */
+      400: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing or invalid credentials */
+      401: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description Missing permission (`forbidden`) */
+      403: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'forbidden';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 403;
+          };
+        };
+      };
+      /** @description Not found (also for resources of another tenant) */
+      404: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            correlationId?: string;
+            error: string;
+            message: string | string[];
+            statusCode: number;
+          };
+        };
+      };
+      /** @description `domain_provider_connection_unavailable` (`reason`: `none`, `not_capable`, `connection_required` with `candidates`), `domain_not_pending` (`status`), the name is owned by another organization, or an Idempotency-Key conflict */
+      409: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code:
+              | 'domain_provider_connection_unavailable'
+              | 'domain_not_pending'
+              | 'idempotency_key_conflict'
+              | 'idempotency_key_in_progress';
+            correlationId?: string;
+            error: string;
+            message: string;
+            /** Format: uuid */
+            requestId?: string;
+            /** @enum {integer} */
+            statusCode: 409;
+          };
+        };
+      };
+      /** @description Idempotency-Key reused with a different request */
+      422: {
+        headers: {
+          'RateLimit-Limit': components['headers']['RateLimit-Limit'];
+          'RateLimit-Remaining': components['headers']['RateLimit-Remaining'];
+          'RateLimit-Reset': components['headers']['RateLimit-Reset'];
+          'X-Correlation-Id': components['headers']['X-Correlation-Id'];
+          'X-Request-Id': components['headers']['X-Request-Id'];
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': {
+            /** @enum {string} */
+            code: 'idempotency_key_reused';
             correlationId?: string;
             error: string;
             message: string;
@@ -59802,6 +61691,38 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            ownership: {
+              /**
+               * @description How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null while never verified
+               * @enum {string|null}
+               */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              /** @description The newest ownership check through the provider tenant; null = none */
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The provider connection checked
+                 */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                /** @description The verification id (decimal) */
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                /**
+                 * @description The provider’s answer (null until the integration-worker checked)
+                 * @enum {string|null}
+                 */
+                result: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              /** @description The domain waits for ownership and the organization has a bound, enabled provider connection with an active mail-flow grant (POST …/ownership/provider-check) */
+              providerCheckAvailable: boolean;
+            };
             /** @description Step API-1: the configured (null = inherit) and effective protection mode */
             protectionMode: {
               /** Format: date-time */
@@ -62137,6 +64058,39 @@ export interface operations {
             name: string;
             /** Format: date-time */
             nextCheckAt: string | null;
+            /** @description Step API-4: ownership method and provider check */
+            ownership: {
+              /**
+               * @description How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null while never verified
+               * @enum {string|null}
+               */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              /** @description The newest ownership check through the provider tenant; null = none */
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The provider connection checked
+                 */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                /** @description The verification id (decimal) */
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                /**
+                 * @description The provider’s answer (null until the integration-worker checked)
+                 * @enum {string|null}
+                 */
+                result: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              /** @description The domain waits for ownership and the organization has a bound, enabled provider connection with an active mail-flow grant (POST …/ownership/provider-check) */
+              providerCheckAvailable: boolean;
+            };
             /** @description Ownership verified: the domain can be activated */
             readyForActivation: boolean;
             /** @enum {string} */
@@ -62331,6 +64285,38 @@ export interface operations {
             /** Format: date-time */
             nextCheckAt: string | null;
             outboundEnabled: boolean;
+            ownership: {
+              /**
+               * @description How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null while never verified
+               * @enum {string|null}
+               */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              /** @description The newest ownership check through the provider tenant; null = none */
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The provider connection checked
+                 */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                /** @description The verification id (decimal) */
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                /**
+                 * @description The provider’s answer (null until the integration-worker checked)
+                 * @enum {string|null}
+                 */
+                result: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              /** @description The domain waits for ownership and the organization has a bound, enabled provider connection with an active mail-flow grant (POST …/ownership/provider-check) */
+              providerCheckAvailable: boolean;
+            };
             /** @description Step API-1: the configured (null = inherit) and effective protection mode */
             protectionMode: {
               /** Format: date-time */
@@ -62625,6 +64611,39 @@ export interface operations {
             name: string;
             /** Format: date-time */
             nextCheckAt: string | null;
+            /** @description Step API-4: ownership method and provider check */
+            ownership: {
+              /**
+               * @description How ownership was won: `dns_txt` (the TXT record) or `provider_tenant` (listed as verified in the organization’s bound Microsoft 365 / Google Workspace tenant); null while never verified
+               * @enum {string|null}
+               */
+              method: 'dns_txt' | 'provider_tenant' | null;
+              /** @description The newest ownership check through the provider tenant; null = none */
+              providerCheck: {
+                /** Format: date-time */
+                checkedAt: string | null;
+                /**
+                 * Format: uuid
+                 * @description The provider connection checked
+                 */
+                connectionId: string | null;
+                /** Format: date-time */
+                expiresAt: string;
+                /** @description The verification id (decimal) */
+                id: string;
+                /** Format: date-time */
+                requestedAt: string;
+                /**
+                 * @description The provider’s answer (null until the integration-worker checked)
+                 * @enum {string|null}
+                 */
+                result: 'verified' | 'unverified' | 'absent' | 'alias' | 'error' | null;
+                /** @enum {string} */
+                status: 'pending' | 'verified' | 'failed' | 'expired';
+              } | null;
+              /** @description The domain waits for ownership and the organization has a bound, enabled provider connection with an active mail-flow grant (POST …/ownership/provider-check) */
+              providerCheckAvailable: boolean;
+            };
             /** @description Ownership verified: the domain can be activated */
             readyForActivation: boolean;
             /** @enum {string} */
@@ -81238,6 +83257,7 @@ export interface operations {
               | 'ato_approval_requested'
               | 'ato_digest'
               | 'ato_provider_health'
+              | 'dlp_detected'
             )[];
             optOut: (
               | 'threat_detected'
@@ -81251,6 +83271,7 @@ export interface operations {
               | 'ato_approval_requested'
               | 'ato_digest'
               | 'ato_provider_health'
+              | 'dlp_detected'
             )[];
             quarantineDigestOptOut: boolean;
             /** @description Whether the organization allows opting out of the quarantine digest */
@@ -81361,7 +83382,7 @@ export interface operations {
     requestBody: {
       content: {
         'application/json': {
-          /** @description Kinds you do not want to receive (unique): `threat_detected`, `domain_dns_failed`, `webhook_disabled`, `policy_alert`, `quarantine_admin_alert`, `quarantine_approval_requested` */
+          /** @description Kinds you do not want to receive (unique): `threat_detected`, `domain_dns_failed`, `webhook_disabled`, `integration_unhealthy`, `policy_alert`, `quarantine_admin_alert`, `quarantine_approval_requested`, `ato_incident`, `ato_approval_requested`, `ato_digest`, `ato_provider_health`, `dlp_detected` (step API-4) */
           optOut: (
             | 'threat_detected'
             | 'domain_dns_failed'
@@ -81374,6 +83395,7 @@ export interface operations {
             | 'ato_approval_requested'
             | 'ato_digest'
             | 'ato_provider_health'
+            | 'dlp_detected'
           )[];
           /** @description Opt out of the quarantine digest (the same setting as `/quarantine/me/preferences`); opting out needs the organization’s `digest.allowOptOut` */
           quarantineDigestOptOut: boolean;
@@ -81407,6 +83429,7 @@ export interface operations {
               | 'ato_approval_requested'
               | 'ato_digest'
               | 'ato_provider_health'
+              | 'dlp_detected'
             )[];
             optOut: (
               | 'threat_detected'
@@ -81420,6 +83443,7 @@ export interface operations {
               | 'ato_approval_requested'
               | 'ato_digest'
               | 'ato_provider_health'
+              | 'dlp_detected'
             )[];
             quarantineDigestOptOut: boolean;
             /** @description Whether the organization allows opting out of the quarantine digest */
@@ -81560,6 +83584,10 @@ export interface operations {
         content: {
           'application/json': {
             bounds: {
+              dlpDetected: {
+                maxThrottleMinutes: number;
+                minThrottleMinutes: number;
+              };
               domainDnsFailed: {
                 maxThrottleMinutes: number;
                 minThrottleMinutes: number;
@@ -81575,6 +83603,13 @@ export interface operations {
             };
             defaults: {
               alerts: {
+                /** @description Step API-4: DLP detections of API-mode copies (to `dlp:read` holders; `block`/`quarantine` high, `require_approval` medium, `alert` low) */
+                dlpDetected: {
+                  enabled: boolean;
+                  /** @enum {string} */
+                  minSeverity: 'low' | 'medium' | 'high';
+                  throttleMinutes: number;
+                };
                 domainDnsFailed: {
                   enabled: boolean;
                   throttleMinutes: number;
@@ -81599,6 +83634,13 @@ export interface operations {
             /** @description Effective settings (stored values over the defaults) */
             settings: {
               alerts: {
+                /** @description Step API-4: DLP detections of API-mode copies (to `dlp:read` holders; `block`/`quarantine` high, `require_approval` medium, `alert` low) */
+                dlpDetected: {
+                  enabled: boolean;
+                  /** @enum {string} */
+                  minSeverity: 'low' | 'medium' | 'high';
+                  throttleMinutes: number;
+                };
                 domainDnsFailed: {
                   enabled: boolean;
                   throttleMinutes: number;
@@ -81619,6 +83661,12 @@ export interface operations {
             /** @description The stored document, or null when none is stored or it is invalid */
             stored: {
               alerts?: {
+                dlpDetected?: {
+                  enabled?: boolean;
+                  /** @enum {string} */
+                  minSeverity?: 'low' | 'medium' | 'high';
+                  throttleMinutes?: number;
+                };
                 domainDnsFailed?: {
                   enabled?: boolean;
                   throttleMinutes?: number;
@@ -81749,6 +83797,12 @@ export interface operations {
           /** @description The whole settings document (replaces the stored one; `{}` = defaults) */
           settings: {
             alerts?: {
+              dlpDetected?: {
+                enabled?: boolean;
+                /** @enum {string} */
+                minSeverity?: 'low' | 'medium' | 'high';
+                throttleMinutes?: number;
+              };
               domainDnsFailed?: {
                 enabled?: boolean;
                 throttleMinutes?: number;
@@ -81782,6 +83836,10 @@ export interface operations {
         content: {
           'application/json': {
             bounds: {
+              dlpDetected: {
+                maxThrottleMinutes: number;
+                minThrottleMinutes: number;
+              };
               domainDnsFailed: {
                 maxThrottleMinutes: number;
                 minThrottleMinutes: number;
@@ -81797,6 +83855,13 @@ export interface operations {
             };
             defaults: {
               alerts: {
+                /** @description Step API-4: DLP detections of API-mode copies (to `dlp:read` holders; `block`/`quarantine` high, `require_approval` medium, `alert` low) */
+                dlpDetected: {
+                  enabled: boolean;
+                  /** @enum {string} */
+                  minSeverity: 'low' | 'medium' | 'high';
+                  throttleMinutes: number;
+                };
                 domainDnsFailed: {
                   enabled: boolean;
                   throttleMinutes: number;
@@ -81821,6 +83886,13 @@ export interface operations {
             /** @description Effective settings (stored values over the defaults) */
             settings: {
               alerts: {
+                /** @description Step API-4: DLP detections of API-mode copies (to `dlp:read` holders; `block`/`quarantine` high, `require_approval` medium, `alert` low) */
+                dlpDetected: {
+                  enabled: boolean;
+                  /** @enum {string} */
+                  minSeverity: 'low' | 'medium' | 'high';
+                  throttleMinutes: number;
+                };
                 domainDnsFailed: {
                   enabled: boolean;
                   throttleMinutes: number;
@@ -81841,6 +83913,12 @@ export interface operations {
             /** @description The stored document, or null when none is stored or it is invalid */
             stored: {
               alerts?: {
+                dlpDetected?: {
+                  enabled?: boolean;
+                  /** @enum {string} */
+                  minSeverity?: 'low' | 'medium' | 'high';
+                  throttleMinutes?: number;
+                };
                 domainDnsFailed?: {
                   enabled?: boolean;
                   throttleMinutes?: number;
@@ -93476,6 +95554,7 @@ export interface operations {
         disposition?: 'allow' | 'require_approval' | 'quarantine' | 'reject';
         from?: string;
         limit?: number;
+        mode?: 'inline' | 'detect' | 'all';
         overrideApplied?: 'true' | 'false';
         policyId?: string;
         ruleId?: string;
@@ -93545,6 +95624,11 @@ export interface operations {
               durationUs: number;
               /** Format: date-time */
               evaluatedAt: string;
+              /**
+               * @description Step API-4: `detect` = an API-mode copy evaluated after delivery (nothing enforced; the message id is a copy registry message, not a gateway message)
+               * @enum {string}
+               */
+              evaluationMode: 'inline' | 'detect';
               /** @enum {string} */
               finalAction:
                 | 'deliver'
@@ -124373,6 +126457,8 @@ export interface operations {
                 | 'ato.account.risk_changed'
                 | 'ato.response.completed'
                 | 'integration.health_changed'
+                | 'mailbox.threat.detected'
+                | 'mailbox.dlp.detected'
               )[];
               /** Format: date-time */
               failingSince: string | null;
@@ -124562,6 +126648,8 @@ export interface operations {
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
             | 'integration.health_changed'
+            | 'mailbox.threat.detected'
+            | 'mailbox.dlp.detected'
           )[];
           filters?: {
             directions?: ('inbound' | 'outbound' | 'internal')[];
@@ -124632,6 +126720,8 @@ export interface operations {
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
               | 'integration.health_changed'
+              | 'mailbox.threat.detected'
+              | 'mailbox.dlp.detected'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -124921,6 +127011,8 @@ export interface operations {
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
               | 'integration.health_changed'
+              | 'mailbox.threat.detected'
+              | 'mailbox.dlp.detected'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -125344,6 +127436,8 @@ export interface operations {
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
             | 'integration.health_changed'
+            | 'mailbox.threat.detected'
+            | 'mailbox.dlp.detected'
           )[];
           /** @description `rowVersion` of the webhook as last read (`409 webhook_version_conflict`) */
           expectedRowVersion: number;
@@ -125409,6 +127503,8 @@ export interface operations {
               | 'ato.account.risk_changed'
               | 'ato.response.completed'
               | 'integration.health_changed'
+              | 'mailbox.threat.detected'
+              | 'mailbox.dlp.detected'
             )[];
             /** Format: date-time */
             failingSince: string | null;
@@ -126405,6 +128501,8 @@ export interface operations {
             | 'ato.account.risk_changed'
             | 'ato.response.completed'
             | 'integration.health_changed'
+            | 'mailbox.threat.detected'
+            | 'mailbox.dlp.detected'
           )[];
           /**
            * Format: date-time

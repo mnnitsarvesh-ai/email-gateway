@@ -7,6 +7,17 @@ import {
   REMEDIATION_STATUSES,
   REMEDIABLE_VERDICTS,
   RULE_LEVELS,
+  DETECT_ONLY_THEN_VALUES,
+  POLICY_ACTION_STATUSES,
+  POLICY_MAPPING_ACTIONS,
+  POLICY_MAPPING_KEYS,
+  POLICY_MAPPING_TAGGED_ACTIONS,
+  POLICY_OUTCOME_ACTION_TYPES,
+  POLICY_OUTCOME_DECISION_SOURCES,
+  POLICY_OUTCOME_DISPOSITIONS,
+  POLICY_OUTCOME_DLP_ACTIONS,
+  POST_DELIVERY_EFFECTS,
+  POST_DELIVERY_REASONS,
 } from '@email-gateway/mailbox-api';
 import { z } from 'zod';
 import { defineListQuery } from '../../../http/listing/list-query';
@@ -69,8 +80,47 @@ export const RemediationPolicyDocumentSchema = z.object({
     }),
   ),
   remediateScanFailures: z.literal(false).optional(),
+  policyMapping: z
+    .object({
+      quarantine: z.enum(POLICY_MAPPING_ACTIONS).optional(),
+      require_approval: z.enum(POLICY_MAPPING_ACTIONS).optional(),
+      reject: z.enum(POLICY_MAPPING_ACTIONS).optional(),
+      allow_tagged: z.enum(POLICY_MAPPING_TAGGED_ACTIONS).optional(),
+    })
+    .optional()
+    .describe(
+      'Step API-4 (A4.2): tenant policy disposition → mailbox action of the policy lane; a ' +
+        'missing key takes its default (never `hard_delete`)',
+    ),
 });
 export type RemediationPolicyDocumentView = z.infer<typeof RemediationPolicyDocumentSchema>;
+
+/** Step API-4 (A4.2): the mapping that applies (the document's keys over the defaults). */
+export const EffectivePolicyMappingSchema = z
+  .object({
+    quarantine: z.enum(POLICY_MAPPING_ACTIONS),
+    require_approval: z.enum(POLICY_MAPPING_ACTIONS),
+    reject: z.enum(POLICY_MAPPING_ACTIONS),
+    allow_tagged: z.enum(POLICY_MAPPING_TAGGED_ACTIONS),
+  })
+  .describe('The effective `policyMapping` (defaults: quarantine folder; tagged allow → tag)');
+export type EffectivePolicyMappingView = z.infer<typeof EffectivePolicyMappingSchema>;
+
+/** Step API-4 (B7): the detect-only start period of a policy row. */
+export const DetectOnlyViewSchema = z
+  .object({
+    until: isoInstant,
+    then: z.enum(DETECT_ONLY_THEN_VALUES).describe('`remind` (default) or `enforce` automatically'),
+    startedAt: nullableInstant,
+    ended: z.boolean().describe('`until` has passed'),
+    simulatedSinceStart: z
+      .number()
+      .int()
+      .describe('Simulated actions of the policy scope since `startedAt` (capped at 10 000)'),
+  })
+  .nullable()
+  .describe('Step API-4 (B7): the detect-only period; null = none');
+export type DetectOnlyView = z.infer<typeof DetectOnlyViewSchema>;
 
 const presetSchema = z.object({
   mode: z.enum(REMEDIATION_MODES),
@@ -92,6 +142,8 @@ export const RemediationPolicyViewSchema = z.object({
       .nullable()
       .describe('CAS version (null: no row; send `expectedRowVersion: null` to create it)'),
     updatedAt: nullableInstant,
+    effectivePolicyMapping: EffectivePolicyMappingSchema,
+    detectOnly: DetectOnlyViewSchema,
   }),
   domains: z
     .array(
@@ -104,6 +156,8 @@ export const RemediationPolicyViewSchema = z.object({
         sha256: z.string(),
         rowVersion: z.number().int(),
         updatedAt: isoInstant,
+        effectivePolicyMapping: EffectivePolicyMappingSchema,
+        detectOnly: DetectOnlyViewSchema,
       }),
     )
     .describe('Per-domain overrides (a domain without one inherits the organization policy)'),
@@ -132,8 +186,23 @@ export const PutRemediationPolicyBodySchema = z.strictObject({
     .unknown()
     .describe(
       'The `api-remediation-policy/1` document: `{ v: 1, rules: [{ id, when: { verdicts, ' +
-        'minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins) }`; ' +
-        'strict (unknown keys refused; `when.policyDispositions` is reserved)',
+        'minLevel?, maxLevel?, hardBlock?, minScore? }, action }] (1-16, first match wins), ' +
+        'policyMapping?: { quarantine?, require_approval?, reject?, allow_tagged? } }`; strict ' +
+        '(unknown keys refused; `when.policyDispositions` is refused with `use_policy_mapping`: ' +
+        'tenant policy dispositions map through `policyMapping`; `hard_delete` is never a ' +
+        'mapping value)',
+    ),
+  detectOnly: z
+    .strictObject({
+      until: isoInstant,
+      then: z.enum(DETECT_ONLY_THEN_VALUES),
+    })
+    .nullable()
+    .optional()
+    .describe(
+      'Step API-4 (B7): `{ until (now + 1 h … now + 30 d), then: remind|enforce }` — only with ' +
+        'mode `detect_only` (else `422 api_mode_detect_only_invalid`); null/absent = no period; ' +
+        'saving `enforce` clears the period',
     ),
   reason: reasonField,
   expectedRowVersion,
@@ -149,6 +218,8 @@ export const RemediationPolicyChangeSchema = z.object({
   sha256: z.string(),
   rowVersion: z.number().int(),
   updatedAt: isoInstant,
+  effectivePolicyMapping: EffectivePolicyMappingSchema,
+  detectOnly: DetectOnlyViewSchema,
   created: z.boolean().describe('true: the row did not exist before'),
 });
 export type RemediationPolicyChangeView = z.infer<typeof RemediationPolicyChangeSchema>;
@@ -253,12 +324,59 @@ const decisionRecordView = z.object({
   notes: z.array(z.string()),
 });
 
+/** Step API-4 (A4.1): the policy outcome a `/2` decision read (codes only). */
+export const PolicyOutcomeViewSchema = z.object({
+  disposition: z.enum(POLICY_OUTCOME_DISPOSITIONS),
+  tagged: z.boolean().describe('TAG or WARN applied with disposition `allow`'),
+  overrideApplied: z.boolean().describe('A tenant override of the recommendation applied'),
+  decisionSource: z.enum(POLICY_OUTCOME_DECISION_SOURCES),
+  decisiveRuleRef: z
+    .string()
+    .nullable()
+    .describe('`<policyPublicId>#<versionNo>/<ruleId>` of the deciding tenant rule'),
+  floorReasons: z.array(z.string()),
+  dlpAction: z.enum(POLICY_OUTCOME_DLP_ACTIONS).nullable(),
+  actionTypes: z.array(z.enum(POLICY_OUTCOME_ACTION_TYPES)),
+  recommendationOnly: z
+    .boolean()
+    .optional()
+    .describe(
+      'The disposition (or the tag of an allow) only restates the platform default risk ' +
+        'recommendation, so it fed no policy lane (the verdict lane decides it); absent in ' +
+        'decision records written before this field existed',
+    ),
+});
+
+/** Step API-4 (A5): what one policy action of the evaluation means after delivery. */
+export const PostDeliveryEntrySchema = z.object({
+  type: z.enum(POST_DELIVERY_EFFECTS),
+  status: z.enum(POLICY_ACTION_STATUSES),
+  reason: z.enum(POST_DELIVERY_REASONS).nullable(),
+});
+
+/** `api-remediation-decision/2` (step API-4 A4.4): `/1` + policy outcome, lanes, post-delivery. */
+const decisionRecordV2View = decisionRecordView.extend({
+  v: z.literal(2),
+  policyOutcome: PolicyOutcomeViewSchema.nullable(),
+  lanes: z.object({
+    verdict: z.object({ ruleId: z.string(), action: z.enum(REMEDIATION_ACTIONS) }).nullable(),
+    policy: z
+      .object({ key: z.enum(POLICY_MAPPING_KEYS), action: z.enum(REMEDIATION_ACTIONS) })
+      .nullable(),
+    winner: z.enum(['verdict', 'policy']).nullable(),
+    suppressedBy: z.literal('policy_allow_override').nullable(),
+  }),
+  postDelivery: z.array(PostDeliveryEntrySchema),
+});
+
 export const RemediationDetailSchema = RemediationSchema.extend({
   decision: z
-    .union([decisionRecordView, manualDecisionSchema])
+    .union([decisionRecordView, decisionRecordV2View, manualDecisionSchema])
     .nullable()
     .describe(
-      '`api-remediation-decision/1` for policy rows, `{ requestedAction, reason }` otherwise',
+      '`api-remediation-decision/1` or `/2` (step API-4: the verdict and policy lanes, the ' +
+        'policy outcome and the post-delivery statuses) for policy rows, `{ requestedAction, ' +
+        'reason }` otherwise',
     ),
   requestedBy: z.object({
     type: z.enum(['system', 'user', 'api_key']),
@@ -351,6 +469,20 @@ const p1Document = {
   ],
 };
 
+const mapping = {
+  quarantine: 'move_quarantine' as const,
+  require_approval: 'move_quarantine' as const,
+  reject: 'move_quarantine' as const,
+  allow_tagged: 'tag' as const,
+};
+const detectOnly = {
+  until: '2026-12-03T09:00:00.000Z',
+  then: 'remind' as const,
+  startedAt: T,
+  ended: false,
+  simulatedSinceStart: 12,
+};
+
 const remediation = {
   id: ACTION,
   action: 'move_quarantine' as const,
@@ -381,6 +513,8 @@ export const REMEDIATION_EXAMPLES = {
       sha256: SHA,
       rowVersion: 3,
       updatedAt: T,
+      effectivePolicyMapping: mapping,
+      detectOnly: null,
     },
     domains: [
       {
@@ -392,6 +526,8 @@ export const REMEDIATION_EXAMPLES = {
         sha256: SHA,
         rowVersion: 1,
         updatedAt: T,
+        effectivePolicyMapping: mapping,
+        detectOnly,
       },
     ],
     presets: {
@@ -416,7 +552,8 @@ export const REMEDIATION_EXAMPLES = {
   },
   policyPut: {
     mode: 'detect_only',
-    document: p1Document,
+    document: { ...p1Document, policyMapping: { reject: 'move_quarantine' } },
+    detectOnly: { until: '2026-12-03T09:00:00.000Z', then: 'remind' },
     reason: 'Start in detect-only mode for the first week',
     expectedRowVersion: null,
   },
@@ -425,10 +562,12 @@ export const REMEDIATION_EXAMPLES = {
     id: POLICY,
     domainId: null,
     mode: 'detect_only' as const,
-    document: p1Document,
+    document: { ...p1Document, policyMapping: { reject: 'move_quarantine' as const } },
     sha256: SHA,
     rowVersion: 1,
     updatedAt: T,
+    effectivePolicyMapping: mapping,
+    detectOnly: { ...detectOnly, simulatedSinceStart: 0 },
     created: true,
   },
   domainPolicyChange: {
@@ -440,6 +579,8 @@ export const REMEDIATION_EXAMPLES = {
     sha256: SHA,
     rowVersion: 2,
     updatedAt: T,
+    effectivePolicyMapping: mapping,
+    detectOnly: null,
     created: false,
   },
   remediation,
@@ -447,7 +588,7 @@ export const REMEDIATION_EXAMPLES = {
   remediationDetail: {
     ...remediation,
     decision: {
-      v: 1 as const,
+      v: 2 as const,
       policy: { scope: 'organization' as const, publicId: POLICY, rowVersion: 3, sha256: SHA },
       mode: 'enforce' as const,
       ruleId: 'p1-high-confidence-malware-phishing-hb',
@@ -458,7 +599,33 @@ export const REMEDIATION_EXAMPLES = {
         hardBlocks: ['hb.malware_attachment'],
         verdictAuthority: 'copy' as const,
       },
-      policyOutcome: null,
+      policyOutcome: {
+        disposition: 'quarantine' as const,
+        tagged: false,
+        overrideApplied: false,
+        decisionSource: 'platform_default' as const,
+        decisiveRuleRef: null,
+        floorReasons: [],
+        dlpAction: null,
+        actionTypes: ['QUARANTINE' as const, 'ALERT' as const],
+      },
+      lanes: {
+        verdict: {
+          ruleId: 'p1-high-confidence-malware-phishing-hb',
+          action: 'move_quarantine' as const,
+        },
+        policy: { key: 'quarantine' as const, action: 'move_quarantine' as const },
+        winner: 'verdict' as const,
+        suppressedBy: null,
+      },
+      postDelivery: [
+        {
+          type: 'QUARANTINE' as const,
+          status: 'requested' as const,
+          reason: 'mapped_to_mailbox_action' as const,
+        },
+        { type: 'ALERT' as const, status: 'requested' as const, reason: null },
+      ],
       notes: [],
     },
     requestedBy: { type: 'system' as const, userId: null },

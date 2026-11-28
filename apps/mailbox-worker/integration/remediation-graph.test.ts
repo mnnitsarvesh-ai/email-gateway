@@ -185,8 +185,12 @@ describe('decision in the copies transaction (R4)', () => {
     });
     expect(action!.nextAttemptAt?.getTime()).toBe(clock.ms());
     expect(malware.copy.lastActionId).toBe(action!.id);
+    // Step API-4 (A4.4): every new decision record is `api-remediation-decision/2`.
     expect(action!.decision).toMatchObject({
-      v: 1,
+      v: 2,
+      policyOutcome: null,
+      lanes: { winner: 'verdict', policy: null },
+      postDelivery: [],
       policy: { scope: 'platform_default' },
       mode: 'enforce',
       ruleId: 'p1-high-confidence-malware-phishing-hb',

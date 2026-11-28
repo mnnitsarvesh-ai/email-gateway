@@ -206,6 +206,38 @@ describe('step 5.2 department routes (e2e, dependencies stubbed)', () => {
     expect(metadata).not.toContain('alice@');
   });
 
+  it('step API-4 B6: a department listed by an API-mode mailbox scope cannot be deleted (409)', async () => {
+    const created = await http()
+      .post(D)
+      .set(await ctx.as(ADMIN))
+      .send({ name: 'Legal' })
+      .expect(201);
+    const id = created.body.id as string;
+    const domainId = randomUUID();
+    const store = ctx.store();
+    // The scope row of the caller's organization (the department's own organization).
+    const department = store.departmentRows.find((d) => d.publicId === id)!;
+    store.apiModeScopes.push({
+      organizationId: department.organizationId,
+      domainPublicId: domainId,
+      departmentIds: [id],
+    });
+    const inUse = await http()
+      .delete(`${D}/${id}`)
+      .set(await ctx.as(ADMIN))
+      .expect(409);
+    expect(inUse.body).toMatchObject({
+      code: 'department_in_use',
+      reference: 'api_mode_scope',
+      domains: [{ domainId }],
+    });
+    store.apiModeScopes.length = 0;
+    await http()
+      .delete(`${D}/${id}`)
+      .set(await ctx.as(ADMIN))
+      .expect(204);
+  });
+
   it('caps departments per organization', async () => {
     for (let i = 0; i < 10; i += 1) {
       await http()

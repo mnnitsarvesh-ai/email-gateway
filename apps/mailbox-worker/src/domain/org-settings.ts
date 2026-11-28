@@ -23,6 +23,8 @@ export async function loadOrgSettings(
       tiMinConfidence: true,
       reportAckEnabled: true,
       reportFeedbackEnabled: true,
+      policyEvaluationEnabled: true,
+      outboundDetectionEnabled: true,
       rowVersion: true,
     },
   });

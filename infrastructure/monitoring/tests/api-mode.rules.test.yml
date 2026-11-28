@@ -382,3 +382,44 @@ tests:
       - eval_time: 50m
         alertname: ApiModeReportsUntriaged
         exp_alerts: []
+  - name: detect policy evaluation errors above 5 % for 15 minutes
+    interval: 1m
+    input_series:
+      # 10 % of the evaluations fail on replica a; replica b evaluates cleanly.
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="a",result="failed"}
+        values: 0+6x60
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="a",result="evaluated"}
+        values: 0+30x60
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="b",result="evaluated"}
+        values: 0+24x60
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiModePolicyEvaluationErrors
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ApiModePolicyEvaluationErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Tenant policy evaluation of API-mode copies is failing
+              description: >-
+                More than 5 % of the detect-mode policy evaluations of API-mode copy messages
+                failed for 15 minutes (malformed round rows or evaluator errors): those copies are
+                remediated by the verdict rules only, without the tenants' policies and DLP
+                bindings. See the policy.errors_1h connection check and the mailbox-worker error
+                logs.
+              runbook_url: docs/runbooks/api-mode.md#apimodepolicyevaluationerrors
+  - name: detect policy evaluation errors at 5 % or less stay quiet
+    interval: 1m
+    input_series:
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="a",result="failed"}
+        values: 0+1x60
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="a",result="evaluated"}
+        values: 0+40x60
+      - series: api_mode_policy_evaluations_total{job="mailbox-worker",instance="a",result="disabled"}
+        values: 0+100x60
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ApiModePolicyEvaluationErrors
+        exp_alerts: []

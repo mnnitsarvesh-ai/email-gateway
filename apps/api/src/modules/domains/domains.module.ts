@@ -24,6 +24,10 @@ import {
   domainScheduleJitterProvider,
 } from './services/domain-verification.service';
 import { DomainsService } from './services/domains.service';
+import { DomainOwnershipReader } from './services/domain-ownership-reader';
+import { DomainProviderOwnershipService } from './services/domain-provider-ownership.service';
+import { ProviderVerificationsRepository } from './repositories/provider-verifications.repository';
+import { BoundConnectionsReader } from '../provider-connections/repositories/bound-connections.repository';
 import { RecipientValidationService } from './services/recipient-validation.service';
 import { DkimKeyStore } from './signing/dkim-key-store';
 import { RedisDkimStore } from './signing/redis-dkim-store';
@@ -33,7 +37,10 @@ import { RedisDkimStore } from './signing/redis-dkim-store';
  * rotation, the background check scheduler and the `/domains` API. Step 2.2 adds inbound
  * recipient validation (D3) and the DKIM signing publisher that feeds redis-dkim (D12). Uses
  * the DNS module (ADR-0017) and the global building blocks (audit, transactions, KV,
- * SecretBox, limits).
+ * SecretBox, limits). Step API-4 (B3, ADR-0107) adds ownership through the bound provider tenant
+ * (the request route, the scheduler's application of the integration-worker's answers and the
+ * `ownership` block of the views; the provider-connections module's bound-connection reader is
+ * provided here, a module import would be circular).
  */
 @Module({
   imports: [DnsModule],
@@ -50,6 +57,9 @@ import { RedisDkimStore } from './signing/redis-dkim-store';
     DomainOutboxRepository,
     RecipientsRepository,
     DkimSigningRepository,
+    // Step API-4 (B3): provider ownership rows and the bound-connection reader of 8.2.
+    ProviderVerificationsRepository,
+    BoundConnectionsReader,
     { provide: DkimKeyStore, useClass: RedisDkimStore },
     // Engine and services.
     DomainDnsChecker,
@@ -59,6 +69,8 @@ import { RedisDkimStore } from './signing/redis-dkim-store';
     DomainVerificationService,
     DkimRotationService,
     DomainsService,
+    DomainOwnershipReader,
+    DomainProviderOwnershipService,
     DomainCheckScheduler,
     RecipientValidationService,
     DkimSigningPublisher,

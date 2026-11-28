@@ -1,6 +1,6 @@
 import { ToneBadge } from '@/components/domain/tone-badge';
 import type { ApiError } from '@/lib/api/errors';
-import type { ListItem, SuccessBody } from '@/lib/api/types';
+import type { ListItem, OperationId, SuccessBody } from '@/lib/api/types';
 import type { Tone } from '@/lib/design/tokens';
 import { humanize } from '@/lib/format';
 
@@ -19,6 +19,14 @@ export type Remediation = ListItem<'ApiModeRemediationController_list_v1'>;
 export type RemediationDetail = SuccessBody<'ApiModeRemediationController_detail_v1'>;
 export type RestoreResult = SuccessBody<'ApiModeRemediationController_restore_v1'>;
 export type RemediationSummary = SuccessBody<'ApiModeController_overview_v1'>['remediation'];
+
+/** Queries a policy change makes stale (the policy view, the coverage badge, step API-4 views). */
+export const POLICY_QUERIES: readonly OperationId[] = [
+  'ApiModeRemediationController_getPolicy_v1',
+  'ApiModeController_overview_v1',
+  'ApiModeOnboardingController_domainOnboarding_v1',
+  'ApiModeOnboardingController_protectionCoverage_v1',
+];
 
 /** Verdicts a rule may name (`clean` and `unknown` are refused, R2.1). */
 export const RULE_VERDICTS = [

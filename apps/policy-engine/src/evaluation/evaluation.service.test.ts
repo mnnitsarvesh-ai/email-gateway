@@ -1,3 +1,17 @@
+import {
+  InconsistentPolicyReadError,
+  type RoundFacts,
+  type SnapshotLookup,
+  detectRowData,
+  evaluateCopyRound,
+} from '@email-gateway/policy-runtime';
+import {
+  cleanFacts,
+  cleanRiskRow,
+  definition,
+  POLICY_A,
+  RULES,
+} from '@email-gateway/policy-runtime/testing';
 import { MetricsService, NonRetryableError } from '@email-gateway/common';
 import {
   deliveryApprovedV1,
@@ -16,15 +30,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DeliveryObject } from '../delivery/delivery-object';
 import type { PolicyCopyResult, PolicyCopyWriter } from '../delivery/policy-copy';
 import { PolicyMetrics } from '../metrics/policy-metrics';
-import { InconsistentPolicyReadError } from './errors';
 import {
   MAX_APPROVAL_RECIPIENTS,
   PolicyEvaluationService,
   type TriggerPayload,
 } from './evaluation.service';
-import type { RoundFacts } from './facts.repository';
-import { cleanFacts, cleanRiskRow, definition, POLICY_A, RULES } from './fixtures.test-support';
-import type { SnapshotLookup } from './snapshot.repository';
 import type { CreatedEntry } from '../quarantine/store-writer';
 
 const RECEIVED = '2026-11-10T09:59:00.000Z';
@@ -903,5 +913,161 @@ describe('PolicyEvaluationService: quarantine store and per-recipient decisions 
     linked(h, pending);
     const outcome = await h.evaluation.evaluate(scannedEvent(), tx as never);
     expect(outcome).toMatchObject({ urlRewrite: 'disabled', outcome: { to: 'quarantined' } });
+  });
+});
+
+/**
+ * Step API-4 §10.1 PARITY (P-I2): golden round rows evaluated through the policy-engine's inline
+ * path (this service) and through `evaluateCopyRound` + `detectRowData` of
+ * `@email-gateway/policy-runtime` (the mailbox-worker's detect path) give the same disposition,
+ * decisive rule, snapshot and `inputSha256`.
+ */
+describe('API-4 parity: inline evaluation vs detect evaluation of a copy (P-I2)', () => {
+  const dlpBlocked = (): RoundFacts => {
+    const f = cleanFacts();
+    return {
+      ...f,
+      dlp: { action: 'block', verdict: 'suspicious', coverage: 'complete', categories: [] },
+    };
+  };
+  const cases: Array<{
+    name: string;
+    facts: RoundFacts;
+    snapshot: SnapshotLookup;
+    direction?: 'inbound' | 'outbound';
+    disposition: string;
+    ruleId: string | null;
+  }> = [
+    {
+      name: 'clean round, platform default',
+      facts: cleanFacts(),
+      snapshot: snapshot(),
+      disposition: 'allow',
+      ruleId: null,
+    },
+    {
+      // TAG is not a disposition: the platform default decides, the rule tags.
+      name: 'tenant TAG',
+      facts: cleanFacts(),
+      snapshot: snapshot([{ rules: [RULES.tagExternal] }]),
+      disposition: 'allow',
+      ruleId: null,
+    },
+    {
+      name: 'tenant QUARANTINE',
+      facts: cleanFacts(),
+      snapshot: snapshot([{ rules: [RULES.quarantineInbound] }]),
+      disposition: 'quarantine',
+      ruleId: 'quarantine-all',
+    },
+    {
+      name: 'tenant REQUIRE_APPROVAL',
+      facts: cleanFacts(),
+      snapshot: snapshot([{ rules: [RULES.holdInbound] }]),
+      disposition: 'require_approval',
+      ruleId: 'hold-all',
+    },
+    {
+      name: 'tenant REJECT on a clean inbound message',
+      facts: cleanFacts(),
+      snapshot: snapshot([{ rules: [RULES.rejectAny('inbound')] }]),
+      disposition: 'reject',
+      ruleId: 'reject-all',
+    },
+    {
+      name: 'DLP block floor',
+      facts: dlpBlocked(),
+      snapshot: snapshot([{ rules: [RULES.tagExternal] }]),
+      disposition: 'reject',
+      ruleId: null,
+    },
+    {
+      name: 'outbound tenant REJECT',
+      facts: cleanFacts({ direction: 'outbound', recipients: ['carol@partner.example'] }),
+      snapshot: snapshot([{ rules: [RULES.rejectAny('outbound')], direction: 'outbound' }]),
+      direction: 'outbound',
+      disposition: 'reject',
+      ruleId: 'reject-all',
+    },
+    {
+      name: 'level-only suspicious risk',
+      facts: cleanFacts({
+        risk: [
+          cleanRiskRow({
+            score: 520,
+            level: 'medium',
+            verdict: 'suspicious',
+            recommendedAction: 'quarantine',
+          }),
+        ],
+      }),
+      snapshot: snapshot(),
+      disposition: 'quarantine',
+      ruleId: null,
+    },
+  ];
+
+  it.each(cases)('$name', async (c) => {
+    const h = harness({ facts: c.facts, snapshot: c.snapshot });
+    const { tx, writes } = fakeTx();
+    const inline = await h.evaluation.evaluate(
+      scannedEvent({ direction: c.direction }),
+      tx as never,
+    );
+    expect(inline.status).toBe('evaluated');
+    const inlineRow = writes.find((w) => w.kind === 'log')!.data;
+
+    const copy = await evaluateCopyRound(
+      tx as never,
+      {
+        facts: h.facts,
+        snapshots: { get: () => Promise.resolve(c.snapshot) },
+        directory: h.directory,
+      },
+      {
+        messageId: 100n,
+        receivedAt: new Date(RECEIVED),
+        organizationId: 7n,
+        round: 0,
+        trigger: 'scanned',
+        scanId: 900n,
+      },
+    );
+    expect(copy.status).toBe('evaluated');
+    if (copy.status !== 'evaluated') return;
+    const detectRow = detectRowData(
+      copy,
+      {
+        messageId: 100n,
+        receivedAt: new Date(RECEIVED),
+        organizationId: 7n,
+        round: 0,
+        trigger: 'scanned',
+        scanId: 900n,
+      },
+      NOW,
+    );
+    const pick = (row: Record<string, unknown>) => ({
+      disposition: row.disposition,
+      decisionSource: row.decisionSource,
+      decisivePolicyPublicId: row.decisivePolicyPublicId,
+      decisivePolicyVersionId: row.decisivePolicyVersionId,
+      decisiveRuleId: row.decisiveRuleId,
+      finalVerdict: row.finalVerdict,
+      riskScore: row.riskScore,
+      overrideApplied: row.overrideApplied,
+      reasonCodes: row.reasonCodes,
+      policyGeneration: row.policyGeneration,
+      snapshotSha256: row.snapshotSha256,
+      inputSha256: row.inputSha256,
+      evaluationSeq: row.evaluationSeq,
+      direction: row.direction,
+    });
+    expect(pick(detectRow)).toEqual(pick(inlineRow));
+    expect(detectRow.disposition).toBe(c.disposition);
+    expect(detectRow.decisiveRuleId).toBe(c.ruleId);
+    // Detect rows never claim a delivery; the inline row's mode column stays the default.
+    expect(detectRow).toMatchObject({ evaluationMode: 'detect', deliveredObject: 'none' });
+    expect(inlineRow).not.toHaveProperty('evaluationMode');
   });
 });

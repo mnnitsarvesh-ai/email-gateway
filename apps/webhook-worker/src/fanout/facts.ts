@@ -37,7 +37,39 @@ export interface MessageFacts {
   sizeBytes: number;
   attachmentCount: number;
   lifecycleRound: number;
+  /**
+   * `email_messages.ingest_source` (step 8.6, API-1): a copy (`journal_intake`, `mailbox_api`)
+   * is never a gateway message — its sandbox verdict yields `mailbox.threat.detected` (API-4 A9.1).
+   */
+  ingestSource: 'gateway' | 'journal_intake' | 'mailbox_api';
 }
+
+/**
+ * The counted copies of a copy message (step API-4 A9.1, sandbox stage): copies with copy verdict
+ * authority (hybrid inline-authority copies never count, P-I3) of in-scope mailboxes (B6).
+ */
+export interface CopyDetectionFacts {
+  /** `api` when any counted copy's mailbox domain is effective `api`, else `hybrid` (A8.2). */
+  protectionMode: 'api' | 'hybrid';
+  direction: WebhookDirection;
+  copySource: 'journal' | 'graph' | 'gmail';
+  /** The strongest stored policy disposition of the counted copies, or null. */
+  policyDisposition: PolicyDispositionCode | null;
+  mailboxCount: number;
+  /** Public ids of the counted copies (first 20 by id). */
+  detectionIds: string[];
+}
+
+/** `PolicyDisposition` values, weakest first (the order of strength A4 uses). */
+export const POLICY_DISPOSITION_ORDER = [
+  'allow',
+  'require_approval',
+  'quarantine',
+  'reject',
+] as const;
+export type PolicyDispositionCode = (typeof POLICY_DISPOSITION_ORDER)[number];
+/** Most copy public ids a detection names (`MAILBOX_MAX_DETECTION_IDS`). */
+const MAX_DETECTION_IDS = 20;
 
 export interface QuarantineEntryFacts {
   publicId: string;
@@ -200,6 +232,7 @@ export class FanoutReads {
           sizeBytes: true,
           recipientCount: true,
           attachmentCount: true,
+          ingestSource: true,
         },
       }),
     ]);
@@ -262,6 +295,96 @@ export class FanoutReads {
       sizeBytes: message.sizeBytes,
       attachmentCount: message.attachmentCount,
       lifecycleRound: message.lifecycleRound,
+      ingestSource: message.ingestSource,
+    };
+  }
+
+  /**
+   * Step API-4 A9.1: the reason codes of a copy's detect scan — the latest risk row of lifecycle
+   * round 0 (`message_risk_scores`, highest revision). Optional: no row → no codes.
+   */
+  async riskReasonCodes(tx: Prisma.TransactionClient, key: MessageKey): Promise<string[]> {
+    const row = await tx.messageRiskScore.findFirst({
+      where: {
+        messageId: key.messageId,
+        receivedAt: key.receivedAt,
+        organizationId: key.organizationId,
+        lifecycleRound: 0,
+      },
+      select: { messageId: true, organizationId: true, receivedAt: true, reasonCodes: true },
+      orderBy: [{ revision: 'desc' }, { id: 'desc' }],
+    });
+    if (row === null) return [];
+    if (
+      row.messageId !== key.messageId ||
+      row.organizationId !== key.organizationId ||
+      row.receivedAt.getTime() !== key.receivedAt.getTime()
+    ) {
+      wrongRead(this.sink, 'risk_score', 'key or organization');
+    }
+    return reasonCodes(row.reasonCodes);
+  }
+
+  /**
+   * Step API-4 A9.1 (sandbox of a copy message): the counted copies of the message — copy
+   * verdict authority, in-scope mailbox — with the effective protection mode of each mailbox's
+   * domain (`COALESCE(domains.protection_mode, organizations.protection_mode)`). Optional: none
+   * counted → null (no detection event). Echo-checked: every row of the envelope organization
+   * and the message key.
+   */
+  async copyDetections(
+    tx: Prisma.TransactionClient,
+    key: MessageKey,
+  ): Promise<CopyDetectionFacts | null> {
+    const rows = await tx.$queryRaw<
+      Array<{
+        organization_id: bigint;
+        message_id: bigint;
+        public_id: string;
+        direction: WebhookDirection;
+        source: 'journal' | 'graph' | 'gmail';
+        policy_disposition: PolicyDispositionCode | null;
+        mode: string | null;
+      }>
+    >`
+      SELECT c.organization_id, c.message_id, c.public_id, c.direction, c.source,
+             c.policy_disposition, COALESCE(d.protection_mode, o.protection_mode) AS mode
+      FROM api_message_copies c
+      JOIN api_mailboxes m ON m.id = c.mailbox_id AND m.organization_id = c.organization_id
+      JOIN organizations o ON o.id = c.organization_id
+      LEFT JOIN domains d ON d.id = m.domain_id AND d.organization_id = c.organization_id
+      WHERE c.organization_id = ${key.organizationId}
+        AND c.message_id = ${key.messageId}
+        AND c.received_at = ${key.receivedAt}
+        AND c.verdict_authority = 'copy'
+        AND m.scope_state = 'in_scope'
+      ORDER BY c.id
+      LIMIT 1000`;
+    if (rows.length === 0) return null;
+    for (const r of rows) {
+      if (idOf(r.organization_id) !== key.organizationId || idOf(r.message_id) !== key.messageId) {
+        wrongRead(this.sink, 'api_message_copies', 'organization or message');
+      }
+    }
+    const first = rows[0]!;
+    let disposition: PolicyDispositionCode | null = null;
+    for (const r of rows) {
+      const d = r.policy_disposition;
+      if (
+        d !== null &&
+        (disposition === null ||
+          POLICY_DISPOSITION_ORDER.indexOf(d) > POLICY_DISPOSITION_ORDER.indexOf(disposition))
+      ) {
+        disposition = d;
+      }
+    }
+    return {
+      protectionMode: rows.some((r) => r.mode === 'api') ? 'api' : 'hybrid',
+      direction: first.direction,
+      copySource: first.source,
+      policyDisposition: disposition,
+      mailboxCount: rows.length,
+      detectionIds: rows.slice(0, MAX_DETECTION_IDS).map((r) => r.public_id),
     };
   }
 

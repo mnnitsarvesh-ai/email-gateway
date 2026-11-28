@@ -1,12 +1,17 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import {
+  canonicalJson,
   canonicalPolicySha256,
   DEFAULT_REMEDIATION_POLICY,
+  effectivePolicyMapping,
   hardDeleteRuleIds,
+  type PolicyMapping,
   parseRemediationPolicy,
   REMEDIATION_PRESETS,
   type RemediationPolicyDocument,
+  validateDetectOnly,
 } from '@email-gateway/mailbox-api';
+import { createHash } from 'node:crypto';
 import type { Prisma } from '@email-gateway/database';
 import { API_CONFIG } from '../../../api-config.token';
 import { AuditService } from '../../../audit/audit.service';
@@ -29,12 +34,15 @@ import {
   type ApiModeConfig,
 } from '../api-mode.constants';
 import {
+  detectOnlyInvalid,
   domainNotFound,
   hardDeleteDisabled,
   organizationNotFound,
   remediationPolicyConflict,
 } from '../api-mode.errors';
 import {
+  type DetectOnlyView,
+  type EffectivePolicyMappingView,
   type PutRemediationPolicyBody,
   PutRemediationPolicyBodySchema,
   type RemediationPolicyChangeView,
@@ -44,6 +52,7 @@ import {
 import {
   ApiRemediationRepository,
   type PolicyRow,
+  type PolicyWrite,
 } from '../repositories/api-remediation.repository';
 import { parseBody, parsePublicId } from './protection-mode.service';
 
@@ -84,6 +93,39 @@ const documentOf = (value: Prisma.JsonValue): RemediationPolicyDocumentView =>
 
 const clone = <T>(value: T): T => structuredClone(value);
 
+/** B7: `simulatedSinceStart` stops counting here. */
+export const DETECT_ONLY_SIMULATED_CAP = 10_000;
+
+/** A4.2: the effective mapping of a stored document (missing keys → defaults). */
+export function mappingOf(document: unknown): EffectivePolicyMappingView {
+  const mapping =
+    document !== null && typeof document === 'object' && !Array.isArray(document)
+      ? ((document as { policyMapping?: PolicyMapping }).policyMapping ?? undefined)
+      : undefined;
+  return effectivePolicyMapping(mapping);
+}
+
+/** Audit metadata: hex SHA-256 of the canonical effective mapping (A12, §6 audit). */
+export function mappingSha256(mapping: EffectivePolicyMappingView): string {
+  return createHash('sha256').update(canonicalJson(mapping), 'utf8').digest('hex');
+}
+
+/** The period columns of a policy row as the view returns them (null = no period). */
+export function detectOnlyViewOf(
+  row: Pick<PolicyRow, 'detectOnlyUntil' | 'detectOnlyThen' | 'detectOnlyStartedAt'>,
+  now: Date,
+  simulatedSinceStart: number,
+): DetectOnlyView {
+  if (row.detectOnlyUntil === null || row.detectOnlyThen === null) return null;
+  return {
+    until: row.detectOnlyUntil.toISOString(),
+    then: row.detectOnlyThen,
+    startedAt: row.detectOnlyStartedAt?.toISOString() ?? null,
+    ended: row.detectOnlyUntil.getTime() <= now.getTime(),
+    simulatedSinceStart,
+  };
+}
+
 /**
  * The remediation policy routes (step API-2 R2, R13 #1-#4; ADR-0101): the organization policy
  * (absent = the platform default P1) with the per-domain overrides, the presets and whether the
@@ -113,6 +155,9 @@ export class RemediationPolicyService {
     const rows = await this.repository.policies(scope);
     const org = rows.organization;
     const platform = DEFAULT_REMEDIATION_POLICY;
+    const now = this.now();
+    const detectOnly = (row: PolicyRow, domainId: bigint | null) =>
+      this.detectOnlyOf(scope, row, domainId, now);
     return {
       organization:
         org === null
@@ -124,6 +169,8 @@ export class RemediationPolicyService {
               sha256: canonicalPolicySha256(platform.document),
               rowVersion: null,
               updatedAt: null,
+              effectivePolicyMapping: mappingOf(platform.document),
+              detectOnly: null,
             }
           : {
               source: 'organization',
@@ -133,17 +180,23 @@ export class RemediationPolicyService {
               sha256: org.documentSha256,
               rowVersion: org.rowVersion,
               updatedAt: org.updatedAt.toISOString(),
+              effectivePolicyMapping: mappingOf(org.document),
+              detectOnly: await detectOnly(org, null),
             },
-      domains: rows.domains.map((d) => ({
-        id: d.publicId,
-        domainId: d.domain.publicId,
-        domainName: d.domain.name,
-        mode: d.mode,
-        document: documentOf(d.document),
-        sha256: d.documentSha256,
-        rowVersion: d.rowVersion,
-        updatedAt: d.updatedAt.toISOString(),
-      })),
+      domains: await Promise.all(
+        rows.domains.map(async (d) => ({
+          id: d.publicId,
+          domainId: d.domain.publicId,
+          domainName: d.domain.name,
+          mode: d.mode,
+          document: documentOf(d.document),
+          sha256: d.documentSha256,
+          rowVersion: d.rowVersion,
+          updatedAt: d.updatedAt.toISOString(),
+          effectivePolicyMapping: mappingOf(d.document),
+          detectOnly: await detectOnly(d, d.domainId),
+        })),
+      ),
       presets: {
         p1: clone(REMEDIATION_PRESETS.p1) as RemediationPolicyView['presets']['p1'],
         detectOnlyStart: clone(
@@ -153,6 +206,22 @@ export class RemediationPolicyService {
       },
       hardDeleteAvailable: this.config.API_MODE_HARD_DELETE_ENABLED,
     };
+  }
+
+  /** B7: the view of a row's period with the bounded simulated count since its start. */
+  async detectOnlyOf(
+    scope: TenantScope,
+    row: PolicyRow,
+    domainId: bigint | null,
+    now: Date,
+  ): Promise<DetectOnlyView> {
+    if (row.detectOnlyUntil === null || row.detectOnlyThen === null) return null;
+    const since = row.detectOnlyStartedAt;
+    const simulated =
+      since === null
+        ? 0
+        : await this.repository.simulatedSince(scope, domainId, since, DETECT_ONLY_SIMULATED_CAP);
+    return detectOnlyViewOf(row, now, simulated);
   }
 
   /** `PUT /api-mode/remediation-policy` (R13 #2). */
@@ -188,6 +257,8 @@ export class RemediationPolicyService {
       body.document,
       this.config.API_MODE_HARD_DELETE_ENABLED,
     );
+    const period = validateDetectOnly(body.detectOnly, body.mode, this.now());
+    if (!period.ok) throw detectOnlyInvalid(period.reason);
     const operation =
       input.domainId === null ? API_MODE_OPERATIONS.policyPut : API_MODE_OPERATIONS.domainPolicyPut;
     const resourceId = input.domainId ?? 'organization';
@@ -244,11 +315,22 @@ export class RemediationPolicyService {
       throw remediationPolicyConflict(current?.rowVersion ?? null);
     }
     const sha256 = canonicalPolicySha256(document);
-    const write = {
+    const now = this.now();
+    // B7: `enforce` clears the period; a new period starts now (`notified_at` cleared); a
+    // detect-only body without `detectOnly` keeps the stored period (API-2 bodies stay valid).
+    const period = validateDetectOnly(body.detectOnly, body.mode, now);
+    if (!period.ok) throw detectOnlyInvalid(period.reason);
+    const keepDetectOnly = body.mode === 'detect_only' && body.detectOnly === undefined;
+    const write: PolicyWrite = {
       mode: body.mode,
       document: document as unknown as Prisma.InputJsonValue,
       documentSha256: sha256,
       updatedByUserId: principalUserId(principal),
+      detectOnly:
+        period.period === null
+          ? null
+          : { until: period.period.until, then: period.period.then, startedAt: now },
+      keepDetectOnly,
     };
     let after: PolicyRow | null;
     if (current === null) {
@@ -265,11 +347,24 @@ export class RemediationPolicyService {
       after = await this.repository.policyById(tx, scope, current.id);
     }
     if (after === null) throw remediationPolicyConflict(null);
+    const mapping = mappingOf(after.document);
+    const detectOnly = detectOnlyViewOf(after, now, 0);
     await this.record(tx, principal, scope, sourceIp, {
       policyId: after.publicId,
       domain,
-      from: current === null ? null : { mode: current.mode, sha256: current.documentSha256 },
-      to: { mode: after.mode, sha256 },
+      from:
+        current === null
+          ? null
+          : {
+              mode: current.mode,
+              sha256: current.documentSha256,
+              policyMappingSha256: mappingSha256(mappingOf(current.document)),
+            },
+      to: { mode: after.mode, sha256, policyMappingSha256: mappingSha256(mapping) },
+      detectOnly:
+        detectOnly === null
+          ? null
+          : { until: detectOnly.until, then: detectOnly.then, startedAt: detectOnly.startedAt },
       reason: body.reason,
       rowVersion: after.rowVersion,
     });
@@ -282,6 +377,12 @@ export class RemediationPolicyService {
       sha256,
       rowVersion: after.rowVersion,
       updatedAt: after.updatedAt.toISOString(),
+      effectivePolicyMapping: mapping,
+      // A new period starts now (nothing simulated yet); a kept period counts since its start.
+      detectOnly:
+        detectOnly === null || write.detectOnly !== null
+          ? detectOnly
+          : await this.detectOnlyOf(scope, after, domain?.id ?? null, now),
       created: current === null,
     };
   }
@@ -338,8 +439,9 @@ export class RemediationPolicyService {
     change: {
       policyId: string;
       domain: { publicId: string; name: string } | null;
-      from: { mode: string; sha256: string } | null;
-      to: { mode: string; sha256: string } | null;
+      from: { mode: string; sha256: string; policyMappingSha256?: string } | null;
+      to: { mode: string; sha256: string; policyMappingSha256?: string } | null;
+      detectOnly?: { until: string; then: string; startedAt: string | null } | null;
       reason: string | null;
       rowVersion: number;
     },
@@ -358,6 +460,7 @@ export class RemediationPolicyService {
           domainName: change.domain?.name ?? null,
           from: change.from,
           to: change.to,
+          ...(change.detectOnly !== undefined && { detectOnly: change.detectOnly }),
           rowVersion: change.rowVersion,
           ...(change.reason !== null && { reason: change.reason }),
         },

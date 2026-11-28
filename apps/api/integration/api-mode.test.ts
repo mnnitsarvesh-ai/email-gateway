@@ -883,6 +883,8 @@ describe('organization purge of the API-mode tables (§3.2)', () => {
       api_remediation_actions: 0,
       api_remediation_policies: 0,
       api_mode_org_settings: 0,
+      // Step API-4 §3.3 (see integration/api-mode-onboarding.test.ts).
+      api_mode_domain_settings: 0,
       api_message_copies: 1,
       api_copy_dedupe_keys: 1,
       api_mailbox_addresses: 2,
@@ -905,7 +907,7 @@ describe('organization purge of the API-mode tables (§3.2)', () => {
     expect(await p.apiMailbox.count({ where: { organizationId: orgA.id } })).toBe(1);
     // A re-run is a no-op.
     expect(Object.values(await purge.purgeOrganization(systemScope(orgB.id)))).toEqual(
-      Array(12).fill(0),
+      Array(13).fill(0),
     );
   });
 });

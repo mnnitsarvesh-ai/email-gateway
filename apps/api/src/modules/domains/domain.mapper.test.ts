@@ -29,6 +29,9 @@ function record(recordKey: string, patch: Partial<DnsRecordRow>): DnsRecordRow {
   };
 }
 
+/** Step API-4 (B3): the ownership block of a domain never checked through a provider. */
+const NO_PROVIDER = { method: null, providerCheck: null, providerCheckAvailable: false };
+
 describe('domain mappers', () => {
   const domain = bed.store.addDomain(ORG_A, 'xn--mnchen-3ya.example.com', { status: 'active' });
 
@@ -77,6 +80,7 @@ describe('domain mappers', () => {
     const checkedAt = new Date('2026-11-02T10:00:00Z');
     const view = toStatusView({
       domain,
+      ownership: NO_PROVIDER,
       gateway,
       records: [
         record('verification', { purpose: 'verification', status: 'valid', lastOutcome: 'valid' }),
@@ -156,7 +160,15 @@ describe('domain mappers', () => {
   });
 
   it('reports never-checked groups as pending with the default DMARC guidance', () => {
-    const view = toStatusView({ domain, gateway, records: [], dkimKeys: [], mx: [] });
+    const view = toStatusView({
+      domain,
+      ownership: NO_PROVIDER,
+      gateway,
+      records: [],
+      dkimKeys: [],
+      mx: [],
+    });
+    expect(view.ownership).toEqual(NO_PROVIDER);
     expect(view.checks.ownership).toEqual({
       status: 'pending',
       lastOutcome: null,

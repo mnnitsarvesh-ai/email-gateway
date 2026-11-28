@@ -112,6 +112,8 @@ export class Harness {
       probeSmtp?: (o: SmtpProbeOptions) => Promise<SmtpProbeResult>;
       healthFaults?: HealthFaults;
       reader?: PrismaClient;
+      /** Provider retry policy (default no retries). */
+      retry?: { retries: number; baseDelayMs?: number; maxDelayMs?: number };
     } = {},
   ): { components: IntegrationComponents; metrics: IntegrationMetrics; service: MetricsService } {
     const config = this.config(options.config);
@@ -129,7 +131,7 @@ export class Harness {
       nameSuffix: `:${this.suffix}`,
       provider: {
         endpoints: this.fake.endpoints(),
-        retry: { retries: 0 },
+        retry: options.retry ?? { retries: 0 },
         ...(options.platform ? { platform: options.platform } : {}),
       },
       resolver: this.resolver,
@@ -169,10 +171,13 @@ export class Harness {
   async domain(
     organizationId: bigint,
     name: string,
-    status: 'active' | 'pending_verification' = 'active',
+    status: 'active' | 'verified' | 'pending_verification' = 'active',
+    ownershipMethod: 'dns_txt' | 'provider_tenant' | null = status === 'pending_verification'
+      ? null
+      : 'dns_txt',
   ) {
     return this.prisma.domain.create({
-      data: { organizationId, name, status, outboundEnabled: true },
+      data: { organizationId, name, status, outboundEnabled: true, ownershipMethod },
     });
   }
 
@@ -205,7 +210,7 @@ export class Harness {
       clientId?: string;
       claimedTenantId?: string;
       subjectEmail?: string;
-      status?: 'verifying' | 'active' | 'error';
+      status?: 'verifying' | 'active' | 'error' | 'revoked';
       expiresAt?: Date;
       keyCipher?: ProviderCredentialCipher;
       /**

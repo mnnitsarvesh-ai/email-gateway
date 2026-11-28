@@ -80,6 +80,9 @@ export const overview = (failingChecks: string[] = []): Overview => ({
     oldestActiveAgeSeconds: 600,
   },
   reports: reportsBlock,
+  policy: { enabled: true, evaluated24h: 0, errors24h: 0 },
+  outbound: { detections24h: 0, enabled: true },
+  scope: { excluded: 0 },
   connections: [
     {
       id: CONN,
@@ -295,6 +298,8 @@ export const settings = (over: Partial<SettingsView> = {}): SettingsView => ({
     tiMinConfidence: 80,
     reportAckEnabled: true,
     reportFeedbackEnabled: true,
+    policyEvaluationEnabled: true,
+    outboundDetectionEnabled: true,
   },
   source: 'defaults',
   rowVersion: null,
@@ -308,6 +313,8 @@ export const settings = (over: Partial<SettingsView> = {}): SettingsView => ({
     tiMinConfidence: 80,
     reportAckEnabled: true,
     reportFeedbackEnabled: true,
+    policyEvaluationEnabled: true,
+    outboundDetectionEnabled: true,
   },
   bounds: {
     autoMaxMailboxes: { min: 1, max: 20_000 },

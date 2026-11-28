@@ -179,8 +179,9 @@ describe('registry completeness and consistency (D3)', () => {
     expect([ai5(COMPLIANCE_WRITES_TESTED_BY), ai5(INTEGRATIONS_WRITES_TESTED_BY)]).toEqual([16, 9]);
     // Nine critical operations of §4.4 plus the step API-3 hard-delete purge (C15).
     expect(NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical')).toHaveLength(10);
+    // 20 of step API-3 plus the 2 of step API-4 (design note 38 B10).
     expect(Object.values(API_MODE_WRITES_TESTED_BY)).toEqual(
-      Array(20).fill(API_MODE_WRITES_TESTED_BY_SUITE),
+      Array(22).fill(API_MODE_WRITES_TESTED_BY_SUITE),
     );
     for (const op of NOT_APPLICABLE_OPERATIONS.filter((o) => o.risk === 'critical'))
       expect(findTool(toolNameOf(op.operationId)), op.operationId).toBeUndefined();
@@ -1327,8 +1328,9 @@ describe('step API-1 (docs/plan/steps/35-api-mode-protection.md D15)', () => {
         id,
       ).toBe(false);
     }
+    // Step API-4 (design note 38 B10): PO-D1 is decided (the add-domain wizard).
     expect(NOT_APPLICABLE_REASONS.apiModePortalOnly).toBe(
-      'API-mode protection mode: portal only (MX conflict checks and the open domain-onboarding decision PO-D1)',
+      'API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)',
     );
     expect('apiModeDeferred' in NOT_APPLICABLE_REASONS).toBe(false);
     // The three API-1 connection writes are AI-6 write tools since API-3 (C15).
@@ -1457,22 +1459,23 @@ describe('step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15)', (
     'ApiModeSettingsController_get_v1',
   ];
 
-  it('API-3 totals: 483 operations, 393 operation tools (393 enabled), 395 enabled tools (207 reads, 188 writes), 90 not applicable, MISSING 0', () => {
+  it('API-4 totals: 488 operations, 398 operation tools (398 enabled), 400 enabled tools (210 reads, 190 writes), 90 not applicable, MISSING 0', () => {
     const count = (pred: (t: OperationTool) => boolean) => OPERATION_TOOLS.filter(pred).length;
     const enabled = ALL_TOOLS.filter((t) => t.enabled);
-    // 464 after API-2 plus the 19 operations of step API-3: 7 enabled reads, 11 new writes (one,
-    // the hard delete, critical and portal only), and the 9 API-1/API-2 writes enabled.
-    expect(operations).toHaveLength(483);
-    expect(OPERATION_TOOLS).toHaveLength(393);
+    // 464 after API-2 plus the 19 operations of step API-3 (7 enabled reads, 11 new writes —
+    // one, the hard delete, critical and portal only — and the 9 API-1/API-2 writes enabled),
+    // plus the 5 of step API-4 (design note 38 B10: 3 enabled reads, 2 confirmed writes).
+    expect(operations).toHaveLength(488);
+    expect(OPERATION_TOOLS).toHaveLength(398);
     expect(NATIVE_TOOLS).toHaveLength(2);
     expect(NOT_APPLICABLE_OPERATIONS).toHaveLength(90);
-    expect(count((t) => t.enabled)).toBe(393);
-    expect(enabled).toHaveLength(395);
-    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(207);
-    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(188);
+    expect(count((t) => t.enabled)).toBe(398);
+    expect(enabled).toHaveLength(400);
+    expect(enabled.filter((t) => t.access === 'read')).toHaveLength(210);
+    expect(enabled.filter((t) => t.access === 'write')).toHaveLength(190);
     expect(count((t) => t.status === 'MISSING')).toBe(0);
     expect(Object.fromEntries(PROGRAM_PHASES.map((p) => [p, count((t) => t.phase === p)]))).toEqual(
-      { 'AI-1': 193, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 20 },
+      { 'AI-1': 196, 'AI-2': 35, 'AI-3': 48, 'AI-R': 0, 'AI-4': 70, 'AI-5': 27, 'AI-6': 22 },
     );
     expect(ASSISTANT_PROGRAM_PHASE).toBe('AI-6');
   });
@@ -1490,8 +1493,8 @@ describe('step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15)', (
     }
   });
 
-  it('the 20 API-mode writes are AI-6 tools with the C15 risks; high risk needs re-authentication', () => {
-    expect(Object.keys(API_MODE_WRITES_TESTED_BY)).toHaveLength(20);
+  it('the 20 API-mode writes (+ the 2 of step API-4) are AI-6 tools with the C15 / B10 risks; high risk needs re-authentication', () => {
+    expect(Object.keys(API_MODE_WRITES_TESTED_BY)).toHaveLength(22);
     const risks = Object.fromEntries(
       Object.keys(API_MODE_WRITES_TESTED_BY).map((id) => [
         id,
@@ -1519,6 +1522,9 @@ describe('step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15)', (
       ApiModeReportsController_addMailbox_v1: 'medium',
       ApiModeReportsController_setMailbox_v1: 'medium',
       ApiModeSettingsController_put_v1: 'high',
+      // Step API-4 B10.
+      ApiModeOnboardingController_putScope_v1: 'high',
+      DomainsController_providerOwnershipCheck_v1: 'low',
     });
     for (const [id, risk] of Object.entries(risks)) {
       expect(RISK_OVERRIDES[id], id).toBe(risk);
@@ -1587,5 +1593,73 @@ describe('step API-3 (docs/plan/steps/37-api-mode-clawback-reporting.md C15)', (
       portalRoute: '/api-mode',
       resourceType: 'api_clawback',
     });
+  });
+});
+
+describe('step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md B10)', () => {
+  it('the three onboarding reads are enabled AI-1 read tools covered by the sweep suite', () => {
+    for (const [id, name] of [
+      [
+        'ApiModeOnboardingController_protectionCoverage_v1',
+        'api_mode_onboarding_protection_coverage',
+      ],
+      ['ApiModeOnboardingController_domainOnboarding_v1', 'api_mode_onboarding_domain_onboarding'],
+      ['ApiModeOnboardingController_getScope_v1', 'api_mode_onboarding_get_scope'],
+    ] as const) {
+      const tool = OPERATION_TOOLS.find((t) => t.operationId === id);
+      expect(tool, id).toMatchObject({
+        name,
+        enabled: true,
+        access: 'read',
+        risk: 'read',
+        phase: 'AI-1',
+        testedBy: READ_TOOLS_TESTED_BY,
+      });
+    }
+    expect(
+      OPERATION_OVERRIDES.ApiModeOnboardingController_protectionCoverage_v1!.untrustedFields,
+    ).toEqual(['items[].name']);
+    expect(OPERATION_OVERRIDES.ApiModeOnboardingController_getScope_v1!.untrustedFields).toEqual([
+      'departments[].name',
+    ]);
+  });
+
+  it('the scope put is a high-risk confirmed write, the provider ownership check a low one', () => {
+    const scope = findTool('api_mode_onboarding_put_scope')!;
+    expect(scope).toMatchObject({
+      operationId: 'ApiModeOnboardingController_putScope_v1',
+      access: 'write',
+      risk: 'high',
+      confirm: 'confirm+impact+reauth',
+      phase: 'AI-6',
+      enabled: true,
+      testedBy: API_MODE_WRITES_TESTED_BY_SUITE,
+    });
+    const check = findTool('domains_provider_ownership_check')!;
+    expect(check).toMatchObject({
+      operationId: 'DomainsController_providerOwnershipCheck_v1',
+      access: 'write',
+      risk: 'low',
+      confirm: 'confirm',
+      phase: 'AI-6',
+      enabled: true,
+      testedBy: API_MODE_WRITES_TESTED_BY_SUITE,
+    });
+    expect(confirmationSpecOf(scope.operationId)!.precondition).toMatchObject({
+      tool: 'api_mode_onboarding_get_scope',
+      params: { domainId: 'domainId' },
+    });
+    expect(confirmationSpecOf(check.operationId)!.precondition).toMatchObject({
+      tool: 'domains_get',
+      params: { id: 'domainId' },
+    });
+  });
+
+  it('the protection-mode writes stay portal only with the decided reason text', () => {
+    for (const id of API_MODE_PORTAL_ONLY_WRITES) {
+      expect(NOT_APPLICABLE_OPERATIONS.find((o) => o.operationId === id)?.reason, id).toBe(
+        'API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)',
+      );
+    }
   });
 });

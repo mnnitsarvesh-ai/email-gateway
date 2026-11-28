@@ -4,6 +4,7 @@ import {
   type ApiCopyRemediationAction,
   type ApiCopyRemediationState,
   type ApiCopyStatus,
+  type ApiDetectOnlyThen,
   type ApiRemediationActionKind,
   type ApiRemediationPolicyMode,
   type ApiRemediationStatus,
@@ -26,6 +27,11 @@ export interface PolicyRow {
   documentSha256: string;
   rowVersion: number;
   updatedAt: Date;
+  /** Step API-4 (B7): the detect-only start period (all null = none). */
+  detectOnlyUntil: Date | null;
+  detectOnlyThen: ApiDetectOnlyThen | null;
+  detectOnlyStartedAt: Date | null;
+  detectOnlyNotifiedAt: Date | null;
 }
 
 export interface DomainPolicyRow extends PolicyRow {
@@ -37,6 +43,10 @@ export interface PolicyWrite {
   document: Prisma.InputJsonValue;
   documentSha256: string;
   updatedByUserId: bigint | null;
+  /** Step API-4 (B7): a new period (`notified_at` cleared), or null = no period. */
+  detectOnly: { until: Date; then: ApiDetectOnlyThen; startedAt: Date } | null;
+  /** Keep the stored period unchanged (an API-2 style body without `detectOnly`). */
+  keepDetectOnly?: boolean;
 }
 
 /** A remediation action as the views read it (provider ids never selected; counts only). */
@@ -167,7 +177,48 @@ export class ApiRemediationRepository {
     documentSha256: true,
     rowVersion: true,
     updatedAt: true,
+    detectOnlyUntil: true,
+    detectOnlyThen: true,
+    detectOnlyStartedAt: true,
+    detectOnlyNotifiedAt: true,
   } satisfies Prisma.ApiRemediationPolicySelect;
+
+  /** The detect-only columns of a policy write (B7). */
+  private detectOnlyData(write: PolicyWrite) {
+    if (write.keepDetectOnly === true) return {};
+    return {
+      detectOnlyUntil: write.detectOnly?.until ?? null,
+      detectOnlyThen: write.detectOnly?.then ?? null,
+      detectOnlyStartedAt: write.detectOnly?.startedAt ?? null,
+      detectOnlyNotifiedAt: null,
+    };
+  }
+
+  /**
+   * B7 `simulatedSinceStart`: `simulated` actions of the organization (or of one domain's
+   * mailboxes) created since `since`, counted up to `cap` (bounded scan of
+   * `(organization_id, status, created_at)`).
+   */
+  async simulatedSince(
+    scope: TenantScope,
+    domainId: bigint | null,
+    since: Date,
+    cap: number,
+  ): Promise<number> {
+    const domainFilter =
+      domainId === null
+        ? Prisma.empty
+        : Prisma.sql`AND a.mailbox_id IN (SELECT mb.id FROM api_mailboxes mb
+            WHERE mb.organization_id = ${scope.organizationId} AND mb.domain_id = ${domainId})`;
+    const rows = await this.reader.client.$queryRaw<Array<{ n: bigint | number }>>`
+      SELECT COUNT(*) AS n FROM (
+        SELECT 1 FROM api_remediation_actions a
+        WHERE a.organization_id = ${scope.organizationId} AND a.status = 'simulated'
+          AND a.created_at >= ${since} ${domainFilter}
+        LIMIT ${cap}
+      ) t`;
+    return Number(rows[0]?.n ?? 0);
+  }
 
   /** The organization row and the domain rows of non-deleted domains (replica by default). */
   async policies(
@@ -248,6 +299,7 @@ export class ApiRemediationRepository {
         document: write.document,
         documentSha256: write.documentSha256,
         updatedByUserId: write.updatedByUserId,
+        ...this.detectOnlyData(write),
       },
       select: this.policySelect,
     });
@@ -268,6 +320,7 @@ export class ApiRemediationRepository {
         document: write.document,
         documentSha256: write.documentSha256,
         updatedByUserId: write.updatedByUserId,
+        ...this.detectOnlyData(write),
         rowVersion: { increment: 1 },
       },
     });

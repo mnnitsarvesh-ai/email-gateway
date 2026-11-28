@@ -13,6 +13,8 @@ import { Can } from '@/lib/auth/can';
 import { RouteGate } from '@/lib/auth/route-gate';
 import { humanize } from '@/lib/format';
 import { DomainProtectionModePanel } from '@/features/api-mode/protection-mode';
+import { OwnershipStep } from './api-onboarding-steps';
+import { ApiProtectionSection } from './api-protection-section';
 import { DestinationsEditor } from './destinations-editor';
 import { DkimPanel } from './dkim-panel';
 import { DnsRecordsPanel } from './dns-records';
@@ -25,6 +27,67 @@ import { VerificationPanel } from './verification-panel';
 
 const TABS = ['overview', 'dns', 'recipients', 'destinations'] as const;
 const URL_SHAPE = { tab: z.enum(TABS).default('overview').catch('overview') };
+
+const OWNERSHIP_METHOD_LABEL: Record<string, string> = {
+  dns_txt: 'DNS TXT record',
+  provider_tenant: 'Provider tenant (Microsoft 365 or Google Workspace)',
+};
+
+/**
+ * An API-mode domain's overview (step API-4 B5, API4-18): status and ownership (method and the
+ * provider check), the protection mode panel and API protection. No DNS records other than the
+ * ownership TXT, no DKIM, destinations, recipients or mail-flow readiness.
+ */
+function ApiOverview({ domain }: { domain: DomainDetail }) {
+  return (
+    <div className="grid min-w-0 gap-6 lg:grid-cols-2 [&>*]:min-w-0">
+      <Section title="Domain">
+        <DetailList
+          items={[
+            { label: 'Status', value: <DomainStatusBadge status={domain.status} /> },
+            {
+              label: 'Reason',
+              value: domain.statusReason ? humanize(domain.statusReason) : 'None',
+            },
+            {
+              label: 'Name (ASCII)',
+              value: <code className="font-mono text-xs">{domain.name}</code>,
+            },
+            { label: 'Domain ID', value: <CopyableId value={domain.id} label="domain ID" /> },
+            {
+              label: 'Ownership',
+              value: domain.ownership.method
+                ? (OWNERSHIP_METHOD_LABEL[domain.ownership.method] ??
+                  humanize(domain.ownership.method))
+                : 'Not verified yet',
+            },
+            { label: 'Added', value: <DateTime value={domain.createdAt} mode="absolute" /> },
+            {
+              label: 'Verified',
+              value: <DateTime value={domain.verifiedAt} mode="absolute" emptyLabel="Not yet" />,
+            },
+            {
+              label: 'Activated',
+              value: <DateTime value={domain.activatedAt} mode="absolute" emptyLabel="Not yet" />,
+            },
+          ]}
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <DomainStatusActions domain={domain} />
+          <DeleteDomainButton domain={domain} />
+        </div>
+      </Section>
+      <Section
+        title="Ownership"
+        description="The ownership TXT record, or automatic verification through your bound provider tenant."
+      >
+        <OwnershipStep domain={domain} />
+      </Section>
+      <DomainProtectionModePanel domain={domain} />
+      <ApiProtectionSection domain={domain} />
+    </div>
+  );
+}
 
 function Overview({ domain }: { domain: DomainDetail }) {
   return (
@@ -82,6 +145,9 @@ function Overview({ domain }: { domain: DomainDetail }) {
         <VerificationPanel domainId={domain.id} />
       </Section>
       <DomainProtectionModePanel domain={domain} />
+      {domain.protectionMode.effective === 'hybrid' ? (
+        <ApiProtectionSection domain={domain} />
+      ) : null}
     </div>
   );
 }
@@ -89,6 +155,7 @@ function Overview({ domain }: { domain: DomainDetail }) {
 function DomainDetailContent({ domain }: { domain: DomainDetail }) {
   const [state, setState] = useUrlState(URL_SHAPE);
   const incomplete = domain.status !== 'active' && domain.status !== 'suspended';
+  const apiOnly = domain.protectionMode.effective === 'api';
   return (
     <div className="grid min-w-0 gap-6 [&>*]:min-w-0">
       <PageHeader
@@ -110,43 +177,47 @@ function DomainDetailContent({ domain }: { domain: DomainDetail }) {
           ) : null
         }
       />
-      <Tabs
-        value={state.tab}
-        onValueChange={(tab) => setState({ tab: tab as (typeof TABS)[number] })}
-      >
-        <TabsList aria-label="Domain sections">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="dns">DNS records</TabsTrigger>
-          <TabsTrigger value="recipients">Recipients</TabsTrigger>
-          <TabsTrigger value="destinations">Destinations</TabsTrigger>
-        </TabsList>
-        <TabsContent value="overview" className="min-w-0">
-          <Overview domain={domain} />
-        </TabsContent>
-        <TabsContent value="dns" className="grid min-w-0 gap-6 [&>*]:min-w-0">
-          <Section title="DNS records">
-            <DnsRecordsPanel domainId={domain.id} />
-          </Section>
-          <Section
-            title="DKIM signing keys"
-            description="Outbound mail is signed with the active key. Rotation needs the new record published first."
-          >
-            <DkimPanel domain={domain} />
-          </Section>
-        </TabsContent>
-        <TabsContent value="recipients" className="grid min-w-0 gap-6 [&>*]:min-w-0">
-          <RecipientValidationSection domainId={domain.id} />
-          <RecipientRegistrySection domainId={domain.id} />
-        </TabsContent>
-        <TabsContent value="destinations" className="min-w-0">
-          <Section
-            title="Destination servers"
-            description="Where approved inbound and internal mail of this domain is delivered."
-          >
-            <DestinationsEditor domainId={domain.id} />
-          </Section>
-        </TabsContent>
-      </Tabs>
+      {apiOnly ? (
+        <ApiOverview domain={domain} />
+      ) : (
+        <Tabs
+          value={state.tab}
+          onValueChange={(tab) => setState({ tab: tab as (typeof TABS)[number] })}
+        >
+          <TabsList aria-label="Domain sections">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="dns">DNS records</TabsTrigger>
+            <TabsTrigger value="recipients">Recipients</TabsTrigger>
+            <TabsTrigger value="destinations">Destinations</TabsTrigger>
+          </TabsList>
+          <TabsContent value="overview" className="min-w-0">
+            <Overview domain={domain} />
+          </TabsContent>
+          <TabsContent value="dns" className="grid min-w-0 gap-6 [&>*]:min-w-0">
+            <Section title="DNS records">
+              <DnsRecordsPanel domainId={domain.id} />
+            </Section>
+            <Section
+              title="DKIM signing keys"
+              description="Outbound mail is signed with the active key. Rotation needs the new record published first."
+            >
+              <DkimPanel domain={domain} />
+            </Section>
+          </TabsContent>
+          <TabsContent value="recipients" className="grid min-w-0 gap-6 [&>*]:min-w-0">
+            <RecipientValidationSection domainId={domain.id} />
+            <RecipientRegistrySection domainId={domain.id} />
+          </TabsContent>
+          <TabsContent value="destinations" className="min-w-0">
+            <Section
+              title="Destination servers"
+              description="Where approved inbound and internal mail of this domain is delivered."
+            >
+              <DestinationsEditor domainId={domain.id} />
+            </Section>
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }

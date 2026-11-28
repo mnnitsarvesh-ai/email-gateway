@@ -328,6 +328,9 @@ export const apiModeOverviewResponse = z.looseObject({
     targetsFailed24h: count,
   }),
   reports: z.looseObject({ pendingTriage: count, received24h: count, resolved24h: count }),
+  /** Step API-4 (A12; optional so older api answers still render). */
+  policy: z.looseObject({ enabled: z.boolean(), evaluated24h: count, errors24h: count }).optional(),
+  outbound: z.looseObject({ detections24h: count, enabled: z.boolean() }).optional(),
   connections: z
     .array(
       z.looseObject({

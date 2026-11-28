@@ -105,9 +105,15 @@ describe('webhooks schemas', () => {
     }
   });
 
-  it('builds a valid example envelope for each of the 16 envelope types (14 types since step 8.4 plus the ping, plus `integration.health_changed` of step 8.2)', () => {
-    expect(EVENT_TYPES_VIEW.data).toHaveLength(16);
+  it('builds a valid example envelope for each of the 18 envelope types (14 types since step 8.4 plus the ping, plus `integration.health_changed` of step 8.2, plus the two API-mode detection types of step API-4)', () => {
+    expect(EVENT_TYPES_VIEW.data).toHaveLength(18);
     expect(EVENT_TYPES_VIEW.data.map((e) => e.type)).toContain('integration.health_changed');
+    expect(EVENT_TYPES_VIEW.data.map((e) => e.type)).toEqual(
+      expect.arrayContaining(['mailbox.threat.detected', 'mailbox.dlp.detected']),
+    );
+    for (const e of EVENT_TYPES_VIEW.data.filter((x) => x.type.startsWith('mailbox.'))) {
+      expect(e.subscribable).toBe(true);
+    }
     for (const entry of EVENT_TYPES_VIEW.data)
       expect(entry.example).toMatchObject({ type: entry.type, version: 1 });
   });

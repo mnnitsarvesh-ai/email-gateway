@@ -20,11 +20,11 @@ function writerDouble(answers: number[]) {
 }
 
 describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () => {
-  it('deletes the twelve tables in FK-safe order, in batches until a short batch', async () => {
-    // targets 2+1, clawbacks 1, reports 0, actions 2+0, policies 1, settings 1, copies 2+1,
-    // dedupe 0, addresses 2+0, mailboxes 1, counters 2+2+1, connections 1
+  it('deletes the thirteen tables in FK-safe order, in batches until a short batch', async () => {
+    // targets 2+1, clawbacks 1, reports 0, actions 2+0, policies 1, settings 1, domain settings
+    // 1, copies 2+1, dedupe 0, addresses 2+0, mailboxes 1, counters 2+2+1, connections 1
     const { writer, statements } = writerDouble([
-      2, 1, 1, 0, 2, 0, 1, 1, 2, 1, 0, 2, 0, 1, 2, 2, 1, 1,
+      2, 1, 1, 0, 2, 0, 1, 1, 1, 2, 1, 0, 2, 0, 1, 2, 2, 1, 1,
     ]);
     const counts = await new ApiModeTenantDataRepository(writer).purgeOrganization(SCOPE, 2);
     expect(counts).toEqual({
@@ -34,6 +34,7 @@ describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () 
       api_remediation_actions: 2,
       api_remediation_policies: 1,
       api_mode_org_settings: 1,
+      api_mode_domain_settings: 1,
       api_message_copies: 3,
       api_copy_dedupe_keys: 0,
       api_mailbox_addresses: 2,
@@ -51,6 +52,7 @@ describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () 
       'api_remediation_actions',
       'api_remediation_policies',
       'api_mode_org_settings',
+      'api_mode_domain_settings',
       'api_message_copies',
       'api_message_copies',
       'api_copy_dedupe_keys',
@@ -93,6 +95,12 @@ describe('ApiModeTenantDataRepository.purgeOrganization (step API-1 §3.2)', () 
     expect(at('api_user_reports')).toBeLessThan(at('api_mailboxes'));
     expect(at('api_user_reports')).toBeLessThan(at('api_mode_connections'));
     expect(API_MODE_PURGE_ORDER).toContain('api_mode_org_settings');
+  });
+
+  it('step API-4 §3.3: domain settings with the organization settings, before the mailboxes', () => {
+    const at = (t: (typeof API_MODE_PURGE_ORDER)[number]) => API_MODE_PURGE_ORDER.indexOf(t);
+    expect(at('api_mode_domain_settings')).toBeGreaterThan(at('api_mode_org_settings'));
+    expect(at('api_mode_domain_settings')).toBeLessThan(at('api_mailboxes'));
   });
 
   it('refuses a non-positive batch', async () => {

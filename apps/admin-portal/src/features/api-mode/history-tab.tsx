@@ -29,6 +29,7 @@ import { formatDuration, formatNumber, humanize } from '@/lib/format';
 import { DetailList, FilterSelect, MutationError } from '@/features/domains/kit';
 import { entryHref, releaseHref } from '@/features/quarantine/links';
 import { clawbackHref } from './clawback-model';
+import { DecisionLanes } from './parity';
 import {
   CONTAINER_LABEL,
   POLICY_SOURCE_LABEL,
@@ -183,6 +184,10 @@ function DecisionRecord({ decision }: { decision: RemediationDetail['decision'] 
         ...(decision.notes.length > 0
           ? [{ label: 'Notes', value: decision.notes.map(humanize).join(', ') }]
           : []),
+        // Step API-4 A4.4: the verdict and policy lanes of a v2 record.
+        ...(decision.v === 2
+          ? [{ label: 'Lanes', value: <DecisionLanes decision={decision} /> }]
+          : [{ label: 'Record', value: 'Version 1 (verdict rules only)' }]),
         {
           label: 'Policy fingerprint',
           value: <span className="font-mono text-xs break-all">{decision.policy.sha256}</span>,

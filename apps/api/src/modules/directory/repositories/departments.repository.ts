@@ -111,6 +111,27 @@ export class DepartmentsRepository {
     return echo(row, scope, 'tenant_department', (r) => r.publicId === publicId);
   }
 
+  /**
+   * Step API-4 (B6, docs/plan/steps/38-api-mode-parity-onboarding.md): public ids of the
+   * organization's domains whose API-mode mailbox scope (`api_mode_domain_settings`, kind
+   * `departments`) lists the department (writer, in the delete transaction; at most 20).
+   */
+  async apiModeScopesReferencing(
+    tx: Client,
+    scope: TenantScope,
+    departmentPublicId: string,
+  ): Promise<string[]> {
+    const rows = await tx.$queryRaw<Array<{ publicId: string }>>`
+      SELECT d.public_id AS publicId
+      FROM api_mode_domain_settings s
+      JOIN domains d ON d.id = s.domain_id AND d.organization_id = s.organization_id
+      WHERE s.organization_id = ${scope.organizationId} AND s.scope_kind = 'departments'
+        AND JSON_CONTAINS(s.scope_department_ids, JSON_QUOTE(${departmentPublicId}))
+      ORDER BY d.public_id
+      LIMIT 20`;
+    return rows.map((r) => r.publicId);
+  }
+
   async afterWrite(tx: Client, scope: TenantScope, id: bigint): Promise<DepartmentRow> {
     const row = await tx.tenantDepartment.findFirst({
       where: tenantWhere(scope, { id }),

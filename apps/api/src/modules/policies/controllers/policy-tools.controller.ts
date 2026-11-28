@@ -223,7 +223,10 @@ export class PolicyToolsController {
       'direction, disposition, final action, decisive source/policy/version/rule, action types ' +
       'with their statuses (`enforced`, `requested`, `recorded`, `not_applicable`), matched rule ' +
       'count, override, generation, input hash, duration and time. Never addresses or content. ' +
-      `From the read replica. ${POLICY_APPLY_NOTE}`,
+      'Step API-4: `mode` selects `inline` gateway evaluations (default, unchanged), `detect` ' +
+      'evaluations of API-mode copies (recorded after delivery, nothing enforced; their message ' +
+      'ids are copy registry messages and stay `404` on the message routes) or `all`; each row ' +
+      `carries \`evaluationMode\`. From the read replica. ${POLICY_APPLY_NOTE}`,
   })
   @ApiQueryFrom(PolicyExecutionQueryDocSchema)
   @ApiOkResponse({ schema: zodToOpenApi(PolicyExecutionPageSchema) })

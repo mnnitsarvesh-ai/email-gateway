@@ -17,6 +17,8 @@ export interface MailboxRedis {
   pttl(key: string): Promise<number>;
   scan(cursor: string | number, ...args: (string | number)[]): Promise<[string, string[]]>;
   del(...keys: string[]): Promise<number>;
+  /** Step API-4 A11: reads an unflushed counter hash (health; optional in test doubles). */
+  hgetall?(key: string): Promise<Record<string, string>>;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -157,6 +159,11 @@ export const COUNTER_FIELDS = [
   'clawback_targets_failed',
   'reports_received',
   'reports_resolved',
+  // Step API-4 (note 38 §3.1, A3.3, A6.2, A8, migration 47).
+  'policy_evaluations',
+  'policy_errors',
+  'outbound_detections',
+  'copy_detections',
 ] as const;
 export type CounterField = (typeof COUNTER_FIELDS)[number];
 /** Maximum fields (kept with GREATEST, never summed). */
@@ -323,7 +330,8 @@ export class CounterStore {
          restores_succeeded, restores_failed, remediation_throttled, remediation_latency_count,
          remediation_latency_sum_ms, remediation_latency_max_ms, internal_copies,
          clawback_targets_queued, clawback_targets_succeeded, clawback_targets_failed,
-         reports_received, reports_resolved, updated_at)
+         reports_received, reports_resolved, policy_evaluations, policy_errors,
+         outbound_detections, copy_detections, updated_at)
       VALUES (${organizationId}, ${apiConnectionId}, ${hour}, ${v('journal_copies')},
         ${v('feed_copies')}, ${v('duplicates')}, ${v('skipped_internal')}, ${v('too_large')},
         ${v('provider_requests')}, ${v('throttled_429')}, ${v('throttled_503')},
@@ -335,7 +343,8 @@ export class CounterStore {
         ${v('remediation_latency_count')}, ${v('remediation_latency_sum_ms')}, ${remediationMax},
         ${v('internal_copies')}, ${v('clawback_targets_queued')},
         ${v('clawback_targets_succeeded')}, ${v('clawback_targets_failed')},
-        ${v('reports_received')}, ${v('reports_resolved')}, NOW(3))
+        ${v('reports_received')}, ${v('reports_resolved')}, ${v('policy_evaluations')},
+        ${v('policy_errors')}, ${v('outbound_detections')}, ${v('copy_detections')}, NOW(3))
       ON DUPLICATE KEY UPDATE
         journal_copies = journal_copies + VALUES(journal_copies),
         feed_copies = feed_copies + VALUES(feed_copies),
@@ -375,6 +384,10 @@ export class CounterStore {
         clawback_targets_failed = clawback_targets_failed + VALUES(clawback_targets_failed),
         reports_received = reports_received + VALUES(reports_received),
         reports_resolved = reports_resolved + VALUES(reports_resolved),
+        policy_evaluations = policy_evaluations + VALUES(policy_evaluations),
+        policy_errors = policy_errors + VALUES(policy_errors),
+        outbound_detections = outbound_detections + VALUES(outbound_detections),
+        copy_detections = copy_detections + VALUES(copy_detections),
         updated_at = NOW(3)`;
   }
 }

@@ -16,6 +16,7 @@ import { DomainDetailPage } from '@/features/domains/domain-detail-page';
 import { DomainsPage } from '@/features/domains/domains-page';
 import {
   DomainOnboardingPage,
+  STEPS_BY_MODE,
   nextStep,
   resumeStep,
   skippedSteps,
@@ -28,6 +29,7 @@ import {
   dnsRecords,
   domainDetail,
   domainSummary,
+  onboardingView,
   statusView,
   validation,
 } from '@/features/domains/test-data';
@@ -154,6 +156,9 @@ const overview = (over: Partial<Overview> = {}): Overview => ({
     oldestPendingAgeSeconds: null,
     reportMailboxes: 0,
   },
+  policy: { enabled: true, evaluated24h: 0, errors24h: 0 },
+  outbound: { detections24h: 0, enabled: true },
+  scope: { excluded: 0 },
   connections: [
     {
       id: CONN,
@@ -224,6 +229,10 @@ const detection = {
   remediationId: null,
   quarantineEntryId: null,
   direction: 'inbound' as const,
+  policyState: 'evaluated' as const,
+  policyDisposition: 'allow' as const,
+  policyTagged: false,
+  dlpAction: null,
   verdictRevision: 0,
   clawbacks: [] as string[],
 };
@@ -245,6 +254,7 @@ describe('Domain onboarding: protection mode step (D3)', () => {
       DomainRecipientsController_get_v1: () => okJson(validation()),
       DomainDnsController_dnsRecords_v1: () => okJson(dnsRecords()),
       ApiModeController_listConnections_v1: () => okJson({ data: [] }),
+      ApiModeOnboardingController_domainOnboarding_v1: () => okJson(onboardingView()),
     });
     const { user, container } = renderWithProviders(<DomainOnboardingPage />, {
       route: '/domains/onboarding',
@@ -314,61 +324,63 @@ describe('Domain onboarding: protection mode step (D3)', () => {
     await expectNoAxeViolations(container);
   });
 
-  it('API mode: destinations and recipients skipped, MX not required, mailbox step informational', async () => {
-    mockApi({
-      DomainsController_get_v1: () =>
-        okJson(domainDetail({ status: 'verified', activatedAt: null, protectionMode: API_DOMAIN })),
-      DomainDestinationsController_get_v1: () =>
-        okJson(destinations({ provider: null, servers: [] })),
-      DomainRecipientsController_get_v1: () => okJson(validation()),
-      DomainDnsController_dnsRecords_v1: () => okJson(dnsRecords()),
-      DomainDnsController_status_v1: () => okJson(statusView()),
-      ApiModeController_listConnections_v1: () => okJson({ data: [row()] }),
-      ProviderConnectionsController_get_v1: () =>
-        okJson({
-          id: CONN,
-          domains: [
-            { id: DOMAIN_ID, name: 'alpha.example.test', providerVerification: 'verified' },
-          ],
-        }),
-    });
-    const { user, container } = renderWithProviders(<DomainOnboardingPage />, {
-      route: `/domains/onboarding?domainId=${DOMAIN_ID}`,
-    });
-    // Resumes at Activate: no destination is needed in API mode.
-    expect(await screen.findByRole('heading', { name: '8. Activate' })).toBeInTheDocument();
-    const steps = screen.getByRole('navigation', { name: 'Onboarding steps' });
-    for (const name of [/Destination mail server/, /Recipient validation/]) {
-      const button = within(steps).getByRole('button', { name });
-      expect(button).toBeDisabled();
-      expect(button).toHaveTextContent('skipped');
-    }
-    await user.click(within(steps).getByRole('button', { name: /Publish DNS records/ }));
-    expect(await screen.findByText('Not required in API mode')).toBeInTheDocument();
-    await user.click(within(steps).getByRole('button', { name: /Mailbox protection/ }));
-    const list = await screen.findByRole('list', { name: 'Linked provider connections' });
-    expect(within(list).getByRole('link', { name: 'Contoso production' })).toHaveAttribute(
-      'href',
-      `/integrations/providers/${CONN}`,
-    );
-    expect(within(list).getByText('Active')).toBeInTheDocument();
-    expect(within(list).getByRole('link', { name: 'Exchange journal rule' })).toHaveAttribute(
-      'href',
-      `/settings/journaling/intake/${SOURCE}`,
-    );
-    expect(
-      within(list).getAllByRole('link', { name: 'Open mailbox protection' })[0],
-    ).toHaveAttribute('href', '/api-mode');
-    // Informational: continuing is always possible.
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled();
-    await expectNoAxeViolations(container);
+  it('step lists per mode (step API-4 B1): API lists no inline step, Hybrid both, Inline unchanged', () => {
+    expect(STEPS_BY_MODE.inline).toEqual([
+      'mode',
+      'add',
+      'dns',
+      'verify',
+      'destinations',
+      'recipients',
+      'mailbox',
+      'activate',
+      'done',
+    ]);
+    expect(STEPS_BY_MODE.api).toEqual([
+      'mode',
+      'add',
+      'ownership',
+      'connect',
+      'intake',
+      'mailboxes',
+      'action',
+      'review',
+      'done',
+    ]);
+    expect(STEPS_BY_MODE.hybrid).toEqual([
+      'mode',
+      'add',
+      'dns',
+      'verify',
+      'destinations',
+      'recipients',
+      'connect',
+      'intake',
+      'mailboxes',
+      'action',
+      'review',
+      'done',
+    ]);
+    expect([...skippedSteps('api')]).toEqual([]);
+    expect([...skippedSteps('inline')]).toEqual(['mailbox']);
+    expect([...skippedSteps('hybrid')]).toEqual([]);
+    expect(nextStep('ownership', 'api')).toBe('connect');
+    expect(nextStep('recipients', 'hybrid')).toBe('connect');
+    expect(nextStep('recipients', 'inline')).toBe('activate');
   });
 
-  it('derives completion and the resume step from server state, with skipped steps', () => {
+  it('derives completion and the resume step from server state', () => {
     const api = domainDetail({ status: 'verified', protectionMode: API_DOMAIN });
     expect(resumeStep({ domain: api, hasDestinations: false, recipientMode: null })).toBe(
-      'activate',
+      'connect',
     );
+    expect(
+      resumeStep({
+        domain: domainDetail({ status: 'pending_verification', protectionMode: API_DOMAIN }),
+        hasDestinations: false,
+        recipientMode: null,
+      }),
+    ).toBe('ownership');
     expect(
       resumeStep({
         domain: domainDetail({ status: 'verified' }),
@@ -376,19 +388,17 @@ describe('Domain onboarding: protection mode step (D3)', () => {
         recipientMode: null,
       }),
     ).toBe('destinations');
-    expect([...skippedSteps('api')]).toEqual(['destinations', 'recipients']);
-    expect([...skippedSteps('inline')]).toEqual(['mailbox']);
-    expect([...skippedSteps('hybrid')]).toEqual([]);
-    expect(nextStep('verify', 'api')).toBe('mailbox');
-    expect(nextStep('recipients', 'inline')).toBe('activate');
-    const completion = stepCompletion({
-      domain: api,
-      hasDestinations: false,
-      recipientMode: null,
-      mailboxReady: true,
-    });
+    expect(
+      resumeStep({
+        domain: domainDetail({ status: 'verified' }),
+        hasDestinations: true,
+        recipientMode: null,
+      }),
+    ).toBe('activate');
+    const completion = stepCompletion({ domain: api, hasDestinations: false, recipientMode: null });
     expect(completion.mode).toBe(true);
-    expect(completion.mailbox).toBe(true);
+    expect(completion.ownership).toBe(true);
+    expect(completion.connect).toBe(false);
     expect(stepCompletion({ domain: null, hasDestinations: false, recipientMode: null }).mode).toBe(
       false,
     );
@@ -420,6 +430,8 @@ function mockDomainPage(protectionMode: DomainMode = API_DOMAIN, observedToGatew
     DomainDestinationsController_get_v1: () => okJson(destinations()),
     DestinationProvidersController_list_v1: () => okJson(PROVIDERS),
     ProtectionModeController_getOrganization_v1: () => okJson(orgMode({ mode: 'hybrid' })),
+    ApiModeOnboardingController_domainOnboarding_v1: () =>
+      okJson(onboardingView({ effectiveMode: protectionMode.effective })),
   });
 }
 

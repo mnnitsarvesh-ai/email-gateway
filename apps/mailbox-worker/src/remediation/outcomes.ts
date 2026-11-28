@@ -23,6 +23,7 @@ import {
   blockApprovedRestore,
   completeRestore,
   createMailboxEntry,
+  policyLaneOfDecision,
   failRestore,
   staleRestore,
   type ApprovedRecheck,
@@ -234,6 +235,7 @@ export class RemediationOutcomes {
             container,
             ruleId: a.trigger === 'policy' ? ruleIdOf(a.decision) : null,
             clawback,
+            policyLane: a.trigger === 'policy' ? policyLaneOfDecision(a.decision) : null,
             copy: {
               id: ctx.copy.id,
               receivedAt: ctx.copy.receivedAt,

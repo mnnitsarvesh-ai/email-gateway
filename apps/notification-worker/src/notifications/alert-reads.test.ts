@@ -186,3 +186,101 @@ describe('SecurityAlertReads.reportCounts (step API-3 C13)', () => {
     ).toBeNull();
   });
 });
+
+describe('step API-4 alert reads (A9.2, B7)', () => {
+  const POLICY = '0192f0c4-eeee-7fff-8000-0000000000d1';
+
+  it('scope keys: dlp_detected has none; api_mode_detect_only_ended one per remediation policy', () => {
+    expect(alertScopeKey('dlp_detected', {})).toBe('-');
+    expect(alertScopeKey('api_mode_detect_only_ended', { remediationPolicyPublicId: POLICY })).toBe(
+      POLICY,
+    );
+  });
+
+  it('messageIngestSource: scoped, echo-checked; null when the row is gone', async () => {
+    const findFirst = vi.fn(() =>
+      Promise.resolve({
+        id: 501n,
+        organizationId: 7n,
+        receivedAt: new Date('2026-11-13T09:00:00.000Z'),
+        ingestSource: 'journal_intake',
+      }),
+    );
+    const tx = { emailMessage: { findFirst } } as never;
+    const reads = new SecurityAlertReads();
+    expect(
+      await reads.messageIngestSource(tx, 7n, 501n, new Date('2026-11-13T09:00:00.000Z')),
+    ).toBe('journal_intake');
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 501n, receivedAt: new Date('2026-11-13T09:00:00.000Z'), organizationId: 7n },
+      }),
+    );
+    await expect(
+      reads.messageIngestSource(tx, 8n, 501n, new Date('2026-11-13T09:00:00.000Z')),
+    ).rejects.toThrow('inconsistent read');
+    findFirst.mockResolvedValueOnce(null as never);
+    expect(
+      await reads.messageIngestSource(tx, 7n, 501n, new Date('2026-11-13T09:00:00.000Z')),
+    ).toBeNull();
+  });
+
+  it('remediationPolicy: period columns and the domain name; never the document', async () => {
+    const findFirst = vi.fn((args: { select: Record<string, boolean> }) => {
+      expect(args.select).not.toHaveProperty('document');
+      return Promise.resolve({
+        publicId: POLICY,
+        organizationId: 7n,
+        domainId: 31n,
+        mode: 'detect_only',
+        detectOnlyUntil: new Date('2026-11-20T09:00:00.000Z'),
+        detectOnlyThen: 'remind',
+        detectOnlyStartedAt: new Date('2026-11-13T09:00:00.000Z'),
+        detectOnlyNotifiedAt: null,
+      });
+    });
+    const domain = vi.fn(() =>
+      Promise.resolve({
+        id: 31n,
+        organizationId: 7n,
+        publicId: 'd',
+        name: 'acme.example',
+        status: 'active',
+      }),
+    );
+    const tx = { apiRemediationPolicy: { findFirst }, domain: { findFirst: domain } } as never;
+    const policy = await new SecurityAlertReads().remediationPolicy(tx, 7n, POLICY);
+    expect(policy).toMatchObject({
+      domainId: 31n,
+      domainName: 'acme.example',
+      mode: 'detect_only',
+    });
+    await expect(new SecurityAlertReads().remediationPolicy(tx, 8n, POLICY)).rejects.toThrow(
+      'inconsistent read',
+    );
+  });
+
+  it('simulatedActions: bounded count of the scope; a foreign row is an inconsistent read', async () => {
+    const queryRaw = vi.fn(() => Promise.resolve([{ n: 3n, org_min: 7n, org_max: 7n }]));
+    const tx = { $queryRaw: queryRaw } as never;
+    const reads = new SecurityAlertReads();
+    expect(await reads.simulatedActions(tx, 7n, 31n, new Date(0))).toEqual({
+      count: 3,
+      capped: false,
+    });
+    queryRaw.mockResolvedValueOnce([{ n: 10_000n, org_min: 7n, org_max: 7n }]);
+    expect(await reads.simulatedActions(tx, 7n, null, new Date(0))).toEqual({
+      count: 10_000,
+      capped: true,
+    });
+    queryRaw.mockResolvedValueOnce([{ n: 2n, org_min: 7n, org_max: 9n }]);
+    await expect(reads.simulatedActions(tx, 7n, null, new Date(0))).rejects.toThrow(
+      'inconsistent read',
+    );
+    queryRaw.mockResolvedValueOnce([{ n: 0n, org_min: null, org_max: null }] as never);
+    expect(await reads.simulatedActions(tx, 7n, null, new Date(0))).toEqual({
+      count: 0,
+      capped: false,
+    });
+  });
+});

@@ -567,6 +567,23 @@ describe('step 5.2 policy routes (e2e, dependencies stubbed)', () => {
       expect.anything(),
       expect.objectContaining({ disposition: 'reject', overrideApplied: true, take: 26 }),
     );
+    // Step API-4 A12: `mode` (default inline; detect = API-mode copies; all).
+    expect(ctx.executions.history).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ evaluationMode: 'inline' }),
+    );
+    await http()
+      .get(`${P}/executions?from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z&mode=detect`)
+      .set(await ctx.as(READ_ONLY))
+      .expect(200);
+    expect(ctx.executions.history).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ evaluationMode: 'detect' }),
+    );
+    await http()
+      .get(`${P}/executions?from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z&mode=copies`)
+      .set(await ctx.as(READ_ONLY))
+      .expect(400);
     await http()
       .get(`${P}/executions?from=2026-11-01T00:00:00Z&to=2026-11-02T00:00:00Z`)
       .set(await ctx.as(['message:read']))

@@ -117,15 +117,17 @@ function defaultsFrom(current: Destinations): z.input<typeof destinationsSchema>
     provider,
     host: provider === 'microsoft_365' ? (current.servers[0]?.host ?? '') : '',
     servers:
-      provider === 'custom' && current.servers.length > 0
-        ? current.servers.map((server) => ({
-            host: server.host,
-            port: server.port,
-            priority: server.priority,
-            tlsMode: server.tlsMode,
-            tlsVerifyNames: server.tlsVerifyNames ?? '',
-          }))
-        : [NEW_SERVER],
+      provider !== 'custom'
+        ? []
+        : current.servers.length > 0
+          ? current.servers.map((server) => ({
+              host: server.host,
+              port: server.port,
+              priority: server.priority,
+              tlsMode: server.tlsMode,
+              tlsVerifyNames: server.tlsVerifyNames ?? '',
+            }))
+          : [NEW_SERVER],
   };
 }
 
@@ -230,7 +232,13 @@ function EditorForm({
               <FormControl>
                 <RadioGroup
                   value={field.value}
-                  onValueChange={field.onChange}
+                  onValueChange={(value) => {
+                    field.onChange(value);
+                    // Presets carry no server rows: an empty custom row would fail validation
+                    // invisibly (step API-4 inline regression finding).
+                    if (value !== 'custom') servers.replace([]);
+                    else if (servers.fields.length === 0) servers.append(NEW_SERVER);
+                  }}
                   className="grid gap-2"
                 >
                   {(['custom', 'microsoft_365', 'google_workspace'] as const)

@@ -58,11 +58,19 @@ const remediation = {
 };
 
 describe('clawback and report health checks (C13)', () => {
-  it('appends the two codes (15 of 16) and evaluates every check in code order', () => {
-    expect(API_MODE_HEALTH_CHECK_CODES).toHaveLength(15);
-    expect(API_MODE_HEALTH_CHECK_CODES.slice(13)).toEqual(['clawback.stalled', 'reports.backlog']);
+  it('appends the two codes (15 of 16; API-4 adds the 16th) and evaluates every check in code order', () => {
+    expect(API_MODE_HEALTH_CHECK_CODES).toHaveLength(16);
+    expect(API_MODE_HEALTH_CHECK_CODES.slice(13, 15)).toEqual([
+      'clawback.stalled',
+      'reports.backlog',
+    ]);
     const result = evaluateApiModeHealth(
-      healthy({ remediation, clawback: clawback(null), reports: reports() }),
+      healthy({
+        remediation,
+        clawback: clawback(null),
+        reports: reports(),
+        policy: { evaluations1h: 0, errors1h: 0 },
+      }),
       HEALTH_CFG,
     );
     expect(result.status).toBe('healthy');

@@ -314,6 +314,8 @@ export class Fixtures {
       messageId: string | null;
       from: string;
       receivedAt: Date;
+      /** Step API-4: `email_messages.direction` (default inbound). */
+      direction?: 'inbound' | 'outbound' | 'internal';
     },
   ): Promise<{ id: bigint; publicId: string; receivedAt: Date }> {
     const key = await this.putEml(org.id, input.eml);
@@ -329,7 +331,7 @@ export class Fixtures {
         id: identity.id,
         receivedAt: input.receivedAt,
         organizationId: org.id,
-        direction: 'inbound',
+        direction: input.direction ?? 'inbound',
         ingestSource: 'journal_intake',
         status: 'journaled',
         statusChangedAt: input.receivedAt,
@@ -465,6 +467,9 @@ export class Fixtures {
       API_MODE_GRAPH_REQUESTS_PER_SECOND: '1000',
       API_MODE_GMAIL_REQUESTS_PER_SECOND: '1000',
       API_MODE_DIRECTORY_REQUESTS_PER_SECOND: '1000',
+      // Step API-4: detect policy evaluation needs the scanner's round rows (email_scans, …),
+      // which the API-1..API-3 suites do not write; `api-parity.test.ts` turns it on with them.
+      API_MODE_POLICY_EVALUATION_ENABLED: 'false',
       ...overrides,
     });
   }
@@ -514,6 +519,20 @@ export class Fixtures {
         // approval requests, then remediation actions (RESTRICT on mailboxes and connections)
         // and policies (RESTRICT on domains).
         await this.prisma.messageOutbox.deleteMany({ where });
+        // Step API-4: detect rows, scan rounds, tenant policies, departments, domain settings.
+        await this.prisma
+          .$executeRaw`DELETE FROM policy_execution_logs WHERE organization_id IN (${inIds})`;
+        await this.prisma.dlpScanResult.deleteMany({ where });
+        await this.prisma.emailAuthResult.deleteMany({ where });
+        await this.prisma.scanEngineResult.deleteMany({ where });
+        await this.prisma.emailScan.deleteMany({ where });
+        await this.prisma.emailPolicy.updateMany({ where, data: { activeVersionId: null } });
+        await this.prisma.policyVersion.deleteMany({ where });
+        await this.prisma.emailPolicy.deleteMany({ where });
+        await this.prisma.policySettings.deleteMany({ where });
+        await this.prisma.tenantDepartmentMember.deleteMany({ where });
+        await this.prisma.tenantDepartment.deleteMany({ where });
+        await this.prisma.apiModeDomainSetting.deleteMany({ where });
         // Step API-3 (§3.4 purge order): clawback targets (cascade with their clawbacks),
         // clawbacks and user reports before remediation actions, mailboxes and connections.
         await this.prisma.apiClawbackTarget.deleteMany({ where });

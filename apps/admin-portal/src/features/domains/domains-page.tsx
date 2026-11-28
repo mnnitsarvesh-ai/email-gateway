@@ -135,14 +135,21 @@ function DomainsList() {
         title="Domains"
         description="The mail domains of your organization: ownership, DNS records, mail flow and destination servers."
         actions={
-          <Can op="DomainsController_create_v1">
-            <Button asChild>
-              <Link href="/domains/onboarding">
-                <PlusIcon aria-hidden />
-                Add domain
-              </Link>
-            </Button>
-          </Can>
+          <>
+            <Can op="ApiModeOnboardingController_protectionCoverage_v1">
+              <Button asChild variant="outline">
+                <Link href="/protection-by-mode">Protection by mode</Link>
+              </Button>
+            </Can>
+            <Can op="DomainsController_create_v1">
+              <Button asChild>
+                <Link href="/domains/onboarding">
+                  <PlusIcon aria-hidden />
+                  Add domain
+                </Link>
+              </Button>
+            </Can>
+          </>
         }
       />
       <DataTable

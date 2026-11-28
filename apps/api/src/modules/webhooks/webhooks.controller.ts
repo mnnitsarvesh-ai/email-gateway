@@ -192,7 +192,10 @@ export class WebhooksController {
   @ApiOperation({
     summary: 'List the webhook event catalogue',
     description:
-      'The ten subscribable event types (payload version 1) and the test-only `webhook.ping`: ' +
+      'Every subscribable event type of the catalogue (payload version 1; step API-4 adds ' +
+      '`mailbox.threat.detected` and `mailbox.dlp.detected` — detections of API-mode copies ' +
+      'after delivery, with the protection mode — while `email.threat.detected` stays inline ' +
+      'only) and the test-only `webhook.ping`: ' +
       'description, severity rule, the filters that apply and an example envelope. Payloads ' +
       'carry ids, codes, domains and counts only: never a subject, body, attachment, address ' +
       'local part, URL found in mail, S3 key or secret.',

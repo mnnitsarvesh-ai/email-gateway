@@ -22,8 +22,9 @@ import {
 import { isApiSide, loadOrgApiModeState, type OrgApiModeState } from '../domain/api-mode-state';
 import { loadConnectionContext, type ConnectionContext } from '../domain/connections';
 import type { MailboxMetrics } from '../metrics/mailbox-metrics';
+import { mailboxScope, type ScopeKindMemo } from '../domain/scope';
 import type { RemediationPolicyLoader } from '../remediation/policy-loader';
-import { hourOf } from '../runtime/redis-stores';
+import { CounterStore, deltaOf, hourOf, type MailboxRedis } from '../runtime/redis-stores';
 import { bool, systemAudit } from '../shared/db';
 import { errorFields } from '../shared/errors';
 
@@ -74,6 +75,11 @@ export interface HealthDeps {
   config: HealthConfig;
   /** Effective remediation policies (`remediation.access`), shared with the copies role. */
   policies: RemediationPolicyLoader;
+  /**
+   * Step API-4 A11: the counter hashes (`mbx:cnt:`) not yet flushed, added to the flushed
+   * `api_mode_counters` for `policy.errors_1h` (absent: flushed counters only).
+   */
+  redis?: MailboxRedis;
   organizationIds?: readonly bigint[];
 }
 
@@ -221,6 +227,7 @@ export class HealthJob {
       subscriptions: { active: 0, expiring: 0, missing: 0 },
     };
     const modes = new Map(state.domains.map((d) => [d.id, d.effectiveMode]));
+    const scopeKinds: ScopeKindMemo = new Map();
     const renewMs = cfg.renewBeforeMinutes * 60_000;
     let after = 0n;
     for (;;) {
@@ -238,29 +245,35 @@ export class HealthJob {
           coverageState: true,
           subscriptionId: true,
           subscriptionExpiresAt: true,
+          scopeState: true,
+          scopeSelected: true,
         },
       });
       const changed = new Map<ApiMailboxCoverageState, bigint[]>();
       for (const m of rows) {
         const mode = m.domainId === null ? null : (modes.get(m.domainId) ?? null);
-        const next = evaluateMailboxCoverage(
-          {
-            status: m.status,
-            domainEffectiveMode: mode,
-            feedStatus: m.feedStatus,
-            lastSyncAt: m.lastSyncAt,
-            journalLastSeenAt: m.journalLastSeenAt,
-          },
-          now,
-          coverageConfig,
-        );
+        // Step API-4 B6: a mailbox excluded by its domain's scope is `out_of_scope`.
+        const scoped = await mailboxScope(this.deps.prisma, ctx.organizationId, m, scopeKinds);
+        const next = !scoped.inScope
+          ? 'out_of_scope'
+          : evaluateMailboxCoverage(
+              {
+                status: m.status,
+                domainEffectiveMode: mode,
+                feedStatus: m.feedStatus,
+                lastSyncAt: m.lastSyncAt,
+                journalLastSeenAt: m.journalLastSeenAt,
+              },
+              now,
+              coverageConfig,
+            );
         summary.byState.set(next, (summary.byState.get(next) ?? 0) + 1);
         if (next !== m.coverageState) {
           const list = changed.get(next) ?? [];
           list.push(m.id);
           changed.set(next, list);
         }
-        const inScope = m.status === 'active' && isApiSide(mode);
+        const inScope = m.status === 'active' && isApiSide(mode) && scoped.inScope;
         if (inScope) {
           summary.inScope += 1;
           if (next === 'covered') summary.covered += 1;
@@ -324,6 +337,8 @@ export class HealthJob {
         throttled503: true,
         remediationSucceeded: true,
         remediationFailed: true,
+        policyEvaluations: true,
+        policyErrors: true,
       },
     });
     const buckets: Record<LagBucket, number> = {
@@ -337,7 +352,11 @@ export class HealthJob {
     let throttles = 0;
     let remediationSucceeded = 0;
     let remediationFailed = 0;
+    let policyEvaluations = 0;
+    let policyErrors = 0;
     for (const c of counters) {
+      policyEvaluations += c.policyEvaluations;
+      policyErrors += c.policyErrors;
       remediationSucceeded += c.remediationSucceeded;
       remediationFailed += c.remediationFailed;
       buckets.le_60s += c.lagLe60s;
@@ -393,6 +412,11 @@ export class HealthJob {
       }),
       clawback: await this.clawbackInput(ctx, now),
       reports: await this.reportsInput(ctx, now),
+      // Step API-4 A11: the flushed counters plus this hour's not yet flushed Redis hash.
+      policy: await this.policyInput(ctx, now, {
+        evaluations1h: policyEvaluations,
+        errors1h: policyErrors,
+      }),
     };
     const result = evaluateApiModeHealth(input, this.deps.config);
     const document = result.document as unknown as Prisma.InputJsonValue;
@@ -521,6 +545,37 @@ export class HealthJob {
       paused,
       thresholds: this.deps.config.remediation,
     };
+  }
+
+  /**
+   * Step API-4 A11 `policy.errors_1h`: the detect evaluations of the connection's copies in the
+   * last hour — `api_mode_counters` (flushed) plus the current and previous hour's `mbx:cnt:`
+   * Redis hashes not flushed yet (read only; the flush stays the counters' single writer).
+   */
+  private async policyInput(
+    ctx: ConnectionContext,
+    now: Date,
+    flushed: { evaluations1h: number; errors1h: number },
+  ): Promise<ApiModeHealthInput['policy']> {
+    let evaluations = flushed.evaluations1h;
+    let errors = flushed.errors1h;
+    const redis = this.deps.redis;
+    if (redis?.hgetall) {
+      for (const hour of [hourOf(now), hourOf(new Date(now.getTime() - 3_600_000))]) {
+        try {
+          const hash = await redis.hgetall(CounterStore.key(ctx.id, hour));
+          const delta = deltaOf(Object.entries(hash).flat());
+          evaluations += delta.policy_evaluations ?? 0;
+          errors += delta.policy_errors ?? 0;
+        } catch (error) {
+          this.deps.logger.debug(
+            { apiConnectionId: ctx.publicId, ...errorFields(error) },
+            'unflushed api-mode counters not read; flushed counters only',
+          );
+        }
+      }
+    }
+    return { evaluations1h: evaluations, errors1h: errors };
   }
 
   /**

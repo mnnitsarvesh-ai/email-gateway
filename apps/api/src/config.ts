@@ -1470,6 +1470,19 @@ export const apiModeApiConfigShape = {
   API_MODE_CLAWBACK_MAX_WINDOW_DAYS: int(1, 186).default(31),
   API_MODE_PURGE_APPROVAL_TTL_HOURS: int(1, 720).default(72),
   API_MODE_REPORT_MAILBOXES_MAX: int(1, 50).default(5),
+  /**
+   * Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md B3, B6, B7, B8): the wizard's
+   * detect-only default (days), the scope bounds (mailboxes per `mailboxes` scope write,
+   * departments per `departments` scope), when the onboarding view starts showing first-copy
+   * hints (minutes), and the provider ownership checks per organization per hour with the TTL
+   * (minutes) of a pending provider verification.
+   */
+  API_MODE_DETECT_ONLY_DEFAULT_DAYS: int(1, 30).default(7),
+  API_MODE_SCOPE_MAX_MAILBOXES: int(1, 5000).default(5000),
+  API_MODE_SCOPE_MAX_DEPARTMENTS: int(1, 20).default(20),
+  API_MODE_FIRST_COPY_HINT_AFTER_MINUTES: int(1, 1440).default(10),
+  DOMAIN_PROVIDER_CHECKS_PER_HOUR: int(1, 1000).default(10),
+  DOMAIN_PROVIDER_CHECK_TTL_MINUTES: int(5, 1440).default(60),
 };
 
 export type ApiModeApiConfigKeys = {

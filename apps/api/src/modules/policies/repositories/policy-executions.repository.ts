@@ -27,6 +27,8 @@ const historySelect = {
   evaluatedAt: true,
   // Step 8.4 D23: shown with the input hash.
   atoFacts: true,
+  // Step API-4 (A12): inline (gateway) or detect (API-mode copy) evaluation.
+  evaluationMode: true,
 } satisfies Prisma.PolicyExecutionLogSelect;
 export type HistoryRow = Prisma.PolicyExecutionLogGetPayload<{ select: typeof historySelect }>;
 
@@ -40,6 +42,8 @@ export interface HistoryFilter {
   ruleId?: string;
   overrideApplied?: boolean;
   trigger?: 'scanned' | 'scan_failed' | 'parse_failed';
+  /** Step API-4 (A12): `inline` (default), `detect` or both (`undefined`). */
+  evaluationMode?: 'inline' | 'detect';
   /** Exclusive `(received_at, id)` upper bound of the previous page. */
   before?: { receivedAt: Date; id: bigint };
   take: number;
@@ -101,6 +105,7 @@ export class PolicyExecutionsRepository {
       ...(f.ruleId !== undefined && { decisiveRuleId: f.ruleId }),
       ...(f.overrideApplied !== undefined && { overrideApplied: f.overrideApplied }),
       ...(f.trigger !== undefined && { trigger: f.trigger }),
+      ...(f.evaluationMode !== undefined && { evaluationMode: f.evaluationMode }),
       ...(f.before !== undefined && {
         OR: [
           { receivedAt: { lt: f.before.receivedAt } },
@@ -129,6 +134,8 @@ export class PolicyExecutionsRepository {
       where: tenantWhere(scope, {
         receivedAt: { gte: f.from, lt: f.to },
         scanId: { not: null },
+        // Step API-4: detect rows of API-mode copies are not gateway rounds.
+        evaluationMode: 'inline' as const,
         ...(f.direction !== undefined && { direction: f.direction }),
       }),
       select: sampleSelect,
@@ -153,7 +160,11 @@ export class PolicyExecutionsRepository {
     message: { id: bigint; receivedAt: Date },
   ): Promise<Array<EvaluationRow & { atoFacts: Prisma.JsonValue }>> {
     return this.db.policyExecutionLog.findMany({
-      where: tenantWhere(scope, { messageId: message.id, receivedAt: message.receivedAt }),
+      where: tenantWhere(scope, {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        evaluationMode: 'inline' as const,
+      }),
       select: { ...evaluationSelect, atoFacts: true },
       orderBy: [{ evaluationSeq: 'desc' }, { id: 'desc' }],
       take: MAX_MESSAGE_EVALUATIONS,
@@ -172,6 +183,7 @@ export class PolicyExecutionsRepository {
         messageId: message.id,
         receivedAt: message.receivedAt,
         scanId: { in: [...scanIds] },
+        evaluationMode: 'inline' as const,
       }),
       select: evaluationSelect,
       orderBy: [{ evaluationSeq: 'desc' }, { id: 'desc' }],

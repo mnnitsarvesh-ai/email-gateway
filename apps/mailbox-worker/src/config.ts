@@ -6,6 +6,7 @@ import {
   redisConfigSchema,
   s3ConfigSchema,
 } from '@email-gateway/config';
+import { isPlatformDefaultId, POLICY_DEFAULT_PLATFORM_ID } from '@email-gateway/policy-dsl';
 import { z } from 'zod';
 
 const int = (min: number, max: number) => z.coerce.number().int().min(min).max(max);
@@ -228,6 +229,24 @@ export const configSchema = baseConfigSchema
     API_MODE_REPORT_TRIAGE_WARN_HOURS: int(1, 720).default(24),
     API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES: int(1, 10_080).default(60),
     API_MODE_REPORT_SCAN_TIMEOUT_MINUTES: int(5, 10_080).default(60),
+
+    // Step API-4 parity and onboarding (note 38 A1–A3, A11, B6, B7; ADR-0105/0107).
+    /**
+     * The platform default policy of detect evaluations (`pol-default/1`), a key of
+     * `POLICY_PLATFORM_DEFAULTS` — same key, default and validation as the policy-engine (A2).
+     */
+    POLICY_PLATFORM_DEFAULT: z
+      .string()
+      .default(POLICY_DEFAULT_PLATFORM_ID)
+      .refine((value) => isPlatformDefaultId(value), 'must be a key of POLICY_PLATFORM_DEFAULTS'),
+    /** Compiled policy snapshots cached per process, keyed (organization, generation) (P12). */
+    POLICY_SNAPSHOT_CACHE_MAX_ENTRIES: int(10, 100_000).default(1000),
+    /** Platform kill switch of detect policy evaluation of API-mode copies (A1, K3). */
+    API_MODE_POLICY_EVALUATION_ENABLED: flag.default(true),
+    /** Health leader: re-evaluate the scope of `departments` domains every N minutes (B6). */
+    API_MODE_SCOPE_REFRESH_MINUTES: int(1, 1440).default(15),
+    /** Most departments of a `departments` scope read by the evaluation (B6). */
+    API_MODE_SCOPE_MAX_DEPARTMENTS: int(1, 20).default(20),
   })
   .superRefine((cfg, ctx) => {
     const testEnv = TEST_ENVIRONMENTS.includes(cfg.APP_ENV);

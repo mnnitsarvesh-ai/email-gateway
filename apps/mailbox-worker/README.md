@@ -20,6 +20,14 @@ Step API-3 ([design](../../docs/plan/steps/37-api-mode-clawback-reporting.md) C1
 
 Shared: `src/domain/` (API-mode state and effective modes, connection context and D4 revocation, mailbox resolution and the hybrid inline lookup), `src/runtime/` (Redis budget `mbx:rb:*`, throttle gate `mbx:throttle:*`, counters `mbx:cnt:*`; the provider runtime with 8.2's token service over the decrypted `*.mailbox_remediation` grant).
 
+## Step API-4: policy evaluation, detections, scope, detect-only expiry
+
+- `src/policy/copy-policy.ts` (`CopyPolicyEvaluator`): the detect-mode evaluation of a copy message with `@email-gateway/policy-runtime` (the policy-engine's fact reads, snapshot cache, directory, ATO facts) in the copies ledger transaction; the `policy_execution_logs` detect row (reused on a replay); the round's DLP facts; the R9.1 recipient row of a mailbox.
+- `src/copies/copies.handler.ts`: per recorded copy `policy_state`/`policy_disposition`/`policy_tagged`/`dlp_action` (written once), the decision with the policy outcome and scope, outbound detection copies on the sender mailbox (A6), the detect-mode policy alert (A7), `mail.message.copy_detected.v1` (A8, payload built by `src/copies/detection.ts`) and the domain's first copy (B8).
+- `src/domain/scope.ts`: the scope rule shared by decisions, clawback, feeds, coverage and feed activations (B6); `src/health/scope-evaluator.ts` (health leader: `scope_state` per domain); `src/health/detect-only.ts` (health leader: detect-only expiry, B7).
+- `src/remediation/quarantine-entries.ts`: policy-lane entries (kind `review` for `require_approval`, reason `policy`/`dlp`/verdict, A5).
+- Integration suite `integration/api-parity.test.ts` (synthetic `it-apiparity-*` organizations; scan rounds and tenant policies from `integration/support/parity.ts`). The older suites run with `API_MODE_POLICY_EVALUATION_ENABLED=false` (they write no scan rounds).
+
 ## Idempotency (N8)
 
 - Copies: `processOnce` ledger row and every effect in one writer transaction (also for skipped events: the queue is reconciled); copy rows are upserts; the dedupe key is unique per (mailbox, Message-ID hash).
@@ -30,6 +38,7 @@ Shared: `src/domain/` (API-mode state and effective modes, connection context an
 - Clawbacks: claims `FOR UPDATE SKIP LOCKED` with a lease (no `row_version` change); state transitions CAS on `row_version`; targets `INSERT IGNORE` on (clawback, copy) in pages of 1 000; queueing re-plans under the copy-row lock and inserts or re-arms the `action_key` row; reconcile is derived from the action rows.
 - Reports: intake `INSERT IGNORE` on the report copy; claims with a lease and CAS; an ingested original uses the ingest key `v2:rpt:<sha256(report public id)>` and a deterministic mail-bucket key, committed with the report's move to `scanning` in one transaction (with a scan deadline: after `API_MODE_REPORT_SCAN_TIMEOUT_MINUTES` the report goes to triage with the report copy's scan, `last_error_code = original_scan_timeout`). A bulk restore requested again after `completed_with_errors` returns the failed targets to `none` first, so they are retried.
 - Health: transitions with a CAS on the previous status; alerts throttled through `notification_alert_windows` and `health_alerted_at`.
+- Step API-4: one detect row per (message, round) (UNIQUE; a replay reuses it), copy policy columns written only from `policy_state = none` (events only on that first write), first copy `INSERT … ON DUPLICATE KEY UPDATE` with COALESCE, scope requests cleared with a CAS on the requested time, detect-only expiry CAS on `row_version` and `detect_only_notified_at IS NULL`.
 - Counters: Redis `HINCRBY`, flushed by taking each hash atomically and adding it to `api_mode_counters` (failed writes are put back). Counters are best effort (a crash between a commit and the increment loses that increment, never a row).
 
 ## Logs

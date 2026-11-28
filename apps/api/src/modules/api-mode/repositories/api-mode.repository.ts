@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaReadService, PrismaService, uuidv7 } from '@email-gateway/common';
 import {
+  type ApiCopyPolicyState,
+  type DlpAction,
+  type PolicyDisposition,
   type ApiCopyDeliveredBasis,
   type ApiCopyRemediationAction,
   type ApiCopyRemediationState,
@@ -20,6 +23,7 @@ import {
   type ProtectionMode,
   type ProviderConnectionStatus,
   type ProviderGrantStatus,
+  evaluationSelect,
 } from '@email-gateway/database';
 import { tenantWhere, type TenantScope } from '../../../auth-contracts/tenant-scope';
 import type { OrganizationAccess } from '../../organizations/domain/organization-access';
@@ -223,7 +227,17 @@ export interface CopyRow {
   quarantineEntryId: string | null;
   /** Step API-3 §3.2: late signals that raised the stored verdict. */
   verdictRevision: number;
+  /** Step API-4 §3.1 (A1, A3): detect-mode policy columns of the copy. */
+  policyState: ApiCopyPolicyState;
+  policyDisposition: PolicyDisposition | null;
+  policyTagged: boolean;
+  dlpAction: DlpAction | null;
 }
+
+/** Step API-4 (A12): a detect row as `evaluationViewOf` of the policies module reads it. */
+export type DetectEvaluationRow = Prisma.PolicyExecutionLogGetPayload<{
+  select: typeof evaluationSelect;
+}>;
 
 export interface CopyFilter {
   verdict?: MessageVerdict[];
@@ -235,6 +249,9 @@ export interface CopyFilter {
   remediationState?: ApiCopyRemediationState[];
   /** Step API-3 C8.6. */
   direction?: ApiCopyDirection[];
+  /** Step API-4 A12. */
+  policyDisposition?: PolicyDisposition[];
+  dlpAction?: DlpAction[];
 }
 
 /** The mailbox a Graph subscription id selects (public callback; no tenant input). */
@@ -666,6 +683,16 @@ export class ApiModeRepository {
     return out;
   }
 
+  /** Step API-4 (B6): non-deleted mailboxes of the organization excluded by a domain scope. */
+  async excludedMailboxes(scope: TenantScope): Promise<number> {
+    return this.reader.client.apiMailbox.count({
+      where: tenantWhere(scope, {
+        scopeState: 'excluded' as const,
+        status: { not: 'deleted' as const },
+      }),
+    });
+  }
+
   /** In-scope mailboxes with a provider id, and how many have an active feed (wizard). */
   async feedCounts(
     scope: TenantScope,
@@ -986,6 +1013,8 @@ export class ApiModeRepository {
              c.verdict, c.risk_score AS riskScore, c.verdict_authority AS verdictAuthority,
              c.provider_delivered_at AS providerDeliveredAt, c.delivered_basis AS deliveredBasis,
              c.verdict_at AS verdictAt, c.lag_ms AS lagMs, c.verdict_revision AS verdictRevision,
+             c.policy_state AS policyState, c.policy_disposition AS policyDisposition,
+             c.policy_tagged AS policyTagged, c.dlp_action AS dlpAction,
              m.subject, m.header_from AS headerFrom,
              c.remediation_state AS remediationState, c.remediation_action AS remediationAction,
              la.public_id AS remediationId,
@@ -1038,6 +1067,10 @@ export class ApiModeRepository {
       remediationId: (r.remediationId as string | null) ?? null,
       quarantineEntryId: (r.quarantineEntryId as string | null) ?? null,
       verdictRevision: Number(r.verdictRevision ?? 0),
+      policyState: (r.policyState as ApiCopyPolicyState | null) ?? 'none',
+      policyDisposition: (r.policyDisposition as PolicyDisposition | null) ?? null,
+      policyTagged: Boolean(r.policyTagged),
+      dlpAction: (r.dlpAction as DlpAction | null) ?? null,
     }));
   }
 
@@ -1068,6 +1101,11 @@ export class ApiModeRepository {
       terms.push(Prisma.sql`c.remediation_state IN (${Prisma.join(filter.remediationState)})`);
     }
     if (filter.direction) terms.push(Prisma.sql`c.direction IN (${Prisma.join(filter.direction)})`);
+    if (filter.policyDisposition) {
+      terms.push(Prisma.sql`c.policy_disposition IN (${Prisma.join(filter.policyDisposition)})`);
+    }
+    if (filter.dlpAction)
+      terms.push(Prisma.sql`c.dlp_action IN (${Prisma.join(filter.dlpAction)})`);
     if (page.before !== undefined) {
       terms.push(
         Prisma.sql`(c.received_at < ${page.before.at} OR (c.received_at = ${page.before.at} AND c.id < ${page.before.id}))`,
@@ -1105,6 +1143,59 @@ export class ApiModeRepository {
     });
     const codes = row?.reasonCodes;
     return Array.isArray(codes) ? codes.filter((c): c is string => typeof c === 'string') : [];
+  }
+
+  // ---- step API-4 detection detail (A12) ----------------------------------------------------
+
+  /** The newest detect-mode evaluation of the copy's registry message (replica), or null. */
+  detectEvaluation(
+    scope: TenantScope,
+    messageId: bigint,
+    receivedAt: Date,
+  ): Promise<DetectEvaluationRow | null> {
+    return this.reader.client.policyExecutionLog.findFirst({
+      where: tenantWhere(scope, { messageId, receivedAt, evaluationMode: 'detect' as const }),
+      select: evaluationSelect,
+      orderBy: [{ evaluationSeq: 'desc' }, { id: 'desc' }],
+    });
+  }
+
+  /** The newest DLP result of the copy's registry message (codes only; replica), or null. */
+  async dlpResult(
+    scope: TenantScope,
+    messageId: bigint,
+    receivedAt: Date,
+  ): Promise<{ action: DlpAction; verdict: string; categories: string[] } | null> {
+    const row = await this.reader.client.dlpScanResult.findFirst({
+      where: tenantWhere(scope, { messageId, receivedAt }),
+      select: { action: true, verdict: true, categories: true },
+      orderBy: [{ lifecycleRound: 'desc' }, { id: 'desc' }],
+    });
+    if (row === null) return null;
+    const categories = Array.isArray(row.categories)
+      ? (row.categories as Array<{ category?: unknown }>)
+          .map((c) => c?.category)
+          .filter((c): c is string => typeof c === 'string')
+          .slice(0, 8)
+      : [];
+    return { action: row.action, verdict: row.verdict, categories };
+  }
+
+  /** The stored decision of the copy's newest policy-triggered action (replica), or null. */
+  async copyPolicyDecision(
+    scope: TenantScope,
+    copy: { id: bigint; receivedAt: Date },
+  ): Promise<Prisma.JsonValue | null> {
+    const row = await this.reader.client.apiRemediationAction.findFirst({
+      where: tenantWhere(scope, {
+        copyId: copy.id,
+        copyReceivedAt: copy.receivedAt,
+        trigger: 'policy' as const,
+      }),
+      select: { decision: true },
+      orderBy: { id: 'desc' },
+    });
+    return row?.decision ?? null;
   }
 
   // ---- public Graph callbacks (D12.4) ------------------------------------------------------

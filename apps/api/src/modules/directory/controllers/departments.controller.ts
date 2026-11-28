@@ -174,8 +174,9 @@ export class DepartmentsController {
     summary: 'Delete a department',
     description:
       'Deletes the department and its members, optionally only at `?expectedRowVersion=`; ' +
-      'refused while an active version of an active policy references it ' +
-      '(`409 department_in_use`). Audited as `department.deleted`.',
+      'refused while an active version of an active policy references it, or while an API-mode ' +
+      'mailbox scope of a domain lists it (step API-4; `409 department_in_use` with `reference: ' +
+      'api_mode_scope`). Audited as `department.deleted`.',
   })
   @ApiDepartmentId()
   @ApiQueryFrom(DepartmentDeleteQuerySchema)

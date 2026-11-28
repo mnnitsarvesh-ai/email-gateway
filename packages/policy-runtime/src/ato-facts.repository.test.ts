@@ -1,9 +1,8 @@
 import type { Prisma } from '@email-gateway/database';
 import { atoSubjectHash } from '@email-gateway/security-contracts';
 import { describe, expect, it, vi } from 'vitest';
-import type { PolicyRead } from '../metrics/policy-metrics';
 import { type AtoFactsResult, AtoFactsRepository } from './ato-facts.repository';
-import { InconsistentPolicyReadError } from './errors';
+import { InconsistentPolicyReadError, type PolicyRead } from './errors';
 
 const ORG = 41n;
 const ADDRESS = 'ceo@corp.example';

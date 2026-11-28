@@ -593,9 +593,19 @@ describe.skipIf(gate.skip)(
       const alexMailbox = await mailboxByAddress(fx.prisma, orgM.id, alex());
       expect(alexMailbox?.status).toBe('discovered');
       expect(alexMailbox?.journalLastSeenAt).not.toBeNull();
-      // Never delivered, evaluated, bounced or announced (N1).
+      // Never delivered, evaluated inline, bounced or announced (N1). Step API-4 (A1): the copies
+      // are evaluated once in detect mode (one `detect` row per registry message and round).
       expect(await fx.prisma.emailDelivery.count({ where: { messageId: msg.id } })).toBe(0);
-      expect(await fx.prisma.policyExecutionLog.count({ where: { messageId: msg.id } })).toBe(0);
+      expect(
+        await fx.prisma.policyExecutionLog.count({
+          where: { messageId: msg.id, evaluationMode: 'inline' },
+        }),
+      ).toBe(0);
+      expect(
+        await fx.prisma.policyExecutionLog.count({
+          where: { messageId: msg.id, evaluationMode: 'detect' },
+        }),
+      ).toBe(1);
       expect(await sinkFiles(partner())).toEqual([]);
       expect(await sinkFiles(addr('ina', inlineDom))).toEqual([]);
       expect(await queuedBouncesTo(['journal-agent@journal-source.test'])).toBe(0);

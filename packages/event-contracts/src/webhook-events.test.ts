@@ -64,6 +64,9 @@ describe('step 6.2 vocabularies', () => {
       // Step API-3 C6, C13.
       'api_mode_purge_approval',
       'api_mode_report_received',
+      // Step API-4 A9.2, B7.
+      'dlp_detected',
+      'api_mode_detect_only_ended',
     ]);
     expect(NOTIFICATION_ALERT_SEVERITY_VALUES).toEqual(['info', 'low', 'medium', 'high']);
   });

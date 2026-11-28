@@ -9,6 +9,7 @@ import {
   type MessageVerdict,
   type RemediationAction,
   type RemediationDecision,
+  type PolicyOutcomeFacts,
   type RemediationInput,
   type RiskLevel,
 } from '@email-gateway/mailbox-api';
@@ -16,6 +17,7 @@ import type { ApiMailboxStatus } from '@email-gateway/database';
 import type { EffectiveRemediationPolicy } from '@email-gateway/mailbox-api';
 import { mailboxProfileOf } from '../domain/connections';
 import { OrgSettingsMemo } from '../domain/org-settings';
+import { mailboxScope, type ScopeKindMemo } from '../domain/scope';
 import type { CounterDelta } from '../runtime/redis-stores';
 import { big, bool, type Db } from '../shared/db';
 import { InconsistentReadError } from '../shared/errors';
@@ -52,8 +54,8 @@ export interface DecisionCopy {
   verdictAt: Date | null;
   remediationState: ApiCopyRemediationState;
   remediationGeneration: number;
-  /** Step API-3 C8.5: `inbound` or `internal`. */
-  direction: 'inbound' | 'internal';
+  /** Step API-3 C8.5: `inbound` or `internal`; step API-4 A6.2: `outbound` detections. */
+  direction: 'inbound' | 'internal' | 'outbound';
 }
 
 /** States in which a new policy decision leaves the copy alone (R4, R5.5, API2-15). */
@@ -71,19 +73,23 @@ export interface DecisionMemo {
   domainModes: Map<string, DomainEffectiveMode | null>;
   /** Step API-3: organization settings (`internal_mail_enabled`, C8.5). */
   settings: OrgSettingsMemo;
+  /** Step API-4 B6: domain scope kinds. */
+  scopeKinds: ScopeKindMemo;
 }
 
 export const newDecisionMemo = (): DecisionMemo => ({
   connections: new Map(),
   domainModes: new Map(),
   settings: new OrgSettingsMemo(),
+  scopeKinds: new Map(),
 });
 
 /**
  * The real context of a copy's decision (R4; reused by the clawback role, note 37 C3.2): the
  * mailbox (status, domain, report flag), the connection's provider, pause flag and mailbox-access
- * grant, the domain's effective mode, the effective policy of the mailbox (R2.6) and the
- * organization's internal-mail setting. Every row is organization echo-checked.
+ * grant, the domain's effective mode, the effective policy of the mailbox (R2.6), the
+ * organization's internal-mail setting and (step API-4 B6) the mailbox scope. Every row is
+ * organization echo-checked.
  */
 export interface DecisionContext {
   mailbox: {
@@ -96,6 +102,11 @@ export interface DecisionContext {
   domainEffectiveMode: DomainEffectiveMode | null;
   effective: EffectiveRemediationPolicy;
   internalMailEnabled: boolean;
+  /**
+   * Step API-4 B6: the mailbox is in its domain's protection scope (live `scope_selected` for
+   * `mailboxes`, stored `scope_state` for `departments`, always for `all`).
+   */
+  mailboxInScope: boolean;
 }
 
 /** The copy fields the context reads need. */
@@ -119,11 +130,14 @@ export async function loadDecisionContext(
       status: true,
       domainId: true,
       reportMailbox: true,
+      scopeState: true,
+      scopeSelected: true,
     },
   });
   if (!mailbox || mailbox.organizationId !== copy.organizationId) {
     throw new InconsistentReadError('api_mailboxes');
   }
+  const scope = await mailboxScope(tx, copy.organizationId, mailbox, memo.scopeKinds);
   const connection = await connectionFacts(tx, copy, memo);
   const domainEffectiveMode = await domainMode(tx, copy.organizationId, mailbox.domainId, memo);
   const effective = await policies.effective(tx, copy.organizationId, mailbox.domainId);
@@ -139,6 +153,7 @@ export async function loadDecisionContext(
     domainEffectiveMode,
     effective,
     internalMailEnabled: settings.internalMailEnabled,
+    mailboxInScope: scope.inScope,
   };
 }
 
@@ -305,8 +320,10 @@ function safeJson(text: string): unknown {
  * The decision step of the copies role (step API-2 R4, ADR-0101): after a copy row was recorded
  * or finalized, **inside the same ledger transaction**, the copy's verdict and its round's risk
  * row are run through the effective remediation policy (R2.6) with the connection's pause flag,
- * the mailbox-access grant, the domain's effective mode and the mailbox status
- * (`decideRemediation`, R2.2):
+ * the mailbox-access grant, the domain's effective mode, the mailbox status and scope and — step
+ * API-4 (A4, ADR-0105) — the copy's detect-mode policy outcome (the policy lane; null = verdict
+ * lane only), and the decision record `api-remediation-decision/2` is stored
+ * (`decideRemediation`, A4.3):
  *
  * - `none` → nothing (the copy keeps `remediation_state = none`);
  * - `skip` → an action row `skipped` with the reason (`INSERT IGNORE` on `action_key`), copy
@@ -332,13 +349,17 @@ export class RemediationDecider {
     scanId: string | null,
     now: Date,
     memo: DecisionMemo = newDecisionMemo(),
+    policyOutcome: PolicyOutcomeFacts | null = null,
   ): Promise<DecisionResult> {
     if (DECIDED_STATES.includes(copy.remediationState)) return { kind: 'unchanged' };
-    // Cheap exits first: nothing to remediate (R2.2 step 1) needs no context reads.
-    if (copy.status !== 'scanned' || copy.verdict === null || copy.verdict === 'clean') {
-      return { kind: 'none' };
-    }
-    if (copy.verdict === 'unknown') return { kind: 'none' };
+    // Cheap exits first: nothing to remediate (A4.3 steps 1–3: not scanned, no verdict lane and
+    // no policy lane) needs no context reads.
+    if (copy.status !== 'scanned') return { kind: 'none' };
+    const verdictLane =
+      copy.verdict !== null && copy.verdict !== 'clean' && copy.verdict !== 'unknown';
+    const policyLane =
+      policyOutcome !== null && (policyOutcome.disposition !== 'allow' || policyOutcome.tagged);
+    if (!verdictLane && !policyLane) return { kind: 'none' };
 
     const ctx = await loadDecisionContext(tx, this.deps.policies, copy, memo);
     // Step API-3 C9.2 / C-I5: report-mailbox copies are never remediated.
@@ -354,7 +375,7 @@ export class RemediationDecider {
         direction: copy.direction,
       },
       risk,
-      policyOutcome: null,
+      policyOutcome,
       context: {
         provider: connection.provider,
         grantActive: connection.grantActive,
@@ -362,6 +383,7 @@ export class RemediationDecider {
         domainEffectiveMode: ctx.domainEffectiveMode,
         mailboxStatus: ctx.mailbox.status,
         internalMailEnabled: ctx.internalMailEnabled,
+        mailboxInScope: ctx.mailboxInScope,
       },
     };
     const decision: RemediationDecision = decideRemediation(input, effective.policy, {

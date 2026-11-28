@@ -29,6 +29,8 @@ export const API_MODE_HEALTH_CHECK_CODES = [
   // Step API-3 (note 37 C13): evaluated only with the `clawback` / `reports` inputs.
   'clawback.stalled',
   'reports.backlog',
+  // Step API-4 (note 38 A11): evaluated only with the `policy` input (16th of 16 allowed).
+  'policy.errors_1h',
 ] as const;
 export type ApiModeHealthCheckCode = (typeof API_MODE_HEALTH_CHECK_CODES)[number];
 
@@ -107,6 +109,54 @@ export interface ApiModeHealthInput {
    * not evaluated (not in the result).
    */
   reports?: ApiModeReportsHealthInput;
+  /**
+   * Step API-4 (A11): detect-mode policy evaluations of the connection's copies in the last hour.
+   * Optional; without it `policy.errors_1h` is not evaluated (not in the result).
+   */
+  policy?: ApiModePolicyHealthInput;
+}
+
+/** A11 `policy.errors_1h` facts (counter sums of the last hour). */
+export interface ApiModePolicyHealthInput {
+  /** `api_mode_counters.policy_evaluations` (evaluated copies). */
+  evaluations1h: number;
+  /** `api_mode_counters.policy_errors` (evaluations that failed). */
+  errors1h: number;
+}
+
+/** `policy.errors_1h` rates only with at least this many attempts in the hour (A11). */
+export const POLICY_ERRORS_MIN_EVALUATIONS = 10;
+/** A11 fixed thresholds of the error ratio (percent; not configuration). */
+export const POLICY_ERRORS_WARN_PERCENT = 5;
+export const POLICY_ERRORS_FAIL_PERCENT = 50;
+
+/**
+ * A11 `policy.errors_1h`: errors / (evaluations + errors) over the last hour; with at least ten
+ * attempts > 5 % → warn, > 50 % → fail.
+ */
+export function evaluatePolicyHealth(input: ApiModePolicyHealthInput): ApiModeHealthCheck {
+  const evaluations = Math.max(0, Math.trunc(input.evaluations1h));
+  const errors = Math.max(0, Math.trunc(input.errors1h));
+  const attempts = evaluations + errors;
+  if (attempts < POLICY_ERRORS_MIN_EVALUATIONS) {
+    return check(
+      'policy.errors_1h',
+      'pass',
+      `${attempts} policy evaluation(s) in the last hour (${POLICY_ERRORS_MIN_EVALUATIONS} needed to rate)`,
+    );
+  }
+  const percent = (errors / attempts) * 100;
+  const status: ApiModeCheckStatus =
+    percent > POLICY_ERRORS_FAIL_PERCENT
+      ? 'fail'
+      : percent > POLICY_ERRORS_WARN_PERCENT
+        ? 'warn'
+        : 'pass';
+  return check(
+    'policy.errors_1h',
+    status,
+    `${pct(percent)} of ${attempts} policy evaluations failed in the last hour (${errors} failed)`,
+  );
 }
 
 /** C13 `clawback.stalled` facts (ages only). */
@@ -429,6 +479,7 @@ export function evaluateApiModeHealth(
   if (input.remediation) checks.push(...evaluateRemediationHealth(input.remediation));
   if (input.clawback) checks.push(evaluateClawbackHealth(input.clawback));
   if (input.reports) checks.push(evaluateReportsHealth(input.reports));
+  if (input.policy) checks.push(evaluatePolicyHealth(input.policy));
 
   const status: ApiModeHealthStatus = checks.some((c) => c.status === 'fail')
     ? 'failing'

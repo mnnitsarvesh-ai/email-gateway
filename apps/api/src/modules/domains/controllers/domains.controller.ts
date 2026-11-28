@@ -3,13 +3,17 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
   Patch,
   Post,
   Query,
+  Res,
+  UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -17,9 +21,20 @@ import {
   ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiParam,
+  ApiResponse,
   ApiSecurity,
   ApiTags,
 } from '@nestjs/swagger';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_REPLAYED_HEADER,
+} from '../../../http/idempotency/idempotency-key';
+import { ArchiveIdempotency } from '../../archive/api-docs';
+import { PROVIDER_CHECK_OPERATION } from '../domains.constants';
+import { DOMAIN_PROVIDER_ERROR_CODES } from '../domains.errors';
+import { DomainProviderOwnershipService } from '../services/domain-provider-ownership.service';
+import { RetryAfterInterceptor } from './retry-after.interceptor';
 import {
   CurrentPrincipal,
   CurrentScope,
@@ -53,10 +68,20 @@ import {
   type DomainSummary,
   type ListDomainsQuery,
   ListDomainsQuerySchema,
+  PROVIDER_CHECK_EXAMPLES,
+  ProviderOwnershipCheckBodySchema,
+  type ProviderOwnershipCheckResponse,
+  ProviderOwnershipCheckResponseSchema,
 } from '../dto/domains.schemas';
 import { DomainsService } from '../services/domains.service';
 import { MAIL_FILTERING_NOT_ENABLED } from '../domains.errors';
 import { API_MODE_ERROR_CODES } from '../../api-mode/api-mode.errors';
+
+/** The keyed-mutation rule of the provider ownership check (step API-4). */
+const PROVIDER_CHECK_KEYED_RULE =
+  ' Requires the Idempotency-Key header (transactional: the request, its audit row and the ' +
+  'stored response commit together; a repeat with the same key returns the stored response with ' +
+  '`Idempotency-Replayed: true`); rate class `sensitive`.';
 
 /** Domains of the caller's organization (§4). The tenant always comes from the credential. */
 @ApiTags('domains')
@@ -64,7 +89,10 @@ import { API_MODE_ERROR_CODES } from '../../api-mode/api-mode.errors';
 @ApiSecurity(API_KEY_SCHEME)
 @Controller({ path: 'domains', version: '1' })
 export class DomainsController {
-  constructor(private readonly domains: DomainsService) {}
+  constructor(
+    private readonly domains: DomainsService,
+    private readonly providerOwnership: DomainProviderOwnershipService,
+  ) {}
 
   @Post()
   @RequirePermissions(DOMAIN_MANAGE)
@@ -163,6 +191,82 @@ export class DomainsController {
     @Client() client: ClientContext,
   ): Promise<DomainDetail> {
     return this.domains.changeStatus(principal, scope, id, body, client);
+  }
+
+  @Post(':domainId/ownership/provider-check')
+  @RequirePermissions(DOMAIN_MANAGE)
+  @HttpCode(HttpStatus.ACCEPTED)
+  @UseInterceptors(RetryAfterInterceptor)
+  @ArchiveIdempotency(PROVIDER_CHECK_OPERATION)
+  @ApiOperation({
+    summary: 'Verify ownership through the bound provider tenant',
+    description:
+      'Step API-4 (ADR-0107): requests an ownership check of a domain waiting for verification ' +
+      'through the organization’s **bound** Microsoft 365 / Google Workspace connection (tenant ' +
+      'verified, not disabled, active `*.mail_flow` grant). `{ connectionId? }` picks the ' +
+      'connection (optional when exactly one qualifies or the previous check used one that still ' +
+      'does; else `409 domain_provider_connection_unavailable` with `reason`). A `failed` domain ' +
+      'is restarted first exactly as `POST /domains/{id}/verify`; a name owned by another ' +
+      'organization is `409`; a domain that is not waiting is `409 domain_not_pending`; an ' +
+      'unknown connection is `404 connection_not_found`. A pending provider check of the domain ' +
+      'with the same connection is reused. The integration-worker asks the provider (verified ' +
+      'for e-mail only); the domain scheduler then applies the answer through the same ' +
+      'first-to-verify-wins transaction as a TXT check (`ownership_method = provider_tenant`, ' +
+      'audit `domain.verified` with `{ method, connectionId }`); any other answer fails the ' +
+      'check only (the domain stays pending, TXT still works); no answer within ' +
+      'DOMAIN_PROVIDER_CHECK_TTL_MINUTES expires it. Provider-proven domains never prove a ' +
+      'tenant binding. Audited `domain.provider_verification_requested`. At most ' +
+      'DOMAIN_PROVIDER_CHECKS_PER_HOUR per organization per hour (`429` with `Retry-After`).' +
+      PROVIDER_CHECK_KEYED_RULE,
+  })
+  @ApiParam({ name: 'domainId', description: 'Domain public id (UUID)', format: 'uuid' })
+  @ApiBody({
+    schema: zodToOpenApi(ProviderOwnershipCheckBodySchema, { io: 'input' }),
+    examples: { bound: { value: PROVIDER_CHECK_EXAMPLES.body } },
+  })
+  @ApiResponse({
+    status: 202,
+    description: 'The pending provider check',
+    content: {
+      'application/json': {
+        schema: zodToOpenApi(ProviderOwnershipCheckResponseSchema),
+        example: PROVIDER_CHECK_EXAMPLES.response,
+      },
+    },
+  })
+  @ApiErrors(400, 401, 404, 429, 503)
+  @ApiCodedError(403, 'Missing permission (`forbidden`)', ['forbidden'])
+  @ApiCodedError(
+    409,
+    '`domain_provider_connection_unavailable` (`reason`: `none`, `not_capable`, ' +
+      '`connection_required` with `candidates`), `domain_not_pending` (`status`), the name is ' +
+      'owned by another organization, or an Idempotency-Key conflict',
+    [
+      DOMAIN_PROVIDER_ERROR_CODES.connectionUnavailable,
+      DOMAIN_PROVIDER_ERROR_CODES.notPending,
+      'idempotency_key_conflict',
+      'idempotency_key_in_progress',
+    ],
+  )
+  @ApiCodedError(422, 'Idempotency-Key reused with a different request', ['idempotency_key_reused'])
+  async providerOwnershipCheck(
+    @CurrentPrincipal() principal: Principal,
+    @CurrentScope() scope: TenantScope,
+    @Param('domainId', domainIdPipe) domainId: string,
+    @Headers(IDEMPOTENCY_KEY_HEADER) idempotencyKey: unknown,
+    @Body() body: unknown,
+    @Client() client: ClientContext,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<ProviderOwnershipCheckResponse> {
+    const result = await this.providerOwnership.request(
+      principal,
+      scope,
+      domainId,
+      { idempotencyKey, body },
+      client,
+    );
+    if (result.replayed) res.setHeader(IDEMPOTENCY_REPLAYED_HEADER, 'true');
+    return result.body;
   }
 
   @Delete(':id')

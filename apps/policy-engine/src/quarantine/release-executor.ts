@@ -1,3 +1,11 @@
+import {
+  type InconsistencySink,
+  type FactsRepository,
+  buildInputWithDirectory,
+  type DirectoryRepository,
+  type SnapshotLookup,
+  type SnapshotRepository,
+} from '@email-gateway/policy-runtime';
 import { uuidv7 } from '@email-gateway/common';
 import { Prisma } from '@email-gateway/database';
 import {
@@ -48,12 +56,7 @@ import {
   planPolicyUrlRewrite,
   type PolicyUrlRewriteConfig,
 } from '../delivery/policy-url-rewrite';
-import type { InconsistencySink } from '../evaluation/errors';
 import { nextDeliverySeq } from '../evaluation/evaluation.service';
-import type { FactsRepository } from '../evaluation/facts.repository';
-import { buildInputWithDirectory } from '../evaluation/input-builder';
-import type { DirectoryRepository } from '../evaluation/directory.repository';
-import type { SnapshotLookup, SnapshotRepository } from '../evaluation/snapshot.repository';
 import type { LifecycleMetrics } from '@email-gateway/message-lifecycle';
 import { type QuarantineInconsistencySink, quarantineWrongRead } from './errors';
 import { chunks, writeMessageEvent, writeQuarantineNotification } from './outbox';

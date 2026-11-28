@@ -5,18 +5,43 @@
  * resolution (domain → organization → platform default, R2.6), the canonical document hash and
  * the decision record `api-remediation-decision/1` (R2.4).
  *
+ * Step API-4 (note 38 A4, ADR-0105): a second, policy lane. The detect-mode policy evaluation of
+ * the copy (`policyOutcome`) maps to a mailbox action through the document-level `policyMapping`;
+ * the stronger of the verdict lane and the policy lane wins (ties → verdict lane), a tenant allow
+ * override suppresses the verdict lane, outbound copies are never remediated, and the decision
+ * record is `api-remediation-decision/2` (readers accept `/1` and `/2`).
+ *
  * The mailbox-worker decides inside the `copies` transaction and the api validates writes and
  * shows the effective policy; both call these functions, so a rule is decided once.
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { CopyDirection } from '../classify';
 import {
+  effectivePolicyMapping,
+  isTenantAllowOverride,
+  POLICY_MAPPING_KEYS,
+  policyLaneOf,
+  policyMappingRuleId,
+  policyMappingSchema,
+  policyOutcomeFactsSchema,
+  postDeliveryEntries,
+  POST_DELIVERY_EFFECTS,
+  POST_DELIVERY_MAX_ENTRIES,
+  POST_DELIVERY_REASONS,
+  POLICY_ACTION_STATUSES,
+  type PolicyMapping,
+  type PolicyMappingKey,
+  type PolicyOutcomeFacts,
+} from './policy-outcome';
+import {
+  REMEDIATION_ACTIONS,
   REMEDIABLE_VERDICTS,
   REMEDIATION_MODES,
   REMEDIATION_RULE_ACTIONS,
   RULE_LEVELS,
+  remediationActionStrength,
   riskLevelRank,
+  type ApiCopyRecordDirection,
   type ApiCopyStatus,
   type ApiMailboxStatus,
   type DomainEffectiveMode,
@@ -32,7 +57,10 @@ import {
 } from './vocabulary';
 
 export const REMEDIATION_POLICY_SCHEMA_VERSION = 1;
-export const REMEDIATION_DECISION_SCHEMA_VERSION = 1;
+/** The decision record written from step API-4 on (`api-remediation-decision/2`, A4.4). */
+export const REMEDIATION_DECISION_SCHEMA_VERSION = 2;
+/** The API-2/API-3 decision record (still accepted by readers). */
+export const REMEDIATION_DECISION_V1_SCHEMA_VERSION = 1;
 
 /** Document limits (R2.1). */
 export const REMEDIATION_POLICY_LIMITS = Object.freeze({
@@ -42,8 +70,12 @@ export const REMEDIATION_POLICY_LIMITS = Object.freeze({
   maxScore: 1000,
 });
 
-/** The zod issue code (message and `params.code`) of the reserved `when.policyDispositions`. */
-export const UNSUPPORTED_UNTIL_POLICY_EVALUATION = 'unsupported_until_policy_evaluation';
+/**
+ * The zod issue code (message and `params.code`) of the refused `when.policyDispositions`: the
+ * reserved hook of API-2 (R2.5) is realized by the document-level `policyMapping` (note 38 A4.2;
+ * API-2 used `unsupported_until_policy_evaluation`).
+ */
+export const USE_POLICY_MAPPING = 'use_policy_mapping';
 
 const RULE_ID = /^[a-z0-9_-]+$/;
 
@@ -59,13 +91,13 @@ const whenSchema = z
     hardBlock: z.boolean().optional(),
     minScore: z.number().int().min(0).max(REMEDIATION_POLICY_LIMITS.maxScore).optional(),
     /**
-     * Reserved for the later policy-evaluation step (R2.5, product-owner item PO-D2): refused in
-     * API-2 with the custom issue `unsupported_until_policy_evaluation`.
+     * Refused (note 38 A4.2): policy dispositions map to mailbox actions through the document's
+     * `policyMapping`, never through a verdict rule (custom issue `use_policy_mapping`).
      */
     policyDispositions: z
       .custom<never>(() => false, {
-        message: UNSUPPORTED_UNTIL_POLICY_EVALUATION,
-        params: { code: UNSUPPORTED_UNTIL_POLICY_EVALUATION },
+        message: USE_POLICY_MAPPING,
+        params: { code: USE_POLICY_MAPPING },
       })
       .optional(),
   })
@@ -106,6 +138,11 @@ export const remediationPolicySchema = z.strictObject({
     }),
   /** Reserved; must be false in API-2 (scan-failed copies are never remediated). */
   remediateScanFailures: z.literal(false).optional(),
+  /**
+   * Step API-4 (A4.2): policy disposition → mailbox action of the policy lane; absent = the
+   * defaults (`DEFAULT_POLICY_MAPPING`). Never `hard_delete`.
+   */
+  policyMapping: policyMappingSchema.optional(),
 });
 
 export interface RemediationRuleWhen {
@@ -127,6 +164,8 @@ export interface RemediationPolicyDocument {
   v: 1;
   rules: RemediationRule[];
   remediateScanFailures?: false;
+  /** Step API-4 (A4.2); absent = `DEFAULT_POLICY_MAPPING`. */
+  policyMapping?: PolicyMapping;
 }
 
 /** A policy as stored: the mode column plus the document. */
@@ -222,14 +261,18 @@ export interface RemediationInput {
     verdictAuthority: VerdictAuthority;
     /**
      * Step API-3 (C8.5): `api_message_copies.direction`. Optional so API-2 callers compile;
-     * absent means `inbound`.
+     * absent means `inbound`. Step API-4 (A6): `outbound` detection copies are never remediated.
      */
-    direction?: CopyDirection;
+    direction?: ApiCopyRecordDirection;
   };
   /** The scan round's latest revision row (`message_risk_scores`); null when missing. */
   risk: { level: RiskLevel | null; hardBlocks: readonly string[] } | null;
-  /** R2.5 hook for a later policy-evaluation step; API-2 always passes null. */
-  policyOutcome: null;
+  /**
+   * Step API-4 (A4.1): the detect-mode policy evaluation of the copy (`policyOutcomeOf` of
+   * `@email-gateway/policy-runtime`); null when not evaluated (disabled, inline authority, failed,
+   * not applicable, clawback re-decisions) — then only the verdict lane decides (API-2).
+   */
+  policyOutcome: PolicyOutcomeFacts | null;
   context: {
     provider: RemediationProvider;
     /** The connection's `*.mailbox_remediation` grant is `active`. */
@@ -242,6 +285,11 @@ export interface RemediationInput {
      * so API-2 callers compile; absent means `true` (the C17 default).
      */
     internalMailEnabled?: boolean;
+    /**
+     * Step API-4 (B6): the mailbox is in the domain's protection scope (`mailboxInScope`).
+     * Optional; absent means `true`. `false` → `skip out_of_scope`.
+     */
+    mailboxInScope?: boolean;
   };
 }
 
@@ -300,43 +348,122 @@ export function firstMatchingRule(
   return document.rules.find((rule) => ruleMatches(rule, input)) ?? null;
 }
 
+/** The two lanes of a decision (A4.3, A4.4 `lanes`). */
+export interface RemediationLanes {
+  /** The first matching verdict rule with an action (null: clean/unknown verdict or no action). */
+  verdict: { ruleId: string; action: RemediationAction } | null;
+  /** The mapped policy disposition (null: no outcome, plain allow or a mapping to `none`). */
+  policy: { key: PolicyMappingKey; action: RemediationAction } | null;
+  /** The lane whose action is decided; null when neither lane (after suppression) has one. */
+  winner: 'verdict' | 'policy' | null;
+  /** The verdict lane had an action and a tenant allow override suppressed it. */
+  suppressedBy: 'policy_allow_override' | null;
+}
+
 /**
- * R2.2, in this order: (1) not scanned or verdict clean/unknown/null → none; (2) first matching
- * rule (none or action `none` → none); (3) inline verdict authority → skip; (4) domain not
- * api/hybrid or mailbox disabled/deleted → skip out_of_scope; (4b, step API-3 C8.5) an internal
- * copy while the organization's internal mail is off → skip internal_mail_disabled; (5) hard delete without the
- * platform setting → skip; (6) detect-only → act simulated; (7) paused → skip; (8) no active
- * grant → skip no_mailbox_access; (9) act.
+ * A4.3 steps 2–5 (pure; `copy.status` is not looked at): the verdict lane (verdict not clean,
+ * unknown or null → first matching rule), the policy lane (`policyLaneOf` over the document's
+ * effective mapping), the allow-override suppression of the verdict lane and the winner (the
+ * stronger action, ties → verdict lane).
+ */
+export function remediationLanes(
+  input: RemediationInput,
+  document: RemediationPolicyDocument,
+): RemediationLanes {
+  const verdict = input.copy.verdict;
+  let verdictLane: RemediationLanes['verdict'] = null;
+  if (verdict !== null && verdict !== 'clean' && verdict !== 'unknown') {
+    const rule = firstMatchingRule(document, input);
+    if (rule !== null && rule.action !== 'none') {
+      verdictLane = { ruleId: rule.id, action: rule.action };
+    }
+  }
+  const outcome = input.policyOutcome;
+  const policyLane =
+    outcome === null ? null : policyLaneOf(outcome, effectivePolicyMapping(document.policyMapping));
+  const suppressed = verdictLane !== null && isTenantAllowOverride(outcome);
+  const candidate = suppressed ? null : verdictLane;
+  let winner: RemediationLanes['winner'] = null;
+  if (candidate !== null && policyLane !== null) {
+    winner =
+      remediationActionStrength(policyLane.action) > remediationActionStrength(candidate.action)
+        ? 'policy'
+        : 'verdict';
+  } else if (candidate !== null) {
+    winner = 'verdict';
+  } else if (policyLane !== null) {
+    winner = 'policy';
+  }
+  return {
+    verdict: verdictLane,
+    policy: policyLane,
+    winner,
+    suppressedBy: suppressed ? 'policy_allow_override' : null,
+  };
+}
+
+/** The winning lane's action and rule id (a verdict rule id or `policy-mapping:<key>`). */
+export function laneDecision(
+  lanes: RemediationLanes,
+): { action: RemediationAction; ruleId: string } | null {
+  if (lanes.winner === 'verdict' && lanes.verdict !== null) {
+    return { action: lanes.verdict.action, ruleId: lanes.verdict.ruleId };
+  }
+  if (lanes.winner === 'policy' && lanes.policy !== null) {
+    return { action: lanes.policy.action, ruleId: policyMappingRuleId(lanes.policy.key) };
+  }
+  return null;
+}
+
+/**
+ * A4.3 (R2.2 as amended by ADR-0105), in this order: (1) not scanned → none; (2–3) the verdict
+ * lane and the policy lane; (4) a tenant allow override suppresses the verdict lane — when only
+ * the verdict lane had an action → skip `policy_allow_override`; (5) the stronger lane wins
+ * (ties → verdict lane), no action → none; (6) an outbound copy → skip `outbound_not_remediable`;
+ * (7) inline verdict authority → skip; domain not api/hybrid, mailbox disabled/deleted or out of
+ * the mailbox scope → skip `out_of_scope`; an internal copy while the organization's internal mail
+ * is off → skip `internal_mail_disabled`; hard delete without the platform setting → skip;
+ * detect-only → act simulated; paused → skip; no active grant → skip `no_mailbox_access`; act.
+ *
+ * With `policyOutcome: null` the result is exactly the API-2/API-3 decision.
  */
 export function decideRemediation(
   input: RemediationInput,
   policy: Readonly<RemediationPolicy>,
   options: RemediationDecisionOptions,
 ): RemediationDecision {
-  const verdict = input.copy.verdict;
-  if (input.copy.status !== 'scanned' || verdict === null || verdict === 'clean') {
-    return { outcome: 'none' };
+  if (input.copy.status !== 'scanned') return { outcome: 'none' };
+  const lanes = remediationLanes(input, policy.document);
+  if (lanes.suppressedBy !== null && lanes.policy === null && lanes.verdict !== null) {
+    return {
+      outcome: 'skip',
+      reason: 'policy_allow_override',
+      ruleId: lanes.verdict.ruleId,
+      action: lanes.verdict.action,
+    };
   }
-  if (verdict === 'unknown') return { outcome: 'none' };
-  const rule = firstMatchingRule(policy.document, input);
-  if (rule === null || rule.action === 'none') return { outcome: 'none' };
-  const action = rule.action;
+  const decided = laneDecision(lanes);
+  if (decided === null) return { outcome: 'none' };
+  const { action, ruleId } = decided;
   const skip = (reason: RemediationSkipReason): RemediationDecision => ({
     outcome: 'skip',
     reason,
-    ruleId: rule.id,
+    ruleId,
     action,
   });
   const ctx = input.context;
+  const direction = input.copy.direction ?? 'inbound';
+  if (direction === 'outbound') return skip('outbound_not_remediable');
   if (input.copy.verdictAuthority === 'inline') return skip('inline_authority');
   if (
     (ctx.domainEffectiveMode !== 'api' && ctx.domainEffectiveMode !== 'hybrid') ||
     ctx.mailboxStatus === 'disabled' ||
-    ctx.mailboxStatus === 'deleted'
+    ctx.mailboxStatus === 'deleted' ||
+    ctx.mailboxInScope === false
   ) {
     return skip('out_of_scope');
   }
-  if ((input.copy.direction ?? 'inbound') === 'internal' && ctx.internalMailEnabled === false) {
+  if (direction === 'internal' && ctx.internalMailEnabled === false) {
     return skip('internal_mail_disabled');
   }
   if (action === 'hard_delete' && !options.hardDeleteEnabled) return skip('hard_delete_disabled');
@@ -345,11 +472,11 @@ export function decideRemediation(
       ? ['hard_delete_falls_back_to_trash']
       : [];
   if (policy.mode === 'detect_only') {
-    return { outcome: 'act', action, ruleId: rule.id, simulated: true, notes };
+    return { outcome: 'act', action, ruleId, simulated: true, notes };
   }
   if (ctx.remediationPaused) return skip('remediation_paused');
   if (!ctx.grantActive) return skip('no_mailbox_access');
-  return { outcome: 'act', action, ruleId: rule.id, simulated: false, notes };
+  return { outcome: 'act', action, ruleId, simulated: false, notes };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -440,27 +567,77 @@ export function canonicalPolicySha256(document: RemediationPolicyDocument): stri
 /** At most this many hard-block ids are recorded in a decision (R2.4). */
 export const DECISION_MAX_HARD_BLOCKS = 9;
 
-/** `api-remediation-decision/1` (R2.4), stored on the action row of a policy decision. */
-export const remediationDecisionRecordSchema = z.strictObject({
-  v: z.literal(REMEDIATION_DECISION_SCHEMA_VERSION),
-  policy: z.strictObject({
-    scope: z.enum(['platform_default', 'organization', 'domain']),
-    publicId: z.string().max(36).nullable(),
-    rowVersion: z.number().int().min(1).nullable(),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  }),
-  mode: z.enum(REMEDIATION_MODES),
-  ruleId: z.string().max(REMEDIATION_POLICY_LIMITS.ruleIdMaxLength).nullable(),
-  inputs: z.strictObject({
-    verdict: z.string().max(32).nullable(),
-    riskScore: z.number().int().min(0).max(1000).nullable(),
-    level: z.string().max(16).nullable(),
-    hardBlocks: z.array(z.string().max(64)).max(DECISION_MAX_HARD_BLOCKS),
-    verdictAuthority: z.enum(['copy', 'inline']),
-  }),
-  policyOutcome: z.null(),
-  notes: z.array(z.string().max(64)).max(8),
+const decisionPolicyRef = z.strictObject({
+  scope: z.enum(['platform_default', 'organization', 'domain']),
+  publicId: z.string().max(36).nullable(),
+  rowVersion: z.number().int().min(1).nullable(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
+const decisionInputs = z.strictObject({
+  verdict: z.string().max(32).nullable(),
+  riskScore: z.number().int().min(0).max(1000).nullable(),
+  level: z.string().max(16).nullable(),
+  hardBlocks: z.array(z.string().max(64)).max(DECISION_MAX_HARD_BLOCKS),
+  verdictAuthority: z.enum(['copy', 'inline']),
+});
+const decisionRuleId = z.string().max(REMEDIATION_POLICY_LIMITS.ruleIdMaxLength).nullable();
+const decisionNotes = z.array(z.string().max(64)).max(8);
+
+/** `api-remediation-decision/1` (R2.4): written by API-2 and API-3 (`policyOutcome: null`). */
+export const remediationDecisionRecordV1Schema = z.strictObject({
+  v: z.literal(REMEDIATION_DECISION_V1_SCHEMA_VERSION),
+  policy: decisionPolicyRef,
+  mode: z.enum(REMEDIATION_MODES),
+  ruleId: decisionRuleId,
+  inputs: decisionInputs,
+  policyOutcome: z.null(),
+  notes: decisionNotes,
+});
+export type RemediationDecisionRecordV1 = z.infer<typeof remediationDecisionRecordV1Schema>;
+
+/**
+ * `api-remediation-decision/2` (note 38 A4.4): the `/1` fields, the policy outcome the decision
+ * read, both lanes (with the winner and an allow-override suppression) and what the evaluation's
+ * actions mean after delivery (A5, at most nine entries).
+ */
+export const remediationDecisionRecordV2Schema = z.strictObject({
+  v: z.literal(REMEDIATION_DECISION_SCHEMA_VERSION),
+  policy: decisionPolicyRef,
+  mode: z.enum(REMEDIATION_MODES),
+  ruleId: decisionRuleId,
+  inputs: decisionInputs,
+  policyOutcome: policyOutcomeFactsSchema.nullable(),
+  lanes: z.strictObject({
+    verdict: z
+      .strictObject({
+        ruleId: z.string().max(REMEDIATION_POLICY_LIMITS.ruleIdMaxLength),
+        action: z.enum(REMEDIATION_ACTIONS),
+      })
+      .nullable(),
+    policy: z
+      .strictObject({ key: z.enum(POLICY_MAPPING_KEYS), action: z.enum(REMEDIATION_ACTIONS) })
+      .nullable(),
+    winner: z.enum(['verdict', 'policy']).nullable(),
+    suppressedBy: z.literal('policy_allow_override').nullable(),
+  }),
+  postDelivery: z
+    .array(
+      z.strictObject({
+        type: z.enum(POST_DELIVERY_EFFECTS),
+        status: z.enum(POLICY_ACTION_STATUSES),
+        reason: z.enum(POST_DELIVERY_REASONS).nullable(),
+      }),
+    )
+    .max(POST_DELIVERY_MAX_ENTRIES),
+  notes: decisionNotes,
+});
+export type RemediationDecisionRecordV2 = z.infer<typeof remediationDecisionRecordV2Schema>;
+
+/** Readers (api history, detections): `/1` or `/2`, discriminated by `v`. */
+export const remediationDecisionRecordSchema = z.discriminatedUnion('v', [
+  remediationDecisionRecordV1Schema,
+  remediationDecisionRecordV2Schema,
+]);
 export type RemediationDecisionRecord = z.infer<typeof remediationDecisionRecordSchema>;
 
 /**
@@ -485,15 +662,24 @@ export function provenanceNotes(provenance: DecisionRecordProvenance): string[] 
   return [`source:${provenance.source}`, `clawback:${provenance.clawbackId}`];
 }
 
-/** Builds the R2.4 record of a decision taken under an effective policy. */
+/**
+ * Builds the `api-remediation-decision/2` record (A4.4) of a decision taken under an effective
+ * policy: the lanes are recomputed from the same input and document (pure), `postDelivery` from
+ * the policy outcome's applying action types and the copy direction.
+ */
 export function buildDecisionRecord(
   effective: EffectiveRemediationPolicy,
   input: RemediationInput,
   decision: RemediationDecision,
   provenance?: DecisionRecordProvenance,
-): RemediationDecisionRecord {
+): RemediationDecisionRecordV2 {
   const notes: string[] = decision.outcome === 'act' ? [...decision.notes] : [];
   if (provenance !== undefined) notes.push(...provenanceNotes(provenance));
+  const lanes =
+    input.copy.status === 'scanned'
+      ? remediationLanes(input, effective.policy.document)
+      : { verdict: null, policy: null, winner: null, suppressedBy: null };
+  const outcome = input.policyOutcome;
   return {
     v: REMEDIATION_DECISION_SCHEMA_VERSION,
     policy: {
@@ -511,7 +697,24 @@ export function buildDecisionRecord(
       hardBlocks: [...(input.risk?.hardBlocks ?? [])].slice(0, DECISION_MAX_HARD_BLOCKS),
       verdictAuthority: input.copy.verdictAuthority,
     },
-    policyOutcome: null,
+    policyOutcome:
+      outcome === null
+        ? null
+        : {
+            ...outcome,
+            floorReasons: [...outcome.floorReasons],
+            actionTypes: [...outcome.actionTypes],
+          },
+    lanes: {
+      verdict: lanes.verdict === null ? null : { ...lanes.verdict },
+      policy: lanes.policy === null ? null : { ...lanes.policy },
+      winner: lanes.winner,
+      suppressedBy: lanes.suppressedBy,
+    },
+    postDelivery:
+      outcome === null
+        ? []
+        : postDeliveryEntries(outcome.actionTypes, input.copy.direction ?? 'inbound'),
     notes,
   };
 }

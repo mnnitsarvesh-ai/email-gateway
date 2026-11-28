@@ -19,6 +19,8 @@ describe('organization settings (note 37 C14 #19, C17)', () => {
       tiMinConfidence: 80,
       reportAckEnabled: true,
       reportFeedbackEnabled: true,
+      policyEvaluationEnabled: true,
+      outboundDetectionEnabled: true,
     });
     expect(Object.isFrozen(ORG_SETTINGS_DEFAULTS)).toBe(true);
     expect(AUTO_CLAWBACK_MODES).toEqual(['enforce', 'review', 'off']);
@@ -43,6 +45,8 @@ describe('organization settings (note 37 C14 #19, C17)', () => {
     ['tiMinConfidence', 80.5],
     ['autoClawback', 'always'],
     ['internalMailEnabled', 'yes'],
+    ['policyEvaluationEnabled', 'yes'],
+    ['outboundDetectionEnabled', 1],
   ])('refuses %s = %j', (key, value) => {
     expect(orgSettingsSchema.safeParse({ ...ORG_SETTINGS_DEFAULTS, [key]: value }).success).toBe(
       false,
@@ -87,6 +91,8 @@ describe('organization settings (note 37 C14 #19, C17)', () => {
     };
     expect(resolveOrgSettings(row)).toEqual({
       ...row,
+      policyEvaluationEnabled: true,
+      outboundDetectionEnabled: true,
       source: 'row',
       rowVersion: 3,
     });
@@ -104,6 +110,33 @@ describe('organization settings (note 37 C14 #19, C17)', () => {
       purgeApprovalMailboxes: 10_000,
       clawbackLookbackDays: 14,
       tiMinConfidence: 50,
+    });
+  });
+
+  it('step API-4: the two flags are optional in the write and resolved from the row', () => {
+    const {
+      policyEvaluationEnabled: _p,
+      outboundDetectionEnabled: _o,
+      ...api3Body
+    } = ORG_SETTINGS_DEFAULTS;
+    expect(orgSettingsSchema.safeParse(api3Body).success).toBe(true);
+    expect(
+      orgSettingsSchema.parse({
+        ...ORG_SETTINGS_DEFAULTS,
+        policyEvaluationEnabled: false,
+        outboundDetectionEnabled: false,
+      }),
+    ).toMatchObject({ policyEvaluationEnabled: false, outboundDetectionEnabled: false });
+    const row: ApiModeOrgSettingsRow = {
+      ...api3Body,
+      policyEvaluationEnabled: false,
+      outboundDetectionEnabled: false,
+      rowVersion: 2,
+    };
+    expect(resolveOrgSettings(row)).toMatchObject({
+      policyEvaluationEnabled: false,
+      outboundDetectionEnabled: false,
+      source: 'row',
     });
   });
 });

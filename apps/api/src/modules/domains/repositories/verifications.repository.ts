@@ -41,8 +41,10 @@ export interface VerificationWrite {
 }
 
 /**
- * `domain_verifications` of the scope's domains (D4). The newest row of a domain is its current
- * verification; a restart adds a row with the same token.
+ * `domain_verifications` of the scope's domains (D4). The newest TXT row of a domain is its
+ * current verification; a restart adds a row with the same token. Step API-4 (B3): rows with
+ * `method = provider_tenant` belong to `ProviderVerificationsRepository` and are never the
+ * current TXT verification.
  */
 @Injectable()
 export class VerificationsRepository {
@@ -54,7 +56,7 @@ export class VerificationsRepository {
     client: Client = this.prisma,
   ): Promise<VerificationRow | null> {
     return client.domainVerification.findFirst({
-      where: tenantWhere(scope, { domainId }),
+      where: tenantWhere(scope, { domainId, method: 'dns_txt' as const }),
       select: verificationSelect,
       orderBy: { id: 'desc' },
     });

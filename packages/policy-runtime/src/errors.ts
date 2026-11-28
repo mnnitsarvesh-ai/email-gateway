@@ -1,4 +1,36 @@
-import type { PolicyRead } from '../metrics/policy-metrics';
+/**
+ * Reads echo-checked by the policy runtime (step 5.2 §6); the `read` label of
+ * `policy_inconsistent_reads_total` (policy-engine) and of the mailbox-worker's detect-evaluation
+ * series. Moved from `apps/policy-engine` (step API-4 A2).
+ */
+export type PolicyRead =
+  | 'message'
+  | 'message_update'
+  | 'recipients'
+  | 'scan'
+  | 'parse'
+  | 'finals'
+  | 'auth'
+  | 'bec'
+  | 'dlp'
+  | 'risk'
+  | 'attachments'
+  | 'attachment_results'
+  | 'urls'
+  | 'url_results'
+  | 'url_rewrite'
+  | 'settings'
+  | 'policies'
+  | 'versions'
+  | 'departments'
+  | 'members'
+  | 'users'
+  | 'lifecycle'
+  | 'parse_structure'
+  | 'message_urls'
+  | 'url_settings'
+  | 'ato_settings'
+  | 'ato_accounts';
 
 /**
  * A writer read returned rows that do not belong to the request (the Prisma wrong-read defect,

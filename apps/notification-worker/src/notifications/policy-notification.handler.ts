@@ -40,6 +40,9 @@ export function addressDomain(raw: string): { address: string; domain: string } 
  * before the ledger commits, so a crash between them may send twice (at least once, same
  * Message-ID). A relay failure is thrown (retryable: the topology retries, then dead-letters).
  * `alerts.enabled` is evaluated by the policy-engine (an ALERT it records is never requested).
+ * Step API-4 A7: `evaluationMode = 'detect'` (the mailbox-worker's evaluation of an API-mode
+ * copy) renders the detect variant (detected after delivery, protection mode, mailbox count read
+ * at send time, `/api-mode` link); a sender notice is never sent for a detect evaluation.
  */
 export class PolicyNotificationHandler {
   constructor(
@@ -63,6 +66,14 @@ export class PolicyNotificationHandler {
       organizationId: event.organizationId,
       kind,
     });
+    const detect = p.evaluationMode === 'detect';
+    if (detect && kind !== 'policy_alert') {
+      // Step API-4 A7 / P-I1: a detect evaluation never notifies a sender (the contract refuses
+      // it too); never sent.
+      this.count(kind, 'no_recipients');
+      log.warn({ message: 'sender notice of a detect evaluation refused' });
+      return 'no_recipients';
+    }
     const message = await this.reads.message(
       tx,
       organizationId,
@@ -100,6 +111,16 @@ export class PolicyNotificationHandler {
       portalUrl: this.options.portalUrl,
       internetMessageId: message.internetMessageId,
       recipientCount: message.recipientCount,
+      ...(detect
+        ? {
+            detect: await this.reads.copySummary(
+              tx,
+              organizationId,
+              message.id,
+              message.receivedAt,
+            ),
+          }
+        : {}),
     };
     const notice =
       kind === 'policy_alert' ? renderPolicyAlert(facts) : renderSenderNonDelivery(facts);

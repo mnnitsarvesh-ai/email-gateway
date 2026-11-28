@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from '@email-gateway/database';
 import type { Logger } from '@email-gateway/logger';
+import { scopeExcludedSql } from '../domain/scope';
 import { isApiSide, loadOrgApiModeState } from '../domain/api-mode-state';
 import { grantActive, loadConnectionContext } from '../domain/connections';
 import { DELETED_MAILBOX_RETENTION_DAYS } from '../inventory/inventory-runner';
@@ -230,7 +231,8 @@ export class Maintenance {
           WHERE api_connection_id = ${ctx.id} AND organization_id = ${ctx.organizationId}
             AND status = 'active' AND provider_user_id IS NOT NULL
             AND feed_status IN ('off', 'revoked')
-            AND domain_id IN (${Prisma.join(apiDomainIds)})`;
+            AND domain_id IN (${Prisma.join(apiDomainIds)})
+            AND NOT ${scopeExcludedSql('api_mailboxes')}`;
       } catch (error) {
         this.deps.logger.warn(
           { apiConnectionId: id.toString(), ...errorFields(error) },

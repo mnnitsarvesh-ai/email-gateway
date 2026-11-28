@@ -25,6 +25,10 @@ import { DomainConfigurationService } from '../../../src/modules/domains/service
 import { DomainEventsService } from '../../../src/modules/domains/services/domain-events.service';
 import { DomainVerificationService } from '../../../src/modules/domains/services/domain-verification.service';
 import { DomainsService } from '../../../src/modules/domains/services/domains.service';
+import { DomainOwnershipReader } from '../../../src/modules/domains/services/domain-ownership-reader';
+import { DomainProviderOwnershipService } from '../../../src/modules/domains/services/domain-provider-ownership.service';
+import type { BoundConnectionsReader } from '../../../src/modules/provider-connections/repositories/bound-connections.repository';
+import type { IdempotencyService } from '../../../src/http/idempotency/idempotency.service';
 import { InMemoryKeyValueStore } from '../in-memory-key-value-store';
 import { TEST_DOMAIN_ENV } from '../test-env';
 import { InMemoryDomainStore } from './in-memory-domain-store';
@@ -178,6 +182,20 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     Promise.resolve(scriptedReport(input, script, gatewayHosts)),
   );
   const checker = { check } as unknown as DomainDnsChecker;
+  // Step API-4 (B3): provider rows in the store, capable connections per organization.
+  const providerVerifications = store.providerVerificationsRepository();
+  const capableConnections = new Map<bigint, Array<{ id: bigint; publicId: string }>>();
+  const connections = {
+    ownershipCapableConnections: (scope: { organizationId: bigint }) =>
+      Promise.resolve(
+        (capableConnections.get(scope.organizationId) ?? []).map((c) => ({
+          ...c,
+          provider: 'microsoft_365' as const,
+          displayName: 'Contoso tenant',
+        })),
+      ),
+  } as unknown as BoundConnectionsReader;
+  const ownershipReader = new DomainOwnershipReader(providerVerifications, connections);
   const verification = new DomainVerificationService(
     config,
     noJitter,
@@ -193,6 +211,7 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     events,
     configuration,
     checker,
+    ownershipReader,
   );
   const rotation = new DkimRotationService(
     config,
@@ -229,8 +248,35 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     configuration,
     events,
     features,
+    ownershipReader,
   );
-  const scheduler = new DomainCheckScheduler(config, kv, jobs, verification, rotation);
+  const idempotency = {
+    execute: async <T>(
+      _request: unknown,
+      work: (tx: unknown) => Promise<{ statusCode: number; body: T }>,
+    ) => ({ ...(await transactions.run((tx) => work(tx))), replayed: false }),
+  } as unknown as IdempotencyService;
+  const providerOwnership = new DomainProviderOwnershipService(
+    config,
+    kv,
+    idempotency,
+    transactions,
+    audit,
+    domains,
+    ownership,
+    providerVerifications,
+    connections,
+    verification,
+    events,
+  );
+  const scheduler = new DomainCheckScheduler(
+    config,
+    kv,
+    jobs,
+    verification,
+    rotation,
+    providerOwnership,
+  );
   return {
     config,
     store,
@@ -250,8 +296,11 @@ export function createDomainTestbed(env: Record<string, string> = {}) {
     /** Step API-1: organizations entitled to API mode. */
     apiModeEntitled,
     scheduler,
+    /** Step API-4 (B3): provider ownership checks and the capable connections per organization. */
+    providerOwnership,
+    capableConnections,
     gatewayHosts,
-    repos: { domains, verifications, records, keys, mx, ownership, jobs },
+    repos: { domains, verifications, records, keys, mx, ownership, jobs, providerVerifications },
   };
 }
 

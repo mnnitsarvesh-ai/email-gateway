@@ -52,3 +52,41 @@ export const mailFilteringNotEnabled = (): CodedHttpException =>
     MAIL_FILTERING_NOT_ENABLED,
     'The organization has the archive-only service profile: mail filtering is not enabled',
   );
+
+/** Step API-4 (B3): coded errors of `POST /domains/{id}/ownership/provider-check`. */
+export const DOMAIN_PROVIDER_ERROR_CODES = {
+  connectionUnavailable: 'domain_provider_connection_unavailable',
+  notPending: 'domain_not_pending',
+} as const;
+
+/**
+ * No bound, enabled provider connection with an active mail-flow grant (or the given one is not
+ * such a connection; or several qualify and `connectionId` was not given: `candidates`).
+ */
+export const providerConnectionUnavailable = (
+  reason: 'none' | 'not_capable' | 'connection_required',
+  candidates: readonly string[] = [],
+): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    DOMAIN_PROVIDER_ERROR_CODES.connectionUnavailable,
+    'Ownership can be checked only through a bound Microsoft 365 / Google Workspace connection ' +
+      'with an active mail-flow grant',
+    { reason, ...(candidates.length > 0 && { candidates: candidates.slice(0, 10).join(',') }) },
+  );
+
+/** The domain is not waiting for ownership (`pending_verification` or `failed`). */
+export const domainNotPending = (status: string): CodedHttpException =>
+  new CodedHttpException(
+    HttpStatus.CONFLICT,
+    DOMAIN_PROVIDER_ERROR_CODES.notPending,
+    'Ownership is checked only for a domain that is pending verification',
+    { status },
+  );
+
+/** `429` of the per-organization provider check window (B3). */
+export class TooManyProviderChecksException extends DomainRateLimitedException {
+  constructor(retryAfterSeconds: number) {
+    super('Too many provider ownership checks for this organization', retryAfterSeconds);
+  }
+}

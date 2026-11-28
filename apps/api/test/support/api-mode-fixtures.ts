@@ -9,6 +9,7 @@
  */
 /* eslint-disable @typescript-eslint/no-this-alias -- the doubles close over the world's state */
 import type { TestingModuleBuilder } from '@nestjs/testing';
+import type { DlpAction } from '@email-gateway/database';
 import { remediationActionKey, type RemediationActionKind } from '@email-gateway/mailbox-api';
 import type { TenantScope } from '../../src/auth-contracts/tenant-scope';
 import {
@@ -65,6 +66,9 @@ export interface StoredConnection extends ConnectionFacts {
 
 export interface StoredMailbox extends MailboxDetailRow {
   organizationId: bigint;
+  /** Step API-4 (B6). */
+  scopeState?: 'in_scope' | 'excluded';
+  scopeSelected?: boolean;
   apiConnectionId: bigint;
   providerUserId: string | null;
   feedCursor: string | null;
@@ -144,6 +148,9 @@ export class ApiModeWorld {
   notifications: Array<{ mailboxId: bigint; effect: Record<string, boolean> }> = [];
   /** Step API-2: remediation policies, actions, counters and the copies' quarantine entries. */
   policies: StoredPolicy[] = [];
+  /** Step API-4: detect rows and DLP results keyed `<organizationId>:<messageId>`. */
+  detectRows = new Map<string, unknown>();
+  dlpResults = new Map<string, { action: DlpAction; verdict: string; categories: string[] }>();
   actions: StoredAction[] = [];
   remediationCounters: Array<RemediationCounterRow & { organizationId: bigint }> = [];
   /** copy id → its latest mailbox-located quarantine entry (public id, state). */
@@ -325,6 +332,10 @@ export class ApiModeWorld {
       remediationGeneration: 0,
       lastActionId: null,
       verdictRevision: 0,
+      policyState: 'none',
+      policyDisposition: null,
+      policyTagged: false,
+      dlpAction: null,
       ...patch,
     };
     this.copies.push(row);
@@ -657,6 +668,11 @@ export class ApiModeWorld {
                 (!filter.remediationState ||
                   filter.remediationState.includes(c.remediationState)) &&
                 (!filter.direction || filter.direction.includes(c.direction)) &&
+                (!filter.policyDisposition ||
+                  (c.policyDisposition !== null &&
+                    filter.policyDisposition.includes(c.policyDisposition))) &&
+                (!filter.dlpAction ||
+                  (c.dlpAction !== null && filter.dlpAction.includes(c.dlpAction))) &&
                 (page.before === undefined ||
                   c.receivedAt < page.before.at ||
                   (c.receivedAt.getTime() === page.before.at.getTime() && c.id < page.before.id)),
@@ -711,6 +727,28 @@ export class ApiModeWorld {
       },
       reasonCodes: (_scope: TenantScope, messageId: bigint) =>
         Promise.resolve([...(w.reasonCodes.get(messageId.toString()) ?? [])]),
+      // Step API-4 (A12, B6).
+      excludedMailboxes: (scope: TenantScope) =>
+        Promise.resolve(
+          w
+            .mine(w.mailboxes, scope)
+            .filter((m) => m.scopeState === 'excluded' && m.status !== 'deleted').length,
+        ),
+      detectEvaluation: (scope: TenantScope, messageId: bigint) =>
+        Promise.resolve(
+          w.organizations.some((o) => o.id === scope.organizationId)
+            ? (w.detectRows.get(`${scope.organizationId}:${messageId}`) ?? null)
+            : null,
+        ),
+      dlpResult: (scope: TenantScope, messageId: bigint) =>
+        Promise.resolve(w.dlpResults.get(`${scope.organizationId}:${messageId}`) ?? null),
+      copyPolicyDecision: (scope: TenantScope, c: { id: bigint }) =>
+        Promise.resolve(
+          w
+            .mine(w.actions, scope)
+            .filter((a) => a.copyId === c.id && a.trigger === 'policy')
+            .sort((a, b) => (a.id < b.id ? 1 : -1))[0]?.decision ?? null,
+        ),
       mailboxBySubscription: (subscriptionId: string) => {
         const m = w.mailboxes.find((x) => x.subscriptionId === subscriptionId);
         if (!m) return Promise.resolve(null);
@@ -789,7 +827,31 @@ export class ApiModeWorld {
         releasePublicId: null,
       };
     };
+    const detectOnlyColumns = (write: PolicyWrite) => ({
+      detectOnlyUntil: write.detectOnly?.until ?? null,
+      detectOnlyThen: write.detectOnly?.then ?? null,
+      detectOnlyStartedAt: write.detectOnly?.startedAt ?? null,
+      detectOnlyNotifiedAt: null,
+    });
     return {
+      simulatedSince: (scope: TenantScope, domainId: bigint | null, since: Date, cap: number) => {
+        const mailboxIds = new Set(
+          w
+            .mine(w.mailboxes, scope)
+            .filter(
+              (m) =>
+                domainId === null ||
+                w.domains.find((d) => d.id === domainId)?.publicId === m.domain?.publicId,
+            )
+            .map((m) => m.id),
+        );
+        const n = w
+          .mine(w.actions, scope)
+          .filter(
+            (a) => a.status === 'simulated' && a.createdAt >= since && mailboxIds.has(a.mailboxId),
+          ).length;
+        return Promise.resolve(Math.min(cap, n));
+      },
       policies: (scope: TenantScope) => {
         const rows = w.mine(w.policies, scope);
         const org = rows.find((p) => p.domainId === null);
@@ -827,6 +889,7 @@ export class ApiModeWorld {
           documentSha256: write.documentSha256,
           rowVersion: 1,
           updatedAt: new Date(),
+          ...detectOnlyColumns(write),
         };
         w.policies.push(row);
         return Promise.resolve(policyView(row));
@@ -846,6 +909,7 @@ export class ApiModeWorld {
           documentSha256: write.documentSha256,
           rowVersion: p.rowVersion + 1,
           updatedAt: new Date(),
+          ...(write.keepDetectOnly === true ? {} : detectOnlyColumns(write)),
         });
         return Promise.resolve(true);
       },

@@ -26,6 +26,7 @@ import { loadApiConfig } from '../src/config';
 import { EmailSender } from '../src/email/email-sender';
 import { configureApiApp } from '../src/http/configure-api-app';
 import { KeyValueStore } from '../src/kv/key-value-store';
+import { ProviderOwnershipCheckBodySchema } from '../src/modules/domains/dto/domains.schemas';
 import { BulkBodySchema } from '../src/modules/quarantine/dto/quarantine.schemas';
 import { isStrictRequestSchema } from '../src/validation/strict-schema';
 import { ZodValidationPipe } from '../src/validation/zod-validation.pipe';
@@ -146,6 +147,12 @@ const V0_LISTS = [
 ];
 
 /** Controllers of the pre-6.1 modules converged by WP4 (the messages module is WP2's). */
+/** Legacy-controller bodies parsed (strictly) in the service after the Idempotency-Key checks. */
+const SERVICE_PARSED_LEGACY_BODIES = new Set([
+  'QuarantineToolsController.bulk',
+  'DomainsController.providerOwnershipCheck',
+]);
+
 const LEGACY_CONTROLLERS = new Set([
   'AuthController',
   'MfaController',
@@ -944,7 +951,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
     }
   });
 
-  it('the step API-1 protection-mode and API-mode routes (+ step API-2 remediation and step API-3 clawback, report and settings routes): exact permissions, keys, classes, cursors; the callbacks are public (D12, R13, C14)', () => {
+  it('the step API-1 protection-mode and API-mode routes (+ step API-2 remediation, step API-3 clawback, report and settings and step API-4 onboarding routes): exact permissions, keys, classes, cursors; the callbacks are public (D12, R13, C14, A10, B6, B8)', () => {
     type Flags = { any?: boolean; cls?: string; cursor?: boolean };
     const READ = 'remediation:read';
     const WRITE = 'remediation:write';
@@ -1015,6 +1022,12 @@ describe('route security (e2e, dependencies stubbed)', () => {
       'put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox': [[WRITE], { cls: 'sensitive' }],
       'get /api/v1/api-mode/settings': [[READ]],
       'put /api/v1/api-mode/settings': [[WRITE], { cls: 'sensitive' }],
+      // Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md A10, B6, B8): protection by
+      // mode and the onboarding state need `domain:read`; the scope the remediation permissions.
+      'get /api/v1/api-mode/protection-coverage': [['domain:read'], { cursor: true }],
+      'get /api/v1/api-mode/domains/:domainId/onboarding': [['domain:read']],
+      'get /api/v1/api-mode/domains/:domainId/scope': [[READ]],
+      'put /api/v1/api-mode/domains/:domainId/scope': [[WRITE], { cls: 'sensitive' }],
     };
     const apiMode = routes.filter(
       (r) => /^\/api\/v1\/api-mode(\/|$)/.test(r.path) || /\/protection-mode$/.test(r.path),
@@ -1042,6 +1055,18 @@ describe('route security (e2e, dependencies stubbed)', () => {
       expect(route.isPublic, key).toBe(true);
       expect(route.requirement, key).toBeUndefined();
     }
+  });
+
+  it('the step API-4 provider ownership check: domain:manage, keyed transactionally, sensitive (B3)', () => {
+    const key = 'post /api/v1/domains/:domainId/ownership/provider-check';
+    const route = routes.find((r) => `${r.method} ${r.path}` === key)!;
+    expect(route.isPublic).toBe(false);
+    expect(route.requirement).toEqual({ mode: 'all', permissions: ['domain:manage'] });
+    expect(route.rateClass).toBe('sensitive');
+    // Transactional key (IdempotencyService.execute), never the reservation interceptor.
+    expect(route.idempotency).toBeNull();
+    expect(route.returnsSecret).toBe(false);
+    expect(route.cursor).toBeNull();
   });
 
   it('the step AI-1, AI-2, AI-R and AI-6 assistant routes: exact permissions, users only, MFA only for the tenant key, classes, no keys, no secrets, v1 cursors (§4.1)', () => {
@@ -1530,10 +1555,11 @@ describe('route security (e2e, dependencies stubbed)', () => {
               ? [(pipe as unknown as { schema: z.ZodType }).schema]
               : [],
           );
-          // `@Body() body: unknown` is parsed (strictly) in the service: quarantine bulk only.
+          // `@Body() body: unknown` is parsed (strictly) in the service: quarantine bulk and the
+          // step API-4 provider ownership check (after its Idempotency-Key checks).
           if (
             schemas.length === 0 &&
-            `${controller.name}.${name}` !== 'QuarantineToolsController.bulk'
+            !SERVICE_PARSED_LEGACY_BODIES.has(`${controller.name}.${name}`)
           ) {
             offenders.push(`${route.method} ${route.path}: no schema`);
           }
@@ -1551,6 +1577,7 @@ describe('route security (e2e, dependencies stubbed)', () => {
     expect(offenders).toEqual([]);
     expect(checked).toBeGreaterThan(130);
     expect(isStrictRequestSchema(BulkBodySchema)).toEqual([]);
+    expect(isStrictRequestSchema(ProviderOwnershipCheckBodySchema)).toEqual([]);
   });
 
   it('non-public routes also reject a junk bearer token and a junk API key', async () => {

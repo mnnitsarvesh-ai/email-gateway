@@ -23,6 +23,7 @@
     "@email-gateway/mail-safety": "workspace:*",
     "@email-gateway/message-lifecycle": "workspace:*",
     "@email-gateway/policy-dsl": "workspace:*",
+    "@email-gateway/policy-runtime": "workspace:*",
     "@email-gateway/quarantine": "workspace:*",
     "@email-gateway/security-contracts": "workspace:*",
     "@email-gateway/shared-types": "workspace:*",

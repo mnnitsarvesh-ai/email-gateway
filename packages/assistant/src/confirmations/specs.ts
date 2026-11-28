@@ -2155,6 +2155,33 @@ export const CONFIRMATION_SPECS: readonly ConfirmationSpec[] = [
       ],
     },
   },
+  // --- step API-4 (design note 38 B10) ---
+  // The scope's `expectedRowVersion` may be null (no row yet): the model passes it.
+  {
+    operationId: 'ApiModeOnboardingController_putScope_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'api_mode_onboarding_get_scope',
+      params: { domainId: 'domainId' },
+      stateFields: ['rowVersion', 'kind', 'selectedMailboxes'],
+      displayFields: ['kind', 'departments[].name', 'selectedMailboxes', 'inScope', 'excluded'],
+    },
+  },
+  {
+    operationId: 'DomainsController_providerOwnershipCheck_v1',
+    precondition: {
+      kind: 'single',
+      tool: 'domains_get',
+      params: { id: 'domainId' },
+      stateFields: ['status'],
+      displayFields: [
+        'name',
+        'status',
+        'ownership.providerCheckAvailable',
+        'ownership.providerCheck.status',
+      ],
+    },
+  },
   // --- native (step AI-R D5) ---
   {
     operationId: 'AssistantNative_reportSendEmail',

@@ -139,6 +139,8 @@ const DEFAULTS: Settings = {
   tiMinConfidence: 80,
   reportAckEnabled: true,
   reportFeedbackEnabled: true,
+  policyEvaluationEnabled: true,
+  outboundDetectionEnabled: true,
 };
 const BOUNDS = {
   autoMaxMailboxes: { min: 1, max: 20_000 },
@@ -584,7 +586,8 @@ function refreshGroups(org: OrgState): void {
 // ---- the simulated clawback role -------------------------------------------------------------
 
 function settingsOf(org: OrgState): Settings {
-  return org.settings?.settings ?? DEFAULTS;
+  // Rows stored before step API-4 lack the two new flags (absent = the default, A12).
+  return { ...DEFAULTS, ...(org.settings?.settings ?? {}) };
 }
 
 function matchKeysOf(record: ClawbackRecord, detection: Detection): Target['matchKeys'] {
@@ -649,6 +652,7 @@ function materialize(organizationId: string, record: ClawbackRecord, seedStatus?
     return (
       at >= from &&
       at <= to &&
+      d.direction !== 'outbound' &&
       directions.includes(d.direction) &&
       !reportMailboxes.has(d.mailboxId) &&
       matchKeysOf(record, d).length > 0
@@ -1157,6 +1161,10 @@ function buildRecord(
 // ---- overview blocks (C13) -------------------------------------------------------------------
 
 registerClawbackHooks({
+  policyEvaluationEnabled: (organizationId) =>
+    settingsOf(orgOf(organizationId)).policyEvaluationEnabled,
+  outboundDetectionEnabled: (organizationId) =>
+    settingsOf(orgOf(organizationId)).outboundDetectionEnabled,
   overview: (organizationId) => {
     const org = orgOf(organizationId);
     const api = apiModeStateOf(organizationId);
@@ -1870,6 +1878,10 @@ export const fixtures: FixtureHandlers = {
         'reportFeedbackEnabled',
       ] as const)
         if (typeof body[key] !== 'boolean') issues.push(`${key}: a boolean`);
+      // Step API-4 A12: the two flags are optional (absent = keep the stored value).
+      for (const key of ['policyEvaluationEnabled', 'outboundDetectionEnabled'] as const)
+        if (body[key] !== undefined && typeof body[key] !== 'boolean')
+          issues.push(`${key}: a boolean`);
       if (!['enforce', 'review', 'off'].includes(String(body.autoClawback)))
         issues.push('autoClawback: enforce, review or off');
       if (issues.length > 0) return apiError(400, 'validation_failed', issues);
@@ -1893,6 +1905,8 @@ export const fixtures: FixtureHandlers = {
         tiMinConfidence: body.tiMinConfidence!,
         reportAckEnabled: body.reportAckEnabled!,
         reportFeedbackEnabled: body.reportFeedbackEnabled!,
+        policyEvaluationEnabled: body.policyEvaluationEnabled ?? before.policyEvaluationEnabled,
+        outboundDetectionEnabled: body.outboundDetectionEnabled ?? before.outboundDetectionEnabled,
       };
       const changed = (Object.keys(next) as Array<keyof Settings>).filter(
         (k) => next[k] !== before[k],

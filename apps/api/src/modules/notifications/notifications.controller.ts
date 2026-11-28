@@ -63,9 +63,12 @@ export class NotificationsController {
       'severity `medium`/`high`, throttle window; DNS record failures and webhook disabled: ' +
       'enabled, throttle window; whether `organization_settings.notification_email` also ' +
       'receives them), the stored document, the defaults, the bounds and `rowVersion` (0 while ' +
-      'nothing is stored). Alerts go to active, verified users holding the kind’s permission ' +
-      '(`quarantine:approve`, `domain:manage`, `webhook:manage`) who did not opt out; one ' +
-      'alert per organization, kind, scope and window at most. From the read replica.',
+      'nothing is stored). Step API-4: `dlpDetected` (DLP detections of API-mode copies: ' +
+      'enabled, minimum severity `low`/`medium`/`high`, throttle window); `threatDetected` also ' +
+      'covers API-mode detections (`mailbox.threat.detected`). Alerts go to active, verified ' +
+      'users holding the kind’s permission (`quarantine:approve`, `domain:manage`, ' +
+      '`webhook:manage`, `dlp:read`) who did not opt out; one alert per organization, kind, ' +
+      'scope and window at most. From the read replica.',
   })
   @ApiOkExample(SettingsResponseSchema, NOTIFICATION_EXAMPLES.settings)
   @ApiErrors(401, 403)
@@ -81,8 +84,9 @@ export class NotificationsController {
     description:
       'Replaces the whole settings document (every key optional; `{}` restores the defaults) ' +
       'with `expectedRowVersion` (`409 notification_settings_conflict` with ' +
-      '`currentRowVersion`; 0 when nothing is stored yet). Bounds: threat throttle 15-1440 ' +
-      'minutes, DNS and webhook throttles 60-10080 minutes; unknown keys or values out of bounds ' +
+      '`currentRowVersion`; 0 when nothing is stored yet). Bounds: threat and DLP (step API-4 ' +
+      '`alerts.dlpDetected`) throttles 15-1440 minutes, DNS and webhook throttles 60-10080 ' +
+      'minutes; unknown keys or values out of bounds ' +
       'are `400 notification_settings_invalid` with `violations` (paths and rules). Takes ' +
       'effect within the delivery worker’s cache TTL. Audited `notification.settings_updated` ' +
       '(changed paths only).',
@@ -128,7 +132,8 @@ export class NotificationsController {
     summary: 'Get my notification preferences',
     description:
       'The notification kinds you opted out of (security alerts, policy alerts, quarantine ' +
-      'admin alerts and approval requests), your quarantine digest opt-out (the same setting as ' +
+      'admin alerts and approval requests, account takeover, integration health and — step ' +
+      'API-4 — `dlp_detected`), your quarantine digest opt-out (the same setting as ' +
       '`/quarantine/me/preferences`) and whether the organization allows it. Users who are ' +
       'members of the organization only: API keys and platform overrides get `403`.',
   })

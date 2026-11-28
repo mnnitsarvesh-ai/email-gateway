@@ -31,8 +31,8 @@ data:
   AUTH_PASSWORD_RESET_TTL_SECONDS: '1800'
   AUTH_EMAIL_VERIFICATION_TTL_SECONDS: '86400'
   AUTH_INVITATION_TTL_SECONDS: '604800'
-  # Policy (step 5.2 §5): the shipped platform default, read by the api and the policy-engine;
-  # they must agree.
+  # Policy (step 5.2 §5): the shipped platform default, read by the api, the policy-engine and
+  # (step API-4 A2, detect evaluation of API-mode copies) the mailbox-worker; they must agree.
   POLICY_PLATFORM_DEFAULT: pol-default/1
   # Quarantine (step 5.3 §5, docs/plan/steps/17-quarantine.md, ADR-0046–0049). Bounds read by the
   # api, the policy-engine and the quarantine-worker; they must agree. The hold/review maxima are
@@ -477,6 +477,22 @@ data:
   API_MODE_REPORT_ALERT_MIN_INTERVAL_MINUTES: '60'
   # mailbox-worker: an ingested report original without a scan after this many minutes → triage.
   API_MODE_REPORT_SCAN_TIMEOUT_MINUTES: '60'
+  # Step API-4 parity and onboarding (docs/plan/steps/38-api-mode-parity-onboarding.md A1–A3,
+  # B3, B6–B8; ADR-0105–0107; docs/deployment/mailbox-worker.md). mailbox-worker: the platform kill
+  # switch of detect policy evaluation of copies (it also reads POLICY_PLATFORM_DEFAULT above and
+  # POLICY_SNAPSHOT_CACHE_MAX_ENTRIES in mailbox-worker.yaml) and the health leader's scope
+  # refresh; api: the wizard's detect-only default, scope bounds, first-copy hints and provider
+  # ownership checks; integration-worker: PROVIDER_OWNERSHIP_CHECK_BATCH (below). Organization
+  # switches (policyEvaluationEnabled, outboundDetectionEnabled) live in api_mode_org_settings.
+  API_MODE_POLICY_EVALUATION_ENABLED: 'true'
+  API_MODE_SCOPE_REFRESH_MINUTES: '15'
+  API_MODE_SCOPE_MAX_DEPARTMENTS: '20'
+  API_MODE_SCOPE_MAX_MAILBOXES: '5000'
+  API_MODE_DETECT_ONLY_DEFAULT_DAYS: '7'
+  API_MODE_FIRST_COPY_HINT_AFTER_MINUTES: '10'
+  DOMAIN_PROVIDER_CHECKS_PER_HOUR: '10'
+  DOMAIN_PROVIDER_CHECK_TTL_MINUTES: '60'
+  PROVIDER_OWNERSHIP_CHECK_BATCH: '10'
   # api: Graph notification requests per client IP per minute on the public callback routes.
   API_MODE_NOTIFICATION_RATE_PER_MINUTE: '1200'
   # Client ids of the operator's mailbox-access app / service account (profiles

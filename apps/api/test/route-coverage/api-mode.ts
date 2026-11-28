@@ -9,7 +9,10 @@
  * remediation operations (docs/plan/steps/36-api-mode-remediation.md R13) with their own e2e and
  * integration files. Step API-3 adds the 19 clawback, report and settings operations
  * (docs/plan/steps/37-api-mode-clawback-reporting.md C14) with their e2e files and one integration
- * file. Consumed by the route inventory (`route-coverage/index.ts`).
+ * file. Step API-4 adds the 5 onboarding operations (docs/plan/steps/38-api-mode-parity-onboarding.md
+ * A10, B3, B6, B8): protection by mode, the domain onboarding state, the mailbox scope and the
+ * provider ownership check of a domain. Consumed by the route inventory
+ * (`route-coverage/index.ts`).
  */
 import type { RouteCoverage } from './insights';
 
@@ -50,6 +53,22 @@ const api3 =
   });
 const clawback = api3(E2E_API_3_CLAWBACK);
 const report = api3(E2E_API_3_REPORTS);
+
+/** Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md §10.4). */
+const E2E_API_4 = 'apps/api/test/api-mode-onboarding.e2e.test.ts';
+const E2E_API_4_PROVIDER = 'apps/api/test/domains-provider-ownership.e2e.test.ts';
+const INT_API_4 = 'apps/api/integration/api-mode-onboarding.test.ts';
+const api4 =
+  (e2e: string) =>
+  (route: string, cursor?: 'v1'): RouteCoverage => ({
+    route,
+    e2e,
+    integration: INT_API_4,
+    crossTenant: INT_API_4,
+    ...(cursor && { cursor }),
+  });
+const onboarding = api4(E2E_API_4);
+const providerCheck = api4(E2E_API_4_PROVIDER);
 
 const callback = (route: string): RouteCoverage => ({
   route,
@@ -109,4 +128,10 @@ export const COVERAGE: readonly RouteCoverage[] = Object.freeze([
   report('put /api/v1/api-mode/mailboxes/:mailboxId/report-mailbox'),
   clawback('get /api/v1/api-mode/settings'),
   clawback('put /api/v1/api-mode/settings'),
+  // Step API-4 A10, B3, B6, B8: protection by mode, onboarding, scope, provider ownership.
+  onboarding('get /api/v1/api-mode/protection-coverage', 'v1'),
+  onboarding('get /api/v1/api-mode/domains/:domainId/onboarding'),
+  onboarding('get /api/v1/api-mode/domains/:domainId/scope'),
+  onboarding('put /api/v1/api-mode/domains/:domainId/scope'),
+  providerCheck('post /api/v1/domains/:domainId/ownership/provider-check'),
 ]);

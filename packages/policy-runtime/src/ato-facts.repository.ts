@@ -1,8 +1,7 @@
 import type { Prisma } from '@email-gateway/database';
-import type { PolicyMetrics } from '../metrics/policy-metrics';
 import type { AtoPolicyFactsRow } from '@email-gateway/policy-dsl';
 import { atoSubjectHash } from '@email-gateway/security-contracts';
-import { type InconsistencySink, wrongRead } from './errors';
+import { type InconsistencySink, type PolicyRead, wrongRead } from './errors';
 
 /** The organization feature that enables account takeover detection (step 8.4 D21). */
 export const ATO_FEATURE_KEY = 'ato_detection';
@@ -178,10 +177,15 @@ export class AtoFactsRepository {
   }
 }
 
+/** The series `atoFactsRepositoryFor` reports to (prom-client counters and histogram). */
+export interface AtoFactsMetrics {
+  atoFacts: { inc(labels: { result: AtoFactsResult }): void };
+  atoFactsSeconds: { observe(seconds: number): void };
+  inconsistentReads: { inc(labels: { read: PolicyRead }): void };
+}
+
 /** The repository with the engine's series (`policy_ato_facts_total`, `policy_ato_facts_seconds`). */
-export function atoFactsRepositoryFor(
-  metrics: Pick<PolicyMetrics, 'atoFacts' | 'atoFactsSeconds' | 'inconsistentReads'>,
-): AtoFactsRepository {
+export function atoFactsRepositoryFor(metrics: AtoFactsMetrics): AtoFactsRepository {
   return new AtoFactsRepository((read) => metrics.inconsistentReads.inc({ read }), {
     observe: (result, seconds) => {
       metrics.atoFacts.inc({ result });

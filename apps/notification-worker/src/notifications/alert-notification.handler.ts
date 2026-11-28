@@ -12,6 +12,7 @@ import {
 import {
   type AlertOrganization,
   alertScopeKey,
+  DETECT_ONLY_MAX_PERIOD_MS,
   type SecurityAlertReads,
   type StoredAlertEvent,
 } from './alert-reads';
@@ -34,7 +35,9 @@ export type AlertKind = NotificationAlertRequestedV1['kind'];
  * the step API-1 `api_mode_unhealthy` → `remediation:read` (D11.3: the users who see the
  * API-mode coverage and health page) and the step API-3 `api_mode_purge_approval` →
  * `remediation:purge` (C6: the users who may approve a purge) and `api_mode_report_received` →
- * `remediation:write` (C13: the users who triage reports).
+ * `remediation:write` (C13: the users who triage reports), and the step API-4 (B7)
+ * `api_mode_detect_only_ended` → `remediation:write` (the users who may switch the policy to
+ * enforce). `dlp_detected` → `dlp:read` comes from the shared map (A9.2).
  */
 export const SECURITY_ALERT_RECIPIENT_PERMISSION: Readonly<Record<SecurityAlertKind, string>> =
   Object.freeze({
@@ -43,7 +46,16 @@ export const SECURITY_ALERT_RECIPIENT_PERMISSION: Readonly<Record<SecurityAlertK
     api_mode_unhealthy: 'remediation:read',
     api_mode_purge_approval: 'remediation:purge',
     api_mode_report_received: 'remediation:write',
+    api_mode_detect_only_ended: 'remediation:write',
   });
+
+/** Public types an alert may refer to (`webhook_events.event_type`). */
+type StoredAlertType =
+  | 'email.threat.detected'
+  | 'mailbox.threat.detected'
+  | 'mailbox.dlp.detected'
+  | 'domain.dns.failed'
+  | 'integration.health_changed';
 
 export interface AlertNotificationOptions {
   maxRecipients: number;
@@ -166,18 +178,23 @@ export class AlertNotificationHandler {
     // Step 8.6 D9: `journal_intake_silent` has no tenant setting (always on, like
     // `integration_unhealthy`; throttled per source by the producer). Step API-1 D11.3: nor has
     // `api_mode_unhealthy` (throttled per API-mode connection by the mailbox-worker), nor the
-    // step API-3 kinds (C6, C13).
+    // step API-3 kinds (C6, C13), nor the step API-4 detect-only end (B7, once per period).
     if (
       p.kind === 'journal_intake_silent' ||
       p.kind === 'api_mode_unhealthy' ||
       p.kind === 'api_mode_purge_approval' ||
-      p.kind === 'api_mode_report_received'
+      p.kind === 'api_mode_report_received' ||
+      p.kind === 'api_mode_detect_only_ended'
     ) {
       return true;
     }
     if (!alertKindSettings(settings, p.kind).enabled) return false;
     if (p.kind === 'threat_detected') {
       return severityRank(p.severity) >= severityRank(settings.alerts.threatDetected.minSeverity);
+    }
+    if (p.kind === 'dlp_detected') {
+      // Step API-4 A9.2: `alerts.dlpDetected.minSeverity` (default medium).
+      return severityRank(p.severity) >= severityRank(settings.alerts.dlpDetected.minSeverity);
     }
     return true;
   }
@@ -196,23 +213,97 @@ export class AlertNotificationHandler {
         if (!webhookEventId || !messageId || !receivedAt) {
           return this.deadLetter(p.kind, 'alert_refs_missing');
         }
+        // Step API-4 A9.2: the stored event is `email.threat.detected` (gateway message) or
+        // `mailbox.threat.detected` (an API-mode copy, detected after delivery).
         const stored = await this.storedEvent(
           tx,
           organization,
           webhookEventId,
           window,
-          'email.threat.detected',
+          ['email.threat.detected', 'mailbox.threat.detected'],
           p.kind,
         );
-        if (stored.messageId === null || stored.messageId !== BigInt(messageId)) {
-          return this.deadLetter(p.kind, 'webhook_event_mismatch');
-        }
-        const identity = await this.reads.messageIdentity(tx, organizationId, BigInt(messageId));
+        const identity = await this.messageOf(
+          tx,
+          p.kind,
+          organizationId,
+          stored,
+          messageId,
+          receivedAt,
+        );
         if (identity === null) return this.deadLetter(p.kind, 'message_not_found');
-        if (identity.receivedAt.getTime() !== Date.parse(receivedAt)) {
-          return this.deadLetter(p.kind, 'message_mismatch');
+        const copyEvent = stored.eventType === 'mailbox.threat.detected';
+        await this.assertIngest(tx, organizationId, p.kind, messageId, receivedAt, copyEvent);
+        const base = {
+          kind: p.kind,
+          severity: stored.severity,
+          ...counts,
+        } as const;
+        if (copyEvent) {
+          const data = stored.envelope.data as WebhookEventData<'mailbox.threat.detected'>;
+          if (data.message.id !== identity.publicId) {
+            return this.deadLetter(p.kind, 'webhook_event_mismatch');
+          }
+          return {
+            scopeKey: alertScopeKey(p.kind, {}),
+            facts: {
+              ...base,
+              threat: {
+                verdict: data.detection.verdict,
+                stage: data.detection.stage,
+                messagePublicId: identity.publicId,
+                receivedAt: identity.receivedAt.toISOString(),
+                copy: {
+                  protectionMode: data.detection.protectionMode,
+                  mailboxCount: data.detection.mailboxCount,
+                },
+              },
+            },
+          };
         }
         const data = stored.envelope.data as WebhookEventData<'email.threat.detected'>;
+        if (data.message.id !== identity.publicId) {
+          return this.deadLetter(p.kind, 'webhook_event_mismatch');
+        }
+        return {
+          scopeKey: alertScopeKey(p.kind, {}),
+          facts: {
+            ...base,
+            threat: {
+              verdict: data.detection.verdict,
+              stage: data.detection.stage,
+              messagePublicId: identity.publicId,
+              receivedAt: identity.receivedAt.toISOString(),
+              copy: null,
+            },
+          },
+        };
+      }
+      case 'dlp_detected': {
+        // Step API-4 A9.2: the stored `mailbox.dlp.detected` event (codes and counts only).
+        const { webhookEventId, messageId, receivedAt } = p.refs;
+        if (!webhookEventId || !messageId || !receivedAt) {
+          return this.deadLetter(p.kind, 'alert_refs_missing');
+        }
+        const stored = await this.storedEvent(
+          tx,
+          organization,
+          webhookEventId,
+          window,
+          ['mailbox.dlp.detected'],
+          p.kind,
+        );
+        const identity = await this.messageOf(
+          tx,
+          p.kind,
+          organizationId,
+          stored,
+          messageId,
+          receivedAt,
+        );
+        if (identity === null) return this.deadLetter(p.kind, 'message_not_found');
+        await this.assertIngest(tx, organizationId, p.kind, messageId, receivedAt, true);
+        const data = stored.envelope.data as WebhookEventData<'mailbox.dlp.detected'>;
         if (data.message.id !== identity.publicId) {
           return this.deadLetter(p.kind, 'webhook_event_mismatch');
         }
@@ -222,11 +313,56 @@ export class AlertNotificationHandler {
             kind: p.kind,
             severity: stored.severity,
             ...counts,
-            threat: {
-              verdict: data.detection.verdict,
-              stage: data.detection.stage,
+            dlp: {
+              action: data.dlp.action,
+              direction: data.dlp.direction,
+              categories: [...data.dlp.categories],
+              protectionMode: data.dlp.protectionMode,
+              mailboxCount: data.dlp.mailboxCount,
               messagePublicId: identity.publicId,
               receivedAt: identity.receivedAt.toISOString(),
+            },
+          },
+        };
+      }
+      case 'api_mode_detect_only_ended': {
+        // Step API-4 B7: the remediation policy at send time (scope, mode, period) and the
+        // simulated actions of its scope; never the policy document.
+        const { remediationPolicyId } = p.refs;
+        if (!remediationPolicyId) return this.deadLetter(p.kind, 'alert_refs_missing');
+        const policy = await this.reads.remediationPolicy(tx, organizationId, remediationPolicyId);
+        if (policy === null) return this.deadLetter(p.kind, 'remediation_policy_not_found');
+        const endedAt = policy.detectOnlyUntil ?? policy.detectOnlyNotifiedAt;
+        // `enforce` clears the period columns (B7): the start is then unknown, so the count
+        // covers the longest possible period before the end.
+        const since =
+          policy.detectOnlyStartedAt ??
+          new Date((endedAt ?? window.from).getTime() - DETECT_ONLY_MAX_PERIOD_MS);
+        const simulated = await this.reads.simulatedActions(
+          tx,
+          organizationId,
+          policy.domainId,
+          since,
+        );
+        // The severity names what happened (A9.2: low = remind, medium = enforce).
+        const then =
+          policy.detectOnlyThen ??
+          (p.severity === 'medium' || policy.mode === 'enforce' ? 'enforce' : 'remind');
+        return {
+          scopeKey: alertScopeKey(p.kind, { remediationPolicyPublicId: policy.publicId }),
+          facts: {
+            kind: p.kind,
+            severity: p.severity,
+            ...counts,
+            policy: {
+              remediationPolicyPublicId: policy.publicId,
+              domainName: policy.domainName,
+              then,
+              modeNow: policy.mode,
+              endedAt: endedAt?.toISOString() ?? null,
+              simulated: simulated.count,
+              simulatedCapped: simulated.capped,
+              simulatedSince: since.toISOString(),
             },
           },
         };
@@ -418,20 +554,67 @@ export class AlertNotificationHandler {
     }
   }
 
-  /** The stored public event of the alert, of the expected type and organization. */
+  /**
+   * The message identity of a message alert, echo-checked against the stored event's message id
+   * and the refs' received time; null when the identity is gone.
+   */
+  private async messageOf(
+    tx: Tx,
+    kind: AlertKind,
+    organizationId: bigint,
+    stored: StoredAlertEvent,
+    messageId: string,
+    receivedAt: string,
+  ): Promise<{ publicId: string; receivedAt: Date } | null> {
+    if (stored.messageId === null || stored.messageId !== BigInt(messageId)) {
+      return this.deadLetter(kind, 'webhook_event_mismatch');
+    }
+    const identity = await this.reads.messageIdentity(tx, organizationId, BigInt(messageId));
+    if (identity === null) return null;
+    if (identity.receivedAt.getTime() !== Date.parse(receivedAt)) {
+      return this.deadLetter(kind, 'message_mismatch');
+    }
+    return identity;
+  }
+
+  /**
+   * Step API-4 A9.2: the message's `ingest_source` agrees with the stored public type (a copy
+   * ⇔ `mailbox.*`). A purged message row cannot be checked and is accepted on the stored type.
+   */
+  private async assertIngest(
+    tx: Tx,
+    organizationId: bigint,
+    kind: AlertKind,
+    messageId: string,
+    receivedAt: string,
+    copyEvent: boolean,
+  ): Promise<void> {
+    const ingest = await this.reads.messageIngestSource(
+      tx,
+      organizationId,
+      BigInt(messageId),
+      new Date(receivedAt),
+    );
+    if (ingest !== null && (ingest !== 'gateway') !== copyEvent) {
+      this.deadLetter(kind, 'webhook_event_mismatch');
+    }
+  }
+
+  /** The stored public event of the alert, of an expected type and the organization. */
   private async storedEvent(
     tx: Tx,
     organization: AlertOrganization,
     eventId: string,
     window: { from: Date; to: Date },
-    type: 'email.threat.detected' | 'domain.dns.failed' | 'integration.health_changed',
+    type: StoredAlertType | readonly StoredAlertType[],
     kind: AlertKind,
   ): Promise<StoredAlertEvent> {
+    const types: readonly string[] = typeof type === 'string' ? [type] : type;
     const stored = await this.reads.webhookEvent(tx, organization.id, eventId, window);
     if (stored === null) return this.deadLetter(kind, 'webhook_event_not_found');
     if (
-      stored.eventType !== type ||
-      stored.envelope.type !== type ||
+      !types.includes(stored.eventType) ||
+      stored.envelope.type !== stored.eventType ||
       stored.envelope.id !== eventId ||
       stored.envelope.organizationId !== organization.publicId
     ) {

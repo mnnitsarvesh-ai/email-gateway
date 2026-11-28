@@ -107,10 +107,18 @@ const POLICY_RULES =
   'matches when the verdict is listed and every present bound holds: `minLevel`/`maxLevel`, ' +
   '`hardBlock`, `minScore`); invalid → `400 validation_failed` with the document paths. A ' +
   '`hard_delete` rule while the platform setting is off → `422 api_mode_hard_delete_disabled` ' +
-  '(`ruleIds`). CAS: `expectedRowVersion` is the version read (null when no row exists: the ' +
-  'PUT creates it); a mismatch → `409 api_mode_remediation_policy_conflict` with ' +
-  '`currentRowVersion`. Audited `api_mode.remediation_policy_updated` (scope, from/to mode and ' +
-  'SHA-256, reason). Needs `remediation:write`.';
+  '(`ruleIds`). Step API-4: the document may carry `policyMapping` (`quarantine`, ' +
+  '`require_approval`, `reject` → `move_quarantine` | `move_junk` | `soft_delete` | `tag` | ' +
+  '`none`; `allow_tagged` → `tag` | `none`; defaults: quarantine folder and tag; never ' +
+  '`hard_delete`): how tenant policy dispositions of API-mode copies map to mailbox actions ' +
+  '(`when.policyDispositions` is refused with `use_policy_mapping`). `detectOnly: { until (now ' +
+  '+ 1 h … now + 30 d), then: remind | enforce } | null` starts a detect-only period (only with ' +
+  'mode `detect_only`, else `422 api_mode_detect_only_invalid` with `reason`); `enforce` clears ' +
+  'it; a `detect_only` body without `detectOnly` keeps the stored period. CAS: ' +
+  '`expectedRowVersion` is the version read (null when no row exists: the PUT creates it); a ' +
+  'mismatch → `409 api_mode_remediation_policy_conflict` with `currentRowVersion`. Audited ' +
+  '`api_mode.remediation_policy_updated` (scope, from/to mode, document and `policyMapping` ' +
+  'SHA-256, the detect-only period, reason). Needs `remediation:write`.';
 
 const NEVER_PROVIDER_IDS =
   ' Never returns provider message ids (`providerRefs` shows the container and the counts only) ' +
@@ -143,7 +151,9 @@ export class ApiModeRemediationController {
       'exists: high-confidence malware and phishing to the quarantine folder, other malware, ' +
       'phishing, suspicious and BEC tagged, nothing hard-deleted), the per-domain overrides, the ' +
       'presets (P1, detect-only start, strict) and whether the platform allows hard delete. ' +
-      'Needs `remediation:read`.',
+      'Step API-4: each policy shows its effective `policyMapping` (the document’s keys over the ' +
+      'defaults) and its detect-only period (`until`, `then`, `startedAt`, `ended`, ' +
+      '`simulatedSinceStart` capped at 10 000). Needs `remediation:read`.',
   })
   @ApiModeResponse(200, RemediationPolicyViewSchema, X.policy, 'The policy')
   @ApiModeForbidden()
@@ -178,11 +188,12 @@ export class ApiModeRemediationController {
     { currentRowVersion: { type: 'integer' } },
   )
   @ApiModeUnprocessable(
-    [C.hardDeleteDisabled],
-    '`api_mode_hard_delete_disabled` (`ruleIds`)',
+    [C.hardDeleteDisabled, C.detectOnlyInvalid],
+    '`api_mode_hard_delete_disabled` (`ruleIds`), `api_mode_detect_only_invalid` (`reason`)',
     true,
     {
       ruleIds: { type: 'string' },
+      reason: { type: 'string' },
     },
   )
   @ApiModeUnavailable()
@@ -238,11 +249,12 @@ export class ApiModeRemediationController {
     { currentRowVersion: { type: 'integer' } },
   )
   @ApiModeUnprocessable(
-    [C.hardDeleteDisabled],
-    '`api_mode_hard_delete_disabled` (`ruleIds`)',
+    [C.hardDeleteDisabled, C.detectOnlyInvalid],
+    '`api_mode_hard_delete_disabled` (`ruleIds`), `api_mode_detect_only_invalid` (`reason`)',
     true,
     {
       ruleIds: { type: 'string' },
+      reason: { type: 'string' },
     },
   )
   @ApiModeUnavailable()
@@ -342,7 +354,10 @@ export class ApiModeRemediationController {
     summary: 'Get an API-mode remediation',
     description:
       'One mailbox action with its decision record (`api-remediation-decision/1`: policy scope, ' +
-      'id, version and SHA-256, mode, rule, the verdict inputs; or `{ requestedAction, reason }` ' +
+      'id, version and SHA-256, mode, rule, the verdict inputs; step API-4 `/2` adds the tenant ' +
+      'policy outcome, the verdict and policy lanes with the winner and an allow-override ' +
+      'suppression, and the post-delivery statuses of the policy actions; or `{ requestedAction, ' +
+      'reason }` ' +
       'of a manual request), the requester, the reversal links and the quarantine release of a ' +
       'release restore. Needs `remediation:read`.' +
       NEVER_PROVIDER_IDS,

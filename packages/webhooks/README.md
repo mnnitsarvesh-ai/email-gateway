@@ -8,17 +8,34 @@ other; everything they share about webhooks lives here. No I/O: `zod` and `node:
 content guard comes from `@email-gateway/common`, the verdict list from
 `@email-gateway/security-contracts`, policy vocabularies from `@email-gateway/event-contracts`).
 
-| Module             | What it holds                                                                                                                                                                                                                                                        |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `catalogue.ts`     | The ten subscribable event types and `webhook.ping`, a strict `data` schema per type (`dataSchemas`), the severity rules (`eventSeverity`, `severityRank`), the catalogue served by `GET /webhooks/event-types` (`WEBHOOK_EVENT_CATALOGUE`) and one example per type |
-| `envelope.ts`      | `buildEnvelope` (validates, guards, serializes once, hashes), the strict envelope schema and the deterministic `webhookEventId`                                                                                                                                      |
-| `filters.ts`       | `subscriptionFiltersSchema` (directions, domainIds, minSeverity, verdicts) and `matchesSubscription`                                                                                                                                                                 |
-| `signing.ts`       | `generateWebhookSecret`, `signPayload`, `signatureHeader`, `parseSignatureHeader`, `verifyWebhookSignature`                                                                                                                                                          |
-| `secret-cipher.ts` | `WebhookSecretCipher` (AES-256-GCM, `v1.<kid>.<iv>.<tag>.<ct>`, previous key for rotation) and `secretAad`                                                                                                                                                           |
-| `retry.ts`         | `retryDelayMs`, `parseRetryAfter`, `nextAttempt` (backoff with jitter, `Retry-After` cap, dead letter after max attempts or max age)                                                                                                                                 |
-| `payload-guard.ts` | `assertWebhookPayloadSafe` (the never-content rule, below)                                                                                                                                                                                                           |
-| `snippet.ts`       | `responseSnippet`: the sanitized, redacted ≤ 512-character response excerpt stored per attempt                                                                                                                                                                       |
-| `notifications.ts` | Alert and preference kinds, `ALERT_RECIPIENT_PERMISSION`, the tenant settings schema with defaults and bounds (`resolveNotificationSettings`), the per-user preference schema and `alertWindowStart`                                                                 |
+| Module             | What it holds                                                                                                                                                                                                                                                                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `catalogue.ts`     | The seventeen subscribable event types (step API-4 adds `mailbox.threat.detected` and `mailbox.dlp.detected`, A9.1) and `webhook.ping`, a strict `data` schema per type (`dataSchemas`), the severity rules (`eventSeverity`, `severityRank`), the catalogue served by `GET /webhooks/event-types` (`WEBHOOK_EVENT_CATALOGUE`) and one example per type |
+| `envelope.ts`      | `buildEnvelope` (validates, guards, serializes once, hashes), the strict envelope schema and the deterministic `webhookEventId`                                                                                                                                                                                                                         |
+| `filters.ts`       | `subscriptionFiltersSchema` (directions, domainIds, minSeverity, verdicts) and `matchesSubscription`                                                                                                                                                                                                                                                    |
+| `signing.ts`       | `generateWebhookSecret`, `signPayload`, `signatureHeader`, `parseSignatureHeader`, `verifyWebhookSignature`                                                                                                                                                                                                                                             |
+| `secret-cipher.ts` | `WebhookSecretCipher` (AES-256-GCM, `v1.<kid>.<iv>.<tag>.<ct>`, previous key for rotation) and `secretAad`                                                                                                                                                                                                                                              |
+| `retry.ts`         | `retryDelayMs`, `parseRetryAfter`, `nextAttempt` (backoff with jitter, `Retry-After` cap, dead letter after max attempts or max age)                                                                                                                                                                                                                    |
+| `payload-guard.ts` | `assertWebhookPayloadSafe` (the never-content rule, below)                                                                                                                                                                                                                                                                                              |
+| `snippet.ts`       | `responseSnippet`: the sanitized, redacted ≤ 512-character response excerpt stored per attempt                                                                                                                                                                                                                                                          |
+| `notifications.ts` | Alert and preference kinds (step API-4: `dlp_detected`, recipients `dlp:read`, settings `alerts.dlpDetected`), `ALERT_RECIPIENT_PERMISSION`, the tenant settings schema with defaults and bounds (`resolveNotificationSettings`), the per-user preference schema and `alertWindowStart`                                                                 |
+
+## API-mode detections (step API-4)
+
+[Design note 38](../../docs/plan/steps/38-api-mode-parity-onboarding.md) A9, ADR-0106. Two new
+version-1 types for copies of delivered mail (journal copies and mailbox feeds), projected by the
+webhook-worker from `mail.message.copy_detected.v1` (and, for the threat type, a sandbox verdict of
+a copy message): `mailbox.threat.detected` (`data.detection`: stage `scan`|`sandbox`, threat
+verdict, risk score, reason codes, `protectionMode` `api`|`hybrid`, direction, copy source, policy
+disposition, mailbox count, remediation counts (null for sandbox), attachment (sandbox only), copy
+ids ≤ 20, `decidedAt`; severity as `email.threat.detected`; filters directions, domainIds,
+minSeverity, verdicts) and `mailbox.dlp.detected` (`data.dlp`: action alert|require_approval|
+quarantine|block, verdict and category codes, protection mode, direction, policy disposition,
+mailbox count, remediation counts (null for outbound), copy ids, `decidedAt`; severity block/
+quarantine → high, require_approval → medium, alert → low; filters directions, domainIds,
+minSeverity). `email.threat.detected` v1 is unchanged and inline-only. Alert kind `dlp_detected`
+(recipients `dlp:read`; tenant settings `alerts.dlpDetected { enabled (true), minSeverity
+low|medium|high (medium), throttleMinutes 15..1440 (60) }`; opt-out kind `dlp_detected`).
 
 ## Envelope
 

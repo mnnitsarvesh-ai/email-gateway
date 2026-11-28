@@ -74,7 +74,7 @@ test('Remediation tab: detect-only preset saved with a reason; a domain override
   await form
     .getByRole('button', { name: 'Apply Detect-only start (recommended for new tenants)' })
     .click();
-  await expect(form.getByRole('radio', { name: 'Detect only' })).toBeChecked();
+  await expect(form.getByRole('radio', { name: 'Detect only', exact: true })).toBeChecked();
   const reason = `E2E detect-only start ${suffix()}`;
   await form.getByLabel('Reason (required)').fill(reason);
   await form.getByRole('button', { name: 'Save policy' }).click();
@@ -94,7 +94,7 @@ test('Remediation tab: detect-only preset saved with a reason; a domain override
   const dialog = page.getByRole('dialog', { name: 'Add a domain override' });
   await dialog.getByRole('combobox', { name: 'Domain' }).click();
   await page.getByRole('option', { name: s.domainNames.hybrid }).click();
-  await dialog.getByRole('radio', { name: 'Enforce' }).click();
+  await dialog.getByRole('radio', { name: 'Enforce', exact: true }).click();
   await dialog.getByLabel('Reason (required)').fill(`${reason} (domain)`);
   await dialog.getByRole('button', { name: 'Save override' }).click();
   const overrides = page.getByRole('table', { name: 'Domain overrides' });

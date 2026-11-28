@@ -70,6 +70,7 @@ const alerts = {
   threatDetected: { enabled: true, minSeverity: 'high' as const, throttleMinutes: 60 },
   domainDnsFailed: { enabled: true, throttleMinutes: 1440 },
   webhookDisabled: { enabled: false, throttleMinutes: 1440 },
+  dlpDetected: { enabled: true, minSeverity: 'medium' as const, throttleMinutes: 60 },
   includeOrganizationContact: true,
 };
 const notificationSettings: SuccessBody<'NotificationsController_settings_v1'> = {
@@ -83,6 +84,7 @@ const notificationSettings: SuccessBody<'NotificationsController_settings_v1'> =
     threatDetected: { minThrottleMinutes: 15, maxThrottleMinutes: 1440 },
     domainDnsFailed: { minThrottleMinutes: 60, maxThrottleMinutes: 10080 },
     webhookDisabled: { minThrottleMinutes: 60, maxThrottleMinutes: 10080 },
+    dlpDetected: { minThrottleMinutes: 15, maxThrottleMinutes: 1440 },
   },
 };
 
@@ -90,7 +92,7 @@ const preferences: SuccessBody<'NotificationsController_preferences_v1'> = {
   optOut: ['policy_alert'],
   quarantineDigestOptOut: false,
   quarantineDigestOptOutAllowed: true,
-  kinds: ['threat_detected', 'domain_dns_failed', 'policy_alert'],
+  kinds: ['threat_detected', 'domain_dns_failed', 'policy_alert', 'dlp_detected'],
   invalidStored: false,
 };
 
@@ -206,6 +208,42 @@ describe('Settings: notifications and preferences', () => {
     expectRequestMatchesContract('NotificationsController_putSettings_v1', bodies[0]);
   });
 
+  it('step API-4: edits the DLP alert (enabled, minimum severity, throttle) within the bounds', async () => {
+    const bodies: unknown[] = [];
+    mockApi({
+      NotificationsController_settings_v1: () => okJson(notificationSettings),
+      NotificationsController_putSettings_v1: ({ body }) => {
+        bodies.push(body);
+        return okJson(notificationSettings);
+      },
+    });
+    const { container, user } = renderWithProviders(<SettingsPage />, {
+      route: '/settings?tab=notifications',
+    });
+    const form = await screen.findByRole('form', { name: 'Organization alerts' });
+    const dlp = within(form).getByRole('group', { name: 'DLP detected (API mode)' });
+    expect(within(dlp).getByRole('switch', { name: 'Send DLP alerts' })).toBeChecked();
+    expect(screen.getByText('api_mode_detect_only_ended')).toBeInTheDocument();
+    const minutes = within(dlp).getByRole('spinbutton');
+    await user.clear(minutes);
+    await user.type(minutes, '5');
+    await user.click(screen.getByRole('button', { name: 'Save alert settings' }));
+    expect(await within(dlp).findByText('At least 15 minutes')).toBeInTheDocument();
+    expect(bodies).toHaveLength(0);
+    await user.clear(minutes);
+    await user.type(minutes, '120');
+    await user.click(within(dlp).getByRole('switch', { name: 'Send DLP alerts' }));
+    await user.click(screen.getByRole('button', { name: 'Save alert settings' }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toMatchObject({
+      settings: {
+        alerts: { dlpDetected: { enabled: false, minSeverity: 'medium', throttleMinutes: 120 } },
+      },
+    });
+    expectRequestMatchesContract('NotificationsController_putSettings_v1', bodies[0]);
+    await expectNoAxeViolations(container);
+  });
+
   it('is read-only without settings:manage', async () => {
     mockApi({ NotificationsController_settings_v1: () => okJson(notificationSettings) });
     renderWithProviders(<SettingsPage />, {
@@ -232,6 +270,7 @@ describe('Settings: notifications and preferences', () => {
     });
     await user.click(await screen.findByRole('checkbox', { name: 'Policy alerts' }));
     await user.click(screen.getByRole('checkbox', { name: 'Threat detected' }));
+    expect(screen.getByRole('checkbox', { name: 'DLP detected in API-mode copies' })).toBeChecked();
     await user.click(screen.getByRole('switch', { name: 'Receive the quarantine digest' }));
     await user.click(screen.getByRole('button', { name: 'Save preferences' }));
     await waitFor(() =>

@@ -401,8 +401,8 @@ export class ProviderDomainsController {
     summary: 'Replace the linked domains of a connection',
     description:
       '`{ domainIds }` replaces the set (≤ PROVIDER_MAX_DOMAINS_PER_CONNECTION). Each domain must ' +
-      'be yours (`404 domain_not_in_organization`), `active` at the gateway (`422 ' +
-      'domain_not_verified`) and not linked to another connection (`409 ' +
+      'be yours (`404 domain_not_in_organization`), `verified` or `active` at the gateway ' +
+      '(step API-4 B4; `pending_verification` → `422 domain_not_verified`) and not linked to another connection (`409 ' +
       'domain_linked_elsewhere`); unlinking needs outbound off (`409 outbound_active`). The ' +
       'integration-worker checks the new domains in the provider tenant on its next health run ' +
       '(requested now). Audited `integration.domains_linked`.' +

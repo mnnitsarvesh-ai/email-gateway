@@ -84,6 +84,9 @@ function setup(options: { configured?: boolean; fail?: boolean; message?: boolea
     activeDomain: vi.fn((_tx: unknown, _org: bigint, domain: string) =>
       Promise.resolve(domain === 'acme.example'),
     ),
+    copySummary: vi.fn((): Promise<{ mailboxCount: number; protectionMode: 'api' | 'hybrid' }> =>
+      Promise.resolve({ mailboxCount: 4, protectionMode: 'api' }),
+    ),
   };
   const counts: Array<Record<string, string>> = [];
   const suppressed: Array<[Record<string, string>, number]> = [];
@@ -201,5 +204,81 @@ describe('PolicyNotificationHandler (P25)', () => {
     expect(addressDomain('')).toBeNull();
     expect(addressDomain('a@b@c, d@e')).toBeNull();
     expect(addressDomain('noat')).toBeNull();
+  });
+});
+
+describe('PolicyNotificationHandler detect variant (step API-4 A7)', () => {
+  const detect = (over: Partial<PolicyNotificationRequestedV1> = {}) =>
+    event({
+      evaluationMode: 'detect',
+      direction: 'inbound',
+      decisive: {
+        source: 'tenant_rule',
+        policyId: '01890a5d-ac96-774b-bcce-b302099a80f5',
+        versionNo: 2,
+        ruleId: 'alert-finance-fraud',
+      },
+      ...over,
+    });
+
+  it('renders "detected after delivery (API mode)", protection mode, mailbox count, /api-mode link', async () => {
+    const ctx = setup();
+    expect(await ctx.handler.handle(detect(), tx)).toBe('sent');
+    expect(ctx.reads.copySummary).toHaveBeenCalledWith(
+      tx,
+      7n,
+      501n,
+      new Date('2026-11-11T10:00:00.000Z'),
+    );
+    expect(ctx.reads.alertRecipients).toHaveBeenCalledWith(tx, 7n, 50, null);
+    const mail = ctx.sent[0]!;
+    expect(mail.subject).toBe(
+      '[Email Gateway] Policy alert (warning): detected after delivery (API mode)',
+    );
+    expect(mail.text).toContain('detected after delivery (API mode)');
+    expect(mail.text).toContain('Policy decision: quarantine');
+    expect(mail.text).toContain('Decided by: policy "Cards", rule alert-finance-fraud');
+    expect(mail.text).toContain(
+      'Protection mode: API mode (after delivery, through the mailbox API)',
+    );
+    expect(mail.text).toContain('Mailboxes with a copy: 4');
+    expect(mail.text).toContain(
+      'Details: https://portal.example/api-mode?tab=detections&message=0190f0f0-0000-7000-8000-0000000001f5',
+    );
+    expect(mail.text).not.toContain('/messages/');
+    // No content, no address, no Internet-Message-ID.
+    expect(mail.text).not.toMatch(/@/);
+    expect(ctx.counts).toEqual([{ kind: 'policy_alert', result: 'sent' }]);
+  });
+
+  it('an outbound detection says it is never removed; opt-outs of policy_alert apply', async () => {
+    const ctx = setup();
+    preferenceRows = [
+      { organizationId: 7n, userId: 1n, preferences: { optOut: ['policy_alert'] } },
+    ];
+    ctx.reads.copySummary.mockResolvedValueOnce({ mailboxCount: 1, protectionMode: 'hybrid' });
+    await ctx.handler.handle(detect({ direction: 'outbound' }), tx);
+    expect(ctx.sent[0]!.recipients).toEqual(['admin2@acme.example']);
+    expect(ctx.sent[0]!.text).toContain('Protection mode: Hybrid (gateway and API mode)');
+    expect(ctx.sent[0]!.text).toContain('outbound detections are recorded, never removed');
+  });
+
+  it('never sends a sender notice for a detect evaluation (P-I1)', async () => {
+    const ctx = setup();
+    expect(
+      await ctx.handler.handle(
+        detect({ kind: 'sender_non_delivery', direction: 'outbound', disposition: 'reject' }),
+        tx,
+      ),
+    ).toBe('no_recipients');
+    expect(ctx.sent).toEqual([]);
+    expect(ctx.reads.message).not.toHaveBeenCalled();
+  });
+
+  it('an inline evaluation (no evaluationMode) keeps the explorer link and reads no copies', async () => {
+    const ctx = setup();
+    await ctx.handler.handle(event(), tx);
+    expect(ctx.reads.copySummary).not.toHaveBeenCalled();
+    expect(ctx.sent[0]!.text).toContain('https://portal.example/messages/');
   });
 });

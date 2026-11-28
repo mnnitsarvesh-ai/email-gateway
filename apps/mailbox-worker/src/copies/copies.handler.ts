@@ -5,16 +5,17 @@ import {
   type HandleOutcome,
 } from '@email-gateway/common';
 import {
+  Prisma,
   processOnce,
   type ApiCopyDeliveredBasis,
   type ApiCopyStatus,
   type MessageVerdict,
-  type Prisma,
   type PrismaClient,
 } from '@email-gateway/database';
 import {
   EventTypes,
   messageCopyScannedV1,
+  policyNotificationRequestedV1,
   type EventEnvelope,
   type MessageCopyScannedV1,
 } from '@email-gateway/event-contracts';
@@ -22,10 +23,12 @@ import type { Logger } from '@email-gateway/logger';
 import {
   assessReport,
   classifyRecipientDirection,
+  copyDetectionOf,
   copyMessageIdHash,
   extractCopyHeaders,
   reportGroupKey,
   reportOriginalSchema,
+  type PolicyOutcomeFacts,
   type ResolvedOrgSettings,
 } from '@email-gateway/mailbox-api';
 import {
@@ -36,13 +39,16 @@ import {
 } from '../domain/api-mode-state';
 import { ensureApiConnection } from '../domain/connections';
 import {
+  discoverMailboxIn,
   findInlineMessage,
   findMailboxByAddress,
+  hasGatewayOutboundMessage,
   resolveOrDiscoverMailbox,
   type InlineLink,
   type MailboxRef,
 } from '../domain/mailboxes';
 import { loadOrgSettings } from '../domain/org-settings';
+import { mailboxScope } from '../domain/scope';
 import type { LateSignalHandler } from '../clawback/late-signal.handler';
 import {
   addrSpecOf,
@@ -52,11 +58,27 @@ import {
   reporterAddressOf,
   requestReportAlert,
 } from '../reports/report-intake';
-import type { CopyResult, MailboxMetrics, RemediationResult } from '../metrics/mailbox-metrics';
+import type {
+  CopyResult,
+  MailboxMetrics,
+  PolicyEvaluationResult,
+  RemediationResult,
+} from '../metrics/mailbox-metrics';
 import {
+  DISABLED_RESULT,
+  inlineDispositionOf,
+  loadCopyDlpFacts,
+  recipientSeqOf,
+  type CopyDlpFacts,
+  type CopyPolicyEvaluator,
+  type MessagePolicyResult,
+} from '../policy/copy-policy';
+import {
+  domainMode,
   loadDecisionCopy,
   newDecisionMemo,
   type DecisionMemo,
+  type DecisionResult,
   type RemediationDecider,
 } from '../remediation/decide';
 import type { CounterDelta, CounterStore } from '../runtime/redis-stores';
@@ -71,6 +93,14 @@ import {
   mergeDelta,
   storedVerdict,
 } from './copy-plan';
+import {
+  copyDetectedPayload,
+  copyPolicyStateOf,
+  detectionDirection,
+  detectionKinds,
+  type CountedCopy,
+  type MessagePolicyState,
+} from './detection';
 
 /**
  * Queue, ledger consumer and accepted events of the copies role (topology v18: step API-3 adds
@@ -102,6 +132,11 @@ export interface CopiesDeps {
   decider: RemediationDecider | null;
   /** Step API-3 C2.1: the handler of `mail.threat.late_signal.v1` (same queue and ledger). */
   lateSignals: LateSignalHandler;
+  /**
+   * Step API-4 A1–A3: the detect-mode policy evaluation of copy messages (null: never evaluated,
+   * every copy `disabled`).
+   */
+  policy: CopyPolicyEvaluator | null;
   /** TEST SEAM: only these organizations are handled (others are acked untouched). */
   organizationIds?: readonly bigint[];
 }
@@ -115,6 +150,25 @@ interface JournalTarget {
   direction: 'inbound' | 'internal';
   /** Step API-3 C9.2: the mailbox is a report mailbox (recorded, never decided, a report). */
   reportMailbox: boolean;
+  /** The recipient's organization domain (step API-4 B8 first copy). */
+  domainId: bigint;
+}
+
+/** A copy row written for this event (journal or feed), before the policy and decision steps. */
+interface RecordedCopy {
+  key: { id: bigint; receivedAt: Date };
+  mailbox: Pick<MailboxRef, 'id' | 'apiConnectionId'>;
+  direction: 'inbound' | 'internal' | 'outbound';
+  authority: 'copy' | 'inline';
+  inline: InlineLink | null;
+  reportMailbox: boolean;
+}
+
+/** Step API-4 A6.2: the sender of an outbound-only journal message (an API-side domain). */
+interface OutboundSender {
+  address: string;
+  domainId: bigint;
+  apiConnectionId: bigint;
 }
 
 interface CopyMessage {
@@ -140,6 +194,13 @@ interface Outcome {
   remediations: Array<{ provider: string; action: string; result: RemediationResult }>;
   /** Step API-3: reports that reached `pending_triage` (seconds since reported). */
   triaged: number[];
+  /** Step API-4: the message's detect evaluation (metric after the commit). */
+  policy: { result: PolicyEvaluationResult; seconds: number | null } | null;
+  /** Step API-4 A8: detections (metric labels) of the event. */
+  detections: Array<{ kinds: string[]; direction: string }>;
+  outboundDetections: number;
+  /** Step API-4 B8: domains whose first copy is set by this event (memo after the commit). */
+  firstCopyDomains: bigint[];
 }
 
 const tally = (o: Outcome, result: CopyResult, n = 1) =>
@@ -178,6 +239,8 @@ const count = (o: Outcome, apiConnectionId: bigint, delta: CounterDelta) =>
  */
 export class CopiesHandler {
   private readonly txPrisma: PrismaClient;
+  /** Step API-4 B8: domains known to have their first copy recorded (the common path writes nothing). */
+  private readonly firstCopyKnown = new Set<string>();
 
   constructor(private readonly deps: CopiesDeps) {
     this.txPrisma = withTransactionDefaults(deps.prisma, {
@@ -207,8 +270,12 @@ export class CopiesHandler {
       lags: [],
       remediations: [],
       triaged: [],
+      policy: null,
+      detections: [],
+      outboundDetections: 0,
+      firstCopyDomains: [],
     };
-    const prepared = await this.prepare(organizationId, payload, outcome);
+    const prepared = await this.prepare(organizationId, payload, outcome, event.correlationId);
     const result = await processOnce(this.txPrisma, COPIES_CONSUMER, event.eventId, (tx) =>
       prepared(tx),
     );
@@ -226,6 +293,19 @@ export class CopiesHandler {
       this.deps.metrics?.report('pending_triage');
       this.deps.metrics?.reportTriage.observe(seconds);
     }
+    if (outcome.policy) {
+      this.deps.metrics?.policyEvaluation(outcome.policy.result, outcome.policy.seconds);
+    }
+    for (const d of outcome.detections) {
+      for (const kind of d.kinds) {
+        this.deps.metrics?.copyDetection(kind as 'threat' | 'dlp' | 'policy', d.direction);
+      }
+    }
+    if (outcome.outboundDetections > 0) {
+      this.deps.metrics?.outboundDetections.inc(outcome.outboundDetections);
+    }
+    if (this.firstCopyKnown.size > 100_000) this.firstCopyKnown.clear();
+    for (const domainId of outcome.firstCopyDomains) this.firstCopyKnown.add(domainId.toString());
     return 'handled';
   };
 
@@ -237,6 +317,7 @@ export class CopiesHandler {
     organizationId: bigint,
     payload: MessageCopyScannedV1,
     outcome: Outcome,
+    correlationId: string,
   ): Promise<(tx: Prisma.TransactionClient) => Promise<void>> {
     const noop = () => Promise.resolve();
     const message = await this.loadMessage(organizationId, payload);
@@ -245,7 +326,7 @@ export class CopiesHandler {
       return noop;
     }
     if (message.ingestSource === 'mailbox_api') {
-      return (tx) => this.finalizeFeedCopies(tx, message, payload, outcome);
+      return (tx) => this.finalizeFeedCopies(tx, message, payload, outcome, correlationId);
     }
     const state = await loadOrgApiModeState(this.deps.prisma, organizationId);
     if (!state?.active) {
@@ -276,17 +357,54 @@ export class CopiesHandler {
     );
     if (targets.length === 0) {
       if (!outcome.results.has('skipped_internal')) {
-        // C8.2: no recipient on an API-side domain and an org-side sender → outbound-only
-        // (metric only: no copy, no mailbox discovery).
+        // C8.2: no recipient on an API-side domain and an org-side sender → outbound-only.
+        // Step API-4 A6.2: evaluated, and recorded on the sender's mailbox when a detection.
         const sender = addrSpecOf(message.headerFrom) ?? addrSpecOf(message.envelopeFrom);
-        const outbound =
-          apiSideRecipients === 0 && sender !== null && domainForAddress(state.domains, sender);
-        tally(outcome, outbound ? 'outbound_only' : 'no_recipient');
+        const senderDomain =
+          apiSideRecipients === 0 && sender !== null
+            ? domainForAddress(state.domains, sender)
+            : null;
+        if (!senderDomain) {
+          tally(outcome, 'no_recipient');
+          return noop;
+        }
+        if (
+          !settings.outboundDetectionEnabled ||
+          !isApiSide(senderDomain.effectiveMode) ||
+          payload.outcome === 'parse_failed' ||
+          (message.messageIdKey !== null &&
+            (await hasGatewayOutboundMessage(this.deps.prisma, {
+              organizationId,
+              messageIdKey: message.messageIdKey,
+              around: message.receivedAt,
+              windowHours: this.deps.config.hybridLinkWindowHours,
+            })))
+        ) {
+          // A6.3 (P-I3): the gateway enforced outbound policy inline; or detections are off.
+          tally(outcome, 'outbound_only');
+          return noop;
+        }
+        const outboundSender: OutboundSender = {
+          address: sender!,
+          domainId: senderDomain.id,
+          apiConnectionId: connection.id,
+        };
+        return (tx) =>
+          this.recordOutboundDetection(
+            tx,
+            message,
+            payload,
+            outboundSender,
+            settings,
+            outcome,
+            correlationId,
+          );
       }
       return noop;
     }
     const delivery = journalDelivery(await this.topReceivedAt(message), message.receivedAt);
-    return (tx) => this.recordJournalCopies(tx, message, payload, targets, delivery, outcome);
+    return (tx) =>
+      this.recordJournalCopies(tx, message, payload, targets, delivery, outcome, correlationId);
   }
 
   private async loadMessage(
@@ -394,7 +512,7 @@ export class CopiesHandler {
               windowHours: this.deps.config.hybridLinkWindowHours,
             })
           : null;
-      targets.push({ mailbox, address, inline, direction, reportMailbox });
+      targets.push({ mailbox, address, inline, direction, reportMailbox, domainId: domain.id });
     }
     return { targets, apiSideRecipients };
   }
@@ -429,7 +547,11 @@ export class CopiesHandler {
     }
   }
 
-  /** D7 steps 6 and 8 for every target mailbox, inside the ledger transaction. */
+  /**
+   * D7 steps 6 and 8 for every target mailbox, inside the ledger transaction; then (step API-4)
+   * the message's detect evaluation and, per recorded copy, the policy columns and the
+   * remediation decision, the ALERT request and the detection event (`applyPolicy`).
+   */
   private async recordJournalCopies(
     tx: Prisma.TransactionClient,
     message: CopyMessage,
@@ -437,12 +559,13 @@ export class CopiesHandler {
     targets: readonly JournalTarget[],
     delivery: { at: Date; basis: ApiCopyDeliveredBasis },
     outcome: Outcome,
+    correlationId: string,
   ): Promise<void> {
     const now = this.deps.now();
     const verdictAt = new Date(payload.completedAt);
     const status = STATUS_OF_OUTCOME[payload.outcome];
     const hash = copyMessageIdHash(message.organizationId, message.internetMessageId);
-    const memo = newDecisionMemo();
+    const recorded: RecordedCopy[] = [];
     for (const target of targets) {
       const { mailbox } = target;
       const lag = lagOf(payload.outcome, delivery.at, verdictAt);
@@ -466,14 +589,14 @@ export class CopiesHandler {
         hash === null
           ? await upsertJournalCopy(tx, write)
           : await this.dedupeJournal(tx, write, hash);
-      const recorded = copy !== null;
+      const isRecorded = copy !== null;
       await tx.$executeRaw`
         UPDATE api_mailboxes
         SET journal_last_seen_at = GREATEST(COALESCE(journal_last_seen_at, ${message.receivedAt}),
                                             ${message.receivedAt}),
             updated_at = ${now}
         WHERE id = ${mailbox.id} AND organization_id = ${message.organizationId}`;
-      if (recorded) {
+      if (isRecorded) {
         const internal = target.direction === 'internal';
         tally(outcome, internal ? 'recorded_internal' : 'recorded');
         count(outcome, mailbox.apiConnectionId, {
@@ -485,9 +608,15 @@ export class CopiesHandler {
         if (target.reportMailbox) {
           // C9.2 / C-I5: a report-mailbox copy is never decided; it becomes a user report.
           await this.intakeReport(tx, message, mailbox, copy, now, outcome);
-        } else {
-          await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
         }
+        recorded.push({
+          key: copy,
+          mailbox,
+          direction: target.direction,
+          authority,
+          inline: target.inline,
+          reportMailbox: target.reportMailbox,
+        });
       } else {
         tally(outcome, 'duplicate');
         count(outcome, mailbox.apiConnectionId, { duplicates: 1 });
@@ -497,13 +626,428 @@ export class CopiesHandler {
           messageId: message.id.toString(),
           mailboxId: mailbox.publicId,
           recipientDomain: domainOf(target.address),
-          result: recorded ? 'recorded' : 'duplicate',
+          result: isRecorded ? 'recorded' : 'duplicate',
           direction: target.direction,
           authority,
         },
         'journal copy recorded for mailbox',
       );
     }
+    if (recorded.length === 0) return;
+    const policy = await this.messagePolicy(tx, message, payload, recorded, now, outcome);
+    await this.applyPolicy(tx, {
+      message,
+      payload,
+      copies: recorded,
+      policy,
+      copySource: 'journal',
+      now,
+      outcome,
+      correlationId,
+    });
+  }
+
+  /**
+   * Step API-4 A6.2: an outbound-only journal message of an API-active organization with outbound
+   * detection on. The message is evaluated (A3, message level); only a detection (A8.1) is
+   * recorded — one `api_message_copies` row for the sender's mailbox (header-From addr-spec, else
+   * the envelope sender; unknown → a `discovered` mailbox under the intake source's connection),
+   * `direction = outbound`, no delivery time or lag, `seen_journal = 1`, never a coverage sighting
+   * and no dedupe claim. When an inbound/internal copy of the same message already exists for
+   * that mailbox (the sender was also a recipient), nothing is recorded. Its decision is always
+   * `skip outbound_not_remediable` (P-I5).
+   */
+  private async recordOutboundDetection(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    payload: MessageCopyScannedV1,
+    sender: OutboundSender,
+    settings: ResolvedOrgSettings,
+    outcome: Outcome,
+    correlationId: string,
+  ): Promise<void> {
+    const now = this.deps.now();
+    // The message level is evaluated before any row exists (a non-detection records nothing).
+    const policy = await this.messagePolicy(
+      tx,
+      message,
+      payload,
+      [
+        {
+          authority: 'copy',
+          reportMailbox: false,
+          mailbox: { id: 0n, apiConnectionId: sender.apiConnectionId },
+        },
+      ],
+      now,
+      outcome,
+      settings,
+    );
+    const messageOutcome = policy.result?.outcomeFor(null) ?? null;
+    const detection = copyDetectionOf({
+      verdict: payload.verdict,
+      policyOutcome: messageOutcome,
+      dlpAction: policy.dlp?.action ?? null,
+    });
+    if (!detection.isDetection) {
+      tally(outcome, 'outbound_only');
+      return;
+    }
+    const mailbox = await discoverMailboxIn(tx, {
+      organizationId: message.organizationId,
+      apiConnectionId: sender.apiConnectionId,
+      address: sender.address,
+      domainId: sender.domainId,
+      now,
+    });
+    const hash = copyMessageIdHash(message.organizationId, message.internetMessageId);
+    const also = await tx.$queryRaw<Array<{ id: bigint | number }>>`
+      SELECT id FROM api_message_copies
+      WHERE organization_id = ${message.organizationId} AND mailbox_id = ${mailbox.id}
+        AND direction IN ('inbound', 'internal')
+        AND ((message_id = ${message.id} AND received_at = ${message.receivedAt})
+             ${hash === null ? Prisma.empty : Prisma.sql`OR message_id_hash = ${hash}`})
+      LIMIT 1`;
+    if (also.length > 0) {
+      // The sender was also a recipient: its inbound/internal copy is the record.
+      tally(outcome, 'outbound_only');
+      return;
+    }
+    const status = STATUS_OF_OUTCOME[payload.outcome];
+    await tx.$executeRaw`
+      INSERT INTO api_message_copies
+        (received_at, public_id, organization_id, api_connection_id, mailbox_id, message_id, source,
+         seen_journal, seen_api, direction, message_id_hash, provider_delivered_at, delivered_basis,
+         status, verdict, risk_score, verdict_at, lag_ms, verdict_authority, created_at, updated_at)
+      VALUES (${message.receivedAt}, ${uuidv7(now.getTime())}, ${message.organizationId},
+              ${mailbox.apiConnectionId}, ${mailbox.id}, ${message.id}, 'journal', 1, 0, 'outbound',
+              ${hash}, NULL, NULL, ${status}, ${payload.verdict}, ${payload.riskScore},
+              ${new Date(payload.completedAt)}, NULL, 'copy', ${now}, ${now})
+      ON DUPLICATE KEY UPDATE seen_journal = 1, updated_at = VALUES(updated_at)`;
+    const rows = await tx.$queryRaw<
+      Array<{ id: bigint | number; organization_id: bigint | number; direction: string }>
+    >`
+      SELECT id, organization_id, direction FROM api_message_copies
+      WHERE message_id = ${message.id} AND received_at = ${message.receivedAt}
+        AND mailbox_id = ${mailbox.id}`;
+    const row = rows[0];
+    if (!row || big(row.organization_id) !== message.organizationId) {
+      throw new InconsistentReadError('api_message_copies');
+    }
+    if (row.direction !== 'outbound') {
+      tally(outcome, 'outbound_only');
+      return;
+    }
+    tally(outcome, 'outbound_detection');
+    count(outcome, mailbox.apiConnectionId, { outbound_detections: 1 });
+    outcome.outboundDetections += 1;
+    await this.applyPolicy(tx, {
+      message,
+      payload,
+      copies: [
+        {
+          key: { id: big(row.id), receivedAt: message.receivedAt },
+          mailbox,
+          direction: 'outbound',
+          authority: 'copy',
+          inline: null,
+          reportMailbox: false,
+        },
+      ],
+      policy,
+      copySource: 'journal',
+      now,
+      outcome,
+      correlationId,
+    });
+  }
+
+  /**
+   * A1: the message-level detect evaluation of a registry copy message — none when no recorded
+   * copy has copy authority outside a report mailbox (all-inline hybrid, report mailboxes);
+   * `not_applicable` for a parse failure; `disabled` by the platform switch or the organization
+   * setting; else `evaluateCopyRound` once (detect row inserted, or reused on a replay). A failed
+   * evaluation is counted, logged and never dead-letters the event. Plus the round's DLP facts.
+   */
+  private async messagePolicy(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    payload: MessageCopyScannedV1,
+    copies: ReadonlyArray<Pick<RecordedCopy, 'authority' | 'reportMailbox' | 'mailbox'>>,
+    now: Date,
+    outcome: Outcome,
+    settings?: ResolvedOrgSettings,
+  ): Promise<MessageEvaluation> {
+    const evaluable = copies.filter((c) => c.authority === 'copy' && !c.reportMailbox);
+    if (evaluable.length === 0) {
+      if (copies.some((c) => c.authority === 'inline')) {
+        outcome.policy = { result: 'inline', seconds: null };
+      }
+      return { state: null, result: null, dlp: null };
+    }
+    if (payload.outcome === 'parse_failed' || payload.scanId === null) {
+      outcome.policy = { result: 'not_applicable', seconds: null };
+      return { state: 'not_applicable', result: null, dlp: null };
+    }
+    const scanId = BigInt(payload.scanId);
+    const dlp = await loadCopyDlpFacts(tx, {
+      messageId: message.id,
+      receivedAt: message.receivedAt,
+      organizationId: message.organizationId,
+      scanId,
+    });
+    const resolved = settings ?? (await loadOrgSettings(tx, message.organizationId));
+    const evaluator = this.deps.policy;
+    if (!evaluator?.enabled || !resolved.policyEvaluationEnabled) {
+      outcome.policy = { result: 'disabled', seconds: null };
+      return { state: 'disabled', result: DISABLED_RESULT, dlp };
+    }
+    const result = await evaluator.evaluate(
+      tx,
+      {
+        messageId: message.id,
+        receivedAt: message.receivedAt,
+        organizationId: message.organizationId,
+        round: payload.lifecycleRound,
+        trigger: payload.outcome === 'scan_failed' ? 'scan_failed' : 'scanned',
+        scanId,
+      },
+      now,
+    );
+    const connectionId = evaluable[0]!.mailbox.apiConnectionId;
+    if (result.state === 'failed') {
+      count(outcome, connectionId, { policy_errors: 1 });
+      outcome.policy = { result: 'failed', seconds: null };
+      this.deps.logger.error(
+        {
+          messageId: payload.messagePublicId,
+          code: result.failureCode,
+          ingestSource: payload.ingestSource,
+        },
+        'detect policy evaluation of a copy message failed; the verdict lane decides alone',
+      );
+    } else {
+      if (result.fresh) count(outcome, connectionId, { policy_evaluations: 1 });
+      outcome.policy = { result: 'evaluated', seconds: result.durationSeconds };
+    }
+    return { state: result.state, result, dlp };
+  }
+
+  /**
+   * Step API-4 per recorded copy (A3): the policy columns (`policy_state`, `policy_disposition`,
+   * `policy_tagged`, `dlp_action`; written once — a copy whose state is already set is a replay)
+   * and the remediation decision with the copy's policy outcome (R9.1 recipient row →
+   * `policyOutcomeOf`) and scope; then the first-copy tracking (B8), the ALERT request (A7) and
+   * the detection event (A8) of the message. Report-mailbox copies are never decided.
+   */
+  private async applyPolicy(
+    tx: Prisma.TransactionClient,
+    input: {
+      message: CopyMessage;
+      payload: MessageCopyScannedV1;
+      copies: readonly RecordedCopy[];
+      policy: MessageEvaluation;
+      copySource: 'journal' | 'graph' | 'gmail';
+      now: Date;
+      outcome: Outcome;
+      correlationId: string;
+    },
+  ): Promise<void> {
+    const { message, payload, policy, now, outcome } = input;
+    const memo = newDecisionMemo();
+    const counted: CountedCopy[] = [];
+    let fresh = false;
+    for (const copy of input.copies) {
+      const state = copyPolicyStateOf({
+        reportMailbox: copy.reportMailbox,
+        authority: copy.authority,
+        messageState: policy.state,
+      });
+      let copyOutcome: PolicyOutcomeFacts | null = null;
+      if (state === 'evaluated' && policy.result) {
+        const rcptSeq =
+          copy.direction === 'outbound'
+            ? null
+            : await recipientSeqOf(tx, {
+                organizationId: message.organizationId,
+                messageId: message.id,
+                receivedAt: message.receivedAt,
+                mailboxId: copy.mailbox.id,
+              });
+        copyOutcome = policy.result.outcomeFor(rcptSeq);
+      }
+      const disposition =
+        state === 'inline' && copy.inline
+          ? await inlineDispositionOf(tx, message.organizationId, copy.inline)
+          : (copyOutcome?.disposition ?? null);
+      const dlpAction =
+        copy.authority === 'copy' && !copy.reportMailbox ? policy.dlp?.action : null;
+      const written = await tx.$executeRaw`
+        UPDATE api_message_copies
+        SET policy_state = ${state}, policy_disposition = ${disposition},
+            policy_tagged = ${copyOutcome?.tagged ?? false}, dlp_action = ${dlpAction ?? null},
+            updated_at = ${now}
+        WHERE id = ${copy.key.id} AND received_at = ${copy.key.receivedAt}
+          AND organization_id = ${message.organizationId} AND policy_state = 'none'`;
+      const copyFresh = written === 1;
+      fresh ||= copyFresh;
+      if (copy.reportMailbox) continue;
+      const decided = await this.decideRemediation(
+        tx,
+        message,
+        copy.key,
+        payload.scanId,
+        now,
+        outcome,
+        memo,
+        copyOutcome,
+      );
+      const scope = await this.copyScope(tx, message.organizationId, copy.mailbox.id, memo);
+      if (copy.direction !== 'outbound' && scope.inScope && scope.domainId !== null) {
+        await this.firstCopy(tx, message, scope.domainId, copy.key, payload, now, outcome);
+      }
+      if (copy.authority !== 'copy' || !scope.inScope) continue;
+      const mode = await domainMode(tx, message.organizationId, scope.domainId, memo);
+      counted.push({
+        publicId: decided.publicId,
+        direction: copy.direction,
+        domainMode: mode,
+        remediation: remediationOf(decided.result),
+        detection: copyDetectionOf({
+          verdict: payload.verdict,
+          policyOutcome: copyOutcome,
+          dlpAction: policy.dlp?.action ?? null,
+        }),
+      });
+    }
+    // Events only for a first processing of the copies (a manual replay writes nothing again).
+    if (!fresh || policy.state === null) return;
+    if (policy.result?.fresh && policy.result.alert) {
+      await this.requestPolicyAlert(tx, message, payload, policy.result, now, input.correlationId);
+    }
+    const detected = copyDetectedPayload({
+      message: {
+        id: message.id,
+        publicId: payload.messagePublicId,
+        receivedAt: message.receivedAt,
+        ingestSource: message.ingestSource === 'mailbox_api' ? 'mailbox_api' : 'journal_intake',
+      },
+      copySource: input.copySource,
+      verdict: payload.verdict,
+      riskScore: payload.riskScore,
+      policyState: policy.state,
+      messageOutcome: policy.result?.messageOutcome ?? null,
+      dlp: policy.dlp,
+      counted,
+      decidedAt: now,
+    });
+    if (!detected) return;
+    await tx.messageOutbox.create({
+      data: {
+        eventId: uuidv7(now.getTime()),
+        organizationId: message.organizationId,
+        eventType: EventTypes.MessageCopyDetected,
+        aggregateType: 'message',
+        aggregateId: payload.messagePublicId,
+        correlationId: input.correlationId.slice(0, 128),
+        payload: detected,
+      },
+      select: { id: true },
+    });
+    const first = input.copies.find((c) => !c.reportMailbox) ?? input.copies[0]!;
+    count(outcome, first.mailbox.apiConnectionId, { copy_detections: 1 });
+    const messageOutcome = policy.result?.messageOutcome ?? null;
+    const kinds = new Set<string>();
+    for (const c of counted) {
+      if (!c.detection.isDetection) continue;
+      for (const k of detectionKinds(c.detection, messageOutcome)) kinds.add(k);
+    }
+    outcome.detections.push({ kinds: [...kinds], direction: detectionDirection(counted) });
+  }
+
+  /** A7: one `mail.policy.notification_requested.v1` (`policy_alert`, detect) per message. */
+  private async requestPolicyAlert(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    payload: MessageCopyScannedV1,
+    result: MessagePolicyResult,
+    now: Date,
+    correlationId: string,
+  ): Promise<void> {
+    const alert = result.alert!;
+    const notification = policyNotificationRequestedV1.parse({
+      messageId: message.id.toString(),
+      receivedAt: message.receivedAt.toISOString(),
+      direction: alert.direction,
+      lifecycleRound: payload.lifecycleRound,
+      kind: 'policy_alert',
+      severity: alert.severity,
+      disposition: alert.disposition,
+      decisive: alert.decisive,
+      ruleRefs: alert.ruleRefs,
+      requestedAt: now.toISOString(),
+      evaluationMode: 'detect',
+    });
+    await tx.messageOutbox.create({
+      data: {
+        eventId: uuidv7(now.getTime()),
+        organizationId: message.organizationId,
+        eventType: EventTypes.PolicyNotificationRequested,
+        aggregateType: 'message',
+        aggregateId: message.id.toString(),
+        correlationId: correlationId.slice(0, 128),
+        payload: notification,
+      },
+      select: { id: true },
+    });
+  }
+
+  /** B6: the copy's mailbox scope (organization echo-checked). */
+  private async copyScope(
+    tx: Prisma.TransactionClient,
+    organizationId: bigint,
+    mailboxId: bigint,
+    memo: DecisionMemo,
+  ): Promise<{ domainId: bigint | null; inScope: boolean }> {
+    const mailbox = await tx.apiMailbox.findUnique({
+      where: { id: mailboxId },
+      select: { organizationId: true, domainId: true, scopeState: true, scopeSelected: true },
+    });
+    if (!mailbox || mailbox.organizationId !== organizationId) {
+      throw new InconsistentReadError('api_mailboxes');
+    }
+    return mailboxScope(tx, organizationId, mailbox, memo.scopeKinds);
+  }
+
+  /**
+   * B8: the domain's first in-scope copy (`api_mode_domain_settings.first_copy_*` when NULL;
+   * `INSERT … ON DUPLICATE KEY UPDATE` with COALESCE). An in-process memo per domain keeps the
+   * common path free of writes.
+   */
+  private async firstCopy(
+    tx: Prisma.TransactionClient,
+    message: CopyMessage,
+    domainId: bigint,
+    key: { id: bigint; receivedAt: Date },
+    payload: MessageCopyScannedV1,
+    now: Date,
+    outcome: Outcome,
+  ): Promise<void> {
+    if (this.firstCopyKnown.has(domainId.toString())) return;
+    if (outcome.firstCopyDomains.includes(domainId)) return;
+    const verdictAt = new Date(payload.completedAt);
+    await tx.$executeRaw`
+      INSERT INTO api_mode_domain_settings
+        (public_id, organization_id, domain_id, scope_kind, first_copy_id, first_copy_received_at,
+         first_copy_at, row_version, created_at, updated_at)
+      VALUES (${uuidv7(now.getTime())}, ${message.organizationId}, ${domainId}, 'all', ${key.id},
+              ${key.receivedAt}, ${verdictAt}, 1, ${now}, ${now})
+      ON DUPLICATE KEY UPDATE
+        first_copy_received_at =
+          IF(first_copy_id IS NULL, VALUES(first_copy_received_at), first_copy_received_at),
+        first_copy_at = IF(first_copy_id IS NULL, VALUES(first_copy_at), first_copy_at),
+        first_copy_id = COALESCE(first_copy_id, VALUES(first_copy_id))`;
+    outcome.firstCopyDomains.push(domainId);
   }
 
   /**
@@ -576,12 +1120,14 @@ export class CopiesHandler {
     now: Date,
     outcome: Outcome,
     memo: DecisionMemo,
-  ): Promise<void> {
-    if (!this.deps.decider) return;
+    policyOutcome: PolicyOutcomeFacts | null,
+  ): Promise<{ publicId: string; result: DecisionResult | null }> {
     const copy = await loadDecisionCopy(tx, { ...key, organizationId: message.organizationId });
     if (!copy) throw new Error('api_message_copies row not visible for the decision');
-    const result = await this.deps.decider.decide(tx, copy, scanId, now, memo);
-    if (result.kind === 'none' || result.kind === 'unchanged' || !result.inserted) return;
+    if (!this.deps.decider) return { publicId: copy.publicId, result: null };
+    const result = await this.deps.decider.decide(tx, copy, scanId, now, memo, policyOutcome);
+    const done = { publicId: copy.publicId, result };
+    if (result.kind === 'none' || result.kind === 'unchanged' || !result.inserted) return done;
     count(outcome, result.apiConnectionId, result.counters);
     if (result.kind !== 'pending') {
       outcome.remediations.push({
@@ -590,6 +1136,7 @@ export class CopiesHandler {
         result: result.kind,
       });
     }
+    return done;
   }
 
   /** C9.2: the `api_user_reports` row of a copy recorded in a report mailbox (same transaction). */
@@ -707,6 +1254,7 @@ export class CopiesHandler {
     message: CopyMessage,
     payload: MessageCopyScannedV1,
     outcome: Outcome,
+    correlationId: string,
   ): Promise<void> {
     const copies = await tx.apiMessageCopy.findMany({
       where: {
@@ -721,6 +1269,7 @@ export class CopiesHandler {
         mailboxId: true,
         source: true,
         providerDeliveredAt: true,
+        direction: true,
       },
     });
     if (copies.length === 0) {
@@ -732,9 +1281,11 @@ export class CopiesHandler {
     const now = this.deps.now();
     const verdictAt = new Date(payload.completedAt);
     const status = STATUS_OF_OUTCOME[payload.outcome];
-    const memo = newDecisionMemo();
+    const recorded: RecordedCopy[] = [];
+    let copySource: 'journal' | 'graph' | 'gmail' = 'graph';
     for (const copy of copies) {
       outcome.source = copy.source;
+      copySource = copy.source;
       const inline = await this.feedInlineLink(tx, message, copy.mailboxId);
       const { verdict, authority } = storedVerdict(payload.verdict, inline);
       const lag = lagOf(payload.outcome, copy.providerDeliveredAt, verdictAt);
@@ -757,13 +1308,31 @@ export class CopiesHandler {
         organizationId: message.organizationId,
         apiConnectionId: copy.apiConnectionId,
       };
-      if (await this.isReportMailbox(mailbox, tx)) {
+      const reportMailbox = await this.isReportMailbox(mailbox, tx);
+      if (reportMailbox) {
         // C9.2: feed copies of a report mailbox become reports too (never decided).
         await this.intakeReport(tx, message, mailbox, copy, now, outcome);
-      } else {
-        await this.decideRemediation(tx, message, copy, payload.scanId, now, outcome, memo);
       }
+      recorded.push({
+        key: { id: copy.id, receivedAt: copy.receivedAt },
+        mailbox,
+        direction: copy.direction,
+        authority,
+        inline,
+        reportMailbox,
+      });
     }
+    const policy = await this.messagePolicy(tx, message, payload, recorded, now, outcome);
+    await this.applyPolicy(tx, {
+      message,
+      payload,
+      copies: recorded,
+      policy,
+      copySource,
+      now,
+      outcome,
+      correlationId,
+    });
   }
 
   /** The hybrid inline link of a feed copy (the mailbox's domain effective `hybrid`). */
@@ -805,6 +1374,24 @@ export class CopiesHandler {
       windowHours: this.deps.config.hybridLinkWindowHours,
     });
   }
+}
+
+/** The message-level evaluation and the round's DLP facts (state null: nothing to evaluate). */
+interface MessageEvaluation {
+  state: MessagePolicyState | null;
+  result: MessagePolicyResult | null;
+  dlp: CopyDlpFacts | null;
+}
+
+/** A8.2 `copies.remediation` bucket of a decision. */
+function remediationOf(result: DecisionResult | null): CountedCopy['remediation'] {
+  if (
+    result &&
+    (result.kind === 'pending' || result.kind === 'simulated' || result.kind === 'skipped')
+  ) {
+    return result.kind;
+  }
+  return 'none';
 }
 
 interface CopyWrite {

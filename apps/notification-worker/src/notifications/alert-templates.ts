@@ -24,7 +24,15 @@ import { type RenderedNotice, safeText } from './templates';
  * action, eligible mailbox and copy counts, approval reasons, approval state and expiry and
  * `/api-mode?tab=purge&clawback=<id>`; API-mode report received (step API-3 C13) → the counts of
  * reports waiting for triage, in review and received in the window, the oldest waiting time and
- * `/api-mode?tab=reports` (never a reporter address, subject or sender).
+ * `/api-mode?tab=reports` (never a reporter address, subject or sender). Step API-4 (A7, A9.2,
+ * B7, ADR-0106): a threat of an API-mode copy (`ingest_source <> 'gateway'`) is rendered as
+ * detected after delivery (API mode) with the protection mode and
+ * `/api-mode?tab=detections&message=<id>` instead of the message explorer (copies are `404`
+ * there); DLP detected → the DLP action, direction, category codes, protection mode, mailbox
+ * count and the same detections link (never a matched value); API-mode detect-only period ended
+ * → the remediation policy's scope (organization or the tenant's domain name), whether it was a
+ * reminder or the automatic switch to enforce, the policy mode now, the count of simulated
+ * actions of the scope read at send time and `/api-mode?tab=remediation`.
  *
  * **Never** a subject, a body, a sender or recipient address, a URL found in mail, a file name,
  * an endpoint URL or a secret. Free text from the database (organization and subscription names)
@@ -45,6 +53,9 @@ interface AlertCommonFacts {
   portalUrl: string;
 }
 
+/** Protection mode of an API-mode detection (step API-4 A8.2). */
+export type DetectionProtectionMode = 'api' | 'hybrid';
+
 export interface ThreatAlertFacts extends AlertCommonFacts {
   kind: 'threat_detected';
   threat: {
@@ -52,6 +63,46 @@ export interface ThreatAlertFacts extends AlertCommonFacts {
     stage: 'scan' | 'sandbox';
     messagePublicId: string;
     receivedAt: string;
+    /**
+     * Step API-4 A9.2: set when the message is an API-mode copy (`ingest_source <> 'gateway'`,
+     * public type `mailbox.threat.detected`): detected after delivery; null for a gateway message.
+     */
+    copy: { protectionMode: DetectionProtectionMode; mailboxCount: number } | null;
+  };
+}
+
+export interface DlpAlertFacts extends AlertCommonFacts {
+  kind: 'dlp_detected';
+  dlp: {
+    /** `alert`, `require_approval`, `quarantine`, `block`. */
+    action: string;
+    direction: string;
+    /** DLP category codes (≤ 8); never a matched value. */
+    categories: string[];
+    protectionMode: DetectionProtectionMode;
+    mailboxCount: number;
+    messagePublicId: string;
+    receivedAt: string;
+  };
+}
+
+export interface DetectOnlyEndedAlertFacts extends AlertCommonFacts {
+  kind: 'api_mode_detect_only_ended';
+  policy: {
+    /** `api_remediation_policies.public_id`. */
+    remediationPolicyPublicId: string;
+    /** The organization policy (null) or the overridden domain's name. */
+    domainName: string | null;
+    /** What happened at the end of the period (B7). */
+    then: 'remind' | 'enforce';
+    /** `api_remediation_policies.mode` when the alert is sent. */
+    modeNow: string;
+    /** When the period ended (`detect_only_until`, else `detect_only_notified_at`). */
+    endedAt: string | null;
+    /** Simulated remediation actions of the policy's scope since `simulatedSince` (capped). */
+    simulated: number;
+    simulatedCapped: boolean;
+    simulatedSince: string;
   };
 }
 
@@ -169,22 +220,26 @@ export type AlertFacts =
   | JournalIntakeAlertFacts
   | ApiModeAlertFacts
   | PurgeApprovalAlertFacts
-  | ReportReceivedAlertFacts;
+  | ReportReceivedAlertFacts
+  | DlpAlertFacts
+  | DetectOnlyEndedAlertFacts;
 
 /**
  * Alert kinds this worker renders: the `@email-gateway/webhooks` kinds plus the step 8.6
  * `journal_intake_silent` (requested by the archive-worker's intake health loop), the step
  * API-1 `api_mode_unhealthy` (requested by the mailbox-worker's health role) and the step API-3
  * `api_mode_purge_approval` (api submit, mailbox-worker `clawback` role) and
- * `api_mode_report_received` (mailbox-worker `reports` role); the event contract carries them,
- * the shared webhooks vocabulary does not yet.
+ * `api_mode_report_received` (mailbox-worker `reports` role) and the step API-4
+ * `api_mode_detect_only_ended` (mailbox-worker health leader, B7); the event contract carries
+ * them, the shared webhooks vocabulary does not (`dlp_detected` is an `AlertKind` since API-4).
  */
 export type SecurityAlertKind =
   | AlertKind
   | 'journal_intake_silent'
   | 'api_mode_unhealthy'
   | 'api_mode_purge_approval'
-  | 'api_mode_report_received';
+  | 'api_mode_report_received'
+  | 'api_mode_detect_only_ended';
 
 /**
  * Titles of the `api-mode-health/1` check codes (step API-1 D11.3; the codes of
@@ -215,6 +270,8 @@ const KIND_TITLE: Readonly<Record<SecurityAlertKind, string>> = {
   api_mode_unhealthy: 'API-mode protection connection degraded or failing',
   api_mode_purge_approval: 'API-mode clawback needs a second approver',
   api_mode_report_received: 'API-mode user reports waiting for triage',
+  dlp_detected: 'Sensitive data detected (DLP, API mode)',
+  api_mode_detect_only_ended: 'API-mode detect-only period ended',
 };
 
 const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
@@ -226,7 +283,33 @@ const KIND_SUBJECT: Readonly<Record<SecurityAlertKind, string>> = {
   api_mode_unhealthy: 'API-mode protection needs attention',
   api_mode_purge_approval: 'clawback approval requested',
   api_mode_report_received: 'reported messages need triage',
+  dlp_detected: 'sensitive data detected',
+  api_mode_detect_only_ended: 'detect-only period ended',
 };
+
+/** Display text of the protection modes of API-mode detections (step API-4 A8.2). */
+const PROTECTION_MODE_TEXT: Readonly<Record<DetectionProtectionMode, string>> = {
+  api: 'API mode (after delivery, through the mailbox API)',
+  hybrid: 'Hybrid (gateway and API mode)',
+};
+
+/** Display text of the DLP actions of a detection (step API-4 A9.1). */
+const DLP_ACTION_TEXT: Readonly<Record<string, string>> = {
+  alert: 'alert only',
+  require_approval: 'require approval',
+  quarantine: 'quarantine',
+  block: 'block',
+};
+
+const DIRECTION_TEXT: Readonly<Record<string, string>> = {
+  inbound: 'inbound',
+  outbound: 'outbound',
+  internal: 'internal',
+};
+
+/** `/api-mode?tab=detections&message=<id>` (copies are 404 in the message explorer, N1). */
+const detectionsLink = (portalUrl: string, messagePublicId: string): string =>
+  `${portalUrl}/api-mode?tab=detections&message=${messagePublicId}`;
 
 /** Display text of the clawback triggers (step API-3 C2). */
 const CLAWBACK_TRIGGER_NAMES: Readonly<Record<string, string>> = {
@@ -324,14 +407,71 @@ function header(facts: AlertFacts): string[] {
 function body(facts: AlertFacts): string[] {
   switch (facts.kind) {
     case 'threat_detected': {
-      const id = publicId(facts.threat.messagePublicId);
+      const t = facts.threat;
+      const id = publicId(t.messagePublicId);
+      if (t.copy !== null) {
+        // Step API-4 A9.2: a copy of a delivered message (API mode): never the explorer link.
+        return [
+          `Verdict: ${code(t.verdict)}`,
+          `Detection stage: after delivery (API mode)${t.stage === 'sandbox' ? ', sandbox' : ''}`,
+          `Protection mode: ${PROTECTION_MODE_TEXT[t.copy.protectionMode] ?? 'unknown'}`,
+          `Mailboxes with a copy: ${String(t.copy.mailboxCount)}`,
+          `First message of the window: ${id || 'unknown'}`,
+          `Received: ${instant(t.receivedAt)}`,
+          '',
+          'The message was already delivered; remediation follows the API-mode remediation policy.',
+          ...(id ? [`Details: ${detectionsLink(facts.portalUrl, id)}`] : []),
+        ];
+      }
       return [
-        `Verdict: ${code(facts.threat.verdict)}`,
-        `Detection stage: ${facts.threat.stage === 'sandbox' ? 'sandbox (after delivery)' : 'scan'}`,
+        `Verdict: ${code(t.verdict)}`,
+        `Detection stage: ${t.stage === 'sandbox' ? 'sandbox (after delivery)' : 'scan'}`,
         `First message of the window: ${id || 'unknown'}`,
-        `Received: ${instant(facts.threat.receivedAt)}`,
+        `Received: ${instant(t.receivedAt)}`,
         '',
         ...(id ? [`Details: ${facts.portalUrl}/messages/${id}`] : []),
+      ];
+    }
+    case 'dlp_detected': {
+      const d = facts.dlp;
+      const id = publicId(d.messagePublicId);
+      const outbound = d.direction === 'outbound';
+      return [
+        `DLP action: ${DLP_ACTION_TEXT[d.action] ?? 'unknown'}`,
+        `Direction: ${DIRECTION_TEXT[d.direction] ?? 'unknown'}`,
+        `DLP categories: ${list(d.categories.slice(0, 8))}`,
+        `Protection mode: ${PROTECTION_MODE_TEXT[d.protectionMode] ?? 'unknown'}`,
+        `Mailboxes with a copy: ${String(d.mailboxCount)}`,
+        `First message of the window: ${id || 'unknown'}`,
+        `Received: ${instant(d.receivedAt)}`,
+        '',
+        outbound
+          ? 'The message was already sent: outbound detections are recorded, never removed from a mailbox.'
+          : 'The message was already delivered; remediation follows the API-mode remediation policy.',
+        ...(id ? [`Details: ${detectionsLink(facts.portalUrl, id)}`] : []),
+      ];
+    }
+    case 'api_mode_detect_only_ended': {
+      const p = facts.policy;
+      const scope =
+        p.domainName === null
+          ? 'organization policy'
+          : `domain ${domainName(p.domainName) || '(name not shown)'}`;
+      return [
+        `Remediation policy: ${scope} (${publicId(p.remediationPolicyPublicId) || 'unknown'})`,
+        `Detect-only period ended: ${instant(p.endedAt)}`,
+        p.then === 'enforce'
+          ? 'What happened: the policy was switched to enforce automatically; detections are now remediated in mailboxes.'
+          : 'What happened: reminder only. The policy is still detect-only: detections are recorded but nothing is removed from mailboxes.',
+        `Policy mode now: ${code(p.modeNow)}`,
+        `Actions that would have been taken (simulated) since ${instant(p.simulatedSince)}: ${
+          p.simulatedCapped ? `${String(p.simulated)} or more` : String(p.simulated)
+        }`,
+        '',
+        p.then === 'enforce'
+          ? 'Review the simulated actions and the remediation policy.'
+          : 'Review the simulated actions, then switch the policy to enforce or extend the period.',
+        `Review: ${facts.portalUrl}/api-mode?tab=remediation`,
       ];
     }
     case 'domain_dns_failed': {

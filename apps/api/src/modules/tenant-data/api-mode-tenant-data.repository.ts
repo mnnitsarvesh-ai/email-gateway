@@ -20,7 +20,10 @@ import type { TenantScope } from '../../auth-contracts/tenant-scope';
  * clawback; deleted first so each statement stays short), the clawbacks and the user reports
  * (they reference the API-mode connections and the report mailboxes with RESTRICT) go before the
  * remediation actions, mailboxes and connections; the organization's API-mode settings
- * (`api_mode_org_settings`, FK to organizations RESTRICT) go before the organization.
+ * (`api_mode_org_settings`, FK to organizations RESTRICT) go before the organization. Step API-4
+ * §3.3 (docs/plan/steps/38-api-mode-parity-onboarding.md): the per-domain onboarding and scope
+ * rows (`api_mode_domain_settings`, FK to organizations RESTRICT, to domains CASCADE) go with the
+ * settings, before the domains; detect rows of `policy_execution_logs` go with the policy purge.
  */
 export const API_MODE_PURGE_ORDER = [
   'api_clawback_targets',
@@ -29,6 +32,7 @@ export const API_MODE_PURGE_ORDER = [
   'api_remediation_actions',
   'api_remediation_policies',
   'api_mode_org_settings',
+  'api_mode_domain_settings',
   'api_message_copies',
   'api_copy_dedupe_keys',
   'api_mailbox_addresses',
@@ -104,6 +108,10 @@ export class ApiModeTenantDataRepository {
         // Primary key organization_id; FK to organizations (RESTRICT).
         return this.prisma.$executeRaw`DELETE FROM api_mode_org_settings
           WHERE organization_id = ${organizationId} ORDER BY organization_id LIMIT ${batch}`;
+      case 'api_mode_domain_settings':
+        // Index (organization_id); FKs to organizations (RESTRICT) and domains (CASCADE).
+        return this.prisma.$executeRaw`DELETE FROM api_mode_domain_settings
+          WHERE organization_id = ${organizationId} ORDER BY id LIMIT ${batch}`;
       case 'api_message_copies':
         // Index (organization_id, received_at, id); partitioned by received_at, no FK.
         return this.prisma.$executeRaw`DELETE FROM api_message_copies

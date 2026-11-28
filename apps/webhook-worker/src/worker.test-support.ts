@@ -12,6 +12,11 @@ export const ORG_ID = 42n;
 export const ORG_PUBLIC_ID = '0192f0c4-7d1e-7b6a-9c55-6f3e2a1d4b10';
 export const MESSAGE_PUBLIC_ID = '0193a1b2-0000-7000-8000-00000000aaaa';
 export const DOMAIN_PUBLIC_ID = '01890a5d-ac96-774b-bcce-b302099a8057';
+/** Public ids of API-mode copies (step API-4 detections). */
+export const COPY_PUBLIC_IDS = [
+  '0193b2c3-1a2b-7c3d-8e4f-5a6b7c8d9e01',
+  '0193b2c3-1a2b-7c3d-8e4f-5a6b7c8d9e02',
+] as const;
 
 export const silentLogger: Logger = createLogger({
   service: 'webhook-worker-test',
@@ -61,6 +66,7 @@ export function messageFacts(overrides: Partial<MessageFacts> = {}): MessageFact
     sizeBytes: 2048,
     attachmentCount: 1,
     lifecycleRound: 0,
+    ingestSource: 'gateway',
     ...overrides,
   };
 }
@@ -127,6 +133,16 @@ export function fakeFacts(overrides: Partial<FactsSource> = {}): FactsSource & {
     domain: (_org, id, publicId) =>
       Promise.resolve({ id, publicId, name: 'acme.example', status: 'active' }),
     atoAccountKind: () => Promise.resolve('mailbox' as const),
+    riskReasonCodes: () => Promise.resolve(['phishing.known_bad_url', 'auth.dmarc_fail']),
+    copyDetections: () =>
+      Promise.resolve({
+        protectionMode: 'api' as const,
+        direction: 'inbound' as const,
+        copySource: 'journal' as const,
+        policyDisposition: 'quarantine' as const,
+        mailboxCount: 2,
+        detectionIds: [COPY_PUBLIC_IDS[0], COPY_PUBLIC_IDS[1]],
+      }),
   };
   const merged = { ...base, ...overrides };
   return {
@@ -140,6 +156,8 @@ export function fakeFacts(overrides: Partial<FactsSource> = {}): FactsSource & {
     sandboxSubmission: track('sandboxSubmission', merged.sandboxSubmission),
     domain: track('domain', merged.domain),
     atoAccountKind: track('atoAccountKind', merged.atoAccountKind),
+    riskReasonCodes: track('riskReasonCodes', merged.riskReasonCodes),
+    copyDetections: track('copyDetections', merged.copyDetections),
   };
 }
 

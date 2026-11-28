@@ -11,6 +11,7 @@ import {
   Globe,
   History,
   KeyRound,
+  Layers,
   LayoutDashboard,
   Link2,
   Mail,
@@ -221,6 +222,15 @@ export const NAVIGATION: readonly NavSection[] = [
         href: '/api-mode',
         icon: MailCheck,
         gate: ['ApiModeController_overview_v1'],
+      },
+      {
+        // Step API-4 (A10, API4-15): what Inline, API and Hybrid cover and each domain's gaps.
+        id: 'protection-by-mode',
+        profiles: GATEWAY_ONLY,
+        label: 'Protection by mode',
+        href: '/protection-by-mode',
+        icon: Layers,
+        gate: ['ApiModeOnboardingController_protectionCoverage_v1'],
       },
     ],
   },

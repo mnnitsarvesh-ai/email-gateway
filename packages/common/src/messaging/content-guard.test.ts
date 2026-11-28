@@ -28,8 +28,10 @@ function refusal(value: unknown): { code: ContentGuardCode; path: string } {
 describe('assertMetadataOnly: valid envelopes pass', () => {
   const types = Object.keys(EVENT_REGISTRY) as RegisteredEventType[];
 
-  it('covers all forty-three registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2, eleven by step 8.4, one by step 8.2, one by step AI-R, one by step AI-6, one by step API-1, two by step API-3)', () => {
-    expect(types).toHaveLength(43);
+  it('covers all forty-four registered event types (two added by step 3.3, one by step 4.2, three by step 4.3, one by step 4.4, one by step 4.5, three by step 4.6, two by step 5.2, two by step 5.3, two by step 6.2, eleven by step 8.4, one by step 8.2, one by step AI-R, one by step AI-6, one by step API-1, two by step API-3, one by step API-4)', () => {
+    expect(types).toHaveLength(44);
+    // Step API-4 A8: API-mode copy detections (ids, codes, enums, counts and times only).
+    expect(types).toContain('mail.message.copy_detected.v1');
     // Step API-3 C2.1, C12: late verdicts (ids, verdict, level, hashes) and reporter feedback
     // (report id, kind and time only).
     expect(types).toContain('mail.threat.late_signal.v1');

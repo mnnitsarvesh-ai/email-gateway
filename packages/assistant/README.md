@@ -204,8 +204,21 @@ new reads (clawbacks list, detail, targets; reports list, detail; report mailbox
 `untrustedFields` (target senders and subjects, report originals' senders and subject keys, analyst notes, reasons,
 mailbox and reporter addresses). The AI report gains the section `api_mode` ("Mailbox protection (API mode)", source
 `api_mode_overview`, no window arguments; skipped with a note without `remediation:read` or without an API-mode
-connection). Phase `AI-6` and the prompt `assistant-system/7` are unchanged. Totals: **483 operations, 393 operation
-tools (all enabled) + 2 native = 395 enabled tools (207 reads, 188 writes), 90 not applicable, `MISSING` 0**.
+connection). Phase `AI-6` and the prompt `assistant-system/7` are unchanged. Totals after API-3: 483 operations, 393
+operation tools (all enabled) + 2 native = 395 enabled tools (207 reads, 188 writes), 90 not applicable, `MISSING` 0.
+
+Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md B10): the three onboarding reads
+`api_mode_onboarding_protection_coverage` (protection by mode; domain names untrusted), `api_mode_onboarding_domain_onboarding`
+and `api_mode_onboarding_get_scope` (department names untrusted) are enabled read tools of the sweep suite; the mailbox
+scope put `api_mode_onboarding_put_scope` is a confirmed write, risk `high` (narrowing the scope removes protection;
+password + TOTP), and the ownership check through the bound provider tenant `domains_provider_ownership_check` a confirmed
+write, risk `low` (it can only prove ownership the bound tenant already shows), both tested in
+`apps/api/integration/assistant-writes-api-mode.test.ts` with their specs and impact templates (the remediation-policy
+cards also show `policyMapping` and the detect-only period). The protection-mode writes stay portal only with the
+reason "API-mode protection mode: portal only (MX conflict checks and the add-domain wizard)" (PO-D1 is decided). The
+`api_mode` report section adds "Policy evaluations (24 h)" and "Outbound detections (24 h)" when the overview carries
+them. Phase `AI-6` and the prompt `assistant-system/7` are unchanged. Totals: **488 operations, 398 operation tools (all
+enabled) + 2 native = 400 enabled tools (210 reads, 190 writes), 90 not applicable, `MISSING` 0**.
 
 ## Meta tools
 

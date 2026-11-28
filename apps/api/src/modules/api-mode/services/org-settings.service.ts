@@ -45,7 +45,7 @@ import { parseBody } from './protection-mode.service';
 
 type Tx = Prisma.TransactionClient;
 
-/** The eight settings of C14 #19, in their stable order. */
+/** The eight settings of C14 #19 and the two of step API-4 (A12), in their stable order. */
 export const ORG_SETTING_KEYS = [
   'internalMailEnabled',
   'autoClawback',
@@ -55,6 +55,8 @@ export const ORG_SETTING_KEYS = [
   'tiMinConfidence',
   'reportAckEnabled',
   'reportFeedbackEnabled',
+  'policyEvaluationEnabled',
+  'outboundDetectionEnabled',
 ] as const;
 type SettingKey = (typeof ORG_SETTING_KEYS)[number];
 
@@ -200,6 +202,10 @@ export class OrgSettingsService {
             tiMinConfidence: body.tiMinConfidence,
             reportAckEnabled: body.reportAckEnabled,
             reportFeedbackEnabled: body.reportFeedbackEnabled,
+            // Step API-4 (A12): absent = keep the current effective value (API-3 bodies).
+            policyEvaluationEnabled: body.policyEvaluationEnabled ?? before.policyEvaluationEnabled,
+            outboundDetectionEnabled:
+              body.outboundDetectionEnabled ?? before.outboundDetectionEnabled,
             updatedByUserId: principal.kind === 'user' ? principal.userId : null,
             purgeApprovalRaisedBy: raise.raisedBy,
             purgeApprovalBeforeRaise: raise.beforeRaise,
@@ -212,7 +218,10 @@ export class OrgSettingsService {
           }
           const after = await this.repository.orgSettings(scope, tx);
           if (after === null) throw settingsConflict(null);
-          const changed: SettingKey[] = ORG_SETTING_KEYS.filter((k) => before[k] !== after[k]);
+          const resolvedAfter = effectiveSettings(after);
+          const changed: SettingKey[] = ORG_SETTING_KEYS.filter(
+            (k) => before[k] !== resolvedAfter[k],
+          );
           const pick = (s: Record<SettingKey, unknown>) =>
             Object.fromEntries(changed.map((k) => [k, s[k]]));
           await this.audit.record(
@@ -226,7 +235,7 @@ export class OrgSettingsService {
               metadata: {
                 changed,
                 from: pick(before),
-                to: pick(after),
+                to: pick(resolvedAfter),
                 created: current === null,
                 rowVersion: after.rowVersion,
                 reason: body.reason,

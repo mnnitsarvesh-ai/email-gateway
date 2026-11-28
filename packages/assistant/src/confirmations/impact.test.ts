@@ -310,6 +310,8 @@ const AI3_READS: Record<string, unknown> = {
     dkimKeys: [
       { selector: 'eg2026a', algorithm: 'rsa_2048', status: 'active', host: 'eg2026a._domainkey' },
     ],
+    // Step API-4 (B3): the ownership block of the detail view.
+    ownership: { method: null, providerCheck: null, providerCheckAvailable: true },
   },
   domain_dns_status: {
     domainId: DOMAIN,
@@ -1595,6 +1597,35 @@ const API3_ARGS: Record<string, Record<string, unknown>> = {
 };
 Object.assign(ARGS, API3_ARGS);
 
+/** Step API-4 (design note 38 B10): the mailbox scope read and the two new writes. */
+Object.assign(READS, {
+  api_mode_onboarding_get_scope: {
+    domainId: DOMAIN,
+    kind: 'all',
+    departments: [],
+    selectedMailboxes: 0,
+    inScope: 250,
+    excluded: 0,
+    recomputePending: false,
+    rowVersion: 3,
+    updatedAt: '2026-11-27T09:00:00.000Z',
+  },
+});
+Object.assign(ARGS, {
+  ApiModeOnboardingController_putScope_v1: {
+    domainId: DOMAIN,
+    body: {
+      scope: { kind: 'departments', departmentIds: [ID(91), ID(92)] },
+      reason: 'Pilot with finance and legal first',
+      expectedRowVersion: 3,
+    },
+  },
+  DomainsController_providerOwnershipCheck_v1: {
+    domainId: DOMAIN,
+    body: { connectionId: ID(93) },
+  },
+});
+
 const toolOf = (operationId: string) => findOperation(operationId) as OperationTool;
 
 /** What the executor does (D1): snapshot, CAS injection, items; then the summary. */
@@ -1644,7 +1675,7 @@ describe('impact templates (D5)', () => {
       CONFIRMATION_SPECS.map((s) => s.operationId).sort(),
     );
     expect(Object.keys(ARGS).sort()).toEqual(Object.keys(IMPACT_TEMPLATES).sort());
-    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(188);
+    expect(Object.keys(IMPACT_TEMPLATES)).toHaveLength(190);
     expect(hasImpactTemplate('LegalHoldsController_release_v1')).toBe(false);
   });
 

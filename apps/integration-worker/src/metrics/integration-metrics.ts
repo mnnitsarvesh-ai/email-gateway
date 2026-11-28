@@ -33,6 +33,12 @@ export class IntegrationMetrics {
   readonly credentialsReencrypted: Counter<'result'>;
   /** 1 while this replica holds the maintenance leader lock. */
   readonly leader: Gauge<'job'>;
+  /**
+   * Step API-4 B3.3: provider ownership checks of `provider_tenant` verifications; provider =
+   * microsoft_365 | google_workspace | unknown (connection not found), result = verified |
+   * unverified | absent | alias | error.
+   */
+  readonly ownershipChecks: Counter<'provider' | 'result'>;
 
   constructor(metrics: MetricsService) {
     this.tokenRequests = metrics.counter(
@@ -108,6 +114,11 @@ export class IntegrationMetrics {
       'integration_worker_leader',
       '1 while this replica holds the named leader lock',
       ['job'],
+    );
+    this.ownershipChecks = metrics.counter(
+      'provider_ownership_checks_total',
+      'Domain ownership checks through a bound provider tenant (step API-4 B3), by provider and result (verified, unverified, absent, alias, error)',
+      ['provider', 'result'],
     );
   }
 }

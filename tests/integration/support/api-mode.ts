@@ -213,6 +213,9 @@ export function simGoogleCustomer(
  * the suite is caused by a change notification, never by the safety poll.
  */
 export const MAILBOX_WORKER_SUITE_ENV: Record<string, string> = {
+  // Step API-4 (ADR-0105): tenant policy evaluation of copies stays on (the product default) for
+  // the API-1..API-3 stack suites too. A platform-default disposition that only restates the risk
+  // recommendation feeds no policy lane (note 38 §15.8), so their verdict-rule decisions hold.
   API_MODE_HEALTH_INTERVAL_MS: '3000',
   API_MODE_COUNTER_FLUSH_SECONDS: '2',
   API_MODE_FEED_TICK_MS: '1000',

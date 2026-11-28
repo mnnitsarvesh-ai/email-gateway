@@ -1,4 +1,5 @@
 import {
+  DLP_ALERT_MIN_SEVERITIES,
   NOTIFICATION_SETTINGS_BOUNDS,
   NOTIFICATION_SETTINGS_DEFAULTS,
   notificationPreferencesSchema,
@@ -40,6 +41,16 @@ const resolvedSchema = z.object({
     }),
     domainDnsFailed: z.object({ enabled: z.boolean(), throttleMinutes: z.number().int() }),
     webhookDisabled: z.object({ enabled: z.boolean(), throttleMinutes: z.number().int() }),
+    dlpDetected: z
+      .object({
+        enabled: z.boolean(),
+        minSeverity: z.enum(DLP_ALERT_MIN_SEVERITIES),
+        throttleMinutes: z.number().int(),
+      })
+      .describe(
+        'Step API-4: DLP detections of API-mode copies (to `dlp:read` holders; `block`/' +
+          '`quarantine` high, `require_approval` medium, `alert` low)',
+      ),
     includeOrganizationContact: z.boolean(),
   }),
 });
@@ -64,6 +75,7 @@ export const SettingsResponseSchema = z.object({
     threatDetected: throttleBounds,
     domainDnsFailed: throttleBounds,
     webhookDisabled: throttleBounds,
+    dlpDetected: throttleBounds,
   }),
 });
 export type SettingsResponse = z.output<typeof SettingsResponseSchema>;
@@ -71,8 +83,9 @@ export type SettingsResponse = z.output<typeof SettingsResponseSchema>;
 export const PreferencesBodySchema = z.strictObject({
   optOut: notificationPreferencesSchema.shape.optOut.describe(
     'Kinds you do not want to receive (unique): `threat_detected`, `domain_dns_failed`, ' +
-      '`webhook_disabled`, `policy_alert`, `quarantine_admin_alert`, ' +
-      '`quarantine_approval_requested`',
+      '`webhook_disabled`, `integration_unhealthy`, `policy_alert`, `quarantine_admin_alert`, ' +
+      '`quarantine_approval_requested`, `ato_incident`, `ato_approval_requested`, ' +
+      '`ato_digest`, `ato_provider_health`, `dlp_detected` (step API-4)',
   ),
   quarantineDigestOptOut: z
     .boolean()
@@ -104,6 +117,7 @@ export const NOTIFICATION_EXAMPLES = {
       alerts: {
         threatDetected: { minSeverity: 'medium', throttleMinutes: 30 },
         domainDnsFailed: { throttleMinutes: 720 },
+        dlpDetected: { minSeverity: 'high', throttleMinutes: 120 },
       },
     },
     expectedRowVersion: 0,
@@ -114,12 +128,14 @@ export const NOTIFICATION_EXAMPLES = {
         ...defaults.alerts,
         threatDetected: { enabled: true, minSeverity: 'medium', throttleMinutes: 30 },
         domainDnsFailed: { enabled: true, throttleMinutes: 720 },
+        dlpDetected: { enabled: true, minSeverity: 'high', throttleMinutes: 120 },
       },
     },
     stored: {
       alerts: {
         threatDetected: { minSeverity: 'medium', throttleMinutes: 30 },
         domainDnsFailed: { throttleMinutes: 720 },
+        dlpDetected: { minSeverity: 'high', throttleMinutes: 120 },
       },
     },
     invalidStored: false,
@@ -128,9 +144,12 @@ export const NOTIFICATION_EXAMPLES = {
     defaults,
     bounds: JSON.parse(JSON.stringify(NOTIFICATION_SETTINGS_BOUNDS)) as unknown,
   },
-  preferencesUpdate: { optOut: ['domain_dns_failed'], quarantineDigestOptOut: false },
+  preferencesUpdate: {
+    optOut: ['domain_dns_failed', 'dlp_detected'],
+    quarantineDigestOptOut: false,
+  },
   preferences: {
-    optOut: ['domain_dns_failed'],
+    optOut: ['domain_dns_failed', 'dlp_detected'],
     quarantineDigestOptOut: false,
     quarantineDigestOptOutAllowed: true,
     kinds: [...PREFERENCE_KINDS],

@@ -23,6 +23,12 @@ export interface NoticeFacts {
   /** Sender notice only. */
   internetMessageId?: string | null;
   recipientCount?: number;
+  /**
+   * Step API-4 A7: set for the detect evaluation of an API-mode copy (`evaluationMode =
+   * 'detect'`): detected after delivery; the counted mailboxes and protection mode read at send
+   * time.
+   */
+  detect?: { protectionMode: 'api' | 'hybrid'; mailboxCount: number };
 }
 
 export interface RenderedNotice {
@@ -76,8 +82,29 @@ function decisiveLine(facts: NoticeFacts): string {
 
 const link = (facts: NoticeFacts) => `${facts.portalUrl}/messages/${facts.messagePublicId}`;
 
+/** Step API-4 A7: copies are `404` in the explorer; their detections live on `/api-mode`. */
+const detectLink = (facts: NoticeFacts) =>
+  `${facts.portalUrl}/api-mode?tab=detections&message=${facts.messagePublicId}`;
+
+const PROTECTION_MODE_TEXT: Readonly<Record<'api' | 'hybrid', string>> = {
+  api: 'API mode (after delivery, through the mailbox API)',
+  hybrid: 'Hybrid (gateway and API mode)',
+};
+
+/**
+ * Step API-4 A7: the disposition of a detect evaluation describes what the tenant policy decided
+ * for a message that was already delivered; the mailbox action follows the remediation policy.
+ */
+const DETECT_DISPOSITION_TEXT: Readonly<Record<NoticeFacts['disposition'], string>> = {
+  allow: 'allow',
+  require_approval: 'require approval',
+  quarantine: 'quarantine',
+  reject: 'reject',
+};
+
 /** An ALERT action requested a notice to the organization's policy administrators. */
 export function renderPolicyAlert(facts: NoticeFacts): RenderedNotice {
+  if (facts.detect !== undefined) return renderDetectPolicyAlert(facts, facts.detect);
   const disposition = DISPOSITION_TEXT[facts.disposition];
   return {
     subject: `[Email Gateway] Policy alert (${facts.severity}): message ${disposition}`,
@@ -92,6 +119,39 @@ export function renderPolicyAlert(facts: NoticeFacts): RenderedNotice {
       decisiveLine(facts),
       '',
       `Details: ${link(facts)}`,
+      '',
+      'This is an automated notice from the email gateway. It contains no message content.',
+    ].join('\n'),
+  };
+}
+
+/**
+ * Step API-4 A7: an ALERT of the detect evaluation of an API-mode copy — "detected after delivery
+ * (API mode)", the protection mode, the mailbox count and the `/api-mode` detections link (never
+ * the explorer, never content).
+ */
+function renderDetectPolicyAlert(
+  facts: NoticeFacts,
+  detect: NonNullable<NoticeFacts['detect']>,
+): RenderedNotice {
+  return {
+    subject: `[Email Gateway] Policy alert (${facts.severity}): detected after delivery (API mode)`,
+    text: [
+      `A policy alert was raised for ${safeText(facts.organizationName) || 'your organization'}: a tenant policy matched a message detected after delivery (API mode).`,
+      '',
+      `Severity: ${facts.severity}`,
+      `Message: ${facts.messagePublicId}`,
+      `Received: ${facts.receivedAt}`,
+      `Direction: ${facts.direction}`,
+      `Policy decision: ${DETECT_DISPOSITION_TEXT[facts.disposition]}`,
+      decisiveLine(facts),
+      `Protection mode: ${PROTECTION_MODE_TEXT[detect.protectionMode]}`,
+      `Mailboxes with a copy: ${String(detect.mailboxCount)}`,
+      '',
+      facts.direction === 'outbound'
+        ? 'The message was already sent: outbound detections are recorded, never removed from a mailbox.'
+        : 'The message was already delivered; the mailbox action follows the API-mode remediation policy.',
+      `Details: ${detectLink(facts)}`,
       '',
       'This is an automated notice from the email gateway. It contains no message content.',
     ].join('\n'),

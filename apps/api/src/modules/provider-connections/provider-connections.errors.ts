@@ -142,7 +142,7 @@ export const domainNotVerified = (domainId: string): CodedHttpException =>
   new CodedHttpException(
     HttpStatus.UNPROCESSABLE_ENTITY,
     C.domainNotVerified,
-    'The domain is not verified (active) at the gateway',
+    'The domain is not verified at the gateway (verified or active needed)',
     { domainId },
   );
 

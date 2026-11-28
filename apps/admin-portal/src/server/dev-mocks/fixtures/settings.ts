@@ -33,6 +33,7 @@ const DEFAULT_ALERTS: Notifications['settings']['alerts'] = {
   threatDetected: { enabled: true, minSeverity: 'high', throttleMinutes: 60 },
   domainDnsFailed: { enabled: true, throttleMinutes: 1440 },
   webhookDisabled: { enabled: true, throttleMinutes: 1440 },
+  dlpDetected: { enabled: true, minSeverity: 'medium', throttleMinutes: 60 },
   includeOrganizationContact: false,
 };
 
@@ -50,6 +51,7 @@ function notificationsOf(orgId: string): Notifications {
         threatDetected: { minThrottleMinutes: 15, maxThrottleMinutes: 1440 },
         domainDnsFailed: { minThrottleMinutes: 60, maxThrottleMinutes: 10080 },
         webhookDisabled: { minThrottleMinutes: 60, maxThrottleMinutes: 10080 },
+        dlpDetected: { minThrottleMinutes: 15, maxThrottleMinutes: 1440 },
       },
     };
     state.notifications.set(orgId, view);
@@ -161,6 +163,7 @@ export const fixtures: FixtureHandlers = {
       Object.assign(alerts.threatDetected, s.threatDetected ?? {});
       Object.assign(alerts.domainDnsFailed, s.domainDnsFailed ?? {});
       Object.assign(alerts.webhookDisabled, s.webhookDisabled ?? {});
+      Object.assign(alerts.dlpDetected, s.dlpDetected ?? {});
       if (typeof s.includeOrganizationContact === 'boolean')
         alerts.includeOrganizationContact = s.includeOrganizationContact;
       const next: Notifications = {

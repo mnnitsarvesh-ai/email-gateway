@@ -27,6 +27,7 @@ import {
   EventTypes,
   integrationHealthChangedV1,
   messageArchiveRequestedV1,
+  messageCopyDetectedV1,
   messageCopyScannedV1,
   messageDlpIncidentV1,
   messageParsedV1,
@@ -453,6 +454,15 @@ export const EVENT_REGISTRY = {
     'email.policy',
     reportFeedbackRequestedV1,
     'organization',
+  ),
+  // Step API-4 A8 (§6, ADR-0106): producer mailbox-worker (copies role, the copy_scanned ledger
+  // transaction) through the outbox, on the exchange of mail.message.copy_scanned.v1; bound to
+  // email.webhooks (consumer: webhook-worker fanout, topology v19).
+  [EventTypes.MessageCopyDetected]: define(
+    EventTypes.MessageCopyDetected,
+    'email.security',
+    messageCopyDetectedV1,
+    'message',
   ),
 } as const satisfies Record<string, EventDefinition>;
 

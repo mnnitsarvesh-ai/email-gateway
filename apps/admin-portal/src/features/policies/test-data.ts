@@ -203,6 +203,7 @@ export function execution(
     inputSha256: 'b'.repeat(64),
     durationUs: 1850,
     evaluatedAt: '2026-11-12T09:14:07.000Z',
+    evaluationMode: 'inline',
     ...overrides,
   };
 }

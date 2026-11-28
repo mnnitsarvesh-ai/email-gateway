@@ -17,6 +17,11 @@
 # api_mode_clawback_targets_total{result}, api_mode_reports_total{result},
 # api_mode_report_triage_seconds and the leader gauges api_mode_clawback_active{status},
 # api_mode_reports_pending and api_mode_reports_oldest_pending_seconds.
+# Step API-4 (docs/plan/steps/38-api-mode-parity-onboarding.md A11, ADR-0105) adds
+# api_mode_policy_evaluations_total{result}, api_mode_policy_evaluation_seconds,
+# api_mode_copy_detections_total{kind,direction}, api_mode_outbound_detections_total and the
+# leader gauges api_mode_scope_mailboxes{state} and api_mode_detect_only_policies{then}; a failed
+# detect evaluation falls back to the verdict-only decision (tenant policies not applied).
 # Validate with `promtool check rules` and `promtool test rules tests/api-mode.rules.test.yml`.
 groups:
   - name: api-mode
@@ -195,3 +200,24 @@ groups:
             analyst is triaging the report mailbox queue. See the reports.backlog connection
             check and the Reports tab.
           runbook_url: docs/runbooks/api-mode.md#apimodereportsuntriaged
+      - alert: ApiModePolicyEvaluationErrors
+        expr: >-
+          (
+            sum(rate(api_mode_policy_evaluations_total{result="failed"}[15m]))
+            /
+            (
+              sum(rate(api_mode_policy_evaluations_total{result="failed"}[15m]))
+              + sum(rate(api_mode_policy_evaluations_total{result="evaluated"}[15m]))
+            )
+          ) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant policy evaluation of API-mode copies is failing
+          description: >-
+            More than 5 % of the detect-mode policy evaluations of API-mode copy messages failed
+            for 15 minutes (malformed round rows or evaluator errors): those copies are remediated
+            by the verdict rules only, without the tenants' policies and DLP bindings. See the
+            policy.errors_1h connection check and the mailbox-worker error logs.
+          runbook_url: docs/runbooks/api-mode.md#apimodepolicyevaluationerrors
